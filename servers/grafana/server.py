@@ -5,7 +5,7 @@ Grafana MCP Server
 API Info:
 - Contact: Grafana Labs <hello@grafana.com> (https://grafana.com)
 
-Generated: 2026-04-14 18:24:18 UTC
+Generated: 2026-04-23 21:23:28 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,9 +41,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "/api")
+# Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
+_SERVER_VARS = {
+    "grafana_url": os.getenv("SERVER_GRAFANA_URL", "grafana1776699204"),
+}
+BASE_URL = os.getenv("BASE_URL", "https://{grafana_url}.grafana.net/api".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Grafana"
 SERVER_VERSION = "1.0.0"
 
@@ -470,12 +477,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +529,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +575,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +727,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +783,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +849,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +883,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -850,16 +973,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -873,6 +997,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -915,6 +1040,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -926,7 +1066,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -934,7 +1073,6 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'api_key',
-    'basic',
 ]
 
 # Initialize authentication handlers at server startup
@@ -947,14 +1085,6 @@ except ValueError as e:
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for api_key not configured: {error_msg}")
     _auth_handlers["api_key"] = None
-try:
-    _auth_handlers["basic"] = _auth.BasicAuth(env_var_username="BASIC_AUTH_USERNAME", env_var_password="BASIC_AUTH_PASSWORD")
-    logging.info("Authentication configured: basic")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for basic not configured: {error_msg}")
-    _auth_handlers["basic"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1080,7 +1210,7 @@ async def list_roles(
     delegatable: bool | None = Field(None, description="When enabled, filters the results to only include roles that the signed-in user has permission to assign to others."),
     include_hidden: bool | None = Field(None, alias="includeHidden", description="When enabled, includes roles that are marked as hidden from the standard role list."),
     target_org_id: str | None = Field(None, alias="targetOrgId", description="The numeric identifier of the target organization. When specified, retrieves roles for that organization instead of the signed-in user's current organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all available roles for the signed-in user's organization, including both global and organization-local roles. Requires the `roles:read` permission with `roles:*` scope."""
 
     _target_org_id = _parse_int(target_org_id)
@@ -1120,7 +1250,7 @@ async def list_roles(
 
 # Tags: access_control, enterprise
 @mcp.tool()
-async def get_role(role_uid: str = Field(..., alias="roleUID", description="The unique identifier of the role to retrieve.")) -> dict[str, Any]:
+async def get_role(role_uid: str = Field(..., alias="roleUID", description="The unique identifier of the role to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific role by its unique identifier. Requires `roles:read` permission with `roles:*` scope."""
 
     # Construct request model with validation
@@ -1156,7 +1286,7 @@ async def get_role(role_uid: str = Field(..., alias="roleUID", description="The 
 
 # Tags: access_control, enterprise
 @mcp.tool()
-async def list_role_assignments(role_uid: str = Field(..., alias="roleUID", description="The unique identifier of the role for which to retrieve assignments.")) -> dict[str, Any]:
+async def list_role_assignments(role_uid: str = Field(..., alias="roleUID", description="The unique identifier of the role for which to retrieve assignments.")) -> dict[str, Any] | ToolResult:
     """Retrieve all user and team assignments for a specific role. This returns direct role assignments only and excludes assignments inherited through group attribute synchronization."""
 
     # Construct request model with validation
@@ -1196,7 +1326,7 @@ async def list_team_roles_search(
     include_hidden: bool | None = Field(None, alias="includeHidden", description="Whether to include hidden roles in the results. Set to true to show roles that are normally hidden from view."),
     team_ids: list[int] | None = Field(None, alias="teamIds", description="Array of team identifiers to retrieve roles for. If provided, only roles assigned to these teams will be returned."),
     user_ids: list[int] | None = Field(None, alias="userIds", description="Array of user identifiers to filter results. If provided, only roles assigned to users within the specified teams will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all roles that have been directly assigned to specified teams. Requires `teams.roles:read` permission with `teams:id:*` scope."""
 
     # Construct request model with validation
@@ -1237,7 +1367,7 @@ async def list_team_roles_search(
 async def list_team_roles(
     team_id: str = Field(..., alias="teamId", description="The unique identifier of the team whose roles you want to retrieve. Must be a positive integer."),
     target_org_id: str | None = Field(None, alias="targetOrgId", description="Optional organization ID to scope the role listing to a specific organization context. Must be a positive integer if provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all roles assigned to a team. Requires `teams.roles:read` permission scoped to the specified team."""
 
     _team_id = _parse_int(team_id)
@@ -1282,7 +1412,7 @@ async def list_team_roles(
 async def assign_team_role(
     team_id: str = Field(..., alias="teamId", description="The unique identifier of the team to which the role will be assigned. Must be a valid 64-bit integer."),
     role_uid: str | None = Field(None, alias="roleUid", description="The unique identifier of the role to assign to the team. Identifies which role permissions and capabilities the team will receive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign a role to a team. Requires permission to delegate team roles within your organization."""
 
     _team_id = _parse_int(team_id)
@@ -1328,7 +1458,7 @@ async def update_team_roles(
     target_org_id: str | None = Field(None, alias="targetOrgId", description="The organization ID to scope the role update to. Optional; if provided, must be a positive integer."),
     include_hidden: bool | None = Field(None, alias="includeHidden", description="Whether to include hidden roles in the operation. Optional boolean flag."),
     role_uids: list[str] | None = Field(None, alias="roleUids", description="Array of role unique identifiers to assign to the team. Order may be significant for role precedence or application sequence."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the roles assigned to a team. Requires permissions to both add and remove team roles with delegation scope."""
 
     _team_id = _parse_int(team_id)
@@ -1376,7 +1506,7 @@ async def update_team_roles(
 async def remove_team_role(
     role_uid: str = Field(..., alias="roleUID", description="The unique identifier of the role to remove from the team."),
     team_id: str = Field(..., alias="teamId", description="The unique identifier of the team from which the role will be removed. Must be a valid positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a role assignment from a team. Requires permission to delegate team roles."""
 
     _team_id = _parse_int(team_id)
@@ -1418,7 +1548,7 @@ async def search_user_roles(
     include_hidden: bool | None = Field(None, alias="includeHidden", description="Include hidden roles in the search results. When enabled, returns roles that are marked as hidden in addition to visible roles."),
     team_ids: list[int] | None = Field(None, alias="teamIds", description="Filter results by team identifiers. Specify as an array of team IDs to limit role search to users belonging to these teams."),
     user_ids: list[int] | None = Field(None, alias="userIds", description="Filter results by user identifiers. Specify as an array of user IDs to search for roles assigned to these specific users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for roles directly assigned to specified users. Returns custom roles only, excluding built-in roles (Viewer, Editor, Admin, Grafana Admin) and team-inherited roles. Requires `users.roles:read` permission with `users:id:*` scope."""
 
     # Construct request model with validation
@@ -1460,7 +1590,7 @@ async def list_user_roles(
     user_id: str = Field(..., alias="userId", description="The unique identifier of the user whose roles should be listed. Must be a positive integer."),
     include_hidden: bool | None = Field(None, alias="includeHidden", description="Whether to include hidden roles in the response. When enabled, returns roles that are normally hidden from the user interface."),
     target_org_id: str | None = Field(None, alias="targetOrgId", description="The organization ID to scope the role query to. When specified, returns roles within that organization context. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all directly assigned roles for a specific user. This returns only explicitly assigned roles and excludes built-in roles (Viewer, Editor, Admin, Grafana Admin) and roles inherited from team membership."""
 
     _user_id = _parse_int(user_id)
@@ -1506,7 +1636,7 @@ async def revoke_user_role(
     role_uid: str = Field(..., alias="roleUID", description="The unique identifier of the role to revoke from the user."),
     user_id: str = Field(..., alias="userId", description="The numeric identifier of the user from whom the role will be removed. Must be a valid 64-bit integer."),
     global_: bool | None = Field(None, alias="global", description="Whether the role assignment is global or organization-scoped. When false, the authenticated user's default organization will be used for the removal."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a role assignment from a user. Requires permission to remove user roles with delegate scope to prevent privilege escalation. For bulk role updates, use the set user role assignments operation instead."""
 
     _user_id = _parse_int(user_id)
@@ -1551,7 +1681,7 @@ async def assign_resource_permissions(
     resource: str = Field(..., description="The type of resource to assign permissions for. Must be one of: datasources, teams, dashboards, folders, or serviceaccounts."),
     resource_id: str = Field(..., alias="resourceID", description="The unique identifier of the specific resource instance for which permissions are being assigned."),
     permissions: list[_models.SetResourcePermissionCommand] | None = Field(None, description="An array of permission assignment objects that define who has access and what actions they can perform. Refer to the resource description endpoint to see valid permission types for the specified resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign or update permissions for a resource (datasource, team, dashboard, folder, or service account) by specifying the resource type and ID along with the desired permission assignments."""
 
     # Construct request model with validation
@@ -1595,7 +1725,7 @@ async def grant_team_resource_permissions(
     resource_id: str = Field(..., alias="resourceID", description="The unique identifier of the resource for which permissions are being granted."),
     team_id: str = Field(..., alias="teamID", description="The unique identifier of the team receiving the permissions. Must be a positive integer."),
     permission: str | None = Field(None, description="The permission level or role to assign to the team. Refer to the resource-specific permissions endpoint for valid values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants or updates permissions for a team to access a specific resource. Supports permissions on datasources, teams, dashboards, folders, and service accounts."""
 
     _team_id = _parse_int(team_id)
@@ -1641,7 +1771,7 @@ async def grant_resource_permission(
     resource_id: str = Field(..., alias="resourceID", description="The unique identifier of the resource instance for which permissions are being granted."),
     user_id: str = Field(..., alias="userID", description="The numeric ID of the user or service account to grant permissions to. Must be a positive integer."),
     permission: str | None = Field(None, description="The permission level to assign. Refer to the resource-specific permissions endpoint for valid permission values for the chosen resource type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant or update a user's permissions for a specific resource. Supports datasources, teams, dashboards, folders, and service accounts."""
 
     _user_id = _parse_int(user_id)
@@ -1682,7 +1812,7 @@ async def grant_resource_permission(
 
 # Tags: admin_ldap
 @mcp.tool()
-async def sync_ldap_user(user_id: str = Field(..., description="The unique identifier of the Grafana user to synchronize with LDAP, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def sync_ldap_user(user_id: str = Field(..., description="The unique identifier of the Grafana user to synchronize with LDAP, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Synchronize a single Grafana user's account with LDAP directory. Requires the `ldap.user:sync` permission in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -1720,7 +1850,7 @@ async def sync_ldap_user(user_id: str = Field(..., description="The unique ident
 
 # Tags: admin_ldap
 @mcp.tool()
-async def lookup_ldap_user(user_name: str = Field(..., description="The LDAP username to look up. This is the unique identifier used in your LDAP directory to retrieve the user's attributes and preview their Grafana mapping.")) -> dict[str, Any]:
+async def lookup_ldap_user(user_name: str = Field(..., description="The LDAP username to look up. This is the unique identifier used in your LDAP directory to retrieve the user's attributes and preview their Grafana mapping.")) -> dict[str, Any] | ToolResult:
     """Retrieves LDAP user details by username to preview how the user will be mapped and synchronized in Grafana. Requires the `ldap.user:read` permission when Fine-grained access control is enabled in Grafana Enterprise."""
 
     # Construct request model with validation
@@ -1760,7 +1890,7 @@ async def create_user(
     email: str | None = Field(None, description="Email address for the new user. Used for user identification and communication."),
     login: str | None = Field(None, description="Login username for the new user. Used for authentication and user identification within Grafana."),
     password: str | None = Field(None, description="Initial password for the new user account. Should meet Grafana's password security requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user in Grafana. Requires the `users:create` permission in Grafana Enterprise with Fine-grained access control enabled. Optionally assign the user to a different organization using the OrgId parameter when `auto_assign_org` is enabled."""
 
     # Construct request model with validation
@@ -1798,7 +1928,7 @@ async def create_user(
 
 # Tags: admin_users
 @mcp.tool()
-async def delete_user(user_id: str = Field(..., description="The unique identifier of the user to delete, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def delete_user(user_id: str = Field(..., description="The unique identifier of the user to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a global user from Grafana. Requires the `users:delete` permission with `global.users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -1836,7 +1966,7 @@ async def delete_user(user_id: str = Field(..., description="The unique identifi
 
 # Tags: admin_users
 @mcp.tool()
-async def list_user_auth_tokens(user_id: str = Field(..., description="The unique identifier of the user whose authentication tokens should be retrieved. Must be a positive integer.")) -> dict[str, Any]:
+async def list_user_auth_tokens(user_id: str = Field(..., description="The unique identifier of the user whose authentication tokens should be retrieved. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all active authentication tokens (devices) for a specific user. Requires Fine-grained access control permission `users.authtoken:list` with `global.users:*` scope in Grafana Enterprise."""
 
     _user_id = _parse_int(user_id)
@@ -1874,7 +2004,7 @@ async def list_user_auth_tokens(user_id: str = Field(..., description="The uniqu
 
 # Tags: admin_users
 @mcp.tool()
-async def disable_user(user_id: str = Field(..., description="The unique identifier of the user to disable, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def disable_user(user_id: str = Field(..., description="The unique identifier of the user to disable, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Disable a user account in Grafana. Requires the `users:disable` permission with `global.users:1` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -1912,7 +2042,7 @@ async def disable_user(user_id: str = Field(..., description="The unique identif
 
 # Tags: admin_users
 @mcp.tool()
-async def enable_user(user_id: str = Field(..., description="The unique identifier of the user to enable, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def enable_user(user_id: str = Field(..., description="The unique identifier of the user to enable, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Activate a disabled user account in Grafana. Requires the `users:enable` permission with `global.users:1` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -1950,7 +2080,7 @@ async def enable_user(user_id: str = Field(..., description="The unique identifi
 
 # Tags: admin_users
 @mcp.tool()
-async def revoke_user_sessions(user_id: str = Field(..., description="The unique identifier of the user whose sessions should be revoked. Must be a positive integer.")) -> dict[str, Any]:
+async def revoke_user_sessions(user_id: str = Field(..., description="The unique identifier of the user whose sessions should be revoked. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Revokes all active authentication tokens and sessions for a user across all devices. The user will be logged out immediately and must re-authenticate on next access. Requires the `users.logout` permission with `global.users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -1991,7 +2121,7 @@ async def revoke_user_sessions(user_id: str = Field(..., description="The unique
 async def set_user_password(
     user_id: str = Field(..., description="The unique identifier of the user whose password will be updated. Must be a positive integer."),
     password: str | None = Field(None, description="The new password to set for the user. If not provided, the password will not be changed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or reset a user's password. Requires the `users.password:update` permission with `global.users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -2032,7 +2162,7 @@ async def set_user_password(
 
 # Tags: quota, admin_users
 @mcp.tool()
-async def get_user_quota(user_id: str = Field(..., description="The unique identifier of the user whose quota information should be retrieved. Must be a positive integer.")) -> dict[str, Any]:
+async def get_user_quota(user_id: str = Field(..., description="The unique identifier of the user whose quota information should be retrieved. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve quota information for a specific user. Requires Fine-grained access control with `users.quotas:list` permission and `global.users:1` scope in Grafana Enterprise."""
 
     _user_id = _parse_int(user_id)
@@ -2074,7 +2204,7 @@ async def update_user_quota(
     quota_target: str = Field(..., description="The quota target type to update (e.g., 'dashboard', 'api_calls', 'storage'). Identifies which quota category to modify for the user."),
     user_id: str = Field(..., description="The unique identifier of the user whose quota is being updated. Must be a positive integer."),
     limit: str | None = Field(None, description="The new quota limit value as a positive integer. Specifies the maximum allowed usage for the quota target."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a user's quota limit for a specific quota target. Requires the `users.quotas:update` permission with global user scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -2119,7 +2249,7 @@ async def update_user_quota(
 async def revoke_user_auth_token(
     user_id: str = Field(..., description="The unique identifier of the user whose authentication token should be revoked. Must be a positive integer."),
     auth_token_id: str | None = Field(None, alias="authTokenId", description="The unique identifier of the specific authentication token (device session) to revoke. If not provided, a default token may be revoked. Must be a positive integer if specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke an authentication token for a user, forcing them to re-authenticate on their next activity. This invalidates the specified device session and logs out the user from that device."""
 
     _user_id = _parse_int(user_id)
@@ -2167,7 +2297,7 @@ async def list_annotations(
     limit: str | None = Field(None, description="Maximum number of annotation results to return in the response."),
     tags: list[str] | None = Field(None, description="Filter organization-level annotations by one or more tags. Organization annotations come from annotation data sources and are not tied to a specific dashboard or panel. Provide tags as an array of strings."),
     match_any: bool | None = Field(None, alias="matchAny", description="When filtering by tags, set to true to match annotations with any of the specified tags, or false to match only annotations with all specified tags."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve annotations from your Grafana instance, optionally filtered by alert rule, dashboard, tags, or other criteria. Annotations can be scoped to specific dashboards or be organization-wide from annotation data sources."""
 
     _limit = _parse_int(limit)
@@ -2213,7 +2343,7 @@ async def create_annotation(
     tags: list[str] | None = Field(None, description="An array of tag strings to categorize and organize the annotation for easier filtering and discovery."),
     time_: str | None = Field(None, alias="time", description="The start time of the annotation as an epoch timestamp in millisecond resolution. Required for all annotations; use timeEnd to create a region annotation spanning a time period."),
     time_end: str | None = Field(None, alias="timeEnd", description="The end time for a region annotation as an epoch timestamp in millisecond resolution. When specified, creates a region annotation spanning from time to timeEnd instead of a point-in-time annotation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates an annotation in Grafana that can be scoped to a specific dashboard and panel, or created as an organization-wide annotation. For region annotations spanning a time period, include both time and timeEnd properties."""
 
     _time_ = _parse_int(time_)
@@ -2258,7 +2388,7 @@ async def create_graphite_annotation(
     tags: Any | None = Field(None, description="Space-separated list of tags to associate with the annotation. Supports both modern and legacy Graphite tag formats (pre-0.10.0)."),
     what: str | None = Field(None, description="Human-readable description or title of the annotation event."),
     when: str | None = Field(None, description="Unix timestamp (in seconds) indicating when the annotation occurred. If omitted, the current server time will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates an annotation using Graphite-compatible event format. The annotation timestamp defaults to the current time if not specified, and tags can use either modern or pre-0.10.0 Graphite formats."""
 
     _when = _parse_int(when)
@@ -2301,7 +2431,7 @@ async def create_graphite_annotation(
 async def delete_annotations(
     annotation_id: str | None = Field(None, alias="annotationId", description="The unique identifier of a specific annotation to delete. Provide one or more annotation IDs to target specific annotations across dashboards."),
     dashboard_uid: str | None = Field(None, alias="dashboardUID", description="The unique identifier of a dashboard. When provided, all annotations associated with this dashboard will be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete one or more annotations from dashboards. Specify either annotation IDs or a dashboard UID to remove annotations in bulk."""
 
     _annotation_id = _parse_int(annotation_id)
@@ -2344,7 +2474,7 @@ async def delete_annotations(
 async def list_annotation_tags(
     tag: str | None = Field(None, description="Filter tags by a specific string value to narrow results to matching tags."),
     limit: str | None = Field(None, description="Maximum number of results to return in the response, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all event tags that have been created in annotations, with optional filtering and pagination support."""
 
     # Construct request model with validation
@@ -2382,7 +2512,7 @@ async def list_annotation_tags(
 
 # Tags: annotations
 @mcp.tool()
-async def get_annotation(annotation_id: str = Field(..., description="The unique identifier of the annotation to retrieve.")) -> dict[str, Any]:
+async def get_annotation(annotation_id: str = Field(..., description="The unique identifier of the annotation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific annotation by its unique identifier. Returns the full annotation details including metadata and content."""
 
     # Construct request model with validation
@@ -2424,7 +2554,7 @@ async def update_annotation(
     text: str | None = Field(None, description="The text content of the annotation."),
     time_: str | None = Field(None, alias="time", description="The start time of the annotation as a Unix timestamp in milliseconds."),
     time_end: str | None = Field(None, alias="timeEnd", description="The end time of the annotation as a Unix timestamp in milliseconds."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update all properties of an annotation by its ID. Use this operation to replace the entire annotation; for partial updates, use the patch annotation operation instead."""
 
     _time_ = _parse_int(time_)
@@ -2472,7 +2602,7 @@ async def update_annotation_partial(
     text: str | None = Field(None, description="The text content or description of the annotation."),
     time_: str | None = Field(None, alias="time", description="The start time of the annotation as a Unix timestamp in milliseconds."),
     time_end: str | None = Field(None, alias="timeEnd", description="The end time of the annotation as a Unix timestamp in milliseconds."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update one or more properties of an annotation by its ID. Supports modifying text content, tags, start time, and end time. Available in Grafana 6.0.0-beta2 and later."""
 
     _time_ = _parse_int(time_)
@@ -2514,7 +2644,7 @@ async def update_annotation_partial(
 
 # Tags: annotations
 @mcp.tool()
-async def delete_annotation(annotation_id: str = Field(..., description="The unique identifier of the annotation to delete.")) -> dict[str, Any]:
+async def delete_annotation(annotation_id: str = Field(..., description="The unique identifier of the annotation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an annotation by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2550,7 +2680,7 @@ async def delete_annotation(annotation_id: str = Field(..., description="The uni
 
 # Tags: devices
 @mcp.tool()
-async def list_devices() -> dict[str, Any]:
+async def list_devices() -> dict[str, Any] | ToolResult:
     """Retrieves all devices that have been active or registered within the last 30 days. Use this to get a current inventory of devices in your system."""
 
     # Extract parameters for API call
@@ -2577,7 +2707,7 @@ async def list_devices() -> dict[str, Any]:
 
 # Tags: devices
 @mcp.tool()
-async def list_devices_search() -> dict[str, Any]:
+async def list_devices_search() -> dict[str, Any] | ToolResult:
     """Retrieves all devices that have been active or registered within the last 30 days. Useful for monitoring recent device activity and inventory."""
 
     # Extract parameters for API call
@@ -2604,7 +2734,7 @@ async def list_devices_search() -> dict[str, Any]:
 
 # Tags: migrations
 @mcp.tool()
-async def list_migration_sessions() -> dict[str, Any]:
+async def list_migration_sessions() -> dict[str, Any] | ToolResult:
     """Retrieve all cloud migration sessions that have been created, providing an overview of migration projects and their current state."""
 
     # Extract parameters for API call
@@ -2631,7 +2761,7 @@ async def list_migration_sessions() -> dict[str, Any]:
 
 # Tags: migrations
 @mcp.tool()
-async def create_migration_session() -> dict[str, Any]:
+async def create_migration_session() -> dict[str, Any] | ToolResult:
     """Initiate a new cloud migration session to begin the migration process. This creates a session that can be used to manage and track migration activities."""
 
     # Extract parameters for API call
@@ -2658,7 +2788,7 @@ async def create_migration_session() -> dict[str, Any]:
 
 # Tags: migrations
 @mcp.tool()
-async def get_migration_session(uid: str = Field(..., description="The unique identifier of the migration session to retrieve.")) -> dict[str, Any]:
+async def get_migration_session(uid: str = Field(..., description="The unique identifier of the migration session to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a cloud migration session by its unique identifier. Use this to check the status, configuration, and progress of a specific migration."""
 
     # Construct request model with validation
@@ -2694,7 +2824,7 @@ async def get_migration_session(uid: str = Field(..., description="The unique id
 
 # Tags: migrations
 @mcp.tool()
-async def delete_migration_session(uid: str = Field(..., description="The unique identifier of the migration session to delete.")) -> dict[str, Any]:
+async def delete_migration_session(uid: str = Field(..., description="The unique identifier of the migration session to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a cloud migration session by its unique identifier. This action removes the migration session and its associated data."""
 
     # Construct request model with validation
@@ -2733,7 +2863,7 @@ async def delete_migration_session(uid: str = Field(..., description="The unique
 async def create_migration_snapshot(
     uid: str = Field(..., description="The unique identifier of the migration session for which to create a snapshot."),
     resource_types: list[Literal["DASHBOARD", "DATASOURCE", "FOLDER", "LIBRARY_ELEMENT", "ALERT_RULE", "ALERT_RULE_GROUP", "CONTACT_POINT", "NOTIFICATION_POLICY", "NOTIFICATION_TEMPLATE", "MUTE_TIMING", "PLUGIN"]] | None = Field(None, alias="resourceTypes", description="Optional list of resource types to include in the snapshot. Specifies which resource categories should be captured."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates the creation of an instance snapshot for a cloud migration session. Returns the snapshot UID upon successful initialization."""
 
     # Construct request model with validation
@@ -2780,7 +2910,7 @@ async def get_snapshot(
     result_sort_column: str | None = Field(None, alias="resultSortColumn", description="Column to sort results by. Valid options are 'name' (resource name), 'resource_type' (type of resource), or 'status' (processing status). Defaults to system-defined sorting if not specified."),
     result_sort_order: str | None = Field(None, alias="resultSortOrder", description="Sort direction for results: 'ASC' for ascending or 'DESC' for descending order. Defaults to ascending."),
     errors_only: bool | None = Field(None, alias="errorsOnly", description="When enabled, returns only resources with error statuses, filtering out successful results. Defaults to false (all results returned)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata about a migration snapshot, including its processing status and results. Use pagination and filtering options to navigate large result sets."""
 
     _result_page = _parse_int(result_page)
@@ -2825,7 +2955,7 @@ async def get_snapshot(
 async def cancel_snapshot(
     uid: str = Field(..., description="The unique identifier of the cloud migration session containing the snapshot to be cancelled."),
     snapshot_uid: str = Field(..., alias="snapshotUid", description="The unique identifier of the snapshot to cancel."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel an in-progress snapshot within a cloud migration session. This operation will halt the snapshot processing at any stage of its execution pipeline."""
 
     # Construct request model with validation
@@ -2864,7 +2994,7 @@ async def cancel_snapshot(
 async def upload_snapshot(
     uid: str = Field(..., description="The unique identifier of the migration session to which this snapshot belongs."),
     snapshot_uid: str = Field(..., alias="snapshotUid", description="The unique identifier of the snapshot being uploaded for processing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a snapshot to the Grafana Migration Service for processing. This operation ingests snapshot data associated with a migration session for analysis and migration preparation."""
 
     # Construct request model with validation
@@ -2904,7 +3034,7 @@ async def list_snapshots(
     uid: str = Field(..., description="The unique identifier of the migration session for which to retrieve snapshots."),
     limit: str | None = Field(None, description="Maximum number of snapshots to return in the response. Defaults to 100 if not specified."),
     sort: str | None = Field(None, description="Sort order for results. Set to 'latest' to return snapshots in descending order by creation date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of snapshots for a cloud migration session. Results can be paginated and sorted by creation date."""
 
     _limit = _parse_int(limit)
@@ -2945,7 +3075,7 @@ async def list_snapshots(
 
 # Tags: migrations
 @mcp.tool()
-async def list_resource_dependencies() -> dict[str, Any]:
+async def list_resource_dependencies() -> dict[str, Any] | ToolResult:
     """Retrieve the dependency graph for all resources currently eligible for migration, showing how resources depend on each other."""
 
     # Extract parameters for API call
@@ -2972,7 +3102,7 @@ async def list_resource_dependencies() -> dict[str, Any]:
 
 # Tags: migrations
 @mcp.tool()
-async def fetch_cloud_migration_token() -> dict[str, Any]:
+async def fetch_cloud_migration_token() -> dict[str, Any] | ToolResult:
     """Retrieve the cloud migration token if one has been previously generated. This token is required for authenticating cloud migration operations."""
 
     # Extract parameters for API call
@@ -2999,7 +3129,7 @@ async def fetch_cloud_migration_token() -> dict[str, Any]:
 
 # Tags: migrations
 @mcp.tool()
-async def revoke_cloud_migration_token(uid: str = Field(..., description="The unique identifier of the cloud migration token to revoke.")) -> dict[str, Any]:
+async def revoke_cloud_migration_token(uid: str = Field(..., description="The unique identifier of the cloud migration token to revoke.")) -> dict[str, Any] | ToolResult:
     """Revokes and removes a cloud migration token, preventing further use for cloud migration operations. This action is permanent and cannot be undone."""
 
     # Construct request model with validation
@@ -3035,7 +3165,7 @@ async def revoke_cloud_migration_token(uid: str = Field(..., description="The un
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def list_prometheus_alert_rules() -> dict[str, Any]:
+async def list_prometheus_alert_rules() -> dict[str, Any] | ToolResult:
     """Retrieves all Grafana-managed alert rules that were imported from Prometheus-compatible sources, organized by namespace for easy navigation and management."""
 
     # Extract parameters for API call
@@ -3062,7 +3192,7 @@ async def list_prometheus_alert_rules() -> dict[str, Any]:
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def convert_prometheus_rules_to_grafana() -> dict[str, Any]:
+async def convert_prometheus_rules_to_grafana() -> dict[str, Any] | ToolResult:
     """Converts Prometheus or Cortex rule groups into Grafana-Managed Rules format for use within Grafana's alerting system."""
 
     # Extract parameters for API call
@@ -3089,7 +3219,7 @@ async def convert_prometheus_rules_to_grafana() -> dict[str, Any]:
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def list_prometheus_alert_rules_by_namespace(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace (folder) containing the alert rules to retrieve. This identifies which rule group to query.")) -> dict[str, Any]:
+async def list_prometheus_alert_rules_by_namespace(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace (folder) containing the alert rules to retrieve. This identifies which rule group to query.")) -> dict[str, Any] | ToolResult:
     """Retrieves Grafana-managed alert rules that were imported from Prometheus-compatible sources for a specified namespace. This operation allows you to view rules organized within a particular folder or namespace."""
 
     # Construct request model with validation
@@ -3138,7 +3268,7 @@ async def convert_prometheus_rule_group(
     limit: str | None = Field(None, description="Maximum number of rules to process from the Prometheus rule group, specified as a 64-bit integer."),
     query_offset: str | None = Field(None, description="Time offset for query evaluation, specified as a duration string (e.g., ISO 8601 format)."),
     rules: list[_models.PrometheusRule] | None = Field(None, description="Array of Prometheus rules to convert. Each rule is converted to Grafana's rule format and included in the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Prometheus rule group into a Grafana-compatible rule group and creates or updates it within the specified namespace. Existing groups that were not originally imported from a Prometheus source will not be replaced and will return an error."""
 
     _interval = _parse_int(interval)
@@ -3183,7 +3313,7 @@ async def convert_prometheus_rule_group(
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def delete_prometheus_rules_by_namespace(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace containing the Prometheus-compatible rule groups to delete. This identifier specifies which namespace's rules will be removed.")) -> dict[str, Any]:
+async def delete_prometheus_rules_by_namespace(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace containing the Prometheus-compatible rule groups to delete. This identifier specifies which namespace's rules will be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes all rule groups that were imported from Prometheus-compatible sources within a specified namespace. This operation removes the entire namespace and its associated rules."""
 
     # Construct request model with validation
@@ -3222,7 +3352,7 @@ async def delete_prometheus_rules_by_namespace(namespace_title: str = Field(...,
 async def get_prometheus_rule_group(
     namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace containing the rule group. This identifies the organizational container where the rule group is stored."),
     group: str = Field(..., alias="Group", description="The name of the rule group to retrieve. This identifies the specific group of Prometheus rules within the namespace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single rule group in Prometheus-compatible format from a namespace. This operation is available only for rule groups that were imported from a Prometheus-compatible source."""
 
     # Construct request model with validation
@@ -3261,7 +3391,7 @@ async def get_prometheus_rule_group(
 async def delete_prometheus_rule_group(
     namespace_title: str = Field(..., alias="NamespaceTitle", description="The namespace title that contains the rule group to delete. This identifies the logical grouping or project under which the rules are organized."),
     group: str = Field(..., alias="Group", description="The name of the rule group to delete. This identifies the specific group of alert rules within the namespace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific rule group from Prometheus-compatible alerting rules. This operation only succeeds if the rule group was originally imported from a Prometheus-compatible source."""
 
     # Construct request model with validation
@@ -3297,7 +3427,7 @@ async def delete_prometheus_rule_group(
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def list_prometheus_alert_rules_from_config() -> dict[str, Any]:
+async def list_prometheus_alert_rules_from_config() -> dict[str, Any] | ToolResult:
     """Retrieves all Grafana-managed alert rules that were imported from Prometheus-compatible sources, organized by namespace for easy navigation and management."""
 
     # Extract parameters for API call
@@ -3324,7 +3454,7 @@ async def list_prometheus_alert_rules_from_config() -> dict[str, Any]:
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def convert_prometheus_rules() -> dict[str, Any]:
+async def convert_prometheus_rules() -> dict[str, Any] | ToolResult:
     """Converts Prometheus rule groups into Grafana-Managed Rules format, enabling centralized rule management within Grafana."""
 
     # Extract parameters for API call
@@ -3351,7 +3481,7 @@ async def convert_prometheus_rules() -> dict[str, Any]:
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def get_prometheus_alert_rules(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace (folder) containing the Prometheus-imported alert rules to retrieve.")) -> dict[str, Any]:
+async def get_prometheus_alert_rules(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace (folder) containing the Prometheus-imported alert rules to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves Grafana-managed alert rules that were imported from Prometheus-compatible sources for a specified namespace (folder)."""
 
     # Construct request model with validation
@@ -3400,7 +3530,7 @@ async def convert_prometheus_rule_group_config(
     limit: str | None = Field(None, description="Maximum number of rules to process from the Prometheus rule group, specified as a 64-bit integer."),
     query_offset: str | None = Field(None, description="Time offset for query evaluation, specified as a duration string (e.g., ISO 8601 format)."),
     rules: list[_models.PrometheusRule] | None = Field(None, description="Array of Prometheus rules to convert. Each rule is converted to Grafana's rule format and included in the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Prometheus rule group into a Grafana-compatible rule group and creates or updates it in the specified namespace. Existing groups that were not originally imported from Prometheus sources will not be replaced and will return an error."""
 
     _interval = _parse_int(interval)
@@ -3445,7 +3575,7 @@ async def convert_prometheus_rule_group_config(
 
 # Tags: convert_prometheus
 @mcp.tool()
-async def delete_prometheus_rules_namespace(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace containing the Prometheus-imported rule groups to delete. This identifier specifies which namespace's rules will be removed.")) -> dict[str, Any]:
+async def delete_prometheus_rules_namespace(namespace_title: str = Field(..., alias="NamespaceTitle", description="The name of the namespace containing the Prometheus-imported rule groups to delete. This identifier specifies which namespace's rules will be removed.")) -> dict[str, Any] | ToolResult:
     """Deletes all rule groups that were imported from Prometheus-compatible sources within a specified namespace. This operation removes the entire namespace and its associated rules."""
 
     # Construct request model with validation
@@ -3484,7 +3614,7 @@ async def delete_prometheus_rules_namespace(namespace_title: str = Field(..., al
 async def get_prometheus_rule_group_config(
     namespace_title: str = Field(..., alias="NamespaceTitle", description="The title or identifier of the namespace containing the rule group."),
     group: str = Field(..., alias="Group", description="The name of the rule group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single rule group in Prometheus-compatible format from a previously imported Prometheus-compatible source configuration."""
 
     # Construct request model with validation
@@ -3523,7 +3653,7 @@ async def get_prometheus_rule_group_config(
 async def delete_prometheus_rule_group_config(
     namespace_title: str = Field(..., alias="NamespaceTitle", description="The namespace title that contains the rule group to be deleted."),
     group: str = Field(..., alias="Group", description="The name of the rule group to delete within the specified namespace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific rule group from a Prometheus-compatible source. This operation only succeeds if the rule group was originally imported from Prometheus."""
 
     # Construct request model with validation
@@ -3559,7 +3689,7 @@ async def delete_prometheus_rule_group_config(
 
 # Tags: dashboards, snapshots
 @mcp.tool()
-async def list_dashboard_snapshots(limit: str | None = Field(None, description="Maximum number of snapshots to return in the response. Defaults to 1000 if not specified.")) -> dict[str, Any]:
+async def list_dashboard_snapshots(limit: str | None = Field(None, description="Maximum number of snapshots to return in the response. Defaults to 1000 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of dashboard snapshots. Use the limit parameter to control the number of results returned."""
 
     _limit = _parse_int(limit)
@@ -3606,7 +3736,7 @@ async def import_dashboard(
     overwrite: bool | None = Field(None, description="Whether to overwrite an existing dashboard with the same name or UID. When true, the import will replace any conflicting dashboard; when false, the import will fail if a conflict exists."),
     path: str | None = Field(None, description="The file path or location identifier for the dashboard being imported. Used to identify the source of the dashboard configuration."),
     plugin_id: str | None = Field(None, alias="pluginId", description="The plugin identifier associated with the dashboard, if the dashboard depends on or is specific to a particular Grafana plugin."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import a dashboard configuration into Grafana, optionally overwriting existing dashboards and placing them in a specified folder. Supports variable substitution through inputs for dynamic dashboard provisioning."""
 
     # Construct request model with validation
@@ -3644,7 +3774,7 @@ async def import_dashboard(
 
 # Tags: dashboards, dashboard_public
 @mcp.tool()
-async def list_dashboards() -> dict[str, Any]:
+async def list_dashboards() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all publicly accessible dashboards. Use this to discover and display available dashboards that don't require authentication."""
 
     # Extract parameters for API call
@@ -3671,7 +3801,7 @@ async def list_dashboards() -> dict[str, Any]:
 
 # Tags: dashboards, dashboard_public
 @mcp.tool()
-async def get_public_dashboard(dashboard_uid: str = Field(..., alias="dashboardUid", description="The unique identifier of the dashboard to retrieve. This is the dashboard's UID that has been configured for public access.")) -> dict[str, Any]:
+async def get_public_dashboard(dashboard_uid: str = Field(..., alias="dashboardUid", description="The unique identifier of the dashboard to retrieve. This is the dashboard's UID that has been configured for public access.")) -> dict[str, Any] | ToolResult:
     """Retrieve a publicly shared dashboard by its unique identifier. This endpoint allows access to dashboards that have been configured for public sharing."""
 
     # Construct request model with validation
@@ -3713,7 +3843,7 @@ async def create_public_dashboard(
     is_enabled: bool | None = Field(None, alias="isEnabled", description="Enable or disable the public dashboard link."),
     share: str | None = Field(None, description="Access level or sharing mode for the public dashboard (e.g., view-only, edit permissions)."),
     time_selection_enabled: bool | None = Field(None, alias="timeSelectionEnabled", description="Enable or disable time range selection controls in the public dashboard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a public dashboard link for an existing dashboard, enabling external sharing with configurable access controls and features."""
 
     # Construct request model with validation
@@ -3760,7 +3890,7 @@ async def update_public_dashboard(
     is_enabled: bool | None = Field(None, alias="isEnabled", description="Enable or disable the public dashboard, controlling whether it is accessible to viewers."),
     share: str | None = Field(None, description="The sharing access level or mode for the public dashboard (e.g., public, restricted, or specific user/team access)."),
     time_selection_enabled: bool | None = Field(None, alias="timeSelectionEnabled", description="Enable or disable the time range selection controls, allowing viewers to modify the dashboard's time window."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration and sharing settings of a public dashboard, including visibility, annotation display, time selection controls, and access permissions."""
 
     # Construct request model with validation
@@ -3802,7 +3932,7 @@ async def update_public_dashboard(
 async def delete_public_dashboard(
     dashboard_uid: str = Field(..., alias="dashboardUid", description="The unique identifier of the dashboard that contains the public dashboard link to be deleted."),
     uid: str = Field(..., description="The unique identifier of the public dashboard link to be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a public dashboard link from a dashboard, preventing public access to the dashboard's shared view."""
 
     # Construct request model with validation
@@ -3838,7 +3968,7 @@ async def delete_public_dashboard(
 
 # Tags: datasources
 @mcp.tool()
-async def list_data_sources() -> dict[str, Any]:
+async def list_data_sources() -> dict[str, Any] | ToolResult:
     """Retrieve all configured data sources in Grafana. Requires the `datasources:read` permission with `datasources:*` scope when Fine-grained access control is enabled in Grafana Enterprise."""
 
     # Extract parameters for API call
@@ -3874,7 +4004,7 @@ async def create_datasource(
     url: str | None = Field(None, description="Connection URL or endpoint for the data source (e.g., database host, API endpoint)."),
     user: str | None = Field(None, description="Username for authenticating with the data source."),
     with_credentials: bool | None = Field(None, alias="withCredentials", description="Whether to send credentials (cookies, authorization headers) with cross-origin requests to the data source."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new data source in Grafana. Sensitive credentials like passwords are automatically encrypted and stored securely in the database. Requires `datasources:create` permission in Grafana Enterprise with Fine-grained access control enabled."""
 
     # Construct request model with validation
@@ -3915,7 +4045,7 @@ async def create_datasource(
 async def list_correlations(
     limit: str | None = Field(None, description="Maximum number of correlations to return per page, up to 1000. Defaults to 100 if not specified."),
     source_uid: list[str] | None = Field(None, alias="sourceUID", description="Filter correlations by one or more source datasource UIDs. Only correlations involving the specified sources will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all correlations across datasources, with optional filtering and pagination. Use this to discover relationships between data sources."""
 
     _limit = _parse_int(limit)
@@ -3955,7 +4085,7 @@ async def list_correlations(
 
 # Tags: datasources, correlations
 @mcp.tool()
-async def list_correlations_by_source(source_uid: str = Field(..., alias="sourceUID", description="The unique identifier of the data source for which to retrieve correlations.")) -> dict[str, Any]:
+async def list_correlations_by_source(source_uid: str = Field(..., alias="sourceUID", description="The unique identifier of the data source for which to retrieve correlations.")) -> dict[str, Any] | ToolResult:
     """Retrieves all correlations that originate from a specified data source. Use this to discover relationships and dependencies associated with a particular data source."""
 
     # Construct request model with validation
@@ -3999,7 +4129,7 @@ async def create_correlation(
     description: str | None = Field(None, description="Optional human-readable description of the correlation's purpose (e.g., 'Logs to Traces')."),
     label: str | None = Field(None, description="Optional label to identify and organize the correlation within the data source."),
     target_uid: str | None = Field(None, alias="targetUID", description="The unique identifier of the target data source for the correlation. Required when the correlation type is a query."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a correlation link between two data sources, enabling navigation from a field in the source to related data in a target source or query."""
 
     # Construct request model with validation
@@ -4042,7 +4172,7 @@ async def create_correlation(
 async def get_correlation(
     source_uid: str = Field(..., alias="sourceUID", description="The unique identifier of the data source containing the correlation."),
     correlation_uid: str = Field(..., alias="correlationUID", description="The unique identifier of the correlation to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific correlation by its unique identifier from a data source. Use this to fetch detailed information about a correlation relationship between data elements."""
 
     # Construct request model with validation
@@ -4085,7 +4215,7 @@ async def update_correlation(
     transformations: list[_models.Transformation] | None = Field(None, description="An ordered array of transformation operations to apply to source data before correlation. Each transformation is an object specifying a type (such as 'logfmt' for log format parsing or 'regex' for pattern matching) and relevant parameters like 'expression' and 'variable' for regex transformations."),
     description: str | None = Field(None, description="An optional human-readable description explaining the purpose or context of this correlation (e.g., 'Logs to Traces')."),
     label: str | None = Field(None, description="An optional label to identify and organize the correlation within your data source."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing correlation configuration for a data source, allowing you to modify the field attachment point, data transformations, description, and label."""
 
     # Construct request model with validation
@@ -4125,7 +4255,7 @@ async def update_correlation(
 
 # Tags: datasources
 @mcp.tool()
-async def get_datasource(uid: str = Field(..., description="The unique identifier of the data source to retrieve.")) -> dict[str, Any]:
+async def get_datasource(uid: str = Field(..., description="The unique identifier of the data source to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single data source by its unique identifier. Requires datasources:read permission with appropriate scopes in Grafana Enterprise with Fine-grained access control enabled."""
 
     # Construct request model with validation
@@ -4171,7 +4301,7 @@ async def update_datasource(
     url: str | None = Field(None, description="The URL endpoint or connection string for the data source."),
     user: str | None = Field(None, description="The username for authenticating with the data source."),
     with_credentials: bool | None = Field(None, alias="withCredentials", description="Whether to send credentials (cookies, authorization headers) when making cross-origin requests to the data source."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing data source configuration. Sensitive credentials like passwords should be provided in secureJsonData to ensure they are encrypted and stored securely in the database."""
 
     # Construct request model with validation
@@ -4210,7 +4340,7 @@ async def update_datasource(
 
 # Tags: datasources
 @mcp.tool()
-async def delete_datasource(uid: str = Field(..., description="The unique identifier of the data source to delete.")) -> dict[str, Any]:
+async def delete_datasource(uid: str = Field(..., description="The unique identifier of the data source to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a data source by its unique identifier. Requires datasources:delete permission with appropriate scopes in Grafana Enterprise with Fine-grained access control enabled."""
 
     # Construct request model with validation
@@ -4249,7 +4379,7 @@ async def delete_datasource(uid: str = Field(..., description="The unique identi
 async def delete_correlation(
     uid: str = Field(..., description="The unique identifier of the datasource containing the correlation to delete."),
     correlation_uid: str = Field(..., alias="correlationUID", description="The unique identifier of the correlation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a correlation from a datasource. This permanently deletes the specified correlation relationship."""
 
     # Construct request model with validation
@@ -4285,7 +4415,7 @@ async def delete_correlation(
 
 # Tags: datasources, health
 @mcp.tool()
-async def check_datasource_health(uid: str = Field(..., description="The unique identifier of the datasource to check. This UID is used to locate and verify the health status of the specific plugin datasource.")) -> dict[str, Any]:
+async def check_datasource_health(uid: str = Field(..., description="The unique identifier of the datasource to check. This UID is used to locate and verify the health status of the specific plugin datasource.")) -> dict[str, Any] | ToolResult:
     """Performs a health check on a plugin datasource to verify its connectivity and operational status. Returns the health status of the datasource identified by the provided UID."""
 
     # Construct request model with validation
@@ -4324,7 +4454,7 @@ async def check_datasource_health(uid: str = Field(..., description="The unique 
 async def fetch_datasource_resource(
     datasource_proxy_route: str = Field(..., description="The unique identifier of the data source to query."),
     uid: str = Field(..., description="The proxy route path that specifies which resource endpoint within the data source to access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve data from a specific data source resource by its unique identifier and proxy route. This operation allows you to access data source resources through their configured proxy endpoints."""
 
     # Construct request model with validation
@@ -4363,7 +4493,7 @@ async def fetch_datasource_resource(
 async def get_datasource_cache_config(
     data_source_uid: str = Field(..., alias="dataSourceUID", description="The unique identifier of the data source for which to retrieve cache configuration."),
     data_source_type: str | None = Field(None, alias="dataSourceType", description="Optional type identifier for the data source, used to filter or validate the cache configuration retrieval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the cache configuration settings for a specific data source. Returns caching policies and parameters that control how data from this source is cached."""
 
     # Construct request model with validation
@@ -4410,7 +4540,7 @@ async def configure_datasource_cache(
     ttl_queries_ms: str | None = Field(None, alias="ttlQueriesMs", description="Time-to-live for cached queries in milliseconds. Specifies how long query results remain in the cache before expiration. Only used if UseDefaultTTL is disabled."),
     ttl_resources_ms: str | None = Field(None, alias="ttlResourcesMs", description="Time-to-live for cached resources in milliseconds. Specifies how long resource data remains in the cache before expiration. Only used if UseDefaultTTL is disabled."),
     use_default_ttl: bool | None = Field(None, alias="useDefaultTTL", description="When enabled, ignores the TTLQueriesMs and TTLResourcesMs values and uses the default TTL settings from the Grafana configuration file instead."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure caching behavior for a specific data source, including TTL settings for queries and resources. Use this to optimize performance by controlling how long cached data persists."""
 
     _data_source_id = _parse_int(data_source_id)
@@ -4459,7 +4589,7 @@ async def configure_datasource_cache(
 async def disable_datasource_cache(
     data_source_uid: str = Field(..., alias="dataSourceUID", description="The unique identifier of the data source for which caching should be disabled."),
     data_source_type: str | None = Field(None, alias="dataSourceType", description="The type or category of the data source, used to provide additional context for the cache disabling operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable caching for a specific data source to ensure fresh data is fetched on subsequent queries. This operation clears the cache configuration for the specified data source."""
 
     # Construct request model with validation
@@ -4501,7 +4631,7 @@ async def disable_datasource_cache(
 async def enable_datasource_cache(
     data_source_uid: str = Field(..., alias="dataSourceUID", description="The unique identifier of the data source for which caching should be enabled."),
     data_source_type: str | None = Field(None, alias="dataSourceType", description="The type of data source (e.g., Prometheus, Graphite, Elasticsearch). Used to apply type-specific cache configuration if needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable caching for a data source to improve query performance and reduce load on the underlying data source."""
 
     # Construct request model with validation
@@ -4544,7 +4674,7 @@ async def query_metrics(
     from_: str = Field(..., alias="from", description="Start time for the query range as an epoch timestamp in milliseconds or a relative Grafana time unit (e.g., 'now-1h', 'now-24h'). Relative units are calculated from the current time."),
     queries: list[_models.Json] = Field(..., description="Array of query objects to execute. Each query must specify a unique datasourceId and can optionally include a refId identifier (defaults to 'A'), maxDataPoints for rendering limits (defaults to 100), and intervalMs for time series granularity in milliseconds (defaults to 1000). Query objects support datasource-specific fields like rawSql for SQL queries and format specification (e.g., 'table')."),
     to: str = Field(..., description="End time for the query range as an epoch timestamp in milliseconds or a relative Grafana time unit (e.g., 'now'). Relative units are calculated from the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute metric queries against a data source with support for expressions and custom time ranges. Requires datasources:query permission in Grafana Enterprise with Fine-grained access control enabled."""
 
     # Construct request model with validation
@@ -4585,7 +4715,7 @@ async def query_metrics(
 async def set_folder_permissions(
     folder_uid: str = Field(..., description="The unique identifier of the folder whose permissions should be updated."),
     items: list[_models.DashboardAclUpdateItem] | None = Field(None, description="An array of permission objects defining who has access to the folder and what level of access they have. Permissions not included in this list will be removed from the folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets permissions for a folder by replacing all existing permissions with the ones specified in the request. Any permissions not included will be removed."""
 
     # Construct request model with validation
@@ -4624,7 +4754,7 @@ async def set_folder_permissions(
 
 # Tags: group_attribute_sync, enterprise
 @mcp.tool()
-async def list_mapped_groups() -> dict[str, Any]:
+async def list_mapped_groups() -> dict[str, Any] | ToolResult:
     """Retrieve all groups that have attribute mappings configured. This endpoint is experimental and requires the groupAttributeSync feature flag to be enabled."""
 
     # Extract parameters for API call
@@ -4651,7 +4781,7 @@ async def list_mapped_groups() -> dict[str, Any]:
 
 # Tags: group_attribute_sync, enterprise
 @mcp.tool()
-async def list_group_roles(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve mapped roles.")) -> dict[str, Any]:
+async def list_group_roles(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve mapped roles.")) -> dict[str, Any] | ToolResult:
     """Retrieve all roles mapped to a specific group. This endpoint is experimental and requires the `groupAttributeSync` feature flag to be enabled."""
 
     # Construct request model with validation
@@ -4694,7 +4824,7 @@ async def list_library_elements(
     exclude_uid: str | None = Field(None, alias="excludeUid", description="Exclude a specific element from the search results by providing its unique identifier (UID)."),
     folder_filter_ui_ds: str | None = Field(None, alias="folderFilterUIDs", description="Filter results to include only elements located in specified folders. Provide multiple folder UIDs as a comma-separated list."),
     per_page: str | None = Field(None, alias="perPage", description="Set the maximum number of elements to return per page. Defaults to 100 results per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all library elements that the authenticated user has permission to view. Results can be filtered, searched, and sorted to find specific elements."""
 
     _per_page = _parse_int(per_page)
@@ -4737,7 +4867,7 @@ async def list_library_elements(
 async def create_library_element(
     folder_uid: str | None = Field(None, alias="folderUid", description="The unique identifier of the folder where this library element will be stored. If not provided, the element will be created in the default location."),
     model: dict[str, Any] | None = Field(None, description="The JSON configuration object defining the library element's properties, type, and settings. This object structure depends on the type of library element being created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new library element that can be reused across dashboards and other resources. Optionally specify a folder location and provide the element configuration as a JSON model."""
 
     # Construct request model with validation
@@ -4775,7 +4905,7 @@ async def create_library_element(
 
 # Tags: library_elements
 @mcp.tool()
-async def get_library_element_by_name(library_element_name: str = Field(..., description="The name of the library element to retrieve. This is the unique identifier used to look up the library element.")) -> dict[str, Any]:
+async def get_library_element_by_name(library_element_name: str = Field(..., description="The name of the library element to retrieve. This is the unique identifier used to look up the library element.")) -> dict[str, Any] | ToolResult:
     """Retrieve a library element by its name. Returns the library element matching the specified name."""
 
     # Construct request model with validation
@@ -4811,7 +4941,7 @@ async def get_library_element_by_name(library_element_name: str = Field(..., des
 
 # Tags: library_elements
 @mcp.tool()
-async def get_library_element(library_element_uid: str = Field(..., description="The unique identifier of the library element to retrieve.")) -> dict[str, Any]:
+async def get_library_element(library_element_uid: str = Field(..., description="The unique identifier of the library element to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific library element by its unique identifier. Returns the complete library element details for the given UID."""
 
     # Construct request model with validation
@@ -4851,7 +4981,7 @@ async def update_library_element(
     library_element_uid: str = Field(..., description="The unique identifier of the library element to update."),
     folder_uid: str | None = Field(None, alias="folderUid", description="The unique identifier of the folder where the library element should be stored or moved to."),
     model: dict[str, Any] | None = Field(None, description="The JSON model containing the library element's properties and configuration to be updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing library element by modifying its properties, folder location, or model configuration. Specify the library element by its unique identifier and provide the fields you want to change."""
 
     # Construct request model with validation
@@ -4890,7 +5020,7 @@ async def update_library_element(
 
 # Tags: library_elements
 @mcp.tool()
-async def delete_library_element(library_element_uid: str = Field(..., description="The unique identifier of the library element to delete. Must reference an unconnected library element.")) -> dict[str, Any]:
+async def delete_library_element(library_element_uid: str = Field(..., description="The unique identifier of the library element to delete. Must reference an unconnected library element.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a library element by its unique identifier. This action cannot be undone and will fail if the library element is currently connected to other resources."""
 
     # Construct request model with validation
@@ -4926,7 +5056,7 @@ async def delete_library_element(library_element_uid: str = Field(..., descripti
 
 # Tags: library_elements
 @mcp.tool()
-async def list_library_element_connections(library_element_uid: str = Field(..., description="The unique identifier of the library element for which to retrieve connections.")) -> dict[str, Any]:
+async def list_library_element_connections(library_element_uid: str = Field(..., description="The unique identifier of the library element for which to retrieve connections.")) -> dict[str, Any] | ToolResult:
     """Retrieve all connections associated with a specific library element. Returns a list of dashboards, panels, or other resources that reference the library element."""
 
     # Construct request model with validation
@@ -4939,7 +5069,7 @@ async def list_library_element_connections(library_element_uid: str = Field(...,
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
     # Extract parameters for API call
-    _http_path = _build_path("/library-elements/{library_element_uid}/connections", _request.path.model_dump(by_alias=True)) if _request.path else "/library-elements/{library_element_uid}/connections"
+    _http_path = _build_path("/library-elements/{library_element_uid}/connections/", _request.path.model_dump(by_alias=True)) if _request.path else "/library-elements/{library_element_uid}/connections/"
     _http_headers = {}
 
     # Inject per-operation authentication
@@ -4962,7 +5092,7 @@ async def list_library_element_connections(library_element_uid: str = Field(...,
 
 # Tags: licensing, enterprise
 @mcp.tool()
-async def create_license_token(instance: str | None = Field(None, description="The instance identifier for which to create the license token. If not specified, the token is created for the default instance.")) -> dict[str, Any]:
+async def create_license_token(instance: str | None = Field(None, description="The instance identifier for which to create the license token. If not specified, the token is created for the default instance.")) -> dict[str, Any] | ToolResult:
     """Generate a new license token for the specified instance. Requires licensing:write permission to perform this operation."""
 
     # Construct request model with validation
@@ -5000,7 +5130,7 @@ async def create_license_token(instance: str | None = Field(None, description="T
 
 # Tags: licensing, enterprise
 @mcp.tool()
-async def remove_license_token(instance: str | None = Field(None, description="The Grafana instance identifier or URL where the license token should be removed.")) -> dict[str, Any]:
+async def remove_license_token(instance: str | None = Field(None, description="The Grafana instance identifier or URL where the license token should be removed.")) -> dict[str, Any] | ToolResult:
     """Remove the license token from the Grafana database. This operation permanently deletes the stored license and requires the `licensing:delete` permission. Available in Grafana Enterprise v7.4+."""
 
     # Construct request model with validation
@@ -5038,7 +5168,7 @@ async def remove_license_token(instance: str | None = Field(None, description="T
 
 # Tags: org
 @mcp.tool()
-async def get_organization() -> dict[str, Any]:
+async def get_organization() -> dict[str, Any] | ToolResult:
     """Retrieve the current organization's details and configuration. This returns metadata about the organization associated with the authenticated user or API key."""
 
     # Extract parameters for API call
@@ -5065,7 +5195,7 @@ async def get_organization() -> dict[str, Any]:
 
 # Tags: org
 @mcp.tool()
-async def update_organization_current() -> dict[str, Any]:
+async def update_organization_current() -> dict[str, Any] | ToolResult:
     """Update the settings and details of the current organization. This operation modifies the organization's profile information and configuration."""
 
     # Extract parameters for API call
@@ -5099,7 +5229,7 @@ async def update_organization_address(
     country: str | None = Field(None, description="The country where the organization is located."),
     state: str | None = Field(None, description="The state or province where the organization is located."),
     zipcode: str | None = Field(None, description="The postal or ZIP code for the organization's location."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the address information for the current organization. Provide any address fields that need to be changed; omitted fields will remain unchanged."""
 
     # Construct request model with validation
@@ -5137,7 +5267,7 @@ async def update_organization_address(
 
 # Tags: org, invites
 @mcp.tool()
-async def list_pending_org_invites() -> dict[str, Any]:
+async def list_pending_org_invites() -> dict[str, Any] | ToolResult:
     """Retrieve all pending organization invitations that have been sent but not yet accepted. Use this to track outstanding invites and their status."""
 
     # Extract parameters for API call
@@ -5168,7 +5298,7 @@ async def invite_organization_member(
     login_or_email: str | None = Field(None, alias="loginOrEmail", description="The login username or email address of the person to invite to the organization."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The role to assign to the invited member. Must be one of: None, Viewer, Editor, or Admin. Determines the member's permissions within the organization."),
     send_email: bool | None = Field(None, alias="sendEmail", description="Whether to send a notification email to the invitee. If true, an invitation email will be delivered; if false, the invite is created silently."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send an invitation to join an organization with a specified role. The invitee can be identified by their login or email address, and an optional notification email can be sent to them."""
 
     # Construct request model with validation
@@ -5206,7 +5336,7 @@ async def invite_organization_member(
 
 # Tags: org, invites
 @mcp.tool()
-async def revoke_invitation(invitation_code: str = Field(..., description="The unique code identifying the invitation to revoke. This code was provided when the invitation was created.")) -> dict[str, Any]:
+async def revoke_invitation(invitation_code: str = Field(..., description="The unique code identifying the invitation to revoke. This code was provided when the invitation was created.")) -> dict[str, Any] | ToolResult:
     """Revoke a pending organization invitation, preventing the recipient from accepting it. This operation invalidates the invitation code immediately."""
 
     # Construct request model with validation
@@ -5242,7 +5372,7 @@ async def revoke_invitation(invitation_code: str = Field(..., description="The u
 
 # Tags: quota, org
 @mcp.tool()
-async def get_organization_quota() -> dict[str, Any]:
+async def get_organization_quota() -> dict[str, Any] | ToolResult:
     """Retrieve the current quota limits and usage for your organization. Requires the `orgs.quotas:read` permission in Grafana Enterprise with Fine-grained access control enabled."""
 
     # Extract parameters for API call
@@ -5269,7 +5399,7 @@ async def get_organization_quota() -> dict[str, Any]:
 
 # Tags: org
 @mcp.tool()
-async def list_organization_users(limit: str | None = Field(None, description="Maximum number of users to return in the response. Specify as a positive integer to limit result set size.")) -> dict[str, Any]:
+async def list_organization_users(limit: str | None = Field(None, description="Maximum number of users to return in the response. Specify as a positive integer to limit result set size.")) -> dict[str, Any] | ToolResult:
     """Retrieve all users in the current organization. Requires org admin role or the `org.users:read` permission in Grafana Enterprise with Fine-grained access control enabled."""
 
     _limit = _parse_int(limit)
@@ -5312,7 +5442,7 @@ async def list_organization_users(limit: str | None = Field(None, description="M
 async def add_user_to_organization(
     login_or_email: str | None = Field(None, alias="loginOrEmail", description="The login username or email address of the global user to add to the organization."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The role to assign to the user within the organization. Must be one of: None, Viewer, Editor, or Admin."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an existing global user to the current organization with a specified role. Requires the `org.users:add` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     # Construct request model with validation
@@ -5350,7 +5480,7 @@ async def add_user_to_organization(
 
 # Tags: org
 @mcp.tool()
-async def list_organization_users_lookup(limit: str | None = Field(None, description="Maximum number of users to return in the response. Specify as a positive integer to limit the result set size.")) -> dict[str, Any]:
+async def list_organization_users_lookup(limit: str | None = Field(None, description="Maximum number of users to return in the response. Specify as a positive integer to limit the result set size.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all users in the current organization with basic information. This lightweight endpoint is designed for UI operations like team member selection and permission management, and requires org admin role or admin privileges in any folder or team."""
 
     _limit = _parse_int(limit)
@@ -5393,7 +5523,7 @@ async def list_organization_users_lookup(limit: str | None = Field(None, descrip
 async def update_org_user_role(
     user_id: str = Field(..., description="The unique identifier of the user to update, specified as a 64-bit integer."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The new role to assign to the user. Must be one of: None, Viewer, Editor, or Admin."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a user's role within the current organization. Requires the `org.users.role:update` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -5434,7 +5564,7 @@ async def update_org_user_role(
 
 # Tags: org
 @mcp.tool()
-async def remove_organization_user(user_id: str = Field(..., description="The unique identifier of the user to remove from the organization. Must be a positive integer.")) -> dict[str, Any]:
+async def remove_organization_user(user_id: str = Field(..., description="The unique identifier of the user to remove from the organization. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Remove a user from the current organization. Requires the `org.users:remove` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _user_id = _parse_int(user_id)
@@ -5472,7 +5602,7 @@ async def remove_organization_user(user_id: str = Field(..., description="The un
 
 # Tags: orgs
 @mcp.tool()
-async def list_organizations(perpage: str | None = Field(None, description="Number of organizations to return per page. Defaults to 1000 items per page; use this with the totalCount response field to navigate through all results.")) -> dict[str, Any]:
+async def list_organizations(perpage: str | None = Field(None, description="Number of organizations to return per page. Defaults to 1000 items per page; use this with the totalCount response field to navigate through all results.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all organizations. Use the totalCount field in the response to determine pagination, where each page contains up to the specified number of items."""
 
     _perpage = _parse_int(perpage)
@@ -5512,7 +5642,7 @@ async def list_organizations(perpage: str | None = Field(None, description="Numb
 
 # Tags: orgs
 @mcp.tool()
-async def create_organization() -> dict[str, Any]:
+async def create_organization() -> dict[str, Any] | ToolResult:
     """Create a new organization in Grafana. This operation requires the allow_org_create configuration setting to be enabled by your Grafana administrator."""
 
     # Extract parameters for API call
@@ -5539,7 +5669,7 @@ async def create_organization() -> dict[str, Any]:
 
 # Tags: orgs
 @mcp.tool()
-async def get_organization_by_name(org_name: str = Field(..., description="The name of the organization to retrieve. This should be the exact organization name as it exists in the system.")) -> dict[str, Any]:
+async def get_organization_by_name(org_name: str = Field(..., description="The name of the organization to retrieve. This should be the exact organization name as it exists in the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific organization by its name. Use this operation to look up organization details when you know the organization's name."""
 
     # Construct request model with validation
@@ -5575,7 +5705,7 @@ async def get_organization_by_name(org_name: str = Field(..., description="The n
 
 # Tags: orgs
 @mcp.tool()
-async def get_organization_by_id(org_id: str = Field(..., description="The unique identifier of the organization to retrieve, provided as a 64-bit integer.")) -> dict[str, Any]:
+async def get_organization_by_id(org_id: str = Field(..., description="The unique identifier of the organization to retrieve, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific organization by its unique identifier. Returns detailed organization information including metadata and configuration."""
 
     _org_id = _parse_int(org_id)
@@ -5613,7 +5743,7 @@ async def get_organization_by_id(org_id: str = Field(..., description="The uniqu
 
 # Tags: orgs
 @mcp.tool()
-async def update_organization(org_id: str = Field(..., description="The unique identifier of the organization to update, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def update_organization(org_id: str = Field(..., description="The unique identifier of the organization to update, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Update an existing organization's details and configuration. Requires the organization ID to identify which organization to modify."""
 
     _org_id = _parse_int(org_id)
@@ -5651,7 +5781,7 @@ async def update_organization(org_id: str = Field(..., description="The unique i
 
 # Tags: orgs
 @mcp.tool()
-async def delete_organization(org_id: str = Field(..., description="The unique identifier of the organization to delete, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def delete_organization(org_id: str = Field(..., description="The unique identifier of the organization to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an organization and all associated data. This action cannot be undone."""
 
     _org_id = _parse_int(org_id)
@@ -5697,7 +5827,7 @@ async def update_organization_address_by_id(
     country: str | None = Field(None, description="The country name or code."),
     state: str | None = Field(None, description="The state, province, or region name or code."),
     zipcode: str | None = Field(None, description="The postal or ZIP code for the address."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the physical address information for an organization. Provide any combination of address fields to update the organization's location details."""
 
     _org_id = _parse_int(org_id)
@@ -5738,7 +5868,7 @@ async def update_organization_address_by_id(
 
 # Tags: quota, orgs
 @mcp.tool()
-async def get_organization_quota_by_id(org_id: str = Field(..., description="The unique identifier of the organization whose quota information should be retrieved. Must be a positive integer.")) -> dict[str, Any]:
+async def get_organization_quota_by_id(org_id: str = Field(..., description="The unique identifier of the organization whose quota information should be retrieved. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve the quota limits and usage for a specific organization. Requires the `orgs.quotas:read` permission with the appropriate organization scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -5780,7 +5910,7 @@ async def update_org_quota(
     quota_target: str = Field(..., description="The quota target type to update (e.g., users, dashboards, data sources). Identifies which resource quota to modify."),
     org_id: str = Field(..., description="The organization ID as a 64-bit integer. Identifies which organization's quota to update."),
     limit: str | None = Field(None, description="The new quota limit as a 64-bit integer. Specifies the maximum number of resources allowed for the quota target."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the quota limit for a specific target within an organization. Requires the `orgs.quotas:write` permission in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -5822,7 +5952,7 @@ async def update_org_quota(
 
 # Tags: orgs
 @mcp.tool()
-async def list_organization_users_by_id(org_id: str = Field(..., description="The unique identifier of the organization. Must be a positive integer.")) -> dict[str, Any]:
+async def list_organization_users_by_id(org_id: str = Field(..., description="The unique identifier of the organization. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all users in a Grafana organization. Requires the `org.users:read` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -5864,7 +5994,7 @@ async def add_organization_user(
     org_id: str = Field(..., description="The unique identifier of the organization to which the user will be added. Must be a positive integer."),
     login_or_email: str | None = Field(None, alias="loginOrEmail", description="The login username or email address of the global user to add to the organization."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The role to assign to the user within the organization. Valid options are: None, Viewer, Editor, or Admin. If not specified, defaults to None."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an existing global user to the current organization with an optional role assignment. Requires the `org.users:add` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -5905,7 +6035,7 @@ async def add_organization_user(
 
 # Tags: orgs
 @mcp.tool()
-async def search_organization_users(org_id: str = Field(..., description="The unique identifier of the organization to search users in. Must be a positive integer.")) -> dict[str, Any]:
+async def search_organization_users(org_id: str = Field(..., description="The unique identifier of the organization to search users in. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Search for users within a specific organization. Requires the `org.users:read` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -5947,7 +6077,7 @@ async def update_organization_user_role(
     org_id: str = Field(..., description="The unique identifier of the organization containing the user. Must be a positive integer."),
     user_id: str = Field(..., description="The unique identifier of the user to update. Must be a positive integer."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The new role to assign to the user. Valid options are: None, Viewer, Editor, or Admin. If not specified, the user's current role remains unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a user's role within an organization. Requires the `org.users.role:update` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -5992,7 +6122,7 @@ async def update_organization_user_role(
 async def remove_organization_user_by_id(
     org_id: str = Field(..., description="The unique identifier of the organization from which the user will be removed. Must be a positive integer."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the organization. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from the current organization. Requires the `org.users:remove` permission with `users:*` scope in Grafana Enterprise with Fine-grained access control enabled."""
 
     _org_id = _parse_int(org_id)
@@ -6031,7 +6161,7 @@ async def remove_organization_user_by_id(
 
 # Tags: dashboards, dashboard_public
 @mcp.tool()
-async def get_public_dashboard_access(access_token: str = Field(..., alias="accessToken", description="The unique access token that grants permission to view the public dashboard. This token is provided when a dashboard is shared publicly.")) -> dict[str, Any]:
+async def get_public_dashboard_access(access_token: str = Field(..., alias="accessToken", description="The unique access token that grants permission to view the public dashboard. This token is provided when a dashboard is shared publicly.")) -> dict[str, Any] | ToolResult:
     """Retrieve a publicly shared dashboard using its access token. This allows viewing dashboards that have been made publicly available without requiring authentication."""
 
     # Construct request model with validation
@@ -6067,7 +6197,7 @@ async def get_public_dashboard_access(access_token: str = Field(..., alias="acce
 
 # Tags: dashboards, annotations, dashboard_public
 @mcp.tool()
-async def list_dashboard_annotations(access_token: str = Field(..., alias="accessToken", description="The unique access token that grants permission to view the public dashboard and its associated annotations.")) -> dict[str, Any]:
+async def list_dashboard_annotations(access_token: str = Field(..., alias="accessToken", description="The unique access token that grants permission to view the public dashboard and its associated annotations.")) -> dict[str, Any] | ToolResult:
     """Retrieve all annotations for a public dashboard using its access token. Annotations provide contextual notes and markers associated with dashboard visualizations."""
 
     # Construct request model with validation
@@ -6106,7 +6236,7 @@ async def list_dashboard_annotations(access_token: str = Field(..., alias="acces
 async def query_dashboard_panel(
     access_token: str = Field(..., alias="accessToken", description="The access token that grants permission to query this public dashboard. This token authenticates your request and determines which dashboard you can access."),
     panel_id: str = Field(..., alias="panelId", description="The unique identifier of the panel within the dashboard whose data you want to query. This is a numeric ID that specifies which panel's results to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a query against a specific panel on a public dashboard and retrieve the results. Use the dashboard's access token and panel identifier to fetch panel data."""
 
     _panel_id = _parse_int(panel_id)
@@ -6150,7 +6280,7 @@ async def list_queries(
     only_starred: bool | None = Field(None, alias="onlyStarred", description="When enabled, return only queries that have been marked as starred or favorited."),
     sort: Literal["time-desc", "time-asc"] | None = Field(None, description="Order results by timestamp in descending order (newest first) or ascending order (oldest first). Defaults to newest first."),
     limit: str | None = Field(None, description="Maximum number of queries to return in a single response. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve queries from history filtered by data source, search terms, or starred status. Results are paginated with a default limit of 100 queries per page."""
 
     _limit = _parse_int(limit)
@@ -6193,7 +6323,7 @@ async def list_queries(
 async def save_query(
     queries: dict[str, Any] = Field(..., description="One or more query objects to add to the history. Each query object contains the query details to be persisted."),
     datasource_uid: str | None = Field(None, alias="datasourceUid", description="The unique identifier of the data source where queries will be stored. Use the data source UID (e.g., PE1C5CBDA0504A6A3) to target a specific data source."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Save one or more queries to the query history for a specified data source. This allows you to persist and track queries for later retrieval and analysis."""
 
     # Construct request model with validation
@@ -6231,7 +6361,7 @@ async def save_query(
 
 # Tags: query_history
 @mcp.tool()
-async def star_query_history(query_history_uid: str = Field(..., description="The unique identifier of the query history entry to star.")) -> dict[str, Any]:
+async def star_query_history(query_history_uid: str = Field(..., description="The unique identifier of the query history entry to star.")) -> dict[str, Any] | ToolResult:
     """Mark a query in your history as starred for quick access and organization. This helps you keep track of frequently used or important queries."""
 
     # Construct request model with validation
@@ -6267,7 +6397,7 @@ async def star_query_history(query_history_uid: str = Field(..., description="Th
 
 # Tags: query_history
 @mcp.tool()
-async def remove_query_star(query_history_uid: str = Field(..., description="The unique identifier of the query history entry to unstar.")) -> dict[str, Any]:
+async def remove_query_star(query_history_uid: str = Field(..., description="The unique identifier of the query history entry to unstar.")) -> dict[str, Any] | ToolResult:
     """Remove a star from a saved query in your query history. This operation unmarks a previously starred query, making it easier to manage your frequently used queries."""
 
     # Construct request model with validation
@@ -6306,7 +6436,7 @@ async def remove_query_star(query_history_uid: str = Field(..., description="The
 async def update_query_comment(
     query_history_uid: str = Field(..., description="The unique identifier of the query history record to update."),
     comment: str | None = Field(None, description="The new comment text to associate with the query. Provide the complete comment as it should appear in the query history."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the comment associated with a specific query in the query history. Use this to add, modify, or replace notes for a previously executed query."""
 
     # Construct request model with validation
@@ -6345,7 +6475,7 @@ async def update_query_comment(
 
 # Tags: query_history
 @mcp.tool()
-async def delete_query_history(query_history_uid: str = Field(..., description="The unique identifier of the query history entry to delete.")) -> dict[str, Any]:
+async def delete_query_history(query_history_uid: str = Field(..., description="The unique identifier of the query history entry to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a query from the query history by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -6381,7 +6511,7 @@ async def delete_query_history(query_history_uid: str = Field(..., description="
 
 # Tags: recording_rules, enterprise
 @mcp.tool()
-async def list_recording_rules() -> dict[str, Any]:
+async def list_recording_rules() -> dict[str, Any] | ToolResult:
     """Retrieves all recording rules from the database, including both active and deleted rules. Use this to view the complete rule inventory for auditing or management purposes."""
 
     # Extract parameters for API call
@@ -6418,7 +6548,7 @@ async def create_recording_rule(
     queries: list[dict[str, Any]] | None = Field(None, description="An array of metric queries to execute for this recording rule. Order matters and determines query execution sequence."),
     range_: str | None = Field(None, alias="range", description="The time range in milliseconds over which each query will look back when evaluating the recording rule."),
     target_ref_id: str | None = Field(None, description="The reference identifier of the target query within the queries array that produces the final recorded metric."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create and register a new recording rule that automatically starts collecting metrics according to the specified query and interval configuration."""
 
     _interval = _parse_int(interval)
@@ -6469,7 +6599,7 @@ async def update_recording_rule(
     queries: list[dict[str, Any]] | None = Field(None, description="An array of query objects that define what data to record. Each query specifies the metrics or logs to capture."),
     range_: str | None = Field(None, alias="range", description="The time range in milliseconds for each evaluation. Defines the lookback window of data considered during rule execution."),
     target_ref_id: str | None = Field(None, description="The reference identifier for the target query or panel. Used to link the recording rule to a specific query definition."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing recording rule's configuration, including its active status, query parameters, and data source settings. This operation allows modification of rule behavior such as evaluation interval, range, and target data source."""
 
     _interval = _parse_int(interval)
@@ -6520,7 +6650,7 @@ async def test_recording_rule(
     queries: list[dict[str, Any]] | None = Field(None, description="An array of query objects that define the data to be recorded. Order matters as queries are evaluated sequentially."),
     range_: str | None = Field(None, alias="range", description="The time range in milliseconds over which the recording rule will evaluate data during the test."),
     target_ref_id: str | None = Field(None, description="The reference identifier of the target query or data source to use as the recording source."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate a recording rule configuration by testing it against the specified data source and queries. This operation allows you to verify the rule's behavior before applying it to production."""
 
     _interval = _parse_int(interval)
@@ -6564,7 +6694,7 @@ async def test_recording_rule(
 async def create_remote_write_target(
     data_source_uid: str | None = Field(None, description="The unique identifier of the Prometheus data source to associate with this remote write target."),
     remote_write_path: str | None = Field(None, description="The endpoint path where Prometheus will send remote write requests for this target."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a remote write target for Prometheus recording rules. Requires an existing Prometheus data source to be configured, otherwise returns a 422 error."""
 
     # Construct request model with validation
@@ -6602,7 +6732,7 @@ async def create_remote_write_target(
 
 # Tags: recording_rules, enterprise
 @mcp.tool()
-async def delete_recording_write_target() -> dict[str, Any]:
+async def delete_recording_write_target() -> dict[str, Any] | ToolResult:
     """Remove the remote write target configuration for recording rules. This stops forwarding recorded metrics to the configured remote destination."""
 
     # Extract parameters for API call
@@ -6629,7 +6759,7 @@ async def delete_recording_write_target() -> dict[str, Any]:
 
 # Tags: recording_rules, enterprise
 @mcp.tool()
-async def delete_recording_rule(recording_rule_id: str = Field(..., alias="recordingRuleID", description="The unique identifier of the recording rule to delete. Must be a valid 64-bit integer.")) -> dict[str, Any]:
+async def delete_recording_rule(recording_rule_id: str = Field(..., alias="recordingRuleID", description="The unique identifier of the recording rule to delete. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a recording rule from the registry and stop its execution. The rule will no longer be active after deletion."""
 
     _recording_rule_id = _parse_int(recording_rule_id)
@@ -6667,7 +6797,7 @@ async def delete_recording_rule(recording_rule_id: str = Field(..., alias="recor
 
 # Tags: reports, enterprise
 @mcp.tool()
-async def list_reports() -> dict[str, Any]:
+async def list_reports() -> dict[str, Any] | ToolResult:
     """Retrieve all reports available in the organization. Only accessible to organization administrators with a valid or expired license and the `reports:read` permission."""
 
     # Extract parameters for API call
@@ -6717,7 +6847,7 @@ async def create_report(
     workdays_only: bool | None = Field(None, alias="workdaysOnly", description="Generate reports only on business days, excluding weekends and holidays."),
     state: str | None = Field(None, description="Current state of the report (e.g., draft, active, paused, archived). Controls whether the report is actively generated."),
     subject: str | None = Field(None, description="Subject line for report email delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a scheduled or on-demand report with customizable formatting, delivery options, and distribution settings. Requires organization admin privileges and a valid license with the `reports.admin:create` permission."""
 
     _scale_factor = _parse_int(scale_factor)
@@ -6760,7 +6890,7 @@ async def create_report(
 
 # Tags: reports, enterprise
 @mcp.tool()
-async def list_reports_by_dashboard(uid: str = Field(..., description="The unique identifier of the dashboard for which to retrieve associated reports.")) -> dict[str, Any]:
+async def list_reports_by_dashboard(uid: str = Field(..., description="The unique identifier of the dashboard for which to retrieve associated reports.")) -> dict[str, Any] | ToolResult:
     """Retrieve all reports associated with a specific dashboard. Requires org admin privileges and a valid or expired license, with `reports:read` permission."""
 
     # Construct request model with validation
@@ -6796,7 +6926,7 @@ async def list_reports_by_dashboard(uid: str = Field(..., description="The uniqu
 
 # Tags: reports, enterprise
 @mcp.tool()
-async def send_report(emails: str | None = Field(None, description="Comma-separated list of email addresses to receive the report. If not provided, the report will be sent to default recipients based on your organization settings.")) -> dict[str, Any]:
+async def send_report(emails: str | None = Field(None, description="Comma-separated list of email addresses to receive the report. If not provided, the report will be sent to default recipients based on your organization settings.")) -> dict[str, Any] | ToolResult:
     """Generate and send a report via email. This operation waits for report generation to complete before returning, so allow at least 60 seconds for the request to finish. Requires Grafana Enterprise v7.0+ with admin privileges and a valid license."""
 
     # Construct request model with validation
@@ -6834,7 +6964,7 @@ async def send_report(emails: str | None = Field(None, description="Comma-separa
 
 # Tags: reports, enterprise
 @mcp.tool()
-async def retrieve_branding_image(image: str = Field(..., description="Image filename to retrieve")) -> dict[str, Any]:
+async def retrieve_branding_image(image: str = Field(..., description="Image filename to retrieve")) -> dict[str, Any] | ToolResult:
     """Retrieve a custom branding report image for your organization. Requires admin access and a valid or expired license."""
 
     # Construct request model with validation
@@ -6873,7 +7003,7 @@ async def retrieve_branding_image(image: str = Field(..., description="Image fil
 async def download_csv_report(
     dashboards: str | None = Field(None, description="Comma-separated list of dashboard identifiers to include in the report. If omitted, the report includes all available dashboards."),
     title: str | None = Field(None, description="Custom title for the generated CSV report. If omitted, a default title is used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download a CSV-formatted report. Available to all users with a valid license."""
 
     # Construct request model with validation
@@ -6918,7 +7048,7 @@ async def render_report_pdfs(
     title: str | None = Field(None, description="Custom title text to display at the top of the generated PDF report."),
     scale_factor: str | None = Field(None, alias="scaleFactor", description="Scaling factor to adjust the size of rendered content. Controls zoom level of dashboards in the final PDF output."),
     include_tables: str | None = Field(None, alias="includeTables", description="Flag to include or exclude data tables associated with the dashboards in the PDF report."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a PDF report rendering multiple dashboards with customizable layout, orientation, and styling options. Available to all licensed users."""
 
     # Construct request model with validation
@@ -6979,7 +7109,7 @@ async def send_test_report_email(
     workdays_only: bool | None = Field(None, alias="workdaysOnly", description="Deliver reports only on business days (Monday-Friday)."),
     state: str | None = Field(None, description="Current state of the report schedule (e.g., active, paused, draft)."),
     subject: str | None = Field(None, description="Email subject line for the report."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send a test report via email to verify configuration before scheduling. Requires organization admin privileges and a valid license with the `reports:send` permission."""
 
     _scale_factor = _parse_int(scale_factor)
@@ -7031,7 +7161,7 @@ async def search_dashboards(
     permission: Literal["Edit", "View"] | None = Field(None, description="Filter by user permissions: 'View' returns dashboards the user can view, 'Edit' returns only dashboards the user can edit. Defaults to 'View'."),
     sort: Literal["alpha-asc", "alpha-desc"] | None = Field(None, description="Sort results by dashboard name in ascending or descending alphabetical order. Defaults to ascending alphabetical order."),
     deleted: bool | None = Field(None, description="When enabled, return only dashboards that have been soft deleted (not permanently removed)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for dashboards and folders by tags, UIDs, starred status, and other criteria. Returns matching dashboards with optional filtering by permissions and deletion status."""
 
     _limit = _parse_int(limit)
@@ -7071,7 +7201,7 @@ async def search_dashboards(
 
 # Tags: search
 @mcp.tool()
-async def list_sort_options() -> dict[str, Any]:
+async def list_sort_options() -> dict[str, Any] | ToolResult:
     """Retrieve available sorting options for search results. Use this to discover valid sort fields and ordering directions supported by the search API."""
 
     # Extract parameters for API call
@@ -7102,7 +7232,7 @@ async def create_service_account(
     is_disabled: bool | None = Field(None, alias="isDisabled", description="Whether the service account should be created in a disabled state. Defaults to false (enabled)."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The role to assign to the service account. Must be one of: None, Viewer, Editor, or Admin. Defaults to None if not specified."),
     name: str | None = Field(None),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new service account in Grafana for programmatic access. Requires Grafana Admin privileges and basic authentication."""
 
     # Construct request model with validation
@@ -7144,7 +7274,7 @@ async def list_service_accounts(
     disabled: bool | None = Field(None, alias="Disabled", description="Filter to include only disabled service accounts when set to true, or only active accounts when false."),
     expired_tokens: bool | None = Field(None, alias="expiredTokens", description="Filter to include only service accounts with expired tokens when set to true."),
     perpage: str | None = Field(None, description="Number of service accounts to return per page. Defaults to 1000 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve service accounts with pagination support. Requires `serviceaccounts:read` permission with `serviceaccounts:*` scope."""
 
     _perpage = _parse_int(perpage)
@@ -7184,7 +7314,7 @@ async def list_service_accounts(
 
 # Tags: service_accounts
 @mcp.tool()
-async def get_service_account(service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account to retrieve. Must be a positive integer.")) -> dict[str, Any]:
+async def get_service_account(service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account to retrieve. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific service account by its ID. Requires serviceaccounts:read permission with scope limited to the requested service account."""
 
     _service_account_id = _parse_int(service_account_id)
@@ -7226,7 +7356,7 @@ async def update_service_account(
     service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account to update. Must be a valid 64-bit integer."),
     is_disabled: bool | None = Field(None, alias="isDisabled", description="Whether the service account is disabled. Set to true to deactivate the account or false to enable it."),
     role: Literal["None", "Viewer", "Editor", "Admin"] | None = Field(None, description="The role to assign to the service account. Must be one of: None, Viewer, Editor, or Admin."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing service account's configuration, including its enabled status and role assignment. Requires serviceaccounts:write permission for the specific service account."""
 
     _service_account_id = _parse_int(service_account_id)
@@ -7267,7 +7397,7 @@ async def update_service_account(
 
 # Tags: service_accounts
 @mcp.tool()
-async def delete_service_account(service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account to delete. Must be a positive integer.")) -> dict[str, Any]:
+async def delete_service_account(service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account to delete. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a service account by its ID. Requires serviceaccounts:delete permission and serviceaccounts:id:{serviceAccountId} scope."""
 
     _service_account_id = _parse_int(service_account_id)
@@ -7305,7 +7435,7 @@ async def delete_service_account(service_account_id: str = Field(..., alias="ser
 
 # Tags: service_accounts
 @mcp.tool()
-async def list_service_account_tokens(service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account. Must be a positive integer.")) -> dict[str, Any]:
+async def list_service_account_tokens(service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all API tokens associated with a specific service account. Requires Grafana Admin privileges and the serviceaccounts:read permission for the target service account."""
 
     _service_account_id = _parse_int(service_account_id)
@@ -7347,7 +7477,7 @@ async def create_service_account_token(
     service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account for which to create the token. Must be a positive integer."),
     seconds_to_live: str | None = Field(None, alias="secondsToLive", description="Optional token lifetime in seconds. If specified, the token will automatically expire after this duration. If omitted, the token will not expire."),
     name: str | None = Field(None),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a new authentication token for a service account. The token can be configured with an optional expiration time in seconds."""
 
     _service_account_id = _parse_int(service_account_id)
@@ -7392,7 +7522,7 @@ async def create_service_account_token(
 async def revoke_service_account_token(
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the service account token to revoke. Must be a positive integer."),
     service_account_id: str = Field(..., alias="serviceAccountId", description="The unique identifier of the service account that owns the token. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke and delete a specific token for a service account. Requires Grafana Admin privileges and the serviceaccounts:write permission for the target service account."""
 
     _token_id = _parse_int(token_id)
@@ -7431,7 +7561,7 @@ async def revoke_service_account_token(
 
 # Tags: snapshots
 @mcp.tool()
-async def list_snapshot_sharing_options() -> dict[str, Any]:
+async def list_snapshot_sharing_options() -> dict[str, Any] | ToolResult:
     """Retrieve the available sharing settings and options for snapshots. Use this to understand what sharing configurations are supported before sharing a snapshot."""
 
     # Extract parameters for API call
@@ -7464,7 +7594,7 @@ async def create_snapshot(
     expires: str | None = Field(None, description="The number of seconds before the snapshot automatically expires and becomes unavailable. Omit or set to 0 to keep the snapshot indefinitely."),
     external: bool | None = Field(None, description="When enabled, stores the snapshot on an external server instead of locally. Requires both `key` and `deleteKey` to be provided."),
     key: str | None = Field(None, description="A unique identifier for this snapshot. Required when storing the snapshot externally. Used to reference and retrieve the snapshot."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a snapshot of a dashboard for sharing or archival. Requires either public snapshot mode to be enabled or valid authentication credentials."""
 
     _expires = _parse_int(expires)
@@ -7504,7 +7634,7 @@ async def create_snapshot(
 
 # Tags: dashboards, snapshots
 @mcp.tool()
-async def delete_snapshot_by_delete_key(delete_key: str = Field(..., alias="deleteKey", description="The unique delete key that identifies the snapshot to be deleted. This key is typically provided when the snapshot is created or shared.")) -> dict[str, Any]:
+async def delete_snapshot_by_delete_key(delete_key: str = Field(..., alias="deleteKey", description="The unique delete key that identifies the snapshot to be deleted. This key is typically provided when the snapshot is created or shared.")) -> dict[str, Any] | ToolResult:
     """Delete a snapshot using its unique delete key. Requires either public snapshot mode to be enabled or valid authentication credentials."""
 
     # Construct request model with validation
@@ -7540,7 +7670,7 @@ async def delete_snapshot_by_delete_key(delete_key: str = Field(..., alias="dele
 
 # Tags: dashboards, snapshots
 @mcp.tool()
-async def get_snapshot_by_key(key: str = Field(..., description="The unique identifier of the snapshot to retrieve.")) -> dict[str, Any]:
+async def get_snapshot_by_key(key: str = Field(..., description="The unique identifier of the snapshot to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a dashboard snapshot by its unique identifier. Returns the snapshot data associated with the provided key."""
 
     # Construct request model with validation
@@ -7576,7 +7706,7 @@ async def get_snapshot_by_key(key: str = Field(..., description="The unique iden
 
 # Tags: dashboards, snapshots
 @mcp.tool()
-async def delete_snapshot(key: str = Field(..., description="The unique identifier of the snapshot to delete.")) -> dict[str, Any]:
+async def delete_snapshot(key: str = Field(..., description="The unique identifier of the snapshot to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a dashboard snapshot by its unique key. This action cannot be undone."""
 
     # Construct request model with validation
@@ -7615,7 +7745,7 @@ async def delete_snapshot(key: str = Field(..., description="The unique identifi
 async def create_team(
     name: str = Field(..., description="The name of the team. This is a required identifier used to distinguish the team from others."),
     email: str | None = Field(None, description="Email address associated with the team for contact and notifications purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new team with a required name and optional email contact. This establishes a new team entity that can be used to organize users and resources."""
 
     # Construct request model with validation
@@ -7656,7 +7786,7 @@ async def create_team(
 async def list_teams(
     perpage: str | None = Field(None, description="Number of teams to return per page for pagination. Defaults to 1000 items per page. Use this with totalCount from the response to navigate through all results."),
     sort: str | None = Field(None, description="Field to sort results by. Specify the team attribute name to order the returned teams."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve teams with pagination support. Use the totalCount field in the response to determine the number of pages available."""
 
     _perpage = _parse_int(perpage)
@@ -7696,7 +7826,7 @@ async def list_teams(
 
 # Tags: sync_team_groups, enterprise
 @mcp.tool()
-async def list_team_groups(team_id: str = Field(..., alias="teamId", description="The unique identifier of the team for which to retrieve associated external groups.")) -> dict[str, Any]:
+async def list_team_groups(team_id: str = Field(..., alias="teamId", description="The unique identifier of the team for which to retrieve associated external groups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all external groups associated with a specific team. This returns a list of groups that have been configured for the team."""
 
     # Construct request model with validation
@@ -7735,7 +7865,7 @@ async def list_team_groups(team_id: str = Field(..., alias="teamId", description
 async def add_group_to_team(
     team_id: str = Field(..., alias="teamId", description="The unique identifier of the team to which the group will be added."),
     group_id: str | None = Field(None, alias="groupId", description="The unique identifier of the external group to add to the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an external group to a team, enabling group-level access and collaboration within the team."""
 
     # Construct request model with validation
@@ -7777,7 +7907,7 @@ async def add_group_to_team(
 async def remove_team_group(
     team_id: str = Field(..., alias="teamId", description="The unique identifier of the team from which the group will be removed."),
     group_id: str | None = Field(None, alias="groupId", description="The unique identifier of the external group to remove from the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an external group from a team. This operation deletes the association between a specific group and the team."""
 
     # Construct request model with validation
@@ -7819,7 +7949,7 @@ async def remove_team_group(
 async def search_groups(
     team_id: str = Field(..., alias="teamId", description="The unique identifier of the team to search groups within. Required to scope the search to a specific team."),
     perpage: str | None = Field(None, description="Maximum number of results to return per page. Defaults to 1000 items if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for groups within a team with optional filtering and pagination support. Returns matching groups based on search criteria with configurable result limits."""
 
     _team_id = _parse_int(team_id)
@@ -7861,7 +7991,7 @@ async def search_groups(
 
 # Tags: teams
 @mcp.tool()
-async def get_team(team_id: str = Field(..., description="The unique identifier of the team to retrieve.")) -> dict[str, Any]:
+async def get_team(team_id: str = Field(..., description="The unique identifier of the team to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific team by its unique identifier. Returns the team's details including name, members, and configuration."""
 
     # Construct request model with validation
@@ -7900,7 +8030,7 @@ async def get_team(team_id: str = Field(..., description="The unique identifier 
 async def update_team(
     team_id: str = Field(..., description="The unique identifier of the team to update."),
     email: str | None = Field(None, description="The email address to associate with the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing team's information, such as the associated email address. Provide the team ID and any fields you want to modify."""
 
     # Construct request model with validation
@@ -7939,7 +8069,7 @@ async def update_team(
 
 # Tags: teams
 @mcp.tool()
-async def delete_team(team_id: str = Field(..., description="The unique identifier of the team to delete.")) -> dict[str, Any]:
+async def delete_team(team_id: str = Field(..., description="The unique identifier of the team to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team by its ID. This action removes the team and all associated data."""
 
     # Construct request model with validation
@@ -7975,7 +8105,7 @@ async def delete_team(team_id: str = Field(..., description="The unique identifi
 
 # Tags: teams
 @mcp.tool()
-async def list_team_members(team_id: str = Field(..., description="The unique identifier of the team whose members you want to retrieve.")) -> dict[str, Any]:
+async def list_team_members(team_id: str = Field(..., description="The unique identifier of the team whose members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all members belonging to a specific team. Returns a list of team members with their associated details and roles."""
 
     # Construct request model with validation
@@ -8014,7 +8144,7 @@ async def list_team_members(team_id: str = Field(..., description="The unique id
 async def add_team_member(
     team_id: str = Field(..., description="The unique identifier of the team to which the member will be added."),
     user_id: str = Field(..., alias="userId", description="The unique identifier of the user to add to the team, specified as a 64-bit integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user to a team by their user ID. The user will gain access to the team's resources and collaboration features."""
 
     _user_id = _parse_int(user_id)
@@ -8059,7 +8189,7 @@ async def update_team_members(
     team_id: str = Field(..., description="The unique identifier of the team to update."),
     admins: list[str] | None = Field(None, description="List of user email addresses to set as team admins. Users should be specified by their email addresses. Omit or provide an empty list to remove all admins."),
     members: list[str] | None = Field(None, description="List of user email addresses to set as team members. Users should be specified by their email addresses. Omit or provide an empty list to remove all members."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update team membership by replacing the current members and admins with the provided lists. Any existing members or admins not included in the new lists will be removed from the team."""
 
     # Construct request model with validation
@@ -8102,7 +8232,7 @@ async def update_team_member(
     team_id: str = Field(..., description="The unique identifier of the team containing the member to be updated."),
     user_id: str = Field(..., description="The unique identifier of the user whose team membership and permissions should be updated. This is a 64-bit integer value."),
     permission: str | None = Field(None, description="The permission level to assign to the team member, specified as a 64-bit integer. This determines the member's access rights and capabilities within the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a team member's information and permissions within a specific team. Modify the member's role or access level by specifying their permission level."""
 
     _user_id = _parse_int(user_id)
@@ -8147,7 +8277,7 @@ async def update_team_member(
 async def remove_team_member(
     team_id: str = Field(..., description="The unique identifier of the team from which the member will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the team. Must be a valid 64-bit integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a team, revoking their access and team membership. The user will no longer have permissions to view or interact with team resources."""
 
     _user_id = _parse_int(user_id)
@@ -8185,7 +8315,7 @@ async def remove_team_member(
 
 # Tags: teams, preferences
 @mcp.tool()
-async def get_team_preferences(team_id: str = Field(..., description="The unique identifier of the team whose preferences you want to retrieve.")) -> dict[str, Any]:
+async def get_team_preferences(team_id: str = Field(..., description="The unique identifier of the team whose preferences you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the preferences and settings configured for a specific team, including notification defaults, display options, and other team-level configurations."""
 
     # Construct request model with validation
@@ -8221,7 +8351,7 @@ async def get_team_preferences(team_id: str = Field(..., description="The unique
 
 # Tags: signed_in_user
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile and details of the currently authenticated user. This operation requires valid authentication credentials."""
 
     # Extract parameters for API call
@@ -8252,7 +8382,7 @@ async def update_user_profile(
     email: str | None = Field(None, description="The new email address for the user account. Must be a valid email format."),
     login: str | None = Field(None, description="The new login username for the user account. Used for authentication and account identification."),
     theme: str | None = Field(None, description="The preferred display theme for the user interface (e.g., light, dark, auto)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the profile information for the currently signed-in user, including email address, login username, and display theme preference."""
 
     # Construct request model with validation
@@ -8290,7 +8420,7 @@ async def update_user_profile(
 
 # Tags: signed_in_user
 @mcp.tool()
-async def list_auth_tokens() -> dict[str, Any]:
+async def list_auth_tokens() -> dict[str, Any] | ToolResult:
     """Retrieve all active authentication tokens for the current user, showing all devices and sessions currently logged in."""
 
     # Extract parameters for API call
@@ -8317,7 +8447,7 @@ async def list_auth_tokens() -> dict[str, Any]:
 
 # Tags: signed_in_user
 @mcp.tool()
-async def clear_help_flags() -> dict[str, Any]:
+async def clear_help_flags() -> dict[str, Any] | ToolResult:
     """Clear all help flags for the current user. This resets any tutorial or onboarding prompts that may have been dismissed."""
 
     # Extract parameters for API call
@@ -8344,7 +8474,7 @@ async def clear_help_flags() -> dict[str, Any]:
 
 # Tags: signed_in_user
 @mcp.tool()
-async def enable_help_flag(flag_id: str = Field(..., description="The unique identifier of the help flag to enable.")) -> dict[str, Any]:
+async def enable_help_flag(flag_id: str = Field(..., description="The unique identifier of the help flag to enable.")) -> dict[str, Any] | ToolResult:
     """Enable a specific help flag for the user to control which help features or guidance are displayed."""
 
     # Construct request model with validation
@@ -8380,7 +8510,7 @@ async def enable_help_flag(flag_id: str = Field(..., description="The unique ide
 
 # Tags: signed_in_user
 @mcp.tool()
-async def list_user_organizations() -> dict[str, Any]:
+async def list_user_organizations() -> dict[str, Any] | ToolResult:
     """Retrieve all organizations that the currently authenticated user belongs to or has access to."""
 
     # Extract parameters for API call
@@ -8407,7 +8537,7 @@ async def list_user_organizations() -> dict[str, Any]:
 
 # Tags: signed_in_user, preferences
 @mcp.tool()
-async def get_user_preferences() -> dict[str, Any]:
+async def get_user_preferences() -> dict[str, Any] | ToolResult:
     """Retrieve the current user's preference settings, including display options, notification settings, and other personalization choices."""
 
     # Extract parameters for API call
@@ -8441,7 +8571,7 @@ async def update_user_preferences_partial(
     theme: Literal["light", "dark"] | None = Field(None, description="The user's preferred color theme. Choose between light mode or dark mode."),
     timezone_: str | None = Field(None, alias="timezone", description="The user's timezone for displaying times and scheduling. Accepts any IANA timezone identifier (e.g., America/New_York), 'utc' for UTC, 'browser' to use the browser's timezone, or an empty string for no preference."),
     week_start: str | None = Field(None, alias="weekStart", description="The day of the week to display as the first day in calendar views."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update user preferences for dashboard, display, and localization settings. Allows customization of theme, timezone, language, and other UI preferences."""
 
     # Construct request model with validation
@@ -8479,7 +8609,7 @@ async def update_user_preferences_partial(
 
 # Tags: quota, signed_in_user
 @mcp.tool()
-async def list_user_quotas() -> dict[str, Any]:
+async def list_user_quotas() -> dict[str, Any] | ToolResult:
     """Retrieve the current quota limits and usage for the authenticated user across all resources and services."""
 
     # Extract parameters for API call
@@ -8506,7 +8636,7 @@ async def list_user_quotas() -> dict[str, Any]:
 
 # Tags: signed_in_user
 @mcp.tool()
-async def star_dashboard(dashboard_uid: str = Field(..., description="The unique identifier of the dashboard to star.")) -> dict[str, Any]:
+async def star_dashboard(dashboard_uid: str = Field(..., description="The unique identifier of the dashboard to star.")) -> dict[str, Any] | ToolResult:
     """Add a dashboard to the current user's starred dashboards. Starred dashboards appear in the user's favorites for quick access."""
 
     # Construct request model with validation
@@ -8542,7 +8672,7 @@ async def star_dashboard(dashboard_uid: str = Field(..., description="The unique
 
 # Tags: signed_in_user
 @mcp.tool()
-async def remove_dashboard_star(dashboard_uid: str = Field(..., description="The unique identifier of the dashboard to unstar. This is the dashboard's UID that was previously starred by the user.")) -> dict[str, Any]:
+async def remove_dashboard_star(dashboard_uid: str = Field(..., description="The unique identifier of the dashboard to unstar. This is the dashboard's UID that was previously starred by the user.")) -> dict[str, Any] | ToolResult:
     """Remove a dashboard from the current user's starred list. This action deletes the star marking for the specified dashboard."""
 
     # Construct request model with validation
@@ -8578,7 +8708,7 @@ async def remove_dashboard_star(dashboard_uid: str = Field(..., description="The
 
 # Tags: signed_in_user
 @mcp.tool()
-async def list_user_teams() -> dict[str, Any]:
+async def list_user_teams() -> dict[str, Any] | ToolResult:
     """Retrieve all teams that the currently authenticated user is a member of. This returns the complete list of teams associated with the user's account."""
 
     # Extract parameters for API call
@@ -8605,7 +8735,7 @@ async def list_user_teams() -> dict[str, Any]:
 
 # Tags: signed_in_user
 @mcp.tool()
-async def switch_organization(org_id: str = Field(..., description="The unique identifier of the organization to switch to. Must be a valid 64-bit integer representing an existing organization the user has access to.")) -> dict[str, Any]:
+async def switch_organization(org_id: str = Field(..., description="The unique identifier of the organization to switch to. Must be a valid 64-bit integer representing an existing organization the user has access to.")) -> dict[str, Any] | ToolResult:
     """Switch the authenticated user's active organization context to the specified organization. This changes which organization's data and resources the user will access in subsequent operations."""
 
     _org_id = _parse_int(org_id)
@@ -8643,7 +8773,7 @@ async def switch_organization(org_id: str = Field(..., description="The unique i
 
 # Tags: users
 @mcp.tool()
-async def list_users(perpage: str | None = Field(None, description="Maximum number of users to return per page. Defaults to 1000 if not specified.")) -> dict[str, Any]:
+async def list_users(perpage: str | None = Field(None, description="Maximum number of users to return per page. Defaults to 1000 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all users that the authenticated user has permission to view. Requires admin permission to access this operation."""
 
     _perpage = _parse_int(perpage)
@@ -8683,7 +8813,7 @@ async def list_users(perpage: str | None = Field(None, description="Maximum numb
 
 # Tags: users
 @mcp.tool()
-async def lookup_user(login_or_email: str = Field(..., alias="loginOrEmail", description="The user's login name or email address to search for. Accepts either format to locate the user account.")) -> dict[str, Any]:
+async def lookup_user(login_or_email: str = Field(..., alias="loginOrEmail", description="The user's login name or email address to search for. Accepts either format to locate the user account.")) -> dict[str, Any] | ToolResult:
     """Retrieve a user account by their login name or email address. Use this to find user details when you have either identifier available."""
 
     # Construct request model with validation
@@ -8721,7 +8851,7 @@ async def lookup_user(login_or_email: str = Field(..., alias="loginOrEmail", des
 
 # Tags: users
 @mcp.tool()
-async def list_users_paginated() -> dict[str, Any]:
+async def list_users_paginated() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users from the system. Use this operation to browse users with built-in pagination support for efficient data retrieval."""
 
     # Extract parameters for API call
@@ -8748,7 +8878,7 @@ async def list_users_paginated() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific user by their unique identifier. Returns the user's profile information and details."""
 
     _user_id = _parse_int(user_id)
@@ -8791,7 +8921,7 @@ async def update_user(
     email: str | None = Field(None, description="The user's email address. Optional field for updating contact information."),
     login: str | None = Field(None, description="The user's login username or identifier. Optional field for updating authentication credentials."),
     theme: str | None = Field(None, description="The user's preferred display theme or UI preference. Optional field for customizing the user experience."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update user account details including email, login credentials, and display preferences. Modifies the user record identified by the provided user ID."""
 
     _user_id = _parse_int(user_id)
@@ -8832,7 +8962,7 @@ async def update_user(
 
 # Tags: users
 @mcp.tool()
-async def list_user_organizations_by_id(user_id: str = Field(..., description="The unique identifier of the user. Must be a positive integer value.")) -> dict[str, Any]:
+async def list_user_organizations_by_id(user_id: str = Field(..., description="The unique identifier of the user. Must be a positive integer value.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organizations associated with a specific user. Returns a list of organizations where the user is a member or has access."""
 
     _user_id = _parse_int(user_id)
@@ -8870,7 +9000,7 @@ async def list_user_organizations_by_id(user_id: str = Field(..., description="T
 
 # Tags: users
 @mcp.tool()
-async def list_user_teams_by_id(user_id: str = Field(..., description="The unique identifier of the user. Must be a positive integer.")) -> dict[str, Any]:
+async def list_user_teams_by_id(user_id: str = Field(..., description="The unique identifier of the user. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all teams that a user is a member of. Returns a list of teams associated with the specified user."""
 
     _user_id = _parse_int(user_id)
@@ -8913,7 +9043,7 @@ async def export_alert_rules(
     folder_uid: list[str] | None = Field(None, alias="folderUid", description="Filter export to specific folders by their UIDs. Provide one or more folder UIDs to limit the rules exported to those folders only."),
     group: str | None = Field(None, description="Filter export to a specific rule group by name. Can only be used together with a single folder UID. Ignored if multiple folders or no folder is specified."),
     rule_uid: str | None = Field(None, alias="ruleUid", description="Export a single alert rule by its UID. When specified, folderUid and group parameters must be empty. Takes precedence over folder and group filters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export all alert rules or a filtered subset in provisioning file format (YAML, JSON, or HCL). Useful for backing up, version controlling, or migrating alert rule configurations."""
 
     # Construct request model with validation
@@ -8954,7 +9084,7 @@ async def export_alert_rules(
 async def export_alert_rule(
     uid: str = Field(..., alias="UID", description="The unique identifier of the alert rule to export."),
     format_: Literal["yaml", "json", "hcl"] | None = Field(None, alias="format", description="The file format for the exported alert rule. Choose from YAML, JSON, or HCL. Defaults to YAML if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export an alert rule in provisioning file format (YAML, JSON, or HCL) for use in infrastructure-as-code workflows."""
 
     # Construct request model with validation
@@ -8993,7 +9123,7 @@ async def export_alert_rule(
 
 # Tags: provisioning
 @mcp.tool()
-async def list_contact_points() -> dict[str, Any]:
+async def list_contact_points() -> dict[str, Any] | ToolResult:
     """Retrieve all configured contact points for notifications and alerts. Contact points define where and how notifications are sent."""
 
     # Extract parameters for API call
@@ -9025,7 +9155,7 @@ async def create_contact_point(
     type_: Literal["alertmanager", "dingding", "discord", "email", "googlechat", "kafka", "line", "opsgenie", "pagerduty", "pushover", "sensugo", "slack", "teams", "telegram", "threema", "victorops", "webhook", "wecom"] = Field(..., alias="type", description="The type of contact point to create. Choose from supported integrations including alertmanager, dingding, discord, email, googlechat, kafka, line, opsgenie, pagerduty, pushover, sensugo, slack, teams, telegram, threema, victorops, webhook, or wecom."),
     disable_resolve_message: bool | None = Field(None, alias="disableResolveMessage", description="Whether to disable the resolve message when alerts are resolved. Defaults to false, meaning resolve messages are sent."),
     name: str | None = Field(None, description="Name is used as grouping key in the UI. Contact points with the same name will be grouped in the UI."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new contact point for alert notifications. Specify the contact point type and configure its settings to enable routing of alerts to external services."""
 
     # Construct request model with validation
@@ -9066,7 +9196,7 @@ async def create_contact_point(
 async def export_contact_points(
     format_: Literal["yaml", "json", "hcl"] | None = Field(None, alias="format", description="File format for the exported contact points. Choose from YAML, JSON, or HCL. Defaults to YAML if not specified."),
     decrypt: bool | None = Field(None, description="Whether to decrypt sensitive settings in the export. When false (default), secure settings are redacted. Only org admins can view decrypted values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export all provisioned contact points in your preferred format (YAML, JSON, or HCL). Optionally decrypt secure settings if you have org admin permissions."""
 
     # Construct request model with validation
@@ -9110,7 +9240,7 @@ async def update_contact_point(
     type_: Literal["alertmanager", "dingding", "discord", "email", "googlechat", "kafka", "line", "opsgenie", "pagerduty", "pushover", "sensugo", "slack", "teams", "telegram", "threema", "victorops", "webhook", "wecom"] = Field(..., alias="type", description="The notification channel type for this contact point. Supported types include webhook, email, Slack, PagerDuty, Telegram, Discord, and other integration platforms."),
     disable_resolve_message: bool | None = Field(None, alias="disableResolveMessage", description="Whether to disable message resolution notifications. Defaults to false, meaning resolution messages are sent by default."),
     name: str | None = Field(None, description="Name is used as grouping key in the UI. Contact points with the\nsame name will be grouped in the UI."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing contact point configuration with new settings and notification type. Allows modification of contact point details such as notification channel type and delivery preferences."""
 
     # Construct request model with validation
@@ -9149,7 +9279,7 @@ async def update_contact_point(
 
 # Tags: provisioning
 @mcp.tool()
-async def delete_contact_point(uid: str = Field(..., alias="UID", description="The unique identifier of the contact point to delete.")) -> dict[str, Any]:
+async def delete_contact_point(uid: str = Field(..., alias="UID", description="The unique identifier of the contact point to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a contact point by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -9189,7 +9319,7 @@ async def export_alert_rule_group(
     folder_uid: str = Field(..., alias="FolderUID", description="The unique identifier of the folder containing the alert rule group to export."),
     group: str = Field(..., alias="Group", description="The name or identifier of the alert rule group to export."),
     format_: Literal["yaml", "json", "hcl"] | None = Field(None, alias="format", description="The file format for the exported provisioning file. Supports YAML, JSON, or HCL formats. Defaults to YAML if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export an alert rule group in provisioning file format (YAML, JSON, or HCL) for backup, version control, or migration purposes."""
 
     # Construct request model with validation
@@ -9228,7 +9358,7 @@ async def export_alert_rule_group(
 
 # Tags: provisioning
 @mcp.tool()
-async def list_mute_timings() -> dict[str, Any]:
+async def list_mute_timings() -> dict[str, Any] | ToolResult:
     """Retrieve all configured mute timings that control when notifications and alerts are suppressed in the system."""
 
     # Extract parameters for API call
@@ -9255,7 +9385,7 @@ async def list_mute_timings() -> dict[str, Any]:
 
 # Tags: provisioning
 @mcp.tool()
-async def export_mute_timings(format_: Literal["yaml", "json", "hcl"] | None = Field(None, alias="format", description="File format for the exported mute timings. Choose from YAML, JSON, or HCL formats. Defaults to YAML if not specified.")) -> dict[str, Any]:
+async def export_mute_timings(format_: Literal["yaml", "json", "hcl"] | None = Field(None, alias="format", description="File format for the exported mute timings. Choose from YAML, JSON, or HCL formats. Defaults to YAML if not specified.")) -> dict[str, Any] | ToolResult:
     """Export all configured mute timings in provisioning format. Returns mute timing definitions that can be used for infrastructure-as-code deployment."""
 
     # Construct request model with validation
@@ -9293,7 +9423,7 @@ async def export_mute_timings(format_: Literal["yaml", "json", "hcl"] | None = F
 
 # Tags: provisioning
 @mcp.tool()
-async def get_mute_timing(name: str = Field(..., description="The unique identifier of the mute timing to retrieve.")) -> dict[str, Any]:
+async def get_mute_timing(name: str = Field(..., description="The unique identifier of the mute timing to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific mute timing configuration by name. Mute timings define periods when alerts and notifications are suppressed."""
 
     # Construct request model with validation
@@ -9332,7 +9462,7 @@ async def get_mute_timing(name: str = Field(..., description="The unique identif
 async def update_mute_timing(
     name: str = Field(..., description="The unique identifier of the mute timing to replace. Must match an existing mute timing name in the system."),
     time_intervals: list[_models.TimeInterval] | None = Field(None, description="Array of time intervals during which alerts should be muted. Each interval defines a period when muting is active. The order of intervals may affect evaluation logic."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace an existing mute timing configuration with new time intervals. This operation completely overwrites the mute timing identified by name with the provided settings."""
 
     # Construct request model with validation
@@ -9371,7 +9501,7 @@ async def update_mute_timing(
 
 # Tags: provisioning
 @mcp.tool()
-async def delete_mute_timing(name: str = Field(..., description="The name of the mute timing to delete. Must match an existing mute timing configuration.")) -> dict[str, Any]:
+async def delete_mute_timing(name: str = Field(..., description="The name of the mute timing to delete. Must match an existing mute timing configuration.")) -> dict[str, Any] | ToolResult:
     """Delete a mute timing configuration by name. This removes the specified mute timing rule from the provisioning system."""
 
     # Construct request model with validation
@@ -9410,7 +9540,7 @@ async def delete_mute_timing(name: str = Field(..., description="The name of the
 async def export_mute_timing(
     name: str = Field(..., description="The name of the mute timing to export."),
     format_: Literal["yaml", "json", "hcl"] | None = Field(None, alias="format", description="The format for the exported file. Choose from YAML, JSON, or HCL. Defaults to YAML if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export a mute timing configuration in the specified provisioning format (YAML, JSON, or HCL) for use in infrastructure-as-code workflows."""
 
     # Construct request model with validation
@@ -9449,7 +9579,7 @@ async def export_mute_timing(
 
 # Tags: provisioning
 @mcp.tool()
-async def list_notification_templates() -> dict[str, Any]:
+async def list_notification_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available notification template groups. Use this to discover what templates are configured in your provisioning system."""
 
     # Extract parameters for API call
@@ -9476,7 +9606,7 @@ async def list_notification_templates() -> dict[str, Any]:
 
 # Tags: provisioning
 @mcp.tool()
-async def get_notification_template(name: str = Field(..., description="The name of the notification template group to retrieve.")) -> dict[str, Any]:
+async def get_notification_template(name: str = Field(..., description="The name of the notification template group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a notification template group by name. Returns the template configuration for the specified template group."""
 
     # Construct request model with validation
@@ -9515,7 +9645,7 @@ async def get_notification_template(name: str = Field(..., description="The name
 async def update_notification_template(
     name: str = Field(..., description="The unique identifier of the notification template group to update. Used to locate and modify the specific template configuration."),
     template: str | None = Field(None, description="The updated template content or configuration for the notification template group. Defines the structure and content of notifications sent through this template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing notification template group with new configuration. Allows modification of template settings for the specified template group name."""
 
     # Construct request model with validation
@@ -9554,7 +9684,7 @@ async def update_notification_template(
 
 # Tags: provisioning
 @mcp.tool()
-async def delete_notification_template(name: str = Field(..., description="The name of the notification template group to delete. Must be an exact match to an existing template group.")) -> dict[str, Any]:
+async def delete_notification_template(name: str = Field(..., description="The name of the notification template group to delete. Must be an exact match to an existing template group.")) -> dict[str, Any] | ToolResult:
     """Delete a notification template group by name. This operation permanently removes the template group and all associated configurations."""
 
     # Construct request model with validation

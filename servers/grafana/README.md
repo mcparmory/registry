@@ -1,11 +1,12 @@
 # Grafana MCP Server
+<!-- mcp-name: com.mcparmory/grafana -->
 
-Base URL: /api
+Base URL: https://grafana1776699204.grafana.net/api
 | | |
 |---|---|
 | **Category** | Infrastructure |
 | **Tools** | 218 |
-| **Auth** | Bearer Token, HTTP Basic |
+| **Auth** | Bearer Token |
 
 ## API Info
 - **Contact:** Grafana Labs (hello@grafana.com) — [https://grafana.com](https://grafana.com)
@@ -17,10 +18,8 @@ Base URL: /api
 ### Quick Start (recommended)
 
 ```bash
-BASE_URL=https://your-instance.example.com \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+SERVER_GRAFANA_URL=YOUR_SERVER_GRAFANA_URL \
 uvx mcparmory-grafana
 ```
 
@@ -28,10 +27,8 @@ uvx mcparmory-grafana
 
 ```bash
 pip install mcparmory-grafana
-BASE_URL=https://your-instance.example.com \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+SERVER_GRAFANA_URL=YOUR_SERVER_GRAFANA_URL \
 mcparmory-grafana
 ```
 
@@ -46,10 +43,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-grafana"],
       "env": {
-        "BASE_URL": "https://your-instance.example.com",
         "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
-        "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
-        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD"
+        "SERVER_GRAFANA_URL": "YOUR_SERVER_GRAFANA_URL"
       }
     }
   }
@@ -63,8 +58,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
-- `BASIC_AUTH_USERNAME` — Username
-- `BASIC_AUTH_PASSWORD` — Password
+- `SERVER_GRAFANA_URL` — Your Grafana instance hostname, visible in the browser URL bar when logged in (e.g. your-stack.grafana.net for Grafana Cloud). (default: `grafana1776699204`)
 Do not commit credentials to version control.
 
 ---
@@ -98,6 +92,17 @@ Example (if server is at `/home/user/mcp-servers/grafana`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  -e SERVER_GRAFANA_URL=YOUR_SERVER_GRAFANA_URL \
+  ghcr.io/mcparmory/grafana:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -105,7 +110,9 @@ docker build -t grafana .
 docker run -p 8000:8000 --env-file .env grafana
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
