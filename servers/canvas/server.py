@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Canvas MCP Server
-Generated: 2026-04-14 18:17:23 UTC
+Generated: 2026-04-23 21:06:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import os
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -36,9 +38,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "")
+# Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
+_SERVER_VARS = {
+    "canvas_domain": os.getenv("SERVER_CANVAS_DOMAIN", ""),
+}
+BASE_URL = os.getenv("BASE_URL", "https://{canvas_domain}/api/v1".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Canvas"
 SERVER_VERSION = "1.0.0"
 
@@ -467,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -494,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -536,18 +572,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -619,7 +719,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -667,6 +775,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -729,7 +841,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -755,10 +875,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -1128,16 +1246,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -1151,6 +1270,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1193,6 +1313,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1204,18 +1339,26 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
+    'OAuth2',
     'bearerAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
+try:
+    _auth_handlers["OAuth2"] = _auth.OAuth2Auth()
+    logging.info("Authentication configured: OAuth2")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for OAuth2 not configured: {error_msg}")
+    _auth_handlers["OAuth2"] = None
 try:
     _auth_handlers["bearerAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
     logging.info("Authentication configured: bearerAuth")
@@ -1345,7 +1488,7 @@ mcp = FastMCP("Canvas", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: plagiarism_detection_platform_assignments
 @mcp.tool()
-async def get_assignment_lti(assignment_id: str = Field(..., description="The Canvas assignment ID or LTI assignment ID that uniquely identifies the assignment to retrieve.")) -> dict[str, Any]:
+async def get_assignment_lti(assignment_id: str = Field(..., description="The Canvas assignment ID or LTI assignment ID that uniquely identifies the assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single Canvas assignment by its Canvas ID or LTI ID. Tool providers can only access assignments associated with their tool."""
 
     # Construct request model with validation
@@ -1384,7 +1527,7 @@ async def get_assignment_lti(assignment_id: str = Field(..., description="The Ca
 async def get_originality_report(
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the file."),
     file_id: str = Field(..., description="The unique identifier of the file for which to retrieve the originality report."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single originality report for a specific file within an assignment. This report contains plagiarism detection and similarity analysis results."""
 
     # Construct request model with validation
@@ -1428,7 +1571,7 @@ async def update_originality_report(
     originality_report_tool_setting_resource_type_code: str | None = Field(None, description="The resource type code identifying which LTI tool resource handler Canvas should use to launch the originality report viewer."),
     originality_report_tool_setting_resource_url: str | None = Field(None, description="The URL Canvas should navigate to when displaying the originality report via LTI. This value is typically inferred from the resource handler's message path unless explicitly specified here. Requires resource_type_code to also be set."),
     originality_report_workflow_state: str | None = Field(None, description="The current state of the originality report processing. Set to 'pending' while processing, 'error' if processing failed, or 'scored' when a final originality score is available. Automatically set to 'scored' if an originality_score is provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing originality report for a submitted file in an assignment. Modify the report URL, originality score, workflow state, or LTI tool configuration."""
 
     # Construct request model with validation
@@ -1470,7 +1613,7 @@ async def update_originality_report(
 async def get_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment that contains the submission."),
     submission_id: str = Field(..., description="The unique identifier of the submission to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific student submission for an LTI assignment. Use this to access submission details, content, and metadata by providing the assignment and submission identifiers."""
 
     # Construct request model with validation
@@ -1509,7 +1652,7 @@ async def get_submission(
 async def list_submission_attempts(
     assignment_id: str = Field(..., description="The unique identifier of the assignment associated with the submission."),
     submission_id: str = Field(..., description="The unique identifier of the submission whose attempt history should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete history of all attempts made for a specific submission, including details about each submission attempt."""
 
     # Construct request model with validation
@@ -1554,7 +1697,7 @@ async def submit_originality_report(
     originality_report_tool_setting_resource_type_code: str | None = Field(None, description="The resource type code identifying which LTI tool resource handler Canvas should use to launch the originality report viewer. Must be specified if using LTI launch instead of a direct URL."),
     originality_report_tool_setting_resource_url: str | None = Field(None, description="The URL Canvas should launch to for viewing the originality report via LTI. This value is typically inferred from the resource handler's message path unless explicitly specified here. Requires resource_type_code to also be set."),
     originality_report_workflow_state: str | None = Field(None, description="The workflow state of the originality report. When an originality score is provided, the state automatically becomes 'scored'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit an originality report for a student submission file, including an originality score and optional report URL or LTI launch configuration."""
 
     _originality_report_file_id = _parse_int(originality_report_file_id)
@@ -1599,7 +1742,7 @@ async def get_originality_report_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment associated with the submission."),
     submission_id: str = Field(..., description="The unique identifier of the student submission for which to retrieve the originality report."),
     id_: str = Field(..., alias="id", description="The unique identifier of the originality report to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single originality report for a student submission. This report contains plagiarism detection results and analysis for the specified assignment submission."""
 
     # Construct request model with validation
@@ -1644,7 +1787,7 @@ async def update_originality_report_submission(
     originality_report_tool_setting_resource_type_code: str | None = Field(None, description="The resource type code identifying which LTI tool resource handler Canvas should use to launch the originality report viewer. When specified, Canvas will use the LTI launch mechanism instead of the direct URL."),
     originality_report_tool_setting_resource_url: str | None = Field(None, description="The URL that Canvas should launch to when displaying the originality report via LTI. This value is typically inferred from the resource handler's message path, but can be explicitly set. Requires resource_type_code to also be specified."),
     originality_report_workflow_state: str | None = Field(None, description="The current state of the originality report processing. Use 'pending' for reports awaiting processing, 'error' for failed reports, or 'scored' for completed reports with results. Automatically set to 'scored' when an originality score is provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing originality report for a submission, including the originality score, report URL, and workflow state. This operation allows modification of plagiarism detection results and LTI tool configuration."""
 
     # Construct request model with validation
@@ -1683,7 +1826,7 @@ async def update_originality_report_submission(
 
 # Tags: plagiarism_detection_platform_users
 @mcp.tool()
-async def get_group_members_lti(group_id: str = Field(..., description="The unique identifier of the group from which to retrieve members.")) -> dict[str, Any]:
+async def get_group_members_lti(group_id: str = Field(..., description="The unique identifier of the group from which to retrieve members.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Canvas users that are members of a specific group. Tool providers can only access groups within their installed context."""
 
     # Construct request model with validation
@@ -1719,7 +1862,7 @@ async def get_group_members_lti(group_id: str = Field(..., description="The uniq
 
 # Tags: webhooks_subscriptions
 @mcp.tool()
-async def list_webhook_subscriptions() -> dict[str, Any]:
+async def list_webhook_subscriptions() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all webhook subscriptions for a tool proxy. Use the 'EndKey' from the response to set 'StartKey' in subsequent requests to fetch additional pages."""
 
     # Extract parameters for API call
@@ -1746,7 +1889,7 @@ async def list_webhook_subscriptions() -> dict[str, Any]:
 
 # Tags: webhooks_subscriptions
 @mcp.tool()
-async def get_webhook_subscription(id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to retrieve.")) -> dict[str, Any]:
+async def get_webhook_subscription(id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific webhook subscription by its ID. Use this to view the configuration and status of an individual LTI webhook subscription."""
 
     # Construct request model with validation
@@ -1782,7 +1925,7 @@ async def get_webhook_subscription(id_: str = Field(..., alias="id", description
 
 # Tags: webhooks_subscriptions
 @mcp.tool()
-async def delete_webhook_subscription(id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to delete.")) -> dict[str, Any]:
+async def delete_webhook_subscription(id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a webhook subscription by its ID. This removes the subscription and stops delivery of webhook events to the configured endpoint."""
 
     # Construct request model with validation
@@ -1818,7 +1961,7 @@ async def delete_webhook_subscription(id_: str = Field(..., alias="id", descript
 
 # Tags: plagiarism_detection_platform_users
 @mcp.tool()
-async def get_lti_user(id_: str = Field(..., alias="id", description="The Canvas user ID or LTI ID of the user to retrieve.")) -> dict[str, Any]:
+async def get_lti_user(id_: str = Field(..., alias="id", description="The Canvas user ID or LTI ID of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single Canvas user by their Canvas ID or LTI ID. Tool providers can only access users who have been assigned an assignment associated with their tool."""
 
     # Construct request model with validation
@@ -1860,7 +2003,7 @@ async def list_sis_export_assignments(
     starts_before: str | None = Field(None, description="Restrict results to courses with a start date before this date (ISO 8601 format)."),
     ends_after: str | None = Field(None, description="Restrict results to courses with an end date after this date (ISO 8601 format)."),
     include: Literal["student_overrides"] | None = Field(None, description="Include additional data in the response. Use 'student_overrides' to return individual student override information for assignments with differentiated assignments enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve published assignments enabled for grade export to SIS within an account. Results include assignment group and section information, with optional course cross-listing and student override details."""
 
     _account_id = _parse_int(account_id)
@@ -1908,7 +2051,7 @@ async def list_sis_export_assignments_by_course(
     starts_before: str | None = Field(None, description="When querying by account, restricts results to courses with a start date before this date (ISO 8601 format)."),
     ends_after: str | None = Field(None, description="When querying by account, restricts results to courses with an end date after this date (ISO 8601 format)."),
     include: Literal["student_overrides"] | None = Field(None, description="Additional data to include in the response. Use 'student_overrides' to return individual student override information for assignments with differentiated assignments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve published assignments enabled for grade export to SIS. Returns assignment details including group and section information, with optional student override data when the Differentiated Assignments feature is enabled."""
 
     _course_id = _parse_int(course_id)
@@ -1953,7 +2096,7 @@ async def list_sis_export_assignments_by_course(
 async def disable_sis_grade_exports(
     course_id: str = Field(..., description="The ID of the course containing assignments to disable for SIS export."),
     grading_period_id: str | None = Field(None, description="Optional ID of a specific grading period to limit the disable operation to assignments within that period only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable all assignments currently flagged for grade export to SIS in a course, with optional filtering by grading period."""
 
     _course_id = _parse_int(course_id)
@@ -1998,7 +2141,7 @@ async def disable_sis_grade_exports(
 async def list_accounts(
     include: list[Literal["lti_guid", "registration_settings", "services"]] | None = Field(None, description="Specify which additional account information to include in the response. Options include LTI identifiers, privacy and terms of use settings, and service availability status (service information requires account management permissions)."),
     per_page: int | None = Field(None, description="Number of accounts to return per page for pagination. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of accounts accessible to the current user. Only account administrators can view accounts; students and teachers typically receive an empty list."""
 
     # Construct request model with validation
@@ -2042,7 +2185,7 @@ async def list_accounts(
 async def search_domains(
     name: str | None = Field(None, description="Campus name to search for. Supports partial matching against account domain names."),
     domain: str | None = Field(None, description="Domain value to search for. Supports partial matching against registered domains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for account domains by name or domain value. Returns up to 5 matching results using partial string matching."""
 
     # Construct request model with validation
@@ -2080,7 +2223,7 @@ async def search_domains(
 
 # Tags: account_notifications
 @mcp.tool()
-async def list_active_notifications(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve notifications.")) -> dict[str, Any]:
+async def list_active_notifications(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve notifications.")) -> dict[str, Any] | ToolResult:
     """Retrieves all active global notifications for the current user in the specified account. Closed or dismissed notifications are excluded from the results."""
 
     # Construct request model with validation
@@ -2124,7 +2267,7 @@ async def create_notification(
     account_notification_subject: str = Field(..., description="The subject line or title of the notification."),
     account_notification_icon: Literal["warning", "information", "question", "error", "calendar"] | None = Field(None, description="The icon displayed alongside the notification. Defaults to warning if not specified."),
     account_notification_roles: list[str] | None = Field(None, description="The user role(s) that should receive this notification. Omit this field to send the notification to all users in the account. Specify one or more enrollment role types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create and distribute a global notification to an account. The notification will be displayed to specified user roles (or all users if roles are omitted) during the specified time window."""
 
     # Construct request model with validation
@@ -2167,7 +2310,7 @@ async def create_notification(
 async def get_notification(
     account_id: str = Field(..., description="The unique identifier of the account containing the notification."),
     id_: str = Field(..., alias="id", description="The unique identifier of the notification to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific global notification for the current user. Closed notifications are not returned."""
 
     # Construct request model with validation
@@ -2211,7 +2354,7 @@ async def update_notification(
     account_notification_subject: str | None = Field(None, description="The subject line of the notification."),
     account_notification_roles: list[str] | None = Field(None, description="An array of role types that should receive this notification. Omitting this field sends the notification to all users."),
     account_notification_time_range: str | None = Field(None, description="Time range for the notification in ISO 8601 interval format (start/end). Example: 2014-01-01T01:00Z/2014-01-02T01:00Z"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a global notification for an account, including its message, subject, icon, and target recipient roles."""
 
     # Call helper functions
@@ -2256,7 +2399,7 @@ async def update_notification(
 async def dismiss_notification(
     account_id: str = Field(..., description="The unique identifier of the account that owns the notification."),
     id_: str = Field(..., alias="id", description="The unique identifier of the notification to dismiss."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Dismiss a notification for the current user so it no longer appears in their notification list. This allows users to hide notifications they no longer wish to see."""
 
     # Construct request model with validation
@@ -2295,7 +2438,7 @@ async def dismiss_notification(
 async def list_admins(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve administrators."),
     per_page: int | None = Field(None, description="The maximum number of administrator records to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of administrators for the specified account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -2339,7 +2482,7 @@ async def promote_account_admin(
     user_id: str = Field(..., description="The unique identifier of the user to promote to admin status."),
     role_id: str | None = Field(None, description="The admin role to assign to the user. If not specified, defaults to the built-in AccountAdmin role."),
     send_confirmation: bool | None = Field(None, description="Whether to send a confirmation email notification to the newly promoted admin. Defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Promote an existing user to admin status within an account. Optionally sends a confirmation email to the newly promoted admin."""
 
     _user_id = _parse_int(user_id)
@@ -2382,7 +2525,7 @@ async def promote_account_admin(
 
 # Tags: analytics
 @mcp.tool()
-async def list_department_participation_completed(account_id: str = Field(..., description="The account identifier for which to retrieve department-level participation data.")) -> dict[str, Any]:
+async def list_department_participation_completed(account_id: str = Field(..., description="The account identifier for which to retrieve department-level participation data.")) -> dict[str, Any] | ToolResult:
     """Retrieve department-level participation metrics for concluded courses in the default term, aggregated by date and content category. Returns page view hits across all courses in the department."""
 
     # Construct request model with validation
@@ -2418,7 +2561,7 @@ async def list_department_participation_completed(account_id: str = Field(..., d
 
 # Tags: analytics
 @mcp.tool()
-async def list_department_grade_distribution_completed(account_id: str = Field(..., description="The unique identifier for the account whose department grade data should be retrieved.")) -> dict[str, Any]:
+async def list_department_grade_distribution_completed(account_id: str = Field(..., description="The unique identifier for the account whose department grade data should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the distribution of student grades across all courses in a department. Returns raw grade counts binned to the nearest integer (0-100 range), where each student contributes one grade per course regardless of enrollment in multiple sections."""
 
     # Construct request model with validation
@@ -2454,7 +2597,7 @@ async def list_department_grade_distribution_completed(account_id: str = Field(.
 
 # Tags: analytics
 @mcp.tool()
-async def get_department_statistics(account_id: str = Field(..., description="The unique identifier for the account whose department statistics should be retrieved.")) -> dict[str, Any]:
+async def get_department_statistics(account_id: str = Field(..., description="The unique identifier for the account whose department statistics should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves numeric statistics for a department, aggregated by term or applied filters. Provides insights into department-level performance and activity metrics."""
 
     # Construct request model with validation
@@ -2490,7 +2633,7 @@ async def get_department_statistics(account_id: str = Field(..., description="Th
 
 # Tags: analytics
 @mcp.tool()
-async def list_department_participation_data(account_id: str = Field(..., description="The Canvas account ID for which to retrieve department-level participation analytics.")) -> dict[str, Any]:
+async def list_department_participation_data(account_id: str = Field(..., description="The Canvas account ID for which to retrieve department-level participation analytics.")) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated page view participation metrics for all courses in a department, grouped by date and content category. Includes data from all available courses in the default term."""
 
     # Construct request model with validation
@@ -2526,7 +2669,7 @@ async def list_department_participation_data(account_id: str = Field(..., descri
 
 # Tags: analytics
 @mcp.tool()
-async def list_department_grade_distribution(account_id: str = Field(..., description="The unique identifier for the account whose department grade data should be retrieved.")) -> dict[str, Any]:
+async def list_department_grade_distribution(account_id: str = Field(..., description="The unique identifier for the account whose department grade data should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the distribution of current student grades across all courses in a department. Grades are binned to the nearest integer (0-100 range), with each student contributing one grade per course regardless of multiple enrollments in the same course."""
 
     # Construct request model with validation
@@ -2562,7 +2705,7 @@ async def list_department_grade_distribution(account_id: str = Field(..., descri
 
 # Tags: analytics
 @mcp.tool()
-async def get_department_statistics_current(account_id: str = Field(..., description="The unique identifier for the account whose department statistics should be retrieved.")) -> dict[str, Any]:
+async def get_department_statistics_current(account_id: str = Field(..., description="The unique identifier for the account whose department statistics should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves numeric statistics for a department, including metrics for the current term or specified filter criteria. Provides aggregated performance and engagement data at the department level."""
 
     # Construct request model with validation
@@ -2601,7 +2744,7 @@ async def get_department_statistics_current(account_id: str = Field(..., descrip
 async def list_department_participation_by_term(
     account_id: str = Field(..., description="The Canvas account ID for which to retrieve department participation data."),
     term_id: str = Field(..., description="The term ID for which to retrieve participation metrics. Includes all available and concluded courses within the specified term."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve department-level participation metrics for a specific term, aggregated across all courses and grouped by date and content category. Returns page view hits with breakdowns by announcements, assignments, collaborations, conferences, discussions, files, general, grades, groups, modules, other, pages, and quizzes."""
 
     # Construct request model with validation
@@ -2640,7 +2783,7 @@ async def list_department_participation_by_term(
 async def list_department_grade_distributions(
     account_id: str = Field(..., description="The unique identifier for the account containing the department and term data."),
     term_id: str = Field(..., description="The unique identifier for the academic term for which to retrieve grade distribution data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the distribution of student grades across all courses within a department for a specific term. Grade data is binned to the nearest integer (0-100 range), with each student contributing one grade per course regardless of multiple enrollments in the same course."""
 
     # Construct request model with validation
@@ -2679,7 +2822,7 @@ async def list_department_grade_distributions(
 async def get_department_statistics_term(
     account_id: str = Field(..., description="The unique identifier for the account containing the department and term data."),
     term_id: str = Field(..., description="The unique identifier for the term for which to retrieve department-level statistics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve numeric statistics for a department within a specific term or filter. Returns aggregated metrics and analytics data at the department level."""
 
     # Construct request model with validation
@@ -2718,7 +2861,7 @@ async def get_department_statistics_term(
 async def list_authentication_providers(
     account_id: str = Field(..., description="The unique identifier of the account for which to list authentication providers."),
     per_page: int | None = Field(None, description="The maximum number of authentication providers to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of authentication providers configured for an account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -2760,7 +2903,7 @@ async def list_authentication_providers(
 async def get_authentication_provider(
     account_id: str = Field(..., description="The unique identifier of the account that owns the authentication provider."),
     id_: str = Field(..., alias="id", description="The unique identifier of the authentication provider to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific authentication provider configuration for the given account. Use this to inspect the details and settings of an authentication provider."""
 
     # Construct request model with validation
@@ -2799,7 +2942,7 @@ async def get_authentication_provider(
 async def list_content_migrations(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve content migrations."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content migrations for the specified account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -2855,7 +2998,7 @@ async def initiate_content_migration(
     settings_overwrite_quizzes: bool | None = Field(None, description="Replace existing quizzes that have matching identifiers in the destination course."),
     settings_question_bank_id: str | None = Field(None, description="The question bank ID where imported questions will be stored if not specified in the content package."),
     settings_source_course_id: str | None = Field(None, description="The source course ID to copy from. Required when migration_type is course_copy_importer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content migration to import course materials from various sources (Canvas cartridges, Common Cartridge, QTI, Moodle, zip files, or another course). File-based migrations begin processing after upload completion; course copy migrations begin immediately upon creation."""
 
     _date_shift_options_day_substitutions_x = _parse_int(date_shift_options_day_substitutions_x)
@@ -2898,7 +3041,7 @@ async def initiate_content_migration(
 
 # Tags: content_migrations
 @mcp.tool()
-async def list_migration_systems(account_id: str = Field(..., description="The unique identifier of the account for which to list available migration systems.")) -> dict[str, Any]:
+async def list_migration_systems(account_id: str = Field(..., description="The unique identifier of the account for which to list available migration systems.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of currently available migration system types for an account. Available migration types may change over time."""
 
     # Construct request model with validation
@@ -2938,7 +3081,7 @@ async def list_migration_issues(
     account_id: str = Field(..., description="The unique identifier of the account containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
     per_page: int | None = Field(None, description="The maximum number of migration issues to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of migration issues for a specific content migration within an account. Use this to monitor and track problems encountered during the content migration process."""
 
     # Construct request model with validation
@@ -2981,7 +3124,7 @@ async def get_migration_issue(
     account_id: str = Field(..., description="The Canvas account ID that contains the content migration."),
     content_migration_id: str = Field(..., description="The content migration ID that contains the migration issue."),
     id_: str = Field(..., alias="id", description="The migration issue ID to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific migration issue within a content migration. Returns the issue data including status, error details, and resolution information."""
 
     # Construct request model with validation
@@ -3022,7 +3165,7 @@ async def resolve_migration_issue(
     content_migration_id: str = Field(..., description="The content migration ID that contains the migration issue."),
     id_: str = Field(..., alias="id", description="The migration issue ID to update."),
     workflow_state: Literal["active", "resolved"] = Field(..., description="The workflow state to set for the migration issue. Use 'active' for ongoing issues or 'resolved' to mark as complete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the workflow state of a migration issue to mark it as active or resolved. Use this to track and manage issues discovered during content migrations."""
 
     # Construct request model with validation
@@ -3064,7 +3207,7 @@ async def resolve_migration_issue(
 async def get_content_migration(
     account_id: str = Field(..., description="The unique identifier of the account containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific content migration by its ID within an account. Returns the current status, progress, and metadata for the migration."""
 
     # Construct request model with validation
@@ -3103,7 +3246,7 @@ async def get_content_migration(
 async def update_content_migration(
     account_id: str = Field(..., description="The account identifier that owns the content migration."),
     id_: str = Field(..., alias="id", description="The content migration identifier to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing content migration with new settings or file upload parameters. Most settings cannot be changed after the migration process has started, but you can supply new file attachment values to retry a failed upload."""
 
     # Construct request model with validation
@@ -3159,7 +3302,7 @@ async def list_courses_by_account(
     starts_before: str | None = Field(None, description="Filter courses by start date (inclusive). Returns courses that start before this date, or whose enrollment term starts before this date, or both start dates are null. Use ISO 8601 format."),
     ends_after: str | None = Field(None, description="Filter courses by end date (inclusive). Returns courses that end after this date, or whose enrollment term ends after this date, or both end dates are null. Use ISO 8601 format."),
     homeroom: bool | None = Field(None, description="Filter to return only homeroom courses when set to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of courses within a specific account, with extensive filtering and sorting options to find courses by status, enrollment, teachers, dates, and other criteria."""
 
     # Construct request model with validation
@@ -3229,7 +3372,7 @@ async def create_course(
     enable_sis_reactivation: bool | None = Field(None, description="Attempt to reactivate a previously deleted course with a matching SIS ID instead of creating a new one."),
     enroll_me: bool | None = Field(None, description="Enroll the current user as the course instructor."),
     offer: bool | None = Field(None, description="Make the course immediately available to students upon creation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new course within an account. Allows configuration of course settings including enrollment options, grading, visibility, and syllabus content."""
 
     _course_grading_standard_id = _parse_int(course_grading_standard_id)
@@ -3276,7 +3419,7 @@ async def bulk_update_courses(
     account_id: str = Field(..., description="The account ID that contains the courses to update."),
     course_ids: list[str] = Field(..., description="List of course IDs to update. Up to 500 courses can be updated in a single request. Order is not significant."),
     event: Literal["offer", "conclude", "delete", "undelete"] = Field(..., description="The action to apply to all specified courses. 'offer' publishes a course to students; 'conclude' locks the course and prevents new enrollments; 'delete' permanently removes the course and all enrollments; 'undelete' attempts to recover a deleted course as unpublished."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk update multiple courses within an account by applying a single action (publish, conclude, delete, or recover) to all specified courses. This operation runs asynchronously; use the progress endpoint to monitor completion status."""
 
     # Construct request model with validation
@@ -3319,7 +3462,7 @@ async def get_course_account(
     account_id: str = Field(..., description="The unique identifier of the account containing the course."),
     id_: str = Field(..., alias="id", description="The unique identifier of the course to retrieve."),
     include: list[Literal["needs_grading_count", "syllabus_body", "public_description", "total_scores", "current_grading_period_scores", "term", "account", "course_progress", "sections", "storage_quota_used_mb", "total_students", "passback_status", "favorites", "teachers", "observed_users", "all_courses", "permissions", "course_image"]] | None = Field(None, description="Optional array of additional data to include in the response. Specify any combination of: all_courses to include recently deleted courses, permissions to include the current user's course permissions, observed_users to include observed users in enrollments, or course_image to include course image data when available."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a single course within an account. Supports optional parameters to include permissions, observed users, course images, and recently deleted courses."""
 
     # Construct request model with validation
@@ -3364,7 +3507,7 @@ async def get_course_account(
 async def get_enrollment(
     account_id: str = Field(..., description="The account identifier that contains the enrollment record."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment object to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific enrollment record by its ID within an account. Returns the complete enrollment object with all associated details."""
 
     _id_ = _parse_int(id_)
@@ -3408,7 +3551,7 @@ async def list_external_tools(
     selectable: bool | None = Field(None, description="When true, returns only tools configured as user-selectable. When false or omitted, returns all tools."),
     include_parents: bool | None = Field(None, description="When true, includes tools installed in all parent accounts above the current context. When false or omitted, returns only tools in the current account."),
     per_page: int | None = Field(None, description="Number of tools to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external tools available in the specified account. Optionally filter by name, selectability, and include tools from parent accounts."""
 
     # Construct request model with validation
@@ -3474,7 +3617,7 @@ async def create_external_tool(
     tool_configuration: dict[str, Any] | None = Field(None, description="Settings for the tool configuration placement (LTI placement)"),
     user_navigation: dict[str, Any] | None = Field(None, description="Settings for the user navigation placement (LTI placement)"),
     custom_fields: dict[str, Any] | None = Field(None, description="Custom fields to send with the LTI launch"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an external tool (LTI integration) in the specified account. The tool can be configured via query parameters or by providing CC XML configuration, and supports multiple integration points including course navigation, editor buttons, and content selection."""
 
     # Construct request model with validation
@@ -3521,7 +3664,7 @@ async def get_external_tool_sessionless_launch_url(
     assignment_id: str | None = Field(None, description="The assignment ID for an assessment launch. Required when launch_type is set to assessment."),
     module_item_id: str | None = Field(None, description="The module item ID for a module item launch. Required when launch_type is set to module_item."),
     launch_type: Literal["assessment", "module_item"] | None = Field(None, description="The type of launch context for the external tool. Use assessment or module_item for those specific contexts, or specify a placement name (e.g., course_navigation) to use the tool's custom launch URL for that placement; placement names require the tool id to be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a sessionless launch URL for an external tool, enabling direct access without requiring an active user session. Either the tool id or launch URL must be provided, unless launching an assessment or module item."""
 
     # Construct request model with validation
@@ -3563,7 +3706,7 @@ async def get_external_tool_sessionless_launch_url(
 async def get_external_tool(
     account_id: str = Field(..., description="The unique identifier of the account containing the external tool."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific external tool configured in an account. Returns the external tool's configuration and metadata."""
 
     # Construct request model with validation
@@ -3602,7 +3745,7 @@ async def get_external_tool(
 async def update_external_tool(
     account_id: str = Field(..., description="The unique identifier of the account containing the external tool."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an external tool's configuration and settings. Accepts the same parameters as tool creation."""
 
     # Construct request model with validation
@@ -3641,7 +3784,7 @@ async def update_external_tool(
 async def remove_external_tool(
     account_id: str = Field(..., description="The unique identifier of the account containing the external tool to be deleted."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool integration to be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an external tool integration from the specified account. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3680,7 +3823,7 @@ async def remove_external_tool(
 async def list_account_features(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve features."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows control over response size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all features available for a specific account. Features define capabilities and functionality enabled for the account."""
 
     # Construct request model with validation
@@ -3722,7 +3865,7 @@ async def list_account_features(
 async def list_enabled_features(
     account_id: str = Field(..., description="The unique identifier of the account for which to list enabled features."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all features currently enabled for a specific account. Only feature names are returned."""
 
     # Construct request model with validation
@@ -3764,7 +3907,7 @@ async def list_enabled_features(
 async def get_feature_flag(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve the feature flag."),
     feature: str = Field(..., description="The unique identifier of the feature flag to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the feature flag configuration for a specific account, course, or user. The flag may be defined directly on the object or inherited from a parent account; check the context_id and context_type fields to determine the source."""
 
     # Construct request model with validation
@@ -3803,7 +3946,7 @@ async def get_feature_flag(
 async def list_grading_periods(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve grading periods."),
     per_page: int | None = Field(None, description="The maximum number of grading periods to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of grading periods for the specified account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -3845,7 +3988,7 @@ async def list_grading_periods(
 async def delete_grading_period(
     account_id: str = Field(..., description="The unique identifier of the account containing the grading period to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a grading period from an account. Returns a 204 No Content response on successful deletion."""
 
     # Construct request model with validation
@@ -3884,7 +4027,7 @@ async def delete_grading_period(
 async def list_grading_standards(
     account_id: str = Field(..., description="The account ID that defines the context for retrieving grading standards."),
     per_page: int | None = Field(None, description="The maximum number of grading standards to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of grading standards available in the specified account context. Only standards visible to the authenticated user are returned."""
 
     # Construct request model with validation
@@ -3928,7 +4071,7 @@ async def create_grading_standard(
     grading_scheme_entry_name: list[str] = Field(..., description="Array of grade names (e.g., 'A', 'A-', 'B+') corresponding to each grading scheme entry. Order must match grading_scheme_entry_value array."),
     grading_scheme_entry_value: list[int] = Field(..., description="Array of minimum score thresholds for each grade. Each value represents the lower bound of the score range for that grade, extending up to the next entry or 100 if highest. Order must match grading_scheme_entry_name array."),
     title: str = Field(..., description="The display name for this grading standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new grading standard for an account with custom grade-to-score mappings. If no grading scheme entries are provided, a default scheme (A: 94, A-: 90, ... F: 0) will be applied."""
 
     # Construct request model with validation
@@ -3971,7 +4114,7 @@ async def create_grading_standard(
 async def get_grading_standard(
     account_id: str = Field(..., description="The unique identifier of the account containing the grading standard."),
     grading_standard_id: str = Field(..., description="The unique identifier of the grading standard to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific grading standard within an account context. Returns the grading standard details if it is visible to the authenticated user."""
 
     # Construct request model with validation
@@ -4010,7 +4153,7 @@ async def get_grading_standard(
 async def list_group_categories(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve group categories."),
     per_page: int | None = Field(None, description="The maximum number of group categories to return per page. Allows control over result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of group categories within a specified account context. Use pagination parameters to control result size and navigate through large datasets."""
 
     # Construct request model with validation
@@ -4057,7 +4200,7 @@ async def create_group_category(
     group_limit: str | None = Field(None, description="The maximum number of students allowed in each group. Only applicable for course-level group categories and requires self-signup to be enabled."),
     self_signup: Literal["enabled", "restricted"] | None = Field(None, description="Controls whether students can self-enroll in groups. 'enabled' allows students to join any group in the course, 'restricted' limits enrollment to groups in the same section, or null to disable self-signup entirely. Only applicable for course-level group categories."),
     sis_group_category_id: str | None = Field(None, description="The unique SIS (Student Information System) identifier for this group category, used for system integration and data synchronization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new group category for organizing students into groups within a course or account. Group categories define how students are allocated, who can lead groups, and enrollment limits."""
 
     _create_group_count = _parse_int(create_group_count)
@@ -4105,7 +4248,7 @@ async def list_groups_in_account(
     only_own_groups: bool | None = Field(None, description="When enabled, restricts results to only groups that the authenticated user is a member of."),
     include: list[Literal["tabs"]] | None = Field(None, description="Specify additional data to include with each group. The 'tabs' option includes the list of tabs configured for each group."),
     per_page: int | None = Field(None, description="The maximum number of groups to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active groups available in the specified account context that are visible to the authenticated user. Optionally filter to only groups the user belongs to and include additional group configuration details."""
 
     # Construct request model with validation
@@ -4150,7 +4293,7 @@ async def list_groups_in_account(
 async def list_logins(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve login records."),
     per_page: int | None = Field(None, description="The maximum number of login records to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of login records for a specific account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -4197,7 +4340,7 @@ async def create_login(
     login_integration_id: str | None = Field(None, description="Secondary identifier for SIS integration purposes. Requires SIS management permissions on the account."),
     login_password: str | None = Field(None, description="The password for the new login."),
     login_sis_user_id: str | None = Field(None, description="SIS identifier for the login. Requires SIS management permissions on the account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new login credential for an existing user within an account. The login can be associated with a specific authentication provider and optionally linked to SIS integration identifiers."""
 
     # Construct request model with validation
@@ -4244,7 +4387,7 @@ async def update_user_login(
     login_password: str | None = Field(None, description="New password for the login. Only administrators with password change permissions can set this value."),
     login_sis_user_id: str | None = Field(None, description="SIS ID for the login. Requires caller to have SIS management permissions on the account."),
     login_unique_id: str | None = Field(None, description="New unique identifier for the login."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing user login in the specified account. Allows modification of login credentials, identifiers, and integration mappings based on caller permissions."""
 
     # Construct request model with validation
@@ -4287,7 +4430,7 @@ async def list_outcome_links(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve outcome links."),
     outcome_style: str | None = Field(None, description="Controls the level of detail returned for outcomes in the response. Use 'abbrev' for condensed information or 'full' for comprehensive details."),
     outcome_group_style: str | None = Field(None, description="Controls the level of detail returned for outcome groups in the response. Use 'abbrev' for condensed information or 'full' for comprehensive details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all outcome links associated with a specific account, with configurable detail levels for outcomes and outcome groups."""
 
     # Construct request model with validation
@@ -4326,7 +4469,7 @@ async def list_outcome_links(
 
 # Tags: outcome_groups
 @mcp.tool()
-async def list_outcome_groups(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve outcome groups.")) -> dict[str, Any]:
+async def list_outcome_groups(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve outcome groups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all outcome groups associated with a specific account. Outcome groups organize related outcomes for tracking and reporting purposes."""
 
     # Construct request model with validation
@@ -4365,7 +4508,7 @@ async def list_outcome_groups(account_id: str = Field(..., description="The uniq
 async def get_outcome_group_account(
     account_id: str = Field(..., description="The unique identifier of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific outcome group within an account. Returns the outcome group configuration and associated metadata."""
 
     # Construct request model with validation
@@ -4408,7 +4551,7 @@ async def update_outcome_group(
     parent_outcome_group_id: str | None = Field(None, description="The ID of the new parent outcome group. The parent must belong to the same context and cannot be a descendant of this outcome group."),
     title: str | None = Field(None, description="The new title for the outcome group."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard associated with this outcome group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing outcome group by updating its title, description, parent group, or vendor GUID. Unspecified fields remain unchanged, and the new parent group must be in the same context without creating circular dependencies."""
 
     _parent_outcome_group_id = _parse_int(parent_outcome_group_id)
@@ -4452,7 +4595,7 @@ async def update_outcome_group(
 async def delete_outcome_group_account(
     account_id: str = Field(..., description="The account ID that contains the outcome group to delete."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an outcome group and its descendant groups and links. Deletion fails if any remaining links to aligned outcomes are included in the group's descendants, as aligned outcomes cannot be deleted."""
 
     # Construct request model with validation
@@ -4493,7 +4636,7 @@ async def copy_outcome_group(
     id_: str = Field(..., alias="id", description="The ID of the destination outcome group where the import will be created as a new subgroup."),
     source_outcome_group_id: str = Field(..., description="The ID of the source outcome group to import. Must be global, from the same context, or from an associated account. Cannot be a root outcome group."),
     async_: bool | None = Field(None, alias="async", description="Whether to perform the import asynchronously. When true, returns a Progress object to track the operation status instead of the imported outcome group directly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Duplicates an outcome group's structure and outcome links into a new subgroup. Recursively imports all nested subgroups while creating new links to existing outcomes rather than copying the outcomes themselves."""
 
     _source_outcome_group_id = _parse_int(source_outcome_group_id)
@@ -4540,7 +4683,7 @@ async def list_outcomes_account(
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group whose linked outcomes should be retrieved."),
     outcome_style: str | None = Field(None, description="Controls the level of detail returned for each outcome. Use 'abbrev' for basic information or 'full' for comprehensive details."),
     per_page: int | None = Field(None, description="The maximum number of outcomes to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of outcomes linked to a specific outcome group. Use outcome_style to control the detail level of returned outcome information."""
 
     # Construct request model with validation
@@ -4591,7 +4734,7 @@ async def link_outcome(
     outcome_id: str | None = Field(None, description="The ID of an existing outcome to link. The outcome must be available in this context: owned by this group's account, an associated account, or a global outcome. If present, other parameters except move_from are ignored."),
     title: str | None = Field(None, description="The title of the new outcome being created. Required when outcome_id is not provided. Ignored if linking an existing outcome."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard, used for external system integration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing outcome into an outcome group, or create and link a new outcome. When linking an existing outcome, only the outcome_id is required. When creating a new outcome, provide at least a title, and optionally description, ratings, and mastery points."""
 
     _calculation_int = _parse_int(calculation_int)
@@ -4648,7 +4791,7 @@ async def link_outcome_existing(
     move_from: str | None = Field(None, description="The ID of the previous outcome group when moving an outcome. Only used when outcome_id is present."),
     title: str | None = Field(None, description="The title of the new outcome being created. Required when outcome_id is not provided."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard, used for external system integration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing outcome to an outcome group, or create and link a new outcome. When linking an existing outcome, only the outcome_id is required; when creating a new outcome, a title is required along with optional description, ratings, and mastery points."""
 
     _outcome_id = _parse_int(outcome_id)
@@ -4696,7 +4839,7 @@ async def unlink_outcome(
     account_id: str = Field(..., description="The account ID that contains the outcome group."),
     id_: str = Field(..., alias="id", description="The outcome group ID from which to unlink the outcome."),
     outcome_id: str = Field(..., description="The outcome ID to unlink from the outcome group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlink an outcome from an outcome group. The outcome is only deleted if this is the last link to it across all groups and contexts; aligned outcomes cannot be deleted and will cause the operation to fail if this is their final link."""
 
     # Construct request model with validation
@@ -4736,7 +4879,7 @@ async def list_subgroups(
     account_id: str = Field(..., description="The unique identifier of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group whose child subgroups should be listed."),
     per_page: int | None = Field(None, description="The maximum number of subgroups to return per page. Adjust this value to balance between API response size and number of requests needed.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of immediate child outcome groups within a specified outcome group. Use pagination parameters to control result size and navigate through large datasets."""
 
     # Construct request model with validation
@@ -4781,7 +4924,7 @@ async def create_outcome_subgroup(
     title: str = Field(..., description="The name of the new subgroup."),
     description: str | None = Field(None, description="A detailed explanation of the subgroup's purpose and content."),
     vendor_guid: str | None = Field(None, description="An optional custom GUID identifier for associating the subgroup with a learning standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new empty subgroup within an outcome group. The subgroup is initialized with the provided title and description."""
 
     # Construct request model with validation
@@ -4826,7 +4969,7 @@ async def import_outcomes(
     attachment: str | None = Field(None, description="CSV outcome data file. Required when using application/x-www-form-urlencoded form submission. Omit this parameter if sending raw POST request with Content-Type header instead."),
     extension: str | None = Field(None, description="File extension indicating the data format (e.g., 'csv'). Recommended for raw POST requests. If not provided, will be inferred from the Content-Type header, defaulting to CSV format."),
     import_type: str | None = Field(None, description="Data format type for parsing outcome data. Specifies the import format structure expected in the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import learning outcomes into a Canvas account using CSV format. Supports both multipart form uploads and raw POST requests with CSV data."""
 
     # Construct request model with validation
@@ -4869,7 +5012,7 @@ async def import_outcomes(
 async def get_outcome_import_status(
     account_id: str = Field(..., description="The Canvas account ID for which to retrieve the outcome import status."),
     id_: str = Field(..., alias="id", description="The outcome import ID to check, or 'latest' to retrieve the most recent import."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status of an outcome import for an account. Use 'latest' as the import ID to fetch the most recent import."""
 
     # Construct request model with validation
@@ -4905,7 +5048,7 @@ async def get_outcome_import_status(
 
 # Tags: proficiency_ratings
 @mcp.tool()
-async def list_proficiency_ratings(account_id: str = Field(..., description="The Canvas account ID for which to retrieve proficiency ratings.")) -> dict[str, Any]:
+async def list_proficiency_ratings(account_id: str = Field(..., description="The Canvas account ID for which to retrieve proficiency ratings.")) -> dict[str, Any] | ToolResult:
     """Retrieve account-level proficiency ratings for learning outcomes. If ratings are not defined for the specified account, the operation returns ratings from the nearest parent super-account. Returns 404 if no proficiency ratings are found in the account hierarchy."""
 
     # Construct request model with validation
@@ -4945,7 +5088,7 @@ async def set_proficiency_ratings(
     account_id: str = Field(..., description="The account ID for which to set proficiency ratings."),
     ratings_color: list[int] | None = Field(None, description="Array of hex color codes associated with each rating level. Order corresponds to rating levels, with each color in the format of a 6-character hexadecimal string."),
     ratings_mastery: list[int] | None = Field(None, description="Array of boolean flags indicating which rating level represents mastery achievement. Exactly one rating per proficiency should be marked as the mastery threshold."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update proficiency ratings at the account level. These ratings apply to all sub-accounts unless they define their own account-level proficiency ratings."""
 
     # Construct request model with validation
@@ -4988,7 +5131,7 @@ async def set_proficiency_ratings(
 async def check_account_permissions(
     account_id: str = Field(..., description="The account ID to check permissions for. Use the special value 'self' to reference the domain root account."),
     permissions: list[str] | None = Field(None, description="Optional list of specific permission names to validate against the authenticated user. Permission names are defined in the role creation endpoint. If omitted, all permissions for the user are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve permission information for the authenticated user within a specified account. Use 'self' as the account ID to check permissions against the domain root account."""
 
     # Construct request model with validation
@@ -5033,7 +5176,7 @@ async def check_account_permissions(
 async def list_reports(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve reports."),
     per_page: int | None = Field(None, description="The maximum number of reports to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of available reports for the specified account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -5075,7 +5218,7 @@ async def list_reports(
 async def list_reports_by_type(
     account_id: str = Field(..., description="The unique identifier for the account whose reports you want to retrieve."),
     report: str = Field(..., description="The type or category of reports to retrieve. Specifies which report type to filter by."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all reports of a specific type that have been run for the given account. Use this to view the history and details of previously generated reports."""
 
     # Construct request model with validation
@@ -5116,7 +5259,7 @@ async def generate_report(
     report: str = Field(..., description="The type of report to generate. Must match one of the available report names for the account."),
     parameters_course_id: str | None = Field(None, description="The course ID to filter the report data. Only applicable for reports that support course-level filtering."),
     parameters_users: bool | None = Field(None, description="Whether to include user data in the report. When true, user-level details are included; when false, user data is omitted. Only applicable for reports that support this parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates generation of a report instance for the specified account. The report type must match an available report name; use the list_available_reports operation to retrieve valid report names and their supported parameters."""
 
     _parameters_course_id = _parse_int(parameters_course_id)
@@ -5162,7 +5305,7 @@ async def get_report_status(
     account_id: str = Field(..., description="The unique identifier of the account that contains the report."),
     report: str = Field(..., description="The type or category of the report being queried."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific report instance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a specific report within an account. Use this to check whether a report is pending, processing, completed, or failed."""
 
     # Construct request model with validation
@@ -5202,7 +5345,7 @@ async def delete_report(
     account_id: str = Field(..., description="The unique identifier for the account that owns the report."),
     report: str = Field(..., description="The type or category identifier of the report to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific report instance to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a generated report instance from the specified account. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5243,7 +5386,7 @@ async def list_roles(
     state: list[Literal["active", "inactive"]] | None = Field(None, description="Filter roles by their state. When omitted, only active roles are returned. Specify multiple states as an array to include roles in any of those states."),
     show_inherited: bool | None = Field(None, description="Include roles inherited from parent accounts in the results. When true, the response includes both account-specific and inherited roles."),
     per_page: int | None = Field(None, description="The maximum number of roles to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of roles available to an account, with optional filtering by state and inheritance from parent accounts."""
 
     # Construct request model with validation
@@ -5289,7 +5432,7 @@ async def get_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the role to retrieve."),
     account_id: str = Field(..., description="The account ID that contains the role being retrieved."),
     role_id: str = Field(..., description="The unique identifier for the role to fetch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific role within an account. Use this to fetch role configuration, permissions, and metadata."""
 
     _role_id = _parse_int(role_id)
@@ -5334,7 +5477,7 @@ async def deactivate_role(
     account_id: str = Field(..., description="The account identifier that contains the role to deactivate."),
     id_: str = Field(..., alias="id", description="The role identifier to deactivate."),
     role_id: str = Field(..., description="The unique identifier for the role being deactivated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deactivates a custom role, hiding it from the user interface and preventing assignment to new users. Existing users with this role retain their current permissions. Built-in roles cannot be deactivated."""
 
     _role_id = _parse_int(role_id)
@@ -5379,7 +5522,7 @@ async def reactivate_role(
     account_id: str = Field(..., description="The unique identifier of the account containing the role."),
     id_: str = Field(..., alias="id", description="The unique identifier of the role to reactivate."),
     role_id: str = Field(..., description="The unique identifier for the role being activated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Re-activates an inactive role, allowing it to be assigned to new users again. This operation restores a previously deactivated role to active status."""
 
     _role_id = _parse_int(role_id)
@@ -5421,7 +5564,7 @@ async def reactivate_role(
 
 # Tags: outcome_groups
 @mcp.tool()
-async def get_root_outcome_group_account(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve the root outcome group.")) -> dict[str, Any]:
+async def get_root_outcome_group_account(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve the root outcome group.")) -> dict[str, Any] | ToolResult:
     """Retrieve the root outcome group for a specific account. This operation redirects to the root outcome group's URL for the given account context."""
 
     # Construct request model with validation
@@ -5460,7 +5603,7 @@ async def get_root_outcome_group_account(account_id: str = Field(..., descriptio
 async def list_rubrics(
     account_id: str = Field(..., description="The unique identifier of the account whose rubrics you want to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of rubrics to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of active rubrics for the specified account. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -5504,7 +5647,7 @@ async def get_rubric(
     id_: str = Field(..., alias="id", description="The ID of the rubric to retrieve."),
     include: Literal["assessments", "graded_assessments", "peer_assessments"] | None = Field(None, description="Optionally include associated rubric assessments in the response. Specify the type of assessments to return: all assessments, only graded assessments, or only peer assessments."),
     style: Literal["full", "comments_only"] | None = Field(None, description="When assessments are included, control the level of detail returned. Use 'full' to include all criteria data and comments, or 'comments_only' to return only assessment comments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific rubric by ID, optionally including associated assessments and their details. Use the include and style parameters to control what assessment data is returned."""
 
     # Construct request model with validation
@@ -5546,7 +5689,7 @@ async def get_rubric(
 async def list_scopes(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve scopes."),
     group_by: Literal["resource_name"] | None = Field(None, description="Optionally group the returned scopes by a specific attribute. When set to 'resource_name', scopes are organized by their associated resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of available scopes that can be applied to developer keys and access tokens. Optionally group scopes by resource name for better organization."""
 
     # Construct request model with validation
@@ -5597,7 +5740,7 @@ async def register_user(
     user_short_name: str | None = Field(None, description="The user's display name as shown in discussions, messages, and comments."),
     user_sortable_name: str | None = Field(None, description="The user's name formatted for alphabetical sorting in lists."),
     user_time_zone: str | None = Field(None, description="The user's time zone, specified as an IANA time zone identifier or Ruby on Rails time zone name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user account through self-registration when enabled on the account. Returns the newly created user and associated pseudonym."""
 
     # Construct request model with validation
@@ -5641,7 +5784,7 @@ async def create_shared_theme(
     account_id: str = Field(..., description="The unique identifier of the account where the shared theme will be created."),
     shared_brand_config_brand_config_md5: str = Field(..., description="The MD5 hash of the brand config to be shared. This identifies the specific theme configuration being made available to other users."),
     shared_brand_config_name: str = Field(..., description="The display name for the shared theme. This name will be visible to other account users when selecting available themes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a shared brand config (theme) by assigning it a name and making it available to other users in the account. This enables team members to access and apply the same branded theme across their work."""
 
     # Construct request model with validation
@@ -5684,7 +5827,7 @@ async def create_shared_theme(
 async def update_shared_theme(
     account_id: str = Field(..., description="The unique identifier of the account that owns the shared theme."),
     id_: str = Field(..., alias="id", description="The unique identifier of the shared theme to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing shared theme by modifying its name or associating it with a different brand configuration. Requires the same parameters as theme creation."""
 
     # Construct request model with validation
@@ -5720,7 +5863,7 @@ async def update_shared_theme(
 
 # Tags: sis_import_errors
 @mcp.tool()
-async def list_sis_import_errors(account_id: str = Field(..., description="The Canvas account ID for which to retrieve SIS import errors.")) -> dict[str, Any]:
+async def list_sis_import_errors(account_id: str = Field(..., description="The Canvas account ID for which to retrieve SIS import errors.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of SIS import errors for an account or specific SIS import. Import errors are retained for 30 days before being automatically removed."""
 
     # Construct request model with validation
@@ -5759,7 +5902,7 @@ async def list_sis_import_errors(account_id: str = Field(..., description="The C
 async def list_sis_imports(
     account_id: str = Field(..., description="The Canvas account ID for which to retrieve SIS imports."),
     created_since: str | None = Field(None, description="Filter results to show only SIS imports created after the specified date. Use ISO 8601 format for the timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of SIS (Student Information System) imports for an account. Optionally filter imports by creation date to see only recent imports."""
 
     # Construct request model with validation
@@ -5798,7 +5941,7 @@ async def list_sis_imports(
 
 # Tags: sis_imports
 @mcp.tool()
-async def abort_pending_sis_imports(account_id: str = Field(..., description="The unique identifier of the account whose pending SIS imports should be aborted.")) -> dict[str, Any]:
+async def abort_pending_sis_imports(account_id: str = Field(..., description="The unique identifier of the account whose pending SIS imports should be aborted.")) -> dict[str, Any] | ToolResult:
     """Abort all pending SIS imports for an account that have been created but not yet processed or are currently processing. This operation cancels any queued or in-progress imports."""
 
     # Construct request model with validation
@@ -5837,7 +5980,7 @@ async def abort_pending_sis_imports(account_id: str = Field(..., description="Th
 async def get_sis_import_status(
     account_id: str = Field(..., description="The Canvas account ID that contains the SIS import."),
     id_: str = Field(..., alias="id", description="The ID of the SIS import job whose status you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and details of a previously created SIS (Student Information System) import job. Use this to monitor import progress and identify any errors or warnings."""
 
     # Construct request model with validation
@@ -5876,7 +6019,7 @@ async def get_sis_import_status(
 async def abort_sis_import(
     account_id: str = Field(..., description="The Canvas account ID that contains the SIS import to abort."),
     id_: str = Field(..., alias="id", description="The ID of the SIS import batch to abort."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Abort an in-progress SIS (Student Information System) import that has not yet completed. This operation allows you to stop a running import process before it finishes."""
 
     # Construct request model with validation
@@ -5915,7 +6058,7 @@ async def abort_sis_import(
 async def list_sis_import_errors_by_import(
     account_id: str = Field(..., description="The Canvas account ID that contains the SIS import."),
     id_: str = Field(..., alias="id", description="The ID of the specific SIS import to retrieve errors for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of errors from a SIS import for the specified account. Import errors are retained for 30 days after the import completes."""
 
     # Construct request model with validation
@@ -5957,7 +6100,7 @@ async def restore_sis_import_workflow_states(
     batch_mode: bool | None = Field(None, description="When enabled, restores only items that were deleted as part of batch mode processing, excluding items created or modified."),
     unconclude_only: bool | None = Field(None, description="When enabled, restores only enrollments that were concluded, ignoring any items that were created or deleted."),
     undelete_only: bool | None = Field(None, description="When enabled, restores only items that were deleted during the import, ignoring any items that were created or modified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore workflow states for all items that were modified during a SIS import, including accounts, terms, courses, sections, groups, users, and related items. Supports selective restoration by deletion status, batch mode, or enrollment conclusion state."""
 
     # Construct request model with validation
@@ -5999,7 +6142,7 @@ async def restore_sis_import_workflow_states(
 async def list_sub_accounts(
     account_id: str = Field(..., description="The unique identifier of the parent account for which to retrieve sub-accounts."),
     recursive: bool | None = Field(None, description="When true, returns the entire account tree hierarchy beneath this account (paginated). When false, returns only direct child sub-accounts. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve sub-accounts of a specified account, with optional recursive traversal of the entire account hierarchy. Results are paginated."""
 
     # Construct request model with validation
@@ -6045,7 +6188,7 @@ async def create_sub_account(
     account_default_storage_quota_mb: str | None = Field(None, description="Default storage quota in megabytes for courses created in this sub-account. If not specified, the parent account's default will be used."),
     account_default_user_storage_quota_mb: str | None = Field(None, description="Default storage quota in megabytes for users in this sub-account. If not specified, the parent account's default will be used."),
     account_sis_account_id: str | None = Field(None, description="The unique identifier for this sub-account in your Student Information System, used for integration and data synchronization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new sub-account under an existing account. Optionally configure default storage quotas for users, courses, and groups within the sub-account."""
 
     _account_default_group_storage_quota_mb = _parse_int(account_default_group_storage_quota_mb)
@@ -6092,7 +6235,7 @@ async def create_sub_account(
 async def delete_sub_account(
     account_id: str = Field(..., description="The ID of the parent account containing the sub-account to delete."),
     id_: str = Field(..., alias="id", description="The ID of the sub-account to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a sub-account from the specified parent account. The sub-account must not have any active courses or active sub-accounts, and cannot be a root account."""
 
     # Construct request model with validation
@@ -6133,7 +6276,7 @@ async def list_enrollment_terms(
     workflow_state: list[Literal["active", "deleted", "all"]] | None = Field(None, description="Filter results to only include terms in specified workflow states. If not provided, defaults to active terms only."),
     include: list[Literal["overrides"]] | None = Field(None, description="Array of additional data to include in the response. Use 'overrides' to include term start and end dates that have been customized for different enrollment types."),
     per_page: int | None = Field(None, description="Number of results to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all enrollment terms in an account, with optional filtering by workflow state and additional metadata."""
 
     # Construct request model with validation
@@ -6184,7 +6327,7 @@ async def create_term(
     enrollment_term_overrides_enrollment_type_start_at: str | None = Field(None, description="Override the term start date for a specific enrollment type. The enrollment_type can be StudentEnrollment, TeacherEnrollment, TaEnrollment, or DesignerEnrollment. Specify as enrollment_term_overrides_[enrollment_type]_start_at in the request."),
     enrollment_term_sis_term_id: str | None = Field(None, description="The unique SIS (Student Information System) identifier for this term, used for system integrations and data synchronization."),
     enrollment_term_start_at: str | None = Field(None, description="The start date and time for the enrollment term in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new enrollment term for an account. Enrollment terms define the academic calendar periods during which students can enroll in courses, with optional role-specific date overrides."""
 
     # Construct request model with validation
@@ -6233,7 +6376,7 @@ async def update_enrollment_term(
     enrollment_term_overrides_enrollment_type_start_at: str | None = Field(None, description="The day and time when the enrollment term starts, overridden for a specific enrollment type (StudentEnrollment, TeacherEnrollment, TaEnrollment, or DesignerEnrollment)."),
     enrollment_term_sis_term_id: str | None = Field(None, description="The unique SIS (Student Information System) identifier for the enrollment term."),
     enrollment_term_start_at: str | None = Field(None, description="The day and time when the enrollment term starts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing enrollment term for the specified account. Modify term dates, name, SIS identifier, and enrollment-type-specific date overrides."""
 
     # Construct request model with validation
@@ -6275,7 +6418,7 @@ async def update_enrollment_term(
 async def delete_enrollment_term(
     account_id: str = Field(..., description="The unique identifier of the account containing the enrollment term to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment term to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an enrollment term from the specified account. This action cannot be undone."""
 
     # Construct request model with validation
@@ -6317,7 +6460,7 @@ async def list_account_users(
     sort: Literal["username", "email", "sis_id", "last_login"] | None = Field(None, description="The field to sort results by."),
     order: Literal["asc", "desc"] | None = Field(None, description="The sort direction for the specified column."),
     per_page: int | None = Field(None, description="The number of users to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users associated with an account, with optional filtering by name or ID and sorting capabilities."""
 
     # Construct request model with validation
@@ -6380,7 +6523,7 @@ async def create_user(
     user_sortable_name: str | None = Field(None, description="The user's sortable name for alphabetical list ordering."),
     user_terms_of_use: bool | None = Field(None, description="Indicates whether the user accepts the terms of use. Required for self-registration on instances where terms acceptance is mandatory. When true, marks the user as having accepted the terms."),
     user_time_zone: str | None = Field(None, description="The user's time zone, specified as an IANA time zone identifier or Ruby on Rails time zone name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user account with login credentials and profile information. Supports both admin-provisioned and self-registration workflows with optional email/SMS confirmation and automatic login redirect."""
 
     # Construct request model with validation
@@ -6423,7 +6566,7 @@ async def create_user(
 async def remove_user_from_account(
     account_id: str = Field(..., description="The unique identifier of the root account from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the account. Warning: Users can remove themselves, which will prevent them from making API calls or logging into Canvas for this account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a Canvas root account. In multi-tenant instances, this only affects the specified account and does not remove the user from other root accounts they may be associated with."""
 
     # Construct request model with validation
@@ -6459,7 +6602,7 @@ async def remove_user_from_account(
 
 # Tags: accounts
 @mcp.tool()
-async def get_account(id_: str = Field(..., alias="id", description="The unique identifier of the account to retrieve. Can be either the account's internal ID or its SIS (Student Information System) account ID.")) -> dict[str, Any]:
+async def get_account(id_: str = Field(..., alias="id", description="The unique identifier of the account to retrieve. Can be either the account's internal ID or its SIS (Student Information System) account ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific account using its unique identifier or SIS account ID."""
 
     # Construct request model with validation
@@ -6509,7 +6652,7 @@ async def update_account(
     account_sis_account_id: str | None = Field(None, description="Updates the SIS account identifier. Requires manage_sis permission and cannot be applied to root accounts."),
     service_name: str | None = Field(None, description="Name of the service to enable or disable (e.g., 'google_docs_collaboration', 'canvas_outcomes', 'avatars', 'twitter', 'facebook', 'linkedin', 'delicious', 'diigo', 'google_drive', 'skype', 'equella', 'kaltura', 'scribd', 'smartmusic', 'wimba', 'etudes', 'mobile_messaging', 'salesforce', 'canvas_lti_fcc', 'canvas_authentication', 'canvas_web_conferences', 'canvas_kaltura', 'canvas_google_drive', 'canvas_outcomes', 'canvas_student_notes', 'canvas_student_context_cards', 'canvas_badges', 'canvas_eportfolios', 'canvas_commons', 'canvas_conferences', 'canvas_gradebook', 'canvas_gradebook2', 'canvas_gradebook_history', 'canvas_gradebook_uploads', 'canvas_gradebook_downloads', 'canvas_gradebook_exports', 'canvas_gradebook_imports', 'canvas_gradebook_settings', 'canvas_gradebook_statistics', 'canvas_gradebook_analytics', 'canvas_gradebook_learning_mastery', 'canvas_gradebook_learning_mastery_enabled', 'canvas_gradebook_learning_mastery_disabled', 'canvas_gradebook_learning_mastery_hidden', 'canvas_gradebook_learning_mastery_visible')"),
     enabled: bool | None = Field(None, description="Whether to enable (true) or disable (false) the specified service"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update account settings including name, storage quotas, time zone, and student visibility restrictions. Requires appropriate permissions for SIS account ID modifications."""
 
     # Call helper functions
@@ -6560,7 +6703,7 @@ async def list_announcements(
     active_only: bool | None = Field(None, description="Filter to return only published announcements. Only applies to users with permission to view unpublished items. Defaults to false for users with unpublished access, otherwise true."),
     include: list[str] | None = Field(None, description="Include related resources in the response. Use 'sections' to include course sections associated with announcements, or 'sections_user_count' to include user counts per section (if sections are included) or total users in the announcement's context."),
     per_page: int | None = Field(None, description="Number of announcements to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of announcements for specified courses within an optional date range. Each announcement includes a context_code field indicating which course it belongs to."""
 
     # Construct request model with validation
@@ -6607,7 +6750,7 @@ async def list_appointment_groups(
     include_past_appointments: bool | None = Field(None, description="Include appointment groups with past reservation dates. Defaults to false, returning only current and future appointment groups."),
     include: list[Literal["appointments", "child_events", "participant_count", "reserved_times", "all_context_codes"]] | None = Field(None, description="Specify additional data to include in the response. Options include calendar event time slots, reservation details, participant counts, reserved time information, and associated context codes."),
     per_page: int | None = Field(None, description="Number of appointment groups to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of appointment groups available for the current user to reserve or manage. Optionally filter by context codes and include additional metadata about appointments and reservations."""
 
     # Construct request model with validation
@@ -6663,7 +6806,7 @@ async def create_appointment_group(
     appointment_group_sub_context_codes: list[str] | None = Field(None, description="Array of sub-context codes (course sections or group categories) to further restrict which students can access this appointment group. If a group category is specified, students sign up as groups rather than individuals."),
     appointment_group_new_appointments_start_times: str | None = Field(None, description="Array of start times (ISO 8601 format) for appointment time slots"),
     appointment_group_new_appointments_end_times: str | None = Field(None, description="Array of end times (ISO 8601 format) for appointment time slots, must be in same order and length as start_times"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new appointment group for scheduling meetings or office hours across one or more courses. Optionally specify time slots, participant limits, and visibility settings."""
 
     # Call helper functions
@@ -6709,7 +6852,7 @@ async def create_appointment_group(
 
 # Tags: appointment_groups
 @mcp.tool()
-async def list_next_appointments(appointment_group_ids: list[str] | None = Field(None, description="Filter results to specific appointment groups by their IDs. If omitted, searches across all appointment groups. Order is not significant.")) -> dict[str, Any]:
+async def list_next_appointments(appointment_group_ids: list[str] | None = Field(None, description="Filter results to specific appointment groups by their IDs. If omitted, searches across all appointment groups. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Retrieve the next available appointment for signup. Returns a single appointment if available, or an empty array if no future appointments exist."""
 
     # Construct request model with validation
@@ -6753,7 +6896,7 @@ async def list_next_appointments(appointment_group_ids: list[str] | None = Field
 async def get_appointment_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group to retrieve."),
     include: list[Literal["child_events", "appointments", "all_context_codes"]] | None = Field(None, description="Optional array of related data to include in the response. Specify 'child_events' for time slot reservations, 'appointments' for appointment details, or 'all_context_codes' for all associated context codes. Appointments are always included by default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific appointment group, optionally including related reservations, appointments, and context codes."""
 
     # Construct request model with validation
@@ -6809,7 +6952,7 @@ async def update_appointment_group(
     appointment_group_publish: bool | None = Field(None, description="Set to true to publish this appointment group and make it available for participant sign-ups. Once published, an appointment group cannot be unpublished. Defaults to false."),
     appointment_group_sub_context_codes: list[str] | None = Field(None, description="Array of sub-context codes (course sections or a single group category) to limit sign-ups to specific sections. If a group category is specified, participants sign up as groups rather than individuals."),
     appointment_group_title: str | None = Field(None, description="Brief title or name for the appointment group displayed to users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an appointment group's details, context links, and time slots. Returns the updated appointment group with new appointments in the same format as list operations."""
 
     _appointment_group_max_appointments_per_participant = _parse_int(appointment_group_max_appointments_per_participant)
@@ -6855,7 +6998,7 @@ async def update_appointment_group(
 async def cancel_appointment_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group to cancel."),
     cancel_reason: str | None = Field(None, description="Optional reason for canceling the appointment group. This reason may be communicated to users with reservations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel an appointment group and all associated time slots and reservations. Returns the deleted appointment group details."""
 
     # Construct request model with validation
@@ -6898,7 +7041,7 @@ async def list_appointment_group_participants(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group."),
     registration_status: Literal["all", "registered"] | None = Field(None, description="Filter results by participation status. Use 'registered' to show only groups that have registered, or 'all' to include all participating groups."),
     per_page: int | None = Field(None, description="The maximum number of results to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of student groups participating in an appointment group. This operation is only applicable to appointment groups with group-based participant types and will return no results for user-based appointment groups."""
 
     # Construct request model with validation
@@ -6941,7 +7084,7 @@ async def list_appointment_group_participants_users(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group."),
     registration_status: Literal["all", "registered"] | None = Field(None, description="Filter results by participation status. Use 'registered' to show only confirmed participants, or 'all' to include all potential participants."),
     per_page: int | None = Field(None, description="Number of results to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users participating in an appointment group. Returns user details for individual participant types; returns no results for group participant types."""
 
     # Construct request model with validation
@@ -6984,7 +7127,7 @@ async def list_authentication_events_by_account(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve authentication events."),
     start_time: str | None = Field(None, description="The start of the time range for retrieving events. If omitted, defaults to the earliest available events."),
     end_time: str | None = Field(None, description="The end of the time range for retrieving events. If omitted, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve authentication events for a specific account within an optional time range. Events are retained for one year."""
 
     # Construct request model with validation
@@ -7027,7 +7170,7 @@ async def list_authentication_events_by_login(
     login_id: str = Field(..., description="The unique identifier of the login for which to retrieve authentication events."),
     start_time: str | None = Field(None, description="The start of the time range for retrieving events. If omitted, defaults to the earliest available events."),
     end_time: str | None = Field(None, description="The end of the time range for retrieving events. If omitted, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve authentication events for a specific login ID within an optional time range. Events are retained for one year."""
 
     # Construct request model with validation
@@ -7070,7 +7213,7 @@ async def list_authentication_events_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose authentication events you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering events. If omitted, defaults to the earliest available events."),
     end_time: str | None = Field(None, description="The end of the time range for filtering events. If omitted, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve authentication events for a specific user within an optional time range. Events are retained for one year from the date of occurrence."""
 
     # Construct request model with validation
@@ -7113,7 +7256,7 @@ async def list_course_events(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve change events."),
     start_time: str | None = Field(None, description="The start of the time range for filtering events. Events on or after this timestamp will be included."),
     end_time: str | None = Field(None, description="The end of the time range for filtering events. Events on or before this timestamp will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of course change events for a specified course, optionally filtered by a time range."""
 
     # Construct request model with validation
@@ -7156,7 +7299,7 @@ async def list_grade_changes_by_assignment(
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve grade change events."),
     start_time: str | None = Field(None, description="The start of the time range for filtering grade change events. Only events on or after this timestamp will be included."),
     end_time: str | None = Field(None, description="The end of the time range for filtering grade change events. Only events on or before this timestamp will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all grade change events for a specific assignment, optionally filtered by a time range. Use this to audit grade modifications and track when grades were changed."""
 
     # Construct request model with validation
@@ -7199,7 +7342,7 @@ async def list_grade_changes_by_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve grade change events."),
     start_time: str | None = Field(None, description="The start of the time range for filtering grade change events (inclusive). Events on or after this timestamp will be included."),
     end_time: str | None = Field(None, description="The end of the time range for filtering grade change events (inclusive). Events on or before this timestamp will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all grade change events for a specific course, with optional filtering by date range. Use this to audit grade modifications within a course over time."""
 
     # Construct request model with validation
@@ -7242,7 +7385,7 @@ async def list_grade_changes_by_grader(
     grader_id: str = Field(..., description="The unique identifier of the grader whose grade change events you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering events. Only events on or after this timestamp will be included."),
     end_time: str | None = Field(None, description="The end of the time range for filtering events. Only events on or before this timestamp will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all grade change events for a specific grader, optionally filtered by a time range. Use this to audit grade modifications made by an individual grader."""
 
     # Construct request model with validation
@@ -7285,7 +7428,7 @@ async def list_grade_changes_by_student(
     student_id: str = Field(..., description="The unique identifier of the student whose grade change events you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering grade change events (inclusive). Specify in ISO 8601 date-time format."),
     end_time: str | None = Field(None, description="The end of the time range for filtering grade change events (inclusive). Specify in ISO 8601 date-time format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all grade change events for a specific student, optionally filtered by a date-time range. Use this to audit grade modifications and track changes over time."""
 
     # Construct request model with validation
@@ -7328,7 +7471,7 @@ async def list_events(
     context_codes: list[str] | None = Field(None, description="List of context codes to filter events by specific courses, groups, or users. Use the format context_type_context_id (e.g., course_42). Limited to 10 codes; additional codes are ignored. If omitted, returns only the current user's personal calendar events."),
     excludes: list[list[dict[str, Any]]] | None = Field(None, description="Array of event attributes to exclude from the response. Reduces payload size by omitting unnecessary data."),
     per_page: int | None = Field(None, description="Number of events to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of calendar events for the current user, optionally filtered by course, group, or user context codes. By default, returns only personal calendar events."""
 
     # Construct request model with validation
@@ -7384,7 +7527,7 @@ async def create_calendar_event(
     calendar_event_start_at: str | None = Field(None, description="Start date and time for the event. Required if end_at is specified and all_day is false."),
     calendar_event_time_zone_edited: str | None = Field(None, description="Time zone context for the user creating or editing the event. Accepts IANA time zone identifiers or Rails-compatible time zone names."),
     calendar_event_title: str | None = Field(None, description="Short, descriptive title for the calendar event."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new calendar event for a course, group, or user. Supports single events, all-day events, and bulk duplication with optional section-level scheduling for course events."""
 
     # Construct request model with validation
@@ -7423,7 +7566,7 @@ async def create_calendar_event(
 
 # Tags: calendar_events
 @mcp.tool()
-async def get_calendar_event(id_: str = Field(..., alias="id", description="The unique identifier of the calendar event or assignment to retrieve.")) -> dict[str, Any]:
+async def get_calendar_event(id_: str = Field(..., alias="id", description="The unique identifier of the calendar event or assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single calendar event or assignment by its ID. Returns detailed information about the specified event including timing, description, and any associated metadata."""
 
     # Construct request model with validation
@@ -7473,7 +7616,7 @@ async def update_event(
     calendar_event_start_at: str | None = Field(None, description="Start date and time of the event. Must be before the end time."),
     calendar_event_time_zone_edited: str | None = Field(None, description="Time zone of the user editing the event. Use IANA time zone identifiers (e.g., America/New_York) or Rails time zone names."),
     calendar_event_title: str | None = Field(None, description="Short, descriptive title for the calendar event."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing calendar event with new details such as title, time, location, and description. Supports moving events between calendars and setting section-specific times for course events."""
 
     # Construct request model with validation
@@ -7515,7 +7658,7 @@ async def update_event(
 async def delete_calendar_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the calendar event to delete."),
     cancel_reason: str | None = Field(None, description="The reason for deleting or canceling the event. This is useful for audit trails and notifications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a calendar event and return the deleted event details. Optionally provide a reason for the cancellation."""
 
     # Construct request model with validation
@@ -7559,7 +7702,7 @@ async def reserve_appointment_slot(
     cancel_existing: bool | None = Field(None, description="If true, automatically cancel any previous reservations held by this participant for the same appointment group. Defaults to false."),
     comments: str | None = Field(None, description="Optional notes or comments to attach to this reservation for reference or context."),
     participant_id: str | None = Field(None, description="The user or group identifier for whom the reservation is being made. If not provided, defaults to the current user or their candidate group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reserve a time slot for a calendar appointment, optionally canceling any existing reservations for the participant. Returns the newly created reservation."""
 
     # Construct request model with validation
@@ -7604,7 +7747,7 @@ async def reserve_time_slot(
     participant_id: str = Field(..., description="The user or group ID for whom the reservation is being made. Defaults to the current user or their candidate group if not specified."),
     cancel_existing: bool | None = Field(None, description="If true, cancel any existing reservations for this participant in the same appointment group before creating the new reservation. Defaults to false."),
     comments: str | None = Field(None, description="Optional comments or notes to attach to the reservation for context or reference."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reserve a time slot for a participant in a calendar event. Optionally cancel any existing reservations for the same participant and appointment group."""
 
     # Construct request model with validation
@@ -7648,7 +7791,7 @@ async def list_collaboration_members(
     id_: str = Field(..., alias="id", description="The unique identifier of the collaboration."),
     include: list[Literal["collaborator_lti_id", "avatar_image_url"]] | None = Field(None, description="Optional member information to include in the response. Specify which additional fields to return with each member record."),
     per_page: int | None = Field(None, description="The number of members to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of members collaborating on a specific collaboration. Optionally include additional member information such as LTI identifiers and avatar URLs."""
 
     # Construct request model with validation
@@ -7695,7 +7838,7 @@ async def list_messages(
     start_time: str | None = Field(None, description="The start of the time range for filtering messages. Messages sent on or after this time will be included."),
     end_time: str | None = Field(None, description="The end of the time range for filtering messages. Messages sent on or before this time will be included."),
     per_page: int | None = Field(None, description="The maximum number of messages to return per page. Useful for controlling response size and implementing pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of communication messages sent to a specific user, optionally filtered by a time range."""
 
     # Construct request model with validation
@@ -7737,7 +7880,7 @@ async def list_conversations(
     include_all_conversation_ids: bool | None = Field(None, description="When enabled, the response structure changes to include both paginated conversation data and a complete list of all conversation IDs in the same order, rather than returning conversations as a top-level array."),
     include: list[Literal["participant_avatars"]] | None = Field(None, description="Specify which additional data to include for each conversation. Use 'participant_avatars' to add avatar URLs for all users participating in the conversation."),
     per_page: int | None = Field(None, description="Number of conversations to return per page. Determines pagination size for the response.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of conversations for the current user, ordered by most recent first. Optionally include participant avatars and retrieve all conversation IDs within the current scope."""
 
     # Construct request model with validation
@@ -7787,7 +7930,7 @@ async def create_conversation_thread(
     mode: Literal["sync", "async"] | None = Field(None, description="Controls whether messages are sent synchronously (immediate response) or asynchronously (batch processing). Async mode is only applicable for bulk private messages; group conversations and single-recipient messages always use sync mode."),
     subject: str | None = Field(None, description="The conversation subject line. Maximum length is 255 characters. This is ignored when reusing an existing conversation."),
     user_note: bool | None = Field(None, description="When true, creates a faculty journal entry for each student recipient (if the sender has permission and faculty journals are enabled in the account)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send a message to one or more recipients, creating a new conversation or reusing an existing private conversation. Supports both individual private messages and group conversations with optional attachments and faculty journal entries."""
 
     # Construct request model with validation
@@ -7829,7 +7972,7 @@ async def create_conversation_thread(
 async def update_conversations_batch(
     conversation_ids: list[str] = Field(..., description="List of conversation IDs to update. Maximum of 500 conversations per request."),
     event: Literal["mark_as_read", "mark_as_unread", "star", "unstar", "archive", "destroy"] = Field(..., description="The action to perform on each conversation in the batch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Perform bulk actions on multiple conversations such as marking as read, starring, or archiving. This operation runs asynchronously; use the progress endpoint to monitor completion status."""
 
     # Construct request model with validation
@@ -7867,7 +8010,7 @@ async def update_conversations_batch(
 
 # Tags: conversations
 @mcp.tool()
-async def list_conversation_batches() -> dict[str, Any]:
+async def list_conversation_batches() -> dict[str, Any] | ToolResult:
     """Retrieves all currently running conversation batches for the authenticated user. Conversation batches are created when bulk private messages are sent asynchronously."""
 
     # Extract parameters for API call
@@ -7899,7 +8042,7 @@ async def list_message_recipients(
     context: str | None = Field(None, description="Limit search results to a specific course or group context. Use format course_[id] or group_[id]."),
     exclude: list[str] | None = Field(None, description="Array of recipient IDs to exclude from results. Include user IDs as integers or course/group IDs with course_ or group_ prefix (e.g., course_3, group_4)."),
     permissions: list[str] | None = Field(None, description="Array of permission strings to check for each matched context. Determines which permissions are returned in the response but does not filter out contexts lacking the specified permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for valid message recipients including users, courses, and groups that the current user can send messages to. Supports filtering by search terms, context, exclusions, and permission checks with pagination."""
 
     # Construct request model with validation
@@ -7941,7 +8084,7 @@ async def list_message_recipients(
 
 # Tags: conversations
 @mcp.tool()
-async def mark_all_conversations_as_read() -> dict[str, Any]:
+async def mark_all_conversations_as_read() -> dict[str, Any] | ToolResult:
     """Mark all conversations as read in a single operation. This updates the read status for every conversation in the user's inbox."""
 
     # Extract parameters for API call
@@ -7968,7 +8111,7 @@ async def mark_all_conversations_as_read() -> dict[str, Any]:
 
 # Tags: conversations
 @mcp.tool()
-async def get_unread_conversation_count() -> dict[str, Any]:
+async def get_unread_conversation_count() -> dict[str, Any] | ToolResult:
     """Retrieve the total number of unread conversations for the authenticated user. This provides a quick way to check for new messages without fetching full conversation details."""
 
     # Extract parameters for API call
@@ -7998,7 +8141,7 @@ async def get_unread_conversation_count() -> dict[str, Any]:
 async def retrieve_conversation(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation to retrieve."),
     auto_mark_as_read: bool | None = Field(None, description="Whether to automatically mark the conversation as read if it is currently unread. Defaults to true, but this default will change to false in a future API release."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single conversation with all details including messages and participant information. Optionally marks unread conversations as read."""
 
     # Construct request model with validation
@@ -8042,7 +8185,7 @@ async def update_conversation(
     conversation_starred: bool | None = Field(None, description="Mark or unmark the conversation as starred in the current user's view."),
     conversation_subscribed: bool | None = Field(None, description="Subscribe or unsubscribe the current user from the conversation. Unsubscribed users retain access to latest messages but won't receive automatic unread flags or inbox prioritization (group conversations only)."),
     conversation_workflow_state: Literal["read", "unread", "archived"] | None = Field(None, description="Set the conversation workflow state to control visibility and read status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update conversation attributes such as starred status, subscription state, and workflow state. Allows users to manage their personal view and organization of conversations."""
 
     # Construct request model with validation
@@ -8081,7 +8224,7 @@ async def update_conversation(
 
 # Tags: conversations
 @mcp.tool()
-async def delete_conversation(id_: str = Field(..., alias="id", description="The unique identifier of the conversation to delete.")) -> dict[str, Any]:
+async def delete_conversation(id_: str = Field(..., alias="id", description="The unique identifier of the conversation to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a conversation and all its associated messages. This action only removes the conversation from the current user's view."""
 
     # Construct request model with validation
@@ -8124,7 +8267,7 @@ async def send_message(
     included_messages: list[str] | None = Field(None, description="An array of message IDs from this conversation to forward to the new message recipients. Recipients who already have copies of these messages will not be affected."),
     recipients: list[str] | None = Field(None, description="An array of user IDs who should receive this message. Defaults to all current conversation recipients. To send only to yourself, provide an array containing only your user ID."),
     user_note: bool | None = Field(None, description="When enabled, creates a faculty journal entry for each student recipient, provided the sender has permission and faculty journals are enabled in the account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send a message to an existing conversation. The response includes the newly sent message and can optionally create faculty journal entries for student recipients."""
 
     # Construct request model with validation
@@ -8167,7 +8310,7 @@ async def send_message(
 async def add_conversation_recipients(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation to add recipients to."),
     recipients: list[str] = Field(..., description="An array of recipient identifiers to add to the conversation. Identifiers can be user IDs or prefixed resource IDs for courses (prefixed with 'course_') or groups (prefixed with 'group_'). Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add recipients to an existing group conversation. The response includes the conversation details with the latest system message indicating who was added and by whom."""
 
     # Construct request model with validation
@@ -8210,7 +8353,7 @@ async def add_conversation_recipients(
 async def remove_messages(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation containing the messages to delete."),
     remove: list[str] = Field(..., description="An array of message identifiers to be removed from the conversation. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more messages from a conversation. This action only affects the current user's view; if all messages are deleted, the conversation is automatically removed."""
 
     # Construct request model with validation
@@ -8250,7 +8393,7 @@ async def remove_messages(
 
 # Tags: accounts
 @mcp.tool()
-async def list_accounts_by_course_admin() -> dict[str, Any]:
+async def list_accounts_by_course_admin() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of accounts accessible to the current user through their admin course enrollments (teacher, TA, or designer roles). Returns account identifiers, names, workflow states, and hierarchy information."""
 
     # Extract parameters for API call
@@ -8283,7 +8426,7 @@ async def list_courses(
     include: list[Literal["needs_grading_count", "syllabus_body", "public_description", "total_scores", "current_grading_period_scores", "term", "account", "course_progress", "sections", "storage_quota_used_mb", "total_students", "passback_status", "favorites", "teachers", "observed_users", "course_image"]] | None = Field(None, description="Specify which optional course metadata to include in the response. Multiple values can be selected to enrich course data with grading information, scores, syllabus content, instructor details, and more."),
     state: list[Literal["unpublished", "available", "completed", "deleted"]] | None = Field(None, description="Filter courses by their current state. By default, returns 'available' courses for students and observers, and all states except 'deleted' for other enrollment types."),
     per_page: int | None = Field(None, description="Number of courses to return per page for pagination. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active courses for the current user, with optional filtering by enrollment state and course configuration, plus selective inclusion of detailed course metadata."""
 
     # Construct request model with validation
@@ -8328,7 +8471,7 @@ async def list_courses(
 async def list_course_activities(
     course_id: str = Field(..., description="The unique identifier of the course whose activity stream you want to retrieve."),
     per_page: int | None = Field(None, description="Number of activity items to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current user's activity stream for a specific course, showing recent actions and events in paginated results."""
 
     # Construct request model with validation
@@ -8367,7 +8510,7 @@ async def list_course_activities(
 
 # Tags: courses
 @mcp.tool()
-async def get_course_activity_summary(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the activity stream summary.")) -> dict[str, Any]:
+async def get_course_activity_summary(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the activity stream summary.")) -> dict[str, Any] | ToolResult:
     """Retrieves a summary of the current user's activity stream for a specific course. This provides an overview of recent course-related activities."""
 
     # Construct request model with validation
@@ -8403,7 +8546,7 @@ async def get_course_activity_summary(course_id: str = Field(..., description="T
 
 # Tags: analytics
 @mcp.tool()
-async def get_course_participation_analytics(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve participation analytics.")) -> dict[str, Any]:
+async def get_course_participation_analytics(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve participation analytics.")) -> dict[str, Any] | ToolResult:
     """Retrieve historical participation analytics for a course, including daily page view hits and participation counts across the entire course history. Data is aggregated by day with page views broken down by access category."""
 
     # Construct request model with validation
@@ -8442,7 +8585,7 @@ async def get_course_participation_analytics(course_id: str = Field(..., descrip
 async def list_assignment_analytics(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve assignment analytics."),
     async_: bool | None = Field(None, alias="async", description="Enable asynchronous processing for large datasets. When true, the response may include a progress_url for polling completion status instead of immediate results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve assignment analytics for a course, including grade breakdowns and submission timeliness status sorted by due date. Supports asynchronous processing for large datasets."""
 
     # Construct request model with validation
@@ -8485,7 +8628,7 @@ async def list_course_student_summaries(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve student summary data."),
     sort_column: Literal["name", "name_descending", "score", "score_descending", "participations", "participations_descending", "page_views", "page_views_descending"] | None = Field(None, description="The metric by which to sort results. Defaults to sorting by student name in ascending order."),
     student_id: str | None = Field(None, description="If provided, returns analytics for only the specified student instead of all students in the course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated analytics for all students in a course, including page views, participations, and submission timeliness. Results can be sorted by various metrics and optionally filtered to a single student."""
 
     # Construct request model with validation
@@ -8527,7 +8670,7 @@ async def list_course_student_summaries(
 async def get_student_course_participation(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve participation data."),
     student_id: str = Field(..., description="The unique identifier of the student whose participation data should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed participation analytics for a student within a specific course, including hourly page view metrics and a chronological history of all participation events."""
 
     # Construct request model with validation
@@ -8566,7 +8709,7 @@ async def get_student_course_participation(
 async def list_student_assignment_analytics(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignments."),
     student_id: str = Field(..., description="The unique identifier of the student whose assignment data and grades should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of assignments for a course with grade breakdowns and submission details for a specific student. Results are sorted by assignment due date."""
 
     # Construct request model with validation
@@ -8605,7 +8748,7 @@ async def list_student_assignment_analytics(
 async def get_course_student_messaging_analytics(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve messaging analytics."),
     student_id: str = Field(..., description="The unique identifier of the student whose messaging activity should be analyzed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves messaging activity analytics for a specific student within a course, including daily counts of instructor-to-student and student-to-instructor messages throughout the course history. Message activity includes direct conversations and comments on homework submissions."""
 
     # Construct request model with validation
@@ -8649,7 +8792,7 @@ async def list_assignment_groups(
     grading_period_id: str | None = Field(None, description="Filter assignment groups to a specific grading period by its ID. Requires grading periods to be configured in the course."),
     scope_assignments_to_student: bool | None = Field(None, description="When true, returns only assignments applicable to the current user within the specified grading period. Requires grading_period_id, active grading periods, and the current user to be a student."),
     per_page: int | None = Field(None, description="Number of assignment groups to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of assignment groups for a course, sorted by position. Optionally include related data such as assignments, discussion topics, and date information."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -8702,7 +8845,7 @@ async def create_assignment_group(
     position: str | None = Field(None, description="The display order of this assignment group relative to other assignment groups in the course, where lower numbers appear first."),
     rules: str | None = Field(None, description="Grading rules that apply to assignments within this group, such as drop lowest or keep highest scoring rules."),
     sis_source_id: str | None = Field(None, description="The SIS (Student Information System) source identifier for this assignment group, used for system integration and data synchronization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new assignment group within a course to organize and weight assignments for grading purposes."""
 
     _position = _parse_int(position)
@@ -8750,7 +8893,7 @@ async def get_assignment_group(
     include: list[Literal["assignments", "discussion_topic", "assignment_visibility", "submission"]] | None = Field(None, description="Comma-separated list of related data to include in the response. Valid options include 'assignments', 'discussion_topic', 'assignment_visibility' (requires Differentiated Assignments feature and 'assignments' to be included), and 'submission' (requires 'assignments' to be included)."),
     override_assignment_dates: bool | None = Field(None, description="Whether to apply assignment overrides for each assignment in the group. When enabled, returns dates adjusted for individual student overrides."),
     grading_period_id: str | None = Field(None, description="The unique identifier of the grading period to filter assignment groups by. Only applicable when grading periods are enabled on the account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific assignment group within a course, optionally including associated assignments, discussion topics, submission data, and visibility rules based on differentiated assignments settings."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -8797,7 +8940,7 @@ async def get_assignment_group(
 async def update_assignment_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment group."),
     assignment_group_id: str = Field(..., description="The unique identifier of the assignment group to be updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing assignment group within a course. Modify properties such as name, weight, and grading rules using the same parameters accepted during creation."""
 
     # Construct request model with validation
@@ -8837,7 +8980,7 @@ async def delete_assignment_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment group to delete."),
     assignment_group_id: str = Field(..., description="The unique identifier of the assignment group to delete."),
     move_assignments_to: str | None = Field(None, description="The unique identifier of an active assignment group to receive the assignments from the deleted group. If omitted, all assignments in the deleted group will be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes an assignment group and optionally reassigns its assignments to another active group. If no destination group is specified, all assignments in the group will be deleted."""
 
     _move_assignments_to = _parse_int(move_assignments_to)
@@ -8888,7 +9031,7 @@ async def list_assignments(
     assignment_ids: list[str] | None = Field(None, description="Limit results to specific assignments by their IDs. When provided, only assignments with matching IDs are returned."),
     order_by: Literal["position", "name"] | None = Field(None, description="Sort the returned assignments by the specified field. 'position' maintains course-defined order, while 'name' sorts alphabetically by assignment title."),
     per_page: int | None = Field(None, description="Number of assignments to return per page for pagination. Larger values reduce API calls but increase response size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of assignments for a course with optional filtering, sorting, and association inclusion. Supports filtering by due date status, submission state, and search terms."""
 
     # Construct request model with validation
@@ -8971,7 +9114,7 @@ async def create_assignment(
     turnitin_journal_check: bool | None = Field(None, description="Whether to check against journal articles. Optional."),
     turnitin_exclude_quoted: bool | None = Field(None, description="Whether to exclude quoted material from similarity check. Optional."),
     turnitin_exclude_small_matches: bool | None = Field(None, description="Whether to exclude small matches from similarity check. Optional."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new assignment for a course. The assignment is created in an active state and can be configured with grading, submission types, peer reviews, and access controls."""
 
     # Call helper functions
@@ -9026,7 +9169,7 @@ async def list_gradeable_students_for_assignments(
     course_id: str = Field(..., description="The unique identifier of the course."),
     assignment_ids: list[str] | None = Field(None, description="Optional list of assignment IDs to filter which assignments' eligible students are returned. If not provided, all assignments in the course are considered."),
     per_page: int | None = Field(None, description="Number of student records to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of students eligible to submit assignments in a course. The caller must have permission to view grades for the course, and section-limited instructors will only see students in their own sections."""
 
     # Construct request model with validation
@@ -9072,7 +9215,7 @@ async def retrieve_assignment_overrides(
     course_id: str = Field(..., description="The ID of the course containing the assignment overrides to retrieve."),
     assignment_overrides_id: list[str] = Field(..., alias="assignment_overridesid", description="Array of override IDs to retrieve. The order and count of IDs should correspond with the assignment IDs provided in assignment_overrides[assignment_id]."),
     assignment_overrides_assignment_id: list[str] = Field(..., alias="assignment_overridesassignment_id", description="Array of assignment IDs corresponding to each override ID. The order and count must match assignment_overrides[id] to properly associate overrides with their assignments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a batch of assignment overrides in a course by their IDs. Returns a list with null elements for any overrides not found or not visible to the current user."""
 
     # Construct request model with validation
@@ -9118,7 +9261,7 @@ async def retrieve_assignment_overrides(
 async def create_assignment_overrides(
     course_id: str = Field(..., description="The unique identifier of the course where assignment overrides will be created."),
     assignment_overrides: list[_models.AssignmentOverride] = Field(..., description="Array of override configurations to create. Each override must specify exactly one of: student_ids (most specific), group_id, or course_section_id. If multiple are provided, only the most specific is used. Overrides are processed in order and all succeed or all fail together."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Batch create assignment overrides for a course in a single transaction. All overrides are created successfully or none are created if any error occurs."""
 
     # Construct request model with validation
@@ -9161,7 +9304,7 @@ async def create_assignment_overrides(
 async def update_assignment_overrides(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignments to update."),
     assignment_overrides: list[_models.AssignmentOverride] = Field(..., description="An array of assignment override objects to update. Each override must include all currently overridden attributes to retain them; omitted attributes will revert to non-overridden state. For ad-hoc overrides, supply student_ids to modify the target set; for group and section overrides, the target set cannot be changed. Errors are returned per input in an errors array."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Batch update assignment overrides for a course. All updates are applied transactionally—if any override fails validation, no changes are persisted."""
 
     # Construct request model with validation
@@ -9204,7 +9347,7 @@ async def check_provisional_grade_status_anonymous(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment to check provisional grade status for."),
     anonymous_id: str | None = Field(None, description="The anonymous identifier of the student whose provisional grade status should be checked. If not provided, returns status for the current user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a student's submission requires one or more provisional grades to be assigned. Use this to determine the grading status before assigning anonymous provisional grades."""
 
     # Construct request model with validation
@@ -9247,7 +9390,7 @@ async def list_gradeable_students(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to list gradeable students."),
     per_page: int | None = Field(None, description="The maximum number of student records to return per page for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of students eligible to submit a specific assignment. Section-limited instructors will only see students in their own sections. Requires permission to view grades."""
 
     # Construct request model with validation
@@ -9290,7 +9433,7 @@ async def list_moderated_students(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to list moderated students."),
     per_page: int | None = Field(None, description="The maximum number of students to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of students selected for moderation on a specific assignment. Use this to view which students have been chosen for the moderation workflow."""
 
     # Construct request model with validation
@@ -9333,7 +9476,7 @@ async def select_moderation_students(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which students will be selected for moderation."),
     student_ids: list[float] | None = Field(None, description="Array of user IDs for students to select for moderation. If not provided, no students are selected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Select specific students for moderation review in an assignment. Returns an array of users that were selected for moderation."""
 
     # Construct request model with validation
@@ -9377,7 +9520,7 @@ async def list_assignment_overrides(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve overrides."),
     per_page: int | None = Field(None, description="The number of override records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of assignment overrides that apply to sections, groups, or students visible to the current user. Use this to view all override rules configured for a specific assignment."""
 
     # Construct request model with validation
@@ -9426,7 +9569,7 @@ async def create_assignment_override(
     assignment_override_student_ids: list[int] | None = Field(None, description="An array of student IDs to target with this override. Each student must have an active enrollment in the course and must not already be targeted by another student-specific override."),
     assignment_override_title: str | None = Field(None, description="The title of the override. Required when targeting specific students; ignored when targeting a group or section (which use the group or section name instead)."),
     assignment_override_unlock_at: str | None = Field(None, description="The unlock date and time for the overridden assignment in ISO 8601 format. If null, removes any previous unlock date. If omitted, the override does not affect the unlock date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an override for an assignment to customize due dates, lock dates, and unlock dates for specific students, groups, or course sections. Exactly one targeting method (student_ids, group_id, or course_section_id) must be specified, with student_ids being the most specific."""
 
     _assignment_override_course_section_id = _parse_int(assignment_override_course_section_id)
@@ -9473,7 +9616,7 @@ async def get_assignment_override(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the override."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific override to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific assignment override by its ID. Returns the override configuration for the given course and assignment."""
 
     # Construct request model with validation
@@ -9518,7 +9661,7 @@ async def update_assignment_override(
     assignment_override_student_ids: list[int] | None = Field(None, description="An array of student user IDs to target with this override. Each ID must correspond to an active student enrollment in the course not already targeted by another ad-hoc override. This parameter is only applied if the override being updated is ad-hoc; it is ignored for group or section overrides."),
     assignment_override_title: str | None = Field(None, description="A descriptive title for the ad-hoc override. This parameter is only applied if the override being updated is ad-hoc; it is ignored for group or section overrides."),
     assignment_override_unlock_at: str | None = Field(None, description="The date and time when the overridden assignment becomes unlocked. Specify in ISO 8601 format. Omit to leave the unlock date unchanged, or set to null to remove any previous unlock date override."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing assignment override for a course assignment. All currently overridden values must be supplied to retain them; omitting a value will remove that override. For ad-hoc overrides, the student target set can be modified; for group or section overrides, the target cannot be changed."""
 
     # Construct request model with validation
@@ -9561,7 +9704,7 @@ async def remove_assignment_override(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which the override is being removed."),
     id_: str = Field(..., alias="id", description="The unique identifier of the override to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an assignment override for a specific course and assignment, returning the details of the deleted override."""
 
     # Construct request model with validation
@@ -9601,7 +9744,7 @@ async def list_peer_reviews(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve peer reviews."),
     include: list[Literal["submission_comments", "user"]] | None = Field(None, description="Optional associations to include with each peer review record. Specify which related data (such as reviewer information, reviewee information, or assessment details) should be populated in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all peer reviews for a specific assignment within a course. Optionally include associated data to enrich the peer review records."""
 
     # Construct request model with validation
@@ -9646,7 +9789,7 @@ async def list_peer_reviews(
 async def finalize_provisional_grades(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which provisional grades are being finalized."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk select which provisional grades will be released to students for an assignment. The caller must be the final grader or an admin with grade selection permissions."""
 
     # Construct request model with validation
@@ -9685,7 +9828,7 @@ async def finalize_provisional_grades(
 async def publish_assignment_grades(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which provisional grades will be published."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Publish selected provisional grades for all submissions to an assignment, overwriting existing grades in the gradebook. This action is irreversible and will apply the chosen provisional grade to all students not in the moderation set."""
 
     # Construct request model with validation
@@ -9725,7 +9868,7 @@ async def check_provisional_grade_status(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment to check provisional grade status for."),
     student_id: str | None = Field(None, description="The unique identifier of the student whose provisional grade status should be checked. If omitted, returns status for the current user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a student's submission requires one or more provisional grades for a specific assignment. Use this to determine the grading status before retrieving or submitting grades."""
 
     _student_id = _parse_int(student_id)
@@ -9770,7 +9913,7 @@ async def copy_provisional_grade_to_final_mark(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the provisional grade."),
     provisional_grade_id: str = Field(..., description="The unique identifier of the provisional grade to copy to the final mark."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copy a provisional grade along with its submission comments and rubric assessments to a final mark for moderation. The final mark can be edited and commented upon by a moderator before grade publication."""
 
     # Construct request model with validation
@@ -9810,7 +9953,7 @@ async def finalize_provisional_grade(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which the provisional grade is being finalized."),
     provisional_grade_id: str = Field(..., description="The unique identifier of the provisional grade to select and apply to the student's submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Finalize a student's grade by selecting which provisional grade to apply to their submission. Only the assignment's final grader or an admin with grade selection permissions can perform this action."""
 
     # Construct request model with validation
@@ -9850,7 +9993,7 @@ async def get_assignment_submission_summary(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submission statistics."),
     grouped: bool | None = Field(None, description="When enabled, the submission counts will be calculated and grouped by student groups rather than treating all students as a single cohort."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves submission statistics for an assignment, showing counts of graded, ungraded, and not-submitted submissions from gradeable students. Optionally accounts for student groups when enabled."""
 
     # Construct request model with validation
@@ -9895,7 +10038,7 @@ async def list_assignment_submissions(
     include: list[Literal["submission_history", "submission_comments", "rubric_assessment", "assignment", "visibility", "course", "user", "group"]] | None = Field(None, description="Associations to include in the response. Use 'group' to add group_id and group_name to each submission record."),
     grouped: bool | None = Field(None, description="When true, organizes the response by student groups instead of individual submissions."),
     per_page: int | None = Field(None, description="The maximum number of submissions to return per page for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all submissions for a specific assignment in a course. Results can be optionally grouped by student groups and filtered to include related associations."""
 
     # Construct request model with validation
@@ -9946,7 +10089,7 @@ async def submit_assignment(
     submission_file_ids: list[int] | None = Field(None, description="One or more file IDs from the submitting user's or group's files section to submit. Only valid when submission_type is 'online_upload'."),
     submission_media_comment_id: str | None = Field(None, description="The media comment ID to submit. Only valid when submission_type is 'media_recording'. Note: Media comment creation is not yet supported via API."),
     submission_url: str | None = Field(None, description="URL to submit as the assignment. Must use http or https scheme. Only valid when submission_type is 'online_url' or 'basic_lti_launch'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit an assignment for a course. You must be enrolled as a student in the course to make a submission. Supports online text entry, file uploads, URLs, and media recordings."""
 
     # Construct request model with validation
@@ -9997,7 +10140,7 @@ async def grade_submissions(
     rubric_criterion_id: str | None = Field(None, description="The ID of the rubric criterion being assessed"),
     rubric_criterion_points: float | None = Field(None, description="The points awarded for this rubric criterion"),
     rubric_criterion_comments: str | None = Field(None, description="Comments or feedback for this rubric criterion"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grade and comment on multiple student submissions for an assignment in a single asynchronous operation. Requires permission to manage grades in the course or section."""
 
     # Call helper functions
@@ -10047,7 +10190,7 @@ async def list_peer_reviews_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the submission."),
     submission_id: str = Field(..., description="The unique identifier of the submission to retrieve peer reviews for."),
     include: list[Literal["submission_comments", "user"]] | None = Field(None, description="Optional array of associations to include in the response. Specify which related data objects should be expanded in the results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all peer reviews for a specific submission within an assignment. Use optional include parameter to expand associated data."""
 
     # Construct request model with validation
@@ -10094,7 +10237,7 @@ async def assign_peer_reviewer(
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which the peer review is being created."),
     submission_id: str = Field(..., description="The unique identifier of the student submission that will be reviewed."),
     user_id: str = Field(..., description="The user ID of the person to assign as the peer reviewer for this submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign a user as a peer reviewer for a student submission on an assignment. This creates a peer review relationship between the reviewer and the submission."""
 
     _user_id = _parse_int(user_id)
@@ -10141,7 +10284,7 @@ async def remove_peer_review(
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
     submission_id: str = Field(..., description="The unique identifier of the submission being reviewed."),
     user_id: str = Field(..., description="The user ID of the peer reviewer to remove from this assignment submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a peer reviewer from an assignment submission. Deletes the peer review relationship, preventing the specified user from reviewing this submission."""
 
     _user_id = _parse_int(user_id)
@@ -10187,7 +10330,7 @@ async def get_submission_by_user(
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the submission."),
     user_id: str = Field(..., description="The unique identifier of the user whose submission should be retrieved."),
     include: list[Literal["submission_history", "submission_comments", "rubric_assessment", "visibility", "course", "user"]] | None = Field(None, description="Optional list of related associations to include in the response, such as rubric assessments or feedback comments. Order and format depend on API capabilities."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single student submission for a specific assignment in a course. Returns submission details including content, status, and grades based on the user ID."""
 
     # Construct request model with validation
@@ -10244,7 +10387,7 @@ async def grade_submission(
     submission_late_policy_status: str | None = Field(None, description="Set the submission's late policy status to indicate whether it is late, missing, or unaffected by late policy."),
     submission_posted_grade: str | None = Field(None, description="Assign a score to the submission. Accepts points (e.g., 13.5), percentage (e.g., 40%), letter grade (e.g., A-), or pass/fail status (pass, complete, fail, incomplete). Extra credit is allowed when the score exceeds the assignment's maximum points."),
     submission_seconds_late_override: str | None = Field(None, description="Override the number of seconds late for this submission. Only applies when late_policy_status is set to 'late'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grade and/or comment on a student's assignment submission. Supports adding text or media comments, assigning rubric assessments, posting grades, and managing submission status (excused, late policy)."""
 
     _submission_seconds_late_override = _parse_int(submission_seconds_late_override)
@@ -10290,7 +10433,7 @@ async def upload_submission_comment_file(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
     user_id: str = Field(..., description="The unique identifier of the user whose submission the comment file is being attached to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to attach to a submission comment. The uploaded file receives an attachment ID that can then be associated with the comment via the submission API."""
 
     # Construct request model with validation
@@ -10330,7 +10473,7 @@ async def upload_submission_file(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
     user_id: str = Field(..., description="The unique identifier of the student user submitting the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to a student submission. This initiates the file upload workflow; upon completion, the returned file ID can be used to submit the assignment."""
 
     # Construct request model with validation
@@ -10370,7 +10513,7 @@ async def mark_submission_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
     user_id: str = Field(..., description="The unique identifier of the student whose submission is being marked as read."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a student submission as read by the instructor. This updates the read status without modifying the submission content."""
 
     # Construct request model with validation
@@ -10410,7 +10553,7 @@ async def mark_submission_as_unread(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
     user_id: str = Field(..., description="The unique identifier of the student whose submission should be marked as unread."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a student's assignment submission as unread to indicate it needs review. This operation removes the read status from a specific submission within a course."""
 
     # Construct request model with validation
@@ -10453,7 +10596,7 @@ async def get_assignment(
     override_assignment_dates: bool | None = Field(None, description="Whether to apply assignment overrides (such as due date extensions) to the returned assignment data."),
     needs_grading_count_by_section: bool | None = Field(None, description="Whether to break down the grading count by course section in the response, providing section-level granularity for submissions needing grading."),
     all_dates: bool | None = Field(None, description="Whether to include all dates associated with the assignment, such as lock dates, unlock dates, and section-specific overrides."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific assignment by ID within a course. Returns assignment details including dates, grading information, and optionally associated data based on requested includes."""
 
     # Construct request model with validation
@@ -10541,7 +10684,7 @@ async def update_assignment(
     turnitin_journal_check: bool | None = Field(None, description="Whether to check against journal articles. Optional."),
     turnitin_exclude_quoted: bool | None = Field(None, description="Whether to exclude quoted material from similarity check. Optional."),
     turnitin_exclude_small_matches: bool | None = Field(None, description="Whether to exclude small matches from similarity check. Optional."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing assignment in a course. Assignment overrides are preserved unless explicitly provided; when provided, overrides are updated, deleted, or created to match the supplied list."""
 
     # Call helper functions
@@ -10595,7 +10738,7 @@ async def update_assignment(
 async def delete_assignment(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     id_: str = Field(..., alias="id", description="The unique identifier of the assignment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an assignment from a course. This action cannot be undone."""
 
     # Construct request model with validation
@@ -10631,7 +10774,7 @@ async def delete_assignment(
 
 # Tags: blueprint_courses
 @mcp.tool()
-async def list_blueprint_subscriptions(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve blueprint subscriptions.")) -> dict[str, Any]:
+async def list_blueprint_subscriptions(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve blueprint subscriptions.")) -> dict[str, Any] | ToolResult:
     """Retrieves all blueprint subscriptions for a specified course. A course can have at most one active blueprint subscription."""
 
     # Construct request model with validation
@@ -10671,7 +10814,7 @@ async def list_blueprint_imports(
     course_id: str = Field(..., description="The ID of the course to retrieve blueprint imports for."),
     subscription_id: str = Field(..., description="The ID of the blueprint subscription. Use 'default' to reference the currently active blueprint subscription."),
     per_page: int | None = Field(None, description="The number of items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of blueprint imports (migrations) for a course, ordered by most recent first. Use 'default' as the subscription_id to reference the currently active blueprint subscription."""
 
     # Construct request model with validation
@@ -10714,7 +10857,7 @@ async def get_blueprint_import(
     course_id: str = Field(..., description="The ID of the course receiving the blueprint import."),
     subscription_id: str = Field(..., description="The ID of the blueprint subscription linking the course to the blueprint."),
     id_: str = Field(..., alias="id", description="The ID of the migration/import to retrieve status for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status of a blueprint import into a course. Shows migration progress and details for a specific blueprint subscription."""
 
     # Construct request model with validation
@@ -10754,7 +10897,7 @@ async def list_blueprint_migration_details(
     course_id: str = Field(..., description="The ID of the course that received the blueprint migration."),
     subscription_id: str = Field(..., description="The ID of the blueprint subscription linking the course to its blueprint template."),
     id_: str = Field(..., alias="id", description="The ID of the specific migration/import to retrieve details for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the detailed changes that were propagated from a blueprint course to a specific course subscription. Shows what content and modifications were applied during the migration."""
 
     # Construct request model with validation
@@ -10793,7 +10936,7 @@ async def list_blueprint_migration_details(
 async def get_blueprint_template(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template. Use 'default' for the standard template associated with the course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve blueprint template information for a course. Use 'default' as the template_id for standard implementations, though specific template IDs may be required for future use cases."""
 
     # Construct request model with validation
@@ -10832,7 +10975,7 @@ async def get_blueprint_template(
 async def list_blueprint_associated_courses(
     course_id: str = Field(..., description="The unique identifier of the course that contains the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template for which to retrieve associated courses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of courses that are configured to receive updates from a specific blueprint template. This shows which courses are linked to receive synchronization from the blueprint."""
 
     # Construct request model with validation
@@ -10872,7 +11015,7 @@ async def list_blueprint_migrations(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template for which to retrieve migrations."),
     per_page: int | None = Field(None, description="The number of migration records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of migrations for a blueprint template, ordered from most recent to oldest. This operation is used to track the history of blueprint synchronizations with associated courses."""
 
     # Construct request model with validation
@@ -10917,7 +11060,7 @@ async def push_blueprint_to_associated_courses(
     comment: str | None = Field(None, description="An optional comment to document the reason for this sync in the migration history."),
     copy_settings: bool | None = Field(None, description="Whether to copy course settings from the blueprint to all associated courses. Defaults to true for newly associated courses."),
     send_notification: bool | None = Field(None, description="Whether to send a notification to the user who initiated the migration when the sync completes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a migration to push recently updated blueprint content to all associated courses. Only one migration can run at a time per blueprint template."""
 
     # Construct request model with validation
@@ -10960,7 +11103,7 @@ async def get_blueprint_migration(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template associated with the migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the migration whose status you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status of a blueprint migration for a specific template. This endpoint shows migration progress and can be called on a blueprint course."""
 
     # Construct request model with validation
@@ -11000,7 +11143,7 @@ async def list_blueprint_migration_changes(
     course_id: str = Field(..., description="The ID of the course that contains the blueprint template."),
     template_id: str = Field(..., description="The ID of the blueprint template associated with the migration."),
     id_: str = Field(..., alias="id", description="The ID of the specific migration to retrieve details for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the changes that were propagated during a blueprint migration. Shows which course content was synchronized from the blueprint template to associated courses."""
 
     # Construct request model with validation
@@ -11043,7 +11186,7 @@ async def update_blueprint_object_restrictions(
     content_type: Literal["assignment", "attachment", "discussion_topic", "external_tool", "quiz", "wiki_page"] | None = Field(None, description="The type of blueprint object being restricted."),
     restricted: bool | None = Field(None, description="Whether to apply restrictions to the blueprint object. When true, the object's editing will be limited in associated course copies."),
     restrictions: Any | None = Field(None, description="Custom restriction settings for the object. If omitted, the course-level restrictions will apply instead. Refer to the Course API documentation for available restriction options."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or remove restrictions on a blueprint course object to control editing capabilities in associated course copies. Restricted objects have limited editing permissions for users in linked courses."""
 
     _content_id = _parse_int(content_id)
@@ -11087,7 +11230,7 @@ async def update_blueprint_object_restrictions(
 async def list_blueprint_unsynced_changes(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template to check for unsynced changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of learning objects that have changed since the last blueprint sync operation. Use this to identify which course content needs to be synchronized with the blueprint template."""
 
     # Construct request model with validation
@@ -11128,7 +11271,7 @@ async def update_blueprint_template_associations(
     template_id: str = Field(..., description="The ID of the blueprint template whose associations will be updated."),
     course_ids_to_add: list[str] | None = Field(None, description="List of course IDs to add as new associations to the template. Courses must belong to the blueprint course's account and cannot be blueprint courses or already associated with another blueprint."),
     course_ids_to_remove: list[str] | None = Field(None, description="List of course IDs to remove from the template's associations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify which courses are associated with a blueprint template by adding or removing course associations. Courses must belong to the same account as the blueprint course and cannot already be associated with another blueprint."""
 
     # Construct request model with validation
@@ -11167,7 +11310,7 @@ async def update_blueprint_template_associations(
 
 # Tags: calendar_events
 @mcp.tool()
-async def get_course_timetable(course_id: str = Field(..., description="The unique identifier of the course whose timetable should be retrieved.")) -> dict[str, Any]:
+async def get_course_timetable(course_id: str = Field(..., description="The unique identifier of the course whose timetable should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current timetable for a course, returning the most recently configured calendar events schedule."""
 
     # Construct request model with validation
@@ -11209,7 +11352,7 @@ async def schedule_course_timetable(
     timetables_course_section_id_location_name: list[str] | None = Field(None, description="Physical or virtual location name for each timetable event (e.g., 'Room 101', 'Building A', 'Online')."),
     timetables_course_section_id_start_time: list[str] | None = Field(None, description="Start time for each timetable event, specified in 12-hour or 24-hour format (e.g., '2:00 pm' or '14:00'). Must be provided alongside end_time if specified."),
     timetables_course_section_id_weekdays: list[str] | None = Field(None, description="Comma-separated list of weekdays on which the timetable event should recur. Use abbreviated weekday names (Mon, Tue, Wed, Thu, Fri, Sat, Sun)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update recurring timetable events for a course based on a weekly schedule. Automatically generates calendar events for specified weekdays and times, replacing any existing timetable events that are no longer part of the schedule."""
 
     # Construct request model with validation
@@ -11253,7 +11396,7 @@ async def create_or_update_timetable_events(
     course_id: str = Field(..., description="The unique identifier of the course for which timetable events will be created or updated."),
     course_section_id: str | None = Field(None, description="The unique identifier of a specific course section. If provided, events will be created for this section only; otherwise, events are created for the entire course."),
     events: list[list[dict[str, Any]]] | None = Field(None, description="An array of event objects defining the timetable events. Each event object should contain the necessary properties to define a calendar event (e.g., title, start time, end time). The order of events in the array is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update timetable events for a course or course section. Accepts a complete list of event objects to replace existing timetable events."""
 
     # Construct request model with validation
@@ -11296,7 +11439,7 @@ async def create_or_update_timetable_events(
 async def list_collaborations(
     course_id: str = Field(..., description="The unique identifier of the course containing the collaborations."),
     per_page: int | None = Field(None, description="The number of collaboration records to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external tool collaborations accessible to the current user within a specific course."""
 
     # Construct request model with validation
@@ -11338,7 +11481,7 @@ async def list_collaborations(
 async def list_conferences(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve conferences."),
     per_page: int | None = Field(None, description="The maximum number of conferences to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of conferences for a specific course. Results are returned in a JSON object with the key 'conferences' containing the conference array."""
 
     # Construct request model with validation
@@ -11380,7 +11523,7 @@ async def list_conferences(
 async def list_content_exports(
     course_id: str = Field(..., description="The unique identifier of the course for which to list content exports."),
     per_page: int | None = Field(None, description="The number of exports to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content export jobs for a course, ordered from newest to oldest. Includes both completed and pending exports."""
 
     # Construct request model with validation
@@ -11435,7 +11578,7 @@ async def initiate_course_export(
     select_module_items: list[str] | None = Field(None, description="List of module item IDs to export. Supported for common_cartridge export type."),
     select_pages: list[str] | None = Field(None, description="List of page IDs to export. Supported for common_cartridge export type."),
     select_rubrics: list[str] | None = Field(None, description="List of rubric IDs to export. Supported for common_cartridge export type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content export job for a course in the specified format. Track progress using the Progress API and retrieve the download URL once the export completes."""
 
     # Call helper functions
@@ -11481,7 +11624,7 @@ async def initiate_course_export(
 async def get_content_export(
     course_id: str = Field(..., description="The unique identifier of the course containing the content export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content export to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific content export for a course, including its status, progress, and download information."""
 
     # Construct request model with validation
@@ -11520,7 +11663,7 @@ async def get_content_export(
 async def list_content_licenses(
     course_id: str = Field(..., description="The unique identifier of the course for which to list available licenses."),
     per_page: int | None = Field(None, description="The maximum number of licenses to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of licenses that can be applied to course content. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -11562,7 +11705,7 @@ async def list_content_licenses(
 async def list_content_migrations_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to list content migrations."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content migrations for a specific course. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -11618,7 +11761,7 @@ async def initiate_content_migration_course(
     settings_overwrite_quizzes: bool | None = Field(None, description="Whether to replace existing quizzes in the destination course that have matching identifiers in the source content package."),
     settings_question_bank_id: str | None = Field(None, description="The question bank ID where imported questions will be added if not explicitly specified in the content package."),
     settings_source_course_id: str | None = Field(None, description="The source course ID to copy content from. Required when migration_type is course_copy_importer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content migration to import course materials from various sources. Processing begins immediately for migrations without file uploads (e.g., course copy), or after file upload completion for file-based migrations. Use the Progress API endpoint provided in the response to monitor migration status."""
 
     _date_shift_options_day_substitutions_x = _parse_int(date_shift_options_day_substitutions_x)
@@ -11661,7 +11804,7 @@ async def initiate_content_migration_course(
 
 # Tags: content_migrations
 @mcp.tool()
-async def list_migration_systems_course(course_id: str = Field(..., description="The unique identifier of the course for which to list available migration systems.")) -> dict[str, Any]:
+async def list_migration_systems_course(course_id: str = Field(..., description="The unique identifier of the course for which to list available migration systems.")) -> dict[str, Any] | ToolResult:
     """Retrieves the currently available migration system types for a course. The list of available migration systems may change over time."""
 
     # Construct request model with validation
@@ -11701,7 +11844,7 @@ async def list_migration_issues_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
     per_page: int | None = Field(None, description="The number of migration issues to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of migration issues for a specific content migration within a course. Use this to identify and track problems encountered during the content migration process."""
 
     # Construct request model with validation
@@ -11744,7 +11887,7 @@ async def get_migration_issue_in_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration job associated with this migration issue."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific migration issue to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific migration issue encountered during a course content migration. Use this to inspect error details and troubleshoot content transfer problems."""
 
     # Construct request model with validation
@@ -11785,7 +11928,7 @@ async def resolve_migration_issue_course(
     content_migration_id: str = Field(..., description="The ID of the content migration associated with this issue."),
     id_: str = Field(..., alias="id", description="The ID of the migration issue to update."),
     workflow_state: Literal["active", "resolved"] = Field(..., description="The new workflow state for the migration issue. Set to 'active' to flag an unresolved issue or 'resolved' to mark it as completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the workflow state of a migration issue to mark it as active or resolved. Use this to track and manage issues discovered during content migration."""
 
     # Construct request model with validation
@@ -11827,7 +11970,7 @@ async def resolve_migration_issue_course(
 async def get_content_migration_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific content migration for a course, including its status and progress information."""
 
     # Construct request model with validation
@@ -11866,7 +12009,7 @@ async def get_content_migration_course(
 async def update_content_migration_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing content migration for a course. Useful for recovering from file upload issues by providing new attachment values to restart the migration process. Note that most setting changes after migration has started will not take effect."""
 
     # Construct request model with validation
@@ -11905,7 +12048,7 @@ async def update_content_migration_course(
 async def duplicate_course_content(
     course_id: str = Field(..., description="The ID of the destination course where content will be copied into."),
     source_course: str | None = Field(None, description="The ID or SIS-ID of the source course to copy content from. If not specified, content is copied from the course making the request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Duplicates course content from a source course into the destination course. By default, all course content is copied; you can selectively control which content types to include or exclude."""
 
     # Construct request model with validation
@@ -11948,7 +12091,7 @@ async def duplicate_course_content(
 async def update_gradebook_column_data(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook columns."),
     column_data: list[list[dict[str, Any]]] = Field(..., description="Array of column data entries to update. Each entry specifies a column, student, and content value. Set content to an empty string to delete the data entry. Order of entries does not affect the operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk update custom gradebook column data for multiple students in a course. Set, modify, or delete column content by providing column ID, user ID, and content for each entry."""
 
     # Construct request model with validation
@@ -11991,7 +12134,7 @@ async def list_custom_gradebook_columns(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook columns."),
     include_hidden: bool | None = Field(None, description="Whether to include hidden custom gradebook columns in the results. When false (default), only visible columns are returned."),
     per_page: int | None = Field(None, description="The maximum number of custom gradebook columns to return per page. Useful for controlling response size in courses with many custom columns.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all custom gradebook columns configured for a course. Use this to discover available custom columns and their visibility settings."""
 
     # Construct request model with validation
@@ -12037,7 +12180,7 @@ async def create_gradebook_column(
     column_position: str | None = Field(None, description="The display position of this column relative to other custom columns in the gradebook, where lower numbers appear first."),
     column_read_only: bool | None = Field(None, description="Whether to prevent editing of this column's values in the gradebook user interface. Read-only columns can only be modified through the API."),
     column_teacher_notes: bool | None = Field(None, description="Whether this column is designated for teacher notes. The gradebook supports only one teacher notes column per course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a custom column in a course's gradebook to track additional student data. Custom columns can be configured as hidden, read-only, or teacher notes, and positioned relative to other custom columns."""
 
     _column_position = _parse_int(column_position)
@@ -12082,7 +12225,7 @@ async def create_gradebook_column(
 async def reorder_custom_columns(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook columns to reorder."),
     order: list[int] = Field(..., description="An ordered array of custom column IDs specifying the new sequence. The order of IDs in this array determines the final column arrangement in the gradebook."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder custom gradebook columns for a course by specifying the desired column sequence. Returns 200 OK upon successful reordering."""
 
     # Construct request model with validation
@@ -12125,7 +12268,7 @@ async def reorder_custom_columns(
 async def update_gradebook_column(
     course_id: str = Field(..., description="The unique identifier of the course containing the gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing custom gradebook column within a course. Accepts the same parameters as custom gradebook column creation to modify column properties."""
 
     # Construct request model with validation
@@ -12164,7 +12307,7 @@ async def update_gradebook_column(
 async def delete_gradebook_column(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a custom gradebook column from a course, including all associated data. This action cannot be undone."""
 
     # Construct request model with validation
@@ -12204,7 +12347,7 @@ async def list_column_entries(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column for which to retrieve entries."),
     include_hidden: bool | None = Field(None, description="Whether to include hidden columns in the results. When true, hidden columns are included; when false or omitted, only visible columns are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all data entries for a specific custom gradebook column. Only returns entries for students who have associated data in the column."""
 
     # Construct request model with validation
@@ -12248,7 +12391,7 @@ async def set_gradebook_column_entry(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column to update."),
     user_id: str = Field(..., description="The unique identifier of the student user whose column entry should be updated."),
     column_data_content: str = Field(..., description="The content to store in the column for this student. Leave blank to delete the entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or clear the content of a custom gradebook column for a specific student. Leaving the content blank will delete the entry."""
 
     # Construct request model with validation
@@ -12296,7 +12439,7 @@ async def list_discussion_topics(
     search_term: str | None = Field(None, description="Filter topics by partial title match. Returns only topics whose titles contain this search term."),
     exclude_context_module_locked_topics: bool | None = Field(None, description="If true, excludes topics locked by module progression for students. Defaults to false."),
     per_page: int | None = Field(None, description="The number of items to return per page. Defaults to 10.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of discussion topics for a course or group, with optional filtering, sorting, and metadata inclusion."""
 
     # Construct request model with validation
@@ -12357,7 +12500,7 @@ async def create_discussion_topic(
     sort_by_rating: bool | None = Field(None, description="Sort discussion entries by rating score. Only applies if allow_rating is enabled."),
     specific_sections: str | None = Field(None, description="Limit this discussion to specific course sections using a comma-separated list of section IDs. Omit or set to 'all' to make available to all sections. Only applicable for course announcements."),
     title: str | None = Field(None, description="The title or subject of the discussion topic."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new discussion topic in a course or group. Optionally configure as an assignment, announcement, or group discussion with customizable settings for posting, rating, and visibility."""
 
     _group_category_id = _parse_int(group_category_id)
@@ -12402,7 +12545,7 @@ async def create_discussion_topic(
 async def reorder_pinned_discussion_topics(
     course_id: str = Field(..., description="The unique identifier of the course containing the pinned discussion topics to reorder."),
     order: list[int] = Field(..., description="An ordered array of pinned discussion topic IDs in the desired sequence. The order of IDs in this array determines the final display order of the topics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder pinned discussion topics within a course by specifying their desired sequence. All pinned topics must be included in the reorder request."""
 
     # Construct request model with validation
@@ -12446,7 +12589,7 @@ async def get_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
     include: list[Literal["all_dates", "sections", "sections_user_count", "overrides"]] | None = Field(None, description="Optional array of additional data to include in the response. Use 'all_dates' to include all dates for graded discussion assignments, 'sections' to include associated course sections, 'sections_user_count' to include user counts per section or total users in the topic context, and 'overrides' to include assignment overrides."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific discussion topic within a course, including optional metadata such as assignment dates, section associations, and assignment overrides."""
 
     # Construct request model with validation
@@ -12513,7 +12656,7 @@ async def update_discussion_topic(
     assignment_unlock_at: str | None = Field(None, description="Date when assignment becomes available (ISO 8601 format)"),
     assignment_submission_types: str | None = Field(None, description="Comma-separated list of submission types (e.g., 'online_text_entry,online_upload')"),
     set_assignment: bool | None = Field(None, description="If false, converts an assignment discussion to a regular discussion"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing discussion topic in a course or group, including settings for publishing, ratings, posting requirements, and visibility."""
 
     # Call helper functions
@@ -12560,7 +12703,7 @@ async def update_discussion_topic(
 async def delete_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a discussion topic from a course. If the topic is associated with an assignment, the assignment will also be deleted."""
 
     # Construct request model with validation
@@ -12600,7 +12743,7 @@ async def list_discussion_entries(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve entries from."),
     per_page: int | None = Field(None, description="The maximum number of entries to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve paginated top-level entries from a discussion topic, including the 10 most recent replies for each entry. May require the user to have posted in the topic first."""
 
     # Construct request model with validation
@@ -12644,7 +12787,7 @@ async def create_discussion_entry(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic where the entry will be posted."),
     attachment: str | None = Field(None, description="An optional file attachment for the entry. Attachments larger than 1 kilobyte are subject to quota restrictions."),
     message: str | None = Field(None, description="The text content of the discussion entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new entry in a discussion topic. Returns the created entry with all metadata on success."""
 
     # Construct request model with validation
@@ -12689,7 +12832,7 @@ async def rate_discussion_entry(
     topic_id: str = Field(..., description="The ID of the discussion topic containing the entry to rate."),
     entry_id: str = Field(..., description="The ID of the discussion entry to rate."),
     rating: str | None = Field(None, description="A rating value for this entry. Only 0 (thumbs down) and 1 (thumbs up) are accepted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rate a discussion entry with a thumbs up (1) or thumbs down (0) rating. Returns 204 No Content on success."""
 
     _rating = _parse_int(rating)
@@ -12736,7 +12879,7 @@ async def mark_discussion_entry_as_read(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the discussion entry to mark as read."),
     forced_read_state: bool | None = Field(None, description="Optional boolean flag to set the entry's forced read state. When specified, overrides the read status; when omitted, no change is made to the forced read state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion entry as read in a course discussion topic. Optionally set the entry's forced read state."""
 
     # Construct request model with validation
@@ -12780,7 +12923,7 @@ async def mark_discussion_entry_unread(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the discussion entry to mark as unread."),
     forced_read_state: bool | None = Field(None, description="Set whether the entry's read state should be forced. When set, this overrides automatic read state changes; when omitted, no change is made to the forced read state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion entry as unread in a course discussion topic. Optionally set the entry's forced read state to control whether it should be marked as read automatically."""
 
     # Construct request model with validation
@@ -12824,7 +12967,7 @@ async def list_discussion_replies(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the top-level entry whose replies should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of replies to return per page. Replies are ordered newest-first by creation timestamp.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve paginated replies to a top-level discussion entry. May require the user to have posted in the topic first; returns 403 Forbidden if initial post is required but not made."""
 
     # Construct request model with validation
@@ -12869,7 +13012,7 @@ async def create_discussion_reply(
     entry_id: str = Field(..., description="The unique identifier of the entry to which the reply is being added."),
     attachment: str | None = Field(None, description="An optional file attachment to include with the reply. Attachments larger than 1 kilobyte are subject to quota restrictions."),
     message: str | None = Field(None, description="The text content of the reply message."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a reply to a discussion topic entry. Returns the created reply object on success. Note: Some topics may require the user to have posted an initial entry before replying."""
 
     # Construct request model with validation
@@ -12914,7 +13057,7 @@ async def update_discussion_entry(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     id_: str = Field(..., alias="id", description="The unique identifier of the discussion entry to update."),
     message: str | None = Field(None, description="The updated text content for the discussion entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing discussion entry in a course topic. The entry must have been created by the current user, or the current user must have admin rights to the discussion; otherwise a 401 error is returned."""
 
     # Construct request model with validation
@@ -12957,7 +13100,7 @@ async def delete_discussion_entry(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the discussion entry to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a discussion entry from a course discussion topic. The entry is marked as deleted with user_id and message cleared; only the entry creator or users with admin rights can delete entries."""
 
     # Construct request model with validation
@@ -12998,7 +13141,7 @@ async def list_discussion_entries_by_ids(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entries."),
     ids: list[str] | None = Field(None, description="Optional list of specific entry IDs to retrieve. Entries are returned in ascending ID order (smallest ID first)."),
     per_page: int | None = Field(None, description="Number of entries to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of discussion entries from a course discussion topic. May require that the user has posted in the topic before viewing entries."""
 
     # Construct request model with validation
@@ -13043,7 +13186,7 @@ async def list_discussion_entries_by_ids(
 async def mark_discussion_topic_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as read."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic as read by updating its read status. This marks the initial text of the discussion topic as read for the authenticated user."""
 
     # Construct request model with validation
@@ -13082,7 +13225,7 @@ async def mark_discussion_topic_as_read(
 async def unread_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as unread."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic as unread. This reverts the read status of the initial topic text, allowing it to reappear as unread in the user's course discussion view."""
 
     # Construct request model with validation
@@ -13122,7 +13265,7 @@ async def mark_all_discussion_entries_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as read."),
     forced_read_state: bool | None = Field(None, description="Optional boolean to set the forced_read_state for all entries. When specified, all entries will have their forced_read_state updated to this value; when omitted, no change is made to forced_read_state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic and all its entries as read for a course. Optionally set the forced_read_state for all entries."""
 
     # Construct request model with validation
@@ -13165,7 +13308,7 @@ async def mark_discussion_entries_as_unread(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as unread."),
     forced_read_state: bool | None = Field(None, description="Optional boolean flag to set the forced read state for all entries in the discussion topic. When specified, all entries will have their forced_read_state set to this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic and all its entries as unread for the specified course. Optionally set the forced read state for all entries."""
 
     # Construct request model with validation
@@ -13207,7 +13350,7 @@ async def mark_discussion_entries_as_unread(
 async def subscribe_to_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to subscribe to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe to a discussion topic to receive notifications when new entries are posted. Returns 204 No Content on success."""
 
     # Construct request model with validation
@@ -13246,7 +13389,7 @@ async def subscribe_to_discussion_topic(
 async def unsubscribe_from_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to unsubscribe from."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unsubscribe from a discussion topic to stop receiving notifications about new entries. Returns 204 No Content on success."""
 
     # Construct request model with validation
@@ -13285,7 +13428,7 @@ async def unsubscribe_from_discussion_topic(
 async def get_discussion_topic_view(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete discussion topic with all entries, participants, and read state information. Returns a cached threaded view of the discussion, including participant details, unread entries, ratings, and optionally newly created entries not yet reflected in the cache."""
 
     # Construct request model with validation
@@ -13324,7 +13467,7 @@ async def get_discussion_topic_view(
 async def list_assignment_due_dates(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve assignment due dates."),
     assignment_ids: list[str] | None = Field(None, description="Optional list of assignment IDs to filter results. If not provided, effective due dates for all assignments in the course will be returned. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve effective due dates for assignments in a course, showing each student's personalized due date and associated grading period information. Returns assignment and student IDs mapped to their due dates, grading period IDs, and closed grading period status."""
 
     # Construct request model with validation
@@ -13374,7 +13517,7 @@ async def list_enrollments(
     enrollment_term_id: str | None = Field(None, description="Return only enrollments for a specified enrollment term. Accepts enrollment term ID or SIS ID prefixed with 'sis_term_id:'. Only applies to user enrollments queries."),
     sis_user_id: list[str] | None = Field(None, description="Filter enrollments by one or more SIS user IDs. Accepts array or comma-separated string of SIS user identifiers."),
     per_page: int | None = Field(None, description="Number of enrollments to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of enrollments in a course, section, or for a specific user. Returns all enrollment types including student, teacher, TA, and observer roles. Note: Only root admins can view other users' enrollments; users can only view their own."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -13431,7 +13574,7 @@ async def enroll_user_in_course(
     enrollment_notify: bool | None = Field(None, description="When true, sends a notification to the enrolled user. Notifications are disabled by default."),
     enrollment_self_enrolled: bool | None = Field(None, description="When true, marks the enrollment as self-initiated, allowing students to drop the course independently. Defaults to false."),
     enrollment_self_enrollment_code: str | None = Field(None, description="A valid self-enrollment code for users without enrollment management permissions to self-enroll as a student in the default section. When used, set user_id to 'self' and enrollment_state will be forced to 'active'; all other parameters are ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enroll a user in a course with a specified role (student, teacher, TA, observer, or designer). The enrollment can be immediately active, pending user acceptance, or inactive depending on configuration."""
 
     _enrollment_associated_user_id = _parse_int(enrollment_associated_user_id)
@@ -13477,7 +13620,7 @@ async def modify_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course containing the enrollment."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment to modify."),
     task: Literal["conclude", "delete", "inactivate", "deactivate"] | None = Field(None, description="The action to perform on the enrollment. Defaults to 'conclude' if not specified. Deactivating and inactivating are equivalent operations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an enrollment by concluding, deactivating, or deleting it. Concluded enrollments are completed; deactivated enrollments remain visible to admins but prevent user participation; deleted enrollments are removed entirely."""
 
     # Construct request model with validation
@@ -13519,7 +13662,7 @@ async def modify_enrollment(
 async def accept_course_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course for which the enrollment invitation is being accepted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment record representing the pending course invitation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Accept a pending course enrollment invitation for the current user. This confirms the user's participation in the specified course."""
 
     # Construct request model with validation
@@ -13558,7 +13701,7 @@ async def accept_course_enrollment(
 async def reactivate_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course containing the enrollment to reactivate."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment record to reactivate."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reactivates an inactive enrollment for a student in a course. This restores access to course materials and participation for a previously deactivated enrollment."""
 
     # Construct request model with validation
@@ -13597,7 +13740,7 @@ async def reactivate_enrollment(
 async def reject_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course from which to reject the enrollment invitation."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment invitation to reject."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reject a pending course enrollment invitation for the current user. This action removes the user from the course's pending enrollments."""
 
     # Construct request model with validation
@@ -13633,7 +13776,7 @@ async def reject_enrollment(
 
 # Tags: e_pub_exports
 @mcp.tool()
-async def initiate_epub_export(course_id: str = Field(..., description="The unique identifier of the course to export as ePub format.")) -> dict[str, Any]:
+async def initiate_epub_export(course_id: str = Field(..., description="The unique identifier of the course to export as ePub format.")) -> dict[str, Any] | ToolResult:
     """Initiate an ePub export for a course. Track progress using the Progress API endpoint linked in the response, then retrieve the download URL once the export completes."""
 
     # Construct request model with validation
@@ -13672,7 +13815,7 @@ async def initiate_epub_export(course_id: str = Field(..., description="The uniq
 async def get_epub_export(
     course_id: str = Field(..., description="The unique identifier of the course containing the ePub export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the ePub export to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific ePub export for a course, including its status and metadata."""
 
     # Construct request model with validation
@@ -13711,7 +13854,7 @@ async def get_epub_export(
 async def list_external_feeds(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve external feeds."),
     per_page: int | None = Field(None, description="The maximum number of external feeds to return per page. Defaults to 10 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external feeds configured for a course. External feeds allow content from external sources to be integrated into the course."""
 
     # Construct request model with validation
@@ -13755,7 +13898,7 @@ async def create_external_feed(
     url: str = Field(..., description="The URL of the external RSS or Atom feed to import from."),
     header_match: bool | None = Field(None, description="Optional filter to import only feed entries whose titles contain this string."),
     verbosity: Literal["full", "truncate", "link_only"] | None = Field(None, description="Controls the level of detail imported from feed entries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new external feed for a course to automatically import content from an RSS or Atom feed source."""
 
     # Construct request model with validation
@@ -13798,7 +13941,7 @@ async def create_external_feed(
 async def remove_external_feed(
     course_id: str = Field(..., description="The unique identifier of the course containing the external feed to be deleted."),
     external_feed_id: str = Field(..., description="The unique identifier of the external feed to be removed from the course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an external feed from a course, stopping the synchronization of content from that feed source."""
 
     # Construct request model with validation
@@ -13840,7 +13983,7 @@ async def list_external_tools_course(
     selectable: bool | None = Field(None, description="When true, returns only tools configured as selectable for end users."),
     include_parents: bool | None = Field(None, description="When true, includes tools installed in all parent accounts above the current course context."),
     per_page: int | None = Field(None, description="Number of tools to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external tools available in a course. Optionally filter by name, selectability, and include tools from parent accounts."""
 
     # Construct request model with validation
@@ -13906,7 +14049,7 @@ async def create_external_tool_course(
     tool_configuration: dict[str, Any] | None = Field(None, description="Settings for the tool configuration placement (LTI placement)"),
     user_navigation: dict[str, Any] | None = Field(None, description="Settings for the user navigation placement (LTI placement)"),
     custom_fields: dict[str, Any] | None = Field(None, description="Custom fields to send with the LTI launch"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an external tool (LTI) in a specified course. The tool integrates third-party applications with Canvas, supporting various launch points like course navigation, editor buttons, and resource selection."""
 
     # Construct request model with validation
@@ -13953,7 +14096,7 @@ async def get_external_tool_sessionless_launch_url_course(
     assignment_id: str | None = Field(None, description="The Canvas assignment ID for an assessment launch. Required when launch_type is set to 'assessment'."),
     module_item_id: str | None = Field(None, description="The Canvas module item ID for a module item launch. Required when launch_type is set to 'module_item'."),
     launch_type: Literal["assessment", "module_item"] | None = Field(None, description="The type of launch context for the external tool. Use 'assessment' for assignment launches or 'module_item' for module item launches. Alternatively, specify a placement name (e.g., 'course_navigation') to use the tool's custom launch URL for that placement; when using a placement name, the tool id must be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a sessionless launch URL for an external tool in a course. This enables direct access to the tool without requiring an active user session."""
 
     # Construct request model with validation
@@ -13995,7 +14138,7 @@ async def get_external_tool_sessionless_launch_url_course(
 async def get_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the external tool."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific external tool integrated with a course. Returns the external tool configuration and metadata."""
 
     # Construct request model with validation
@@ -14034,7 +14177,7 @@ async def get_external_tool_course(
 async def update_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the external tool to update."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an external tool configuration for a course. Accepts the same parameters as tool creation to modify existing tool settings."""
 
     # Construct request model with validation
@@ -14073,7 +14216,7 @@ async def update_external_tool_course(
 async def remove_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course from which the external tool will be removed."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an external tool from a course. This action permanently deletes the tool integration and its associated configuration."""
 
     # Construct request model with validation
@@ -14112,7 +14255,7 @@ async def remove_external_tool_course(
 async def list_course_features(
     course_id: str = Field(..., description="The unique identifier of the course for which to list features."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows pagination control over the result set.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all features available for a specific course. Features define capabilities and settings that apply to the course."""
 
     # Construct request model with validation
@@ -14154,7 +14297,7 @@ async def list_course_features(
 async def get_feature_flag_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the feature flag."),
     feature: str = Field(..., description="The unique identifier of the feature flag to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the feature flag configuration for a specific course. The flag may be defined directly on the course or inherited from a parent account; check the context_id and context_type fields to determine the source."""
 
     # Construct request model with validation
@@ -14198,7 +14341,7 @@ async def list_course_files(
     sort: Literal["name", "size", "created_at", "updated_at", "content_type", "user"] | None = Field(None, description="Sort results by the specified field. Defaults to 'name'. Note that sorting by 'user' automatically includes user metadata in the response."),
     order: Literal["asc", "desc"] | None = Field(None, description="Set the sort direction for results. Defaults to ascending order."),
     per_page: int | None = Field(None, description="The maximum number of files to return per page. Defaults to 10 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of files in a course, with optional filtering by content type, search term, and sorting capabilities. Supports including additional metadata such as upload user information and usage rights."""
 
     # Construct request model with validation
@@ -14241,7 +14384,7 @@ async def list_course_files(
 
 # Tags: files
 @mcp.tool()
-async def get_course_storage_quota(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve storage quota information.")) -> dict[str, Any]:
+async def get_course_storage_quota(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve storage quota information.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total and used storage quota for a course. Use this to monitor storage consumption and availability."""
 
     # Construct request model with validation
@@ -14281,7 +14424,7 @@ async def get_file_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the file."),
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
     include: list[Literal["user"]] | None = Field(None, description="Optional array of additional data to include in the response. Specify 'user' to include uploader/editor information, or 'usage_rights' to include copyright and license details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific file attachment from a course, including metadata such as upload information and optional usage rights details."""
 
     # Construct request model with validation
@@ -14326,7 +14469,7 @@ async def get_file_course(
 async def list_folders(
     course_id: str = Field(..., description="The unique identifier of the course containing the folders to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of folders to return per page. Valid range is 1 to 100 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all folders for a course, including all subfolders as a flat list."""
 
     # Construct request model with validation
@@ -14371,7 +14514,7 @@ async def create_folder(
     hidden: bool | None = Field(None, description="Hides the folder from view when enabled."),
     locked: bool | None = Field(None, description="Prevents modifications to the folder when enabled."),
     position: str | None = Field(None, description="The sort position of the folder within the course. Lower values appear first in the list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new folder within a specified course. The folder can be configured with visibility, lock status, and sort position settings."""
 
     _position = _parse_int(position)
@@ -14413,7 +14556,7 @@ async def create_folder(
 
 # Tags: files
 @mcp.tool()
-async def get_folder_path(course_id: str = Field(..., description="The unique identifier of the course containing the folder path to resolve.")) -> dict[str, Any]:
+async def get_folder_path(course_id: str = Field(..., description="The unique identifier of the course containing the folder path to resolve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the folder hierarchy for a given path within a course. Returns all folders from the root to the specified folder, or just the root folder if an empty path is provided."""
 
     # Construct request model with validation
@@ -14452,7 +14595,7 @@ async def get_folder_path(course_id: str = Field(..., description="The unique id
 async def get_folder(
     course_id: str = Field(..., description="The unique identifier of the course containing the folder."),
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to retrieve. Use 'root' to access the course's root folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific folder within a course. Use 'root' as the folder ID to access the course's root folder."""
 
     # Construct request model with validation
@@ -14488,7 +14631,7 @@ async def get_folder(
 
 # Tags: pages
 @mcp.tool()
-async def get_course_front_page(course_id: str = Field(..., description="The unique identifier of the course whose front page content should be retrieved.")) -> dict[str, Any]:
+async def get_course_front_page(course_id: str = Field(..., description="The unique identifier of the course whose front page content should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the front page content for a specific course. The front page typically contains course overview, announcements, and key information displayed to students upon course entry."""
 
     # Construct request model with validation
@@ -14531,7 +14674,7 @@ async def update_course_front_page(
     wiki_page_notify_of_update: bool | None = Field(None, description="Whether to send notifications to course participants when this page is updated."),
     wiki_page_published: bool | None = Field(None, description="Whether the page is published and visible (true) or in draft state (false)."),
     wiki_page_title: str | None = Field(None, description="The display title for the front page. Changing the title will update the page's URL, which will be returned in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update or create a course's front page with custom title, content, and publishing settings. Changes to the page title will update its URL."""
 
     # Construct request model with validation
@@ -14570,7 +14713,7 @@ async def update_course_front_page(
 
 # Tags: gradebook_history
 @mcp.tool()
-async def list_gradebook_history_days(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve gradebook history dates.")) -> dict[str, Any]:
+async def list_gradebook_history_days(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve gradebook history dates.")) -> dict[str, Any] | ToolResult:
     """Retrieves a map of dates when gradebook changes occurred for a course, organized by grader and assignment groups. Use this to understand the timeline of gradebook modifications."""
 
     _course_id = _parse_int(course_id)
@@ -14613,7 +14756,7 @@ async def list_submission_versions(
     assignment_id: str | None = Field(None, description="Filter results to a specific assignment. If omitted, submission versions from all assignments in the course are included."),
     ascending: bool | None = Field(None, description="Sort submission versions by date in ascending order (oldest first). Defaults to descending order (newest first) when omitted."),
     per_page: int | None = Field(None, description="Number of submission versions to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of uncollated submission versions for all matching submissions in a course. Each SubmissionVersion includes only the current grade and graded_at timestamp, without historical grade comparisons."""
 
     _course_id = _parse_int(course_id)
@@ -14658,7 +14801,7 @@ async def list_submission_versions(
 async def list_gradebook_history_details(
     course_id: str = Field(..., description="The ID of the course for which to retrieve gradebook history details."),
     date: str = Field(..., description="The date for which to retrieve gradebook history details. Specify in ISO 8601 format (YYYY-MM-DD)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve gradebook activity for a specific date, including which graders made changes and which assignments they worked on. Use the submissions endpoint with a grader and assignment selection for more detailed submission-level information."""
 
     _course_id = _parse_int(course_id)
@@ -14701,7 +14844,7 @@ async def list_submission_versions_by_grader(
     date: str = Field(..., description="The specific date for which to retrieve submission versions. Use ISO 8601 format (YYYY-MM-DD)."),
     grader_id: str = Field(..., description="The unique identifier of the grader whose submissions you want to view."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submission versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a nested list of submission versions for a specific assignment, grader, and date within a course. Useful for tracking submission history and grading changes over time."""
 
     _course_id = _parse_int(course_id)
@@ -14744,7 +14887,7 @@ async def list_submission_versions_by_grader(
 async def list_grading_periods_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve grading periods."),
     per_page: int | None = Field(None, description="The maximum number of grading periods to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of grading periods for a specific course. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -14786,7 +14929,7 @@ async def list_grading_periods_course(
 async def get_grading_period(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading period."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific grading period for a course by its ID. Returns detailed information about the grading period including dates and configuration."""
 
     # Construct request model with validation
@@ -14828,7 +14971,7 @@ async def update_grading_period(
     grading_periods_end_date: list[str] = Field(..., description="The date when the grading period ends. Provided as an array where the first element is the end date."),
     grading_periods_start_date: list[str] = Field(..., description="The date when the grading period starts. Provided as an array where the first element is the start date."),
     grading_periods_weight: list[float] | None = Field(None, description="A numeric weight value that determines how much assignments in this grading period contribute to the total course grade relative to other periods in the grading period set. Provided as an array where the first element is the weight value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing grading period for a course, including its date range and optional weight contribution to the overall grade calculation."""
 
     # Construct request model with validation
@@ -14870,7 +15013,7 @@ async def update_grading_period(
 async def delete_grading_period_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading period to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a grading period from a course. Returns a 204 No Content response on successful deletion."""
 
     # Construct request model with validation
@@ -14909,7 +15052,7 @@ async def delete_grading_period_course(
 async def list_grading_standards_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve grading standards."),
     per_page: int | None = Field(None, description="The number of grading standards to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of grading standards available in a course that are visible to the user."""
 
     # Construct request model with validation
@@ -14953,7 +15096,7 @@ async def create_grading_standard_course(
     grading_scheme_entry_name: list[str] = Field(..., description="Array of grade names corresponding to each grading scale entry (e.g., 'A', 'B+', 'C-'). The order and count must match the grading_scheme_entry_value array."),
     grading_scheme_entry_value: list[int] = Field(..., description="Array of numeric lower bounds for each grade, where each value represents the minimum score to achieve that grade. Values must be in descending order, with the lowest value having a lower bound of 0 and the highest approaching 100. The order and count must match the grading_scheme_entry_name array."),
     title: str = Field(..., description="A descriptive name for this grading standard (e.g., 'Standard Letter Grades', 'Weighted Scale')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new grading standard for a course with custom grade scale entries. If no grading scheme entries are provided, a default scale (A through F) will be applied automatically."""
 
     # Construct request model with validation
@@ -14996,7 +15139,7 @@ async def create_grading_standard_course(
 async def get_grading_standard_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading standard."),
     grading_standard_id: str = Field(..., description="The unique identifier of the grading standard to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific grading standard within a course context. Returns the grading standard details visible to the authenticated user."""
 
     # Construct request model with validation
@@ -15035,7 +15178,7 @@ async def get_grading_standard_course(
 async def list_group_categories_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the group categories to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of group categories to return per page. Allows pagination control for large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of group categories for a specific course. Group categories are used to organize students into groups within a course context."""
 
     # Construct request model with validation
@@ -15082,7 +15225,7 @@ async def create_group_category_course(
     group_limit: str | None = Field(None, description="The maximum number of users allowed in each group. Only applicable at the course level and requires self-signup to be enabled."),
     self_signup: Literal["enabled", "restricted"] | None = Field(None, description="Controls whether students can self-enroll into groups. When enabled, students can join any group; when restricted, students can only join groups in their own section."),
     sis_group_category_id: str | None = Field(None, description="The unique SIS (Student Information System) identifier for this group category, used for system integration and data synchronization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new group category for organizing students into groups within a course. Group categories enable collaborative work with configurable self-signup, automatic leader assignment, and group size limits."""
 
     _create_group_count = _parse_int(create_group_count)
@@ -15130,7 +15273,7 @@ async def list_groups_in_course(
     only_own_groups: bool | None = Field(None, description="When enabled, restricts results to only groups that the user is a member of."),
     include: list[Literal["tabs"]] | None = Field(None, description="Additional data to include with each group. Specify 'tabs' to include the list of tabs configured for each group."),
     per_page: int | None = Field(None, description="The maximum number of groups to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active groups available in a course that are visible to the user. Optionally filter to only groups the user belongs to and include additional group configuration details."""
 
     # Construct request model with validation
@@ -15175,7 +15318,7 @@ async def list_groups_in_course(
 async def list_assessments(
     course_id: str = Field(..., description="The unique identifier of the course containing the live assessments."),
     per_page: int | None = Field(None, description="The maximum number of assessments to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of live assessments for a specific course. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -15214,7 +15357,7 @@ async def list_assessments(
 
 # Tags: live_assessments
 @mcp.tool()
-async def create_or_find_live_assessment(course_id: str = Field(..., description="The unique identifier of the course where the live assessment will be created or found.")) -> dict[str, Any]:
+async def create_or_find_live_assessment(course_id: str = Field(..., description="The unique identifier of the course where the live assessment will be created or found.")) -> dict[str, Any] | ToolResult:
     """Creates a new live assessment or retrieves an existing one by key, then aligns it with a linked learning outcome. Use this operation to ensure a live assessment exists for a course and is properly mapped to course outcomes."""
 
     # Construct request model with validation
@@ -15254,7 +15397,7 @@ async def list_assessment_results(
     course_id: str = Field(..., description="The unique identifier of the course containing the assessment."),
     assessment_id: str = Field(..., description="The unique identifier of the live assessment to retrieve results for."),
     per_page: int | None = Field(None, description="The maximum number of results to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of results from a live assessment within a course. Use this to view student responses and performance data for a specific assessment."""
 
     # Construct request model with validation
@@ -15296,7 +15439,7 @@ async def list_assessment_results(
 async def submit_live_assessment_result(
     course_id: str = Field(..., description="The unique identifier of the course containing the live assessment."),
     assessment_id: str = Field(..., description="The unique identifier of the live assessment for which results are being submitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit results for a live assessment within a course. This operation records student responses and scores for a specific live assessment."""
 
     # Construct request model with validation
@@ -15336,7 +15479,7 @@ async def get_module_item_sequence(
     course_id: str = Field(..., description="The unique identifier of the course containing the module item sequence."),
     asset_type: Literal["ModuleItem", "File", "Page", "Discussion", "Assignment", "Quiz", "ExternalTool"] | None = Field(None, description="The type of asset to locate within the module sequence. Specify ModuleItem when known to avoid ambiguity if the asset appears multiple times in the sequence."),
     asset_id: str | None = Field(None, description="The unique identifier of the asset (or the URL for Page assets) to find in the module sequence."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the sequence context for a course asset, including the ModuleItem it belongs to and the previous/next items in the course sequence, along with any applicable mastery path rules."""
 
     _asset_id = _parse_int(asset_id)
@@ -15383,7 +15526,7 @@ async def list_modules(
     search_term: str | None = Field(None, description="Filter modules and optionally module items by partial name match. The search is case-insensitive and returns all modules containing the specified term."),
     student_id: str | None = Field(None, description="Return module completion progress and status information for the specified student. Provide the student's unique identifier."),
     per_page: int | None = Field(None, description="The maximum number of modules to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of modules in a course with optional filtering, search, and inline content expansion capabilities."""
 
     # Construct request model with validation
@@ -15433,7 +15576,7 @@ async def create_module(
     module_publish_final_grade: bool | None = Field(None, description="Whether to automatically publish the student's final course grade upon completion of this module."),
     module_require_sequential_progress: bool | None = Field(None, description="Whether items within this module must be completed in sequential order before the next item unlocks."),
     module_unlock_at: str | None = Field(None, description="The date and time when this module becomes available to students."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new module within a course. Modules organize course content and can have prerequisites, sequential progression requirements, and scheduled unlock dates."""
 
     _module_position = _parse_int(module_position)
@@ -15480,7 +15623,7 @@ async def get_module(
     id_: str = Field(..., alias="id", description="The unique identifier of the module to retrieve."),
     include: list[Literal["items", "content_details"]] | None = Field(None, description="Optional array of related data to include in the response. Use 'items' to return module items inline within the module object, or 'content_details' (requires 'items') to include additional lock information and content-specific details for each item."),
     student_id: str | None = Field(None, description="The unique identifier of a student to retrieve module completion information for that specific student."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific module within a course, optionally including module items and their content details."""
 
     # Construct request model with validation
@@ -15532,7 +15675,7 @@ async def update_module(
     module_published: bool | None = Field(None, description="Whether the module is visible and accessible to students. Unpublished modules are hidden from student view."),
     module_require_sequential_progress: bool | None = Field(None, description="Whether module items must be completed in sequential order. When enabled, students cannot skip ahead to later items within the module."),
     module_unlock_at: str | None = Field(None, description="The date and time when the module becomes available to students. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing course module with new settings such as name, position, prerequisites, and publication status. Changes take effect immediately for enrolled students."""
 
     _module_position = _parse_int(module_position)
@@ -15576,7 +15719,7 @@ async def update_module(
 async def delete_module(
     course_id: str = Field(..., description="The unique identifier of the course containing the module to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a module from a course. This action cannot be undone and will remove all associated module content."""
 
     # Construct request model with validation
@@ -15615,7 +15758,7 @@ async def delete_module(
 async def relock_module_progressions(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module whose progressions should be reset and relocked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reset module progressions to their default locked state and recalculate based on current requirements. Use this when adding progression requirements to an active course to lock students out of modules they've already unlocked."""
 
     # Construct request model with validation
@@ -15658,7 +15801,7 @@ async def list_module_items(
     search_term: str | None = Field(None, description="Filter items by partial title match. Returns only items whose titles contain this search term."),
     student_id: str | None = Field(None, description="Return module completion status for the specified student. Provide the student's unique identifier."),
     per_page: int | None = Field(None, description="Number of items to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of items within a course module. Optionally filter by search term, include additional content details, or get completion information for a specific student."""
 
     # Construct request model with validation
@@ -15713,7 +15856,7 @@ async def add_module_item(
     module_item_page_url: str | None = Field(None, description="The URL suffix for the linked wiki page (e.g., 'front-page'). Required for 'Page' item type."),
     module_item_position: str | None = Field(None, description="The position where this item appears in the module, using 1-based indexing."),
     module_item_title: str | None = Field(None, description="The display name for this module item and its associated content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new item to a course module, linking content such as files, assignments, discussions, or external resources. The item type determines which content identifier and optional fields are required."""
 
     _module_item_completion_requirement_min_score = _parse_int(module_item_completion_requirement_min_score)
@@ -15763,7 +15906,7 @@ async def get_module_item(
     id_: str = Field(..., alias="id", description="The unique identifier of the module item to retrieve."),
     include: list[Literal["content_details"]] | None = Field(None, description="Array of additional details to include in the response, such as content-specific information and lock status. Order is not significant."),
     student_id: str | None = Field(None, description="The unique identifier of the student for whom to return module completion information. When provided, the response includes completion status specific to this student."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific module item within a course module. Optionally includes additional content-specific details and student completion tracking."""
 
     # Construct request model with validation
@@ -15816,7 +15959,7 @@ async def update_module_item(
     module_item_published: bool | None = Field(None, description="Whether the module item is published and visible to students. Unpublished items are hidden from student view."),
     module_item_title: str | None = Field(None, description="The display name or title of the module item."),
     module_item_completion_requirement: str | None = Field(None, description="Completion requirement in standard format: 'type' or 'type:min_score'. Types: 'must_view', 'must_contribute', 'must_submit', 'min_score'. Use 'min_score:N' format when type is 'min_score' and a minimum score is required."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing module item within a course module. Modify properties such as title, position, visibility, and external links for the specified item."""
 
     # Call helper functions
@@ -15865,7 +16008,7 @@ async def delete_module_item(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module item to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific item from a course module. This removes the item from the module structure permanently."""
 
     # Construct request model with validation
@@ -15905,7 +16048,7 @@ async def toggle_module_item_completion(
     course_id: str = Field(..., description="The unique identifier of the course containing the module item."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module item to mark as done or not done."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a module item as completed or incomplete. Use PUT to mark as done, or DELETE to mark as not done."""
 
     # Construct request model with validation
@@ -15945,7 +16088,7 @@ async def mark_module_item_read(
     course_id: str = Field(..., description="The Canvas course ID containing the module item."),
     module_id: str = Field(..., description="The Canvas module ID containing the item to mark as read."),
     id_: str = Field(..., alias="id", description="The Canvas module item ID to mark as read."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a module item as read to fulfill the 'must view' requirement. Use this when accessing external content directly outside of Canvas's normal redirect flow. Cannot be used on locked or unpublished module items."""
 
     # Construct request model with validation
@@ -15987,7 +16130,7 @@ async def assign_mastery_path(
     id_: str = Field(..., alias="id", description="The unique identifier of the module item with multiple mastery paths available."),
     assignment_set_id: str | None = Field(None, description="The identifier of the assignment set to select, as returned in the mastery_paths section of the module item response."),
     student_id: str | None = Field(None, description="The unique identifier of the student to assign the path to. If omitted, the assignment applies to the current authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign a mastery path to a student when a module item offers multiple learning paths. Requires the Mastery Paths feature to be enabled. Returns the assignments and related module items for the selected path."""
 
     # Construct request model with validation
@@ -16030,7 +16173,7 @@ async def assign_mastery_path(
 async def list_outcome_aligned_assignments(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome alignments."),
     student_id: str | None = Field(None, description="The unique identifier of the student to filter assignments for. When omitted, returns all assignments aligned to the outcome for the entire course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all assignments aligned to a specific learning outcome within a course, optionally filtered for a particular student. This helps track which assignments assess a given outcome."""
 
     _course_id = _parse_int(course_id)
@@ -16076,7 +16219,7 @@ async def list_outcome_links_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve outcome links."),
     outcome_style: str | None = Field(None, description="Controls the detail level of outcomes in the response. Use 'abbrev' for basic information or 'full' for comprehensive details."),
     outcome_group_style: str | None = Field(None, description="Controls the detail level of outcome groups in the response. Use 'abbrev' for basic information or 'full' for comprehensive details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all outcome links associated with a course, including their related outcome groups. Use outcome_style and outcome_group_style parameters to control the level of detail returned."""
 
     # Construct request model with validation
@@ -16115,7 +16258,7 @@ async def list_outcome_links_course(
 
 # Tags: outcome_groups
 @mcp.tool()
-async def list_outcome_groups_course(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve outcome groups.")) -> dict[str, Any]:
+async def list_outcome_groups_course(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve outcome groups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all outcome groups associated with a specific course. Outcome groups organize learning outcomes within a course context."""
 
     # Construct request model with validation
@@ -16154,7 +16297,7 @@ async def list_outcome_groups_course(course_id: str = Field(..., description="Th
 async def get_outcome_group_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific outcome group within a course. Outcome groups organize learning outcomes and their assessments."""
 
     # Construct request model with validation
@@ -16197,7 +16340,7 @@ async def update_outcome_group_course(
     parent_outcome_group_id: str | None = Field(None, description="The unique identifier of the new parent outcome group. The parent must belong to the same context and cannot be a descendant of this outcome group."),
     title: str | None = Field(None, description="The new title for the outcome group."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the associated learning standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing outcome group within a course. Unspecified fields retain their current values, and the new parent group must be in the same context without creating circular dependencies."""
 
     _parent_outcome_group_id = _parse_int(parent_outcome_group_id)
@@ -16241,7 +16384,7 @@ async def update_outcome_group_course(
 async def delete_outcome_group_course(
     course_id: str = Field(..., description="The ID of the course containing the outcome group to delete."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an outcome group and its descendant groups and outcome links. Linked outcomes are only deleted if all their links are removed. Deletion will fail if any aligned outcomes have all remaining links within this group's descendants."""
 
     # Construct request model with validation
@@ -16282,7 +16425,7 @@ async def import_outcome_group(
     id_: str = Field(..., alias="id", description="The ID of the destination outcome group where the source group will be imported as a subgroup."),
     source_outcome_group_id: str = Field(..., description="The ID of the source outcome group to import. Must be a global group, from the same context, or from an associated account. Cannot be the root outcome group of its context."),
     async_: bool | None = Field(None, alias="async", description="Whether to perform the import asynchronously. When true, returns a Progress object that can be queried for status; the imported outcome group ID and URL will be available in the progress results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import an outcome group by creating a new subgroup with the same structure and outcome links as the source group. This operation recursively imports all subgroups while maintaining organizational hierarchy without duplicating the outcomes themselves."""
 
     _source_outcome_group_id = _parse_int(source_outcome_group_id)
@@ -16329,7 +16472,7 @@ async def list_outcomes_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group whose linked outcomes should be retrieved."),
     outcome_style: str | None = Field(None, description="Controls the level of detail returned for each outcome. Use 'abbrev' for basic information or 'full' for comprehensive outcome details."),
     per_page: int | None = Field(None, description="The maximum number of outcomes to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of learning outcomes linked to a specific outcome group within a course. Results can be filtered by detail level to show abbreviated or full outcome information."""
 
     # Construct request model with validation
@@ -16380,7 +16523,7 @@ async def link_outcome_course(
     outcome_id: str | None = Field(None, description="The ID of an existing outcome to link. The outcome must be available in this context (owned by the group's context, an associated account, or a global outcome). If provided, other parameters except move_from are ignored."),
     title: str | None = Field(None, description="The title of the new outcome being created. Required when outcome_id is not provided. Ignored if linking an existing outcome."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard, useful for mapping to external standards frameworks."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing outcome or create and link a new outcome to an outcome group. When linking an existing outcome, only the outcome_id is required. When creating a new outcome, provide at least a title, and optionally description, ratings, and mastery points."""
 
     _calculation_int = _parse_int(calculation_int)
@@ -16437,7 +16580,7 @@ async def link_outcome_course_existing(
     move_from: str | None = Field(None, description="The ID of the previous outcome group when moving an outcome. Only used when linking an existing outcome."),
     title: str | None = Field(None, description="The title of the new outcome being created. Required when creating a new outcome (outcome_id absent). Ignored if linking an existing outcome."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard, useful for mapping to external standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing outcome to an outcome group, or create and link a new outcome. When linking an existing outcome, only the outcome_id is required. When creating a new outcome, provide at least a title and optionally description, ratings, and mastery points."""
 
     _outcome_id = _parse_int(outcome_id)
@@ -16485,7 +16628,7 @@ async def remove_outcome_from_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group from which the outcome will be removed."),
     outcome_id: str = Field(..., description="The unique identifier of the outcome to be removed from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an outcome from a course outcome group. The outcome is only deleted if this is the last link to it across all groups and contexts; aligned outcomes cannot be deleted and will cause the operation to fail if this is their final link."""
 
     # Construct request model with validation
@@ -16525,7 +16668,7 @@ async def list_outcome_subgroups(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group whose immediate children you want to retrieve."),
     per_page: int | None = Field(None, description="The number of outcome subgroups to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of immediate child outcome groups within a specified outcome group. Use this to explore the hierarchical structure of learning outcomes organized by course."""
 
     # Construct request model with validation
@@ -16570,7 +16713,7 @@ async def create_outcome_subgroup_course(
     title: str = Field(..., description="The display name for the new outcome subgroup."),
     description: str | None = Field(None, description="A detailed explanation of the new outcome subgroup's purpose and content."),
     vendor_guid: str | None = Field(None, description="An optional custom identifier (GUID) for tracking this learning standard across external systems."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new empty subgroup within an outcome group. The subgroup is organized under a parent outcome group and can be identified by a custom vendor GUID if provided."""
 
     # Construct request model with validation
@@ -16615,7 +16758,7 @@ async def import_outcomes_course(
     attachment: str | None = Field(None, description="The outcome data file for multipart form-encoded uploads. Required when using application/x-www-form-urlencoded style posts; omit when using raw POST requests with Content-Type headers."),
     extension: str | None = Field(None, description="File format extension (e.g., csv) for raw POST requests. Recommended to specify explicitly; if omitted, will be inferred from Content-Type header or default to csv."),
     import_type: str | None = Field(None, description="Data format specification for parsing outcome data. Determines how the import file is interpreted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import learning outcomes into a Canvas course from a CSV file. Supports both multipart form uploads and raw POST requests with CSV data."""
 
     # Construct request model with validation
@@ -16658,7 +16801,7 @@ async def import_outcomes_course(
 async def get_outcome_import_status_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome import."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome import, or 'latest' to retrieve the most recent import for this course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status of an outcome import for a specific course. Use 'latest' as the import ID to fetch the most recent import."""
 
     # Construct request model with validation
@@ -16700,7 +16843,7 @@ async def list_outcome_results(
     outcome_ids: list[int] | None = Field(None, description="Filter results to include only specified outcomes. All specified outcomes must be linked to the course context."),
     include: list[str] | None = Field(None, description="Include additional related data in the response. Specify one or more collections to side-load with results."),
     include_hidden: bool | None = Field(None, description="If true, include results that are hidden from the learning mastery gradebook and student rollup scores. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve outcome results for users and outcomes within a course context. Results can be filtered by specific users or outcomes and optionally include related alignments, outcome groups, and learning paths."""
 
     # Construct request model with validation
@@ -16755,7 +16898,7 @@ async def list_outcome_rollups(
     sort_by: Literal["student", "outcome"] | None = Field(None, description="Sorts results by student name or by a specific outcome's rollup score. Requires 'sort_outcome_id' when sorting by outcome."),
     sort_outcome_id: str | None = Field(None, description="The outcome ID to use for sorting when sort_by is set to 'outcome'."),
     sort_order: Literal["asc", "desc"] | None = Field(None, description="Sets the sort order to ascending or descending. Defaults to ascending."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves outcome rollups for users and outcomes within a course, with optional aggregation across users and filtering by specific users or outcomes."""
 
     _sort_outcome_id = _parse_int(sort_outcome_id)
@@ -16809,7 +16952,7 @@ async def list_course_pages(
     search_term: str | None = Field(None, description="Filter pages by partial title match. Returns pages whose titles contain this search term."),
     published: bool | None = Field(None, description="Filter pages by publication status. When true, returns only published pages; when false, returns only unpublished pages; when omitted, returns all pages regardless of status."),
     per_page: int | None = Field(None, description="Number of pages to return per request. Used for pagination control.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of wiki pages associated with a course. Supports filtering by publication status and search terms, with customizable sorting and pagination."""
 
     # Construct request model with validation
@@ -16856,7 +16999,7 @@ async def create_wiki_page(
     wiki_page_front_page: bool | None = Field(None, description="If true, designates this page as the course wiki front page (only applies to published pages)."),
     wiki_page_notify_of_update: bool | None = Field(None, description="If true, course participants will receive notifications when this page is created or updated."),
     wiki_page_published: bool | None = Field(None, description="If true, the page is immediately published and visible to users; if false, the page remains in draft state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new wiki page in a course with customizable content, editing permissions, and publication status."""
 
     # Construct request model with validation
@@ -16899,7 +17042,7 @@ async def create_wiki_page(
 async def get_course_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the wiki page."),
     url: str = Field(..., description="The URL path or identifier of the wiki page to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the content of a wiki page within a course. Returns the full page content for the specified URL."""
 
     # Construct request model with validation
@@ -16944,7 +17087,7 @@ async def update_wiki_page(
     wiki_page_notify_of_update: bool | None = Field(None, description="Set to true to notify course participants when this page is updated."),
     wiki_page_published: bool | None = Field(None, description="Set to true to publish the page, or false to save it as a draft."),
     wiki_page_title: str | None = Field(None, description="The title for the wiki page. Changing the title will automatically update the page's URL, which will be returned in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update or create a wiki page within a course, including its title, content, visibility, and editing permissions. Changing a page's title will update its URL."""
 
     # Construct request model with validation
@@ -16986,7 +17129,7 @@ async def update_wiki_page(
 async def delete_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the page to delete."),
     url: str = Field(..., description="The URL or unique identifier of the wiki page to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a wiki page from a course. This operation permanently removes the specified page and cannot be undone."""
 
     # Construct request model with validation
@@ -17025,7 +17168,7 @@ async def delete_page(
 async def duplicate_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the page to duplicate."),
     url: str = Field(..., description="The URL path or identifier of the wiki page to duplicate."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a duplicate copy of an existing wiki page within a course. The duplicated page will have identical content to the original."""
 
     # Construct request model with validation
@@ -17065,7 +17208,7 @@ async def list_page_revisions(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL identifier of the page whose revisions you want to list."),
     per_page: int | None = Field(None, description="The number of revision records to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of revisions for a specific course page. You must have update rights on the page to access its revision history."""
 
     # Construct request model with validation
@@ -17108,7 +17251,7 @@ async def get_page_revision_latest(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page whose latest revision should be retrieved."),
     summary: bool | None = Field(None, description="When enabled, excludes the page content from the response and returns only metadata about the revision."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the latest revision metadata and optionally content for a course page. Requires edit rights to access historic page versions."""
 
     # Construct request model with validation
@@ -17152,7 +17295,7 @@ async def get_page_revision(
     url: str = Field(..., description="The URL path or identifier of the page within the course."),
     revision_id: str = Field(..., description="The unique identifier of the specific revision to retrieve."),
     summary: bool | None = Field(None, description="When enabled, excludes the page content from the response and returns only metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metadata and content of a specific revision of a course page. Requires edit rights to access historic versions."""
 
     # Construct request model with validation
@@ -17195,7 +17338,7 @@ async def revert_page_to_revision(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page to revert."),
     revision_id: str = Field(..., description="The revision number to revert to. Must be a valid revision ID from the page's revision history."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revert a course page to a previous revision. Use the List Revisions API to identify available revisions for the page."""
 
     _revision_id = _parse_int(revision_id)
@@ -17236,7 +17379,7 @@ async def revert_page_to_revision(
 async def check_course_permissions(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve permission information."),
     permissions: list[str] | None = Field(None, description="Optional list of specific permission names to validate against the authenticated user. Permission names follow the same format as those documented in role creation endpoints. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves permission information for the authenticated user in a specific course. Optionally validates whether the user has specific permissions."""
 
     # Construct request model with validation
@@ -17281,7 +17424,7 @@ async def check_course_permissions(
 async def list_course_collaborators(
     course_id: str = Field(..., description="The unique identifier of the course for which to list potential collaborators."),
     per_page: int | None = Field(None, description="The maximum number of collaborators to return per page. Allows pagination control over the results.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users who can be added as collaborators to a course. This includes all enrolled users in the course."""
 
     # Construct request model with validation
@@ -17323,7 +17466,7 @@ async def list_course_collaborators(
 async def preview_course_html(
     course_id: str = Field(..., description="The unique identifier of the course for which to preview the processed HTML."),
     html: str | None = Field(None, description="The HTML content to process and preview. If not provided, the operation will preview using default or previously stored content for the course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Preview HTML content after it has been processed according to the course's formatting and styling rules. Use this to validate how HTML will render within the course context before publishing."""
 
     # Construct request model with validation
@@ -17371,7 +17514,7 @@ async def grant_quiz_extensions(
     extra_attempts: str | None = Field(None, description="Number of additional attempts allowed beyond the quiz's multiple-attempt limit, up to 1000 total attempts."),
     extra_time: str | None = Field(None, description="Number of extra minutes to add to the student's total time limit across all attempts, limited to 1 week."),
     manually_unlocked: bool | None = Field(None, description="Whether to allow the student to take the quiz even if it is locked for other students."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant quiz extensions and accommodations to a student for a specific course. Extensions can include additional time, extra attempts, or manual unlocking of locked quizzes."""
 
     _user_id = _parse_int(user_id)
@@ -17421,7 +17564,7 @@ async def list_quizzes(
     course_id: str = Field(..., description="The unique identifier of the course containing the quizzes."),
     search_term: str | None = Field(None, description="Filter quizzes by partial title match. Returns only quizzes whose titles contain this search term."),
     per_page: int | None = Field(None, description="Number of quizzes to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of quizzes in a course, with optional filtering by title and customizable page size."""
 
     # Construct request model with validation
@@ -17485,7 +17628,7 @@ async def create_quiz(
     quiz_shuffle_answers: bool | None = Field(None, description="When enabled, randomizes answer order for multiple choice questions for each student."),
     quiz_time_limit: str | None = Field(None, description="Maximum duration in minutes for completing the quiz. Set to null for no time limit."),
     quiz_unlock_at: str | None = Field(None, description="Date and time when the quiz becomes accessible to students."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new quiz for a course with customizable settings for access control, grading, timing, and student visibility. Configure quiz type, attempt limits, question presentation, and answer visibility to match your course requirements."""
 
     _quiz_allowed_attempts = _parse_int(quiz_allowed_attempts)
@@ -17532,7 +17675,7 @@ async def create_quiz(
 async def list_quiz_override_dates(
     course_id: str = Field(..., description="The ID of the course containing the quizzes."),
     quiz_assignment_overrides_0__quiz_ids: list[int] | None = Field(None, alias="quiz_assignment_overrides0quiz_ids", description="An optional array of quiz IDs to filter results. If omitted, overrides for all quizzes available to the current user will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the actual due, unlock, and availability dates for quizzes based on assignment overrides applicable to the current user. Useful for determining personalized quiz deadlines when overrides are in effect."""
 
     # Construct request model with validation
@@ -17577,7 +17720,7 @@ async def list_quiz_override_dates(
 async def get_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific quiz by its ID within a course. Returns detailed quiz information including settings, questions, and metadata."""
 
     # Construct request model with validation
@@ -17617,7 +17760,7 @@ async def update_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to be updated."),
     quiz_notify_of_update: bool | None = Field(None, description="When true, sends notifications to enrolled users about the quiz modification. Defaults to true if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing quiz in a course. Optionally notify users of the changes made to the quiz."""
 
     # Construct request model with validation
@@ -17659,7 +17802,7 @@ async def update_quiz(
 async def delete_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a quiz from a course. This action cannot be undone and will remove all associated quiz data."""
 
     # Construct request model with validation
@@ -17699,7 +17842,7 @@ async def reorder_quiz_questions(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to reorder."),
     order_id: list[int] = Field(..., description="An ordered array of question or group IDs that defines the new sequence. The position in the array determines the display order in the quiz."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder the sequence of questions or question groups within a quiz. Specify the new order by providing an ordered list of question IDs."""
 
     # Construct request model with validation
@@ -17743,7 +17886,7 @@ async def send_quiz_message_to_users(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to send the message about."),
     conversations: Any | None = Field(None, description="Message content including the subject line, body text, and recipient group (submitted or unsubmitted users)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send a message to users who have either submitted or not yet submitted a quiz. Creates a new conversation with the specified recipients and message content."""
 
     # Construct request model with validation
@@ -17792,7 +17935,7 @@ async def grant_quiz_extensions_specific(
     quiz_extensions_extra_attempts: list[int] | None = Field(None, description="Number of additional attempts allowed beyond the quiz's multiple-attempt limit. Maximum 1000 attempts."),
     quiz_extensions_extra_time: list[int] | None = Field(None, description="Number of extra minutes added to all quiz attempts, extending the existing time limit. Maximum 10080 minutes (1 week)."),
     quiz_extensions_manually_unlocked: list[bool] | None = Field(None, description="Whether to allow the student to take the quiz even if it is locked for other students."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant quiz extensions to a student, including extra time, attempts, and deadline adjustments. Extensions allow students additional time or attempts beyond the standard quiz limits."""
 
     # Construct request model with validation
@@ -17839,7 +17982,7 @@ async def create_question_group(
     quiz_groups_name: list[str] | None = Field(None, description="The display name for this question group, used to identify it within the quiz."),
     quiz_groups_pick_count: list[int] | None = Field(None, description="The number of questions to randomly select from the question bank for this group. Must be a positive integer not exceeding the total questions available in the bank."),
     quiz_groups_question_points: list[int] | None = Field(None, description="The point value assigned to each question in this group. All questions in the group receive equal weight based on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new question group within a quiz to organize questions into randomized selections. Question groups allow you to specify which questions to include, how many to randomly select, and point values for assessment."""
 
     # Construct request model with validation
@@ -17883,7 +18026,7 @@ async def get_quiz_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific quiz group within a course. Returns the quiz group's configuration and metadata."""
 
     # Construct request model with validation
@@ -17926,7 +18069,7 @@ async def update_question_group(
     quiz_groups_name: list[str] | None = Field(None, description="The display name for the question group. Used to identify the group within the quiz."),
     quiz_groups_pick_count: list[int] | None = Field(None, description="The number of questions to randomly select from this group when the quiz is administered. Must be a non-negative integer."),
     quiz_groups_question_points: list[int] | None = Field(None, description="The point value assigned to each question in this group. All questions in the group receive equal weight based on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration of a question group within a quiz, including its name, number of questions to randomly select, and point values. Changes apply to the specified question group in the given course and quiz."""
 
     # Construct request model with validation
@@ -17969,7 +18112,7 @@ async def delete_question_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the question group to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a question group from a quiz. Returns a 204 No Content response on successful deletion."""
 
     # Construct request model with validation
@@ -18010,7 +18153,7 @@ async def reorder_question_groups(
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the question group to reorder."),
     order_id: list[int] = Field(..., description="An ordered array of question identifiers that defines the new sequence for questions within the group. The array order determines the final question order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder the questions within a specific question group in a quiz. Returns 204 No Content on successful reordering."""
 
     # Construct request model with validation
@@ -18053,7 +18196,7 @@ async def reorder_question_groups(
 async def list_quiz_ip_filters(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve IP filters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all IP filters configured for a specific quiz. IP filters restrict quiz access to specified IP addresses or ranges."""
 
     # Construct request model with validation
@@ -18094,7 +18237,7 @@ async def list_quiz_questions(
     quiz_id: str = Field(..., description="The ID of the quiz to retrieve questions from."),
     quiz_submission_id: str | None = Field(None, description="If specified, returns the questions as presented in this submission rather than the current quiz version. Must be used together with quiz_submission_attempt."),
     per_page: int | None = Field(None, description="Number of questions to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the paginated list of questions in a quiz. Optionally retrieve questions as they were presented in a specific submission, useful when the quiz has been modified since the submission was created."""
 
     _quiz_submission_id = _parse_int(quiz_submission_id)
@@ -18148,7 +18291,7 @@ async def create_quiz_question(
     question_question_type: Literal["calculated_question", "essay_question", "file_upload_question", "fill_in_multiple_blanks_question", "matching_question", "multiple_answers_question", "multiple_choice_question", "multiple_dropdowns_question", "numerical_question", "short_answer_question", "text_only_question", "true_false_question"] | None = Field(None, description="The format type of the question, which determines the expected answer structure and available response options."),
     question_quiz_group_id: str | None = Field(None, description="The identifier of the quiz group to organize this question within, if the quiz uses question grouping."),
     question_text_after_answers: str | None = Field(None, description="Additional text or instructions displayed after the answer options or response area."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new question for a quiz within a course. Supports multiple question types including multiple choice, essay, matching, and more, with customizable feedback and point values."""
 
     _question_points_possible = _parse_int(question_points_possible)
@@ -18196,7 +18339,7 @@ async def get_quiz_question(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz question to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific quiz question by its unique identifier within a course and quiz. Use this to fetch individual question details for display or analysis."""
 
     _id_ = _parse_int(id_)
@@ -18248,7 +18391,7 @@ async def update_quiz_question(
     question_question_type: Literal["calculated_question", "essay_question", "file_upload_question", "fill_in_multiple_blanks_question", "matching_question", "multiple_answers_question", "multiple_choice_question", "multiple_dropdowns_question", "numerical_question", "short_answer_question", "text_only_question", "true_false_question"] | None = Field(None, description="The question format type, which determines the answer structure and evaluation method."),
     question_quiz_group_id: str | None = Field(None, description="The identifier of the quiz group to assign this question to, for organizing questions into logical sections."),
     question_text_after_answers: str | None = Field(None, description="Additional text content displayed after the answer options or response area."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing quiz question within a specific quiz. Allows modification of question content, type, scoring, feedback comments, and positioning."""
 
     _quiz_id = _parse_int(quiz_id)
@@ -18297,7 +18440,7 @@ async def remove_quiz_question(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz question to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a quiz question from a course quiz. Returns a 204 No Content response on successful deletion."""
 
     _quiz_id = _parse_int(quiz_id)
@@ -18340,7 +18483,7 @@ async def list_quiz_reports(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve reports."),
     includes_all_versions: bool | None = Field(None, description="When true, includes reports that aggregate data across all submission versions. When false (default), reports only consider the most recent submission per student. This parameter is ignored for item analysis reports."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all available reports for a specific quiz within a course. Reports can optionally include data from all submission versions or only the most recent submissions."""
 
     # Construct request model with validation
@@ -18385,7 +18528,7 @@ async def generate_quiz_report(
     quiz_report_report_type: Literal["student_analysis", "item_analysis"] = Field(..., description="The type of analysis to generate. 'student_analysis' provides per-student performance metrics, while 'item_analysis' provides per-question difficulty and discrimination statistics."),
     include: Literal["file", "progress"] | None = Field(None, description="Specifies which associated objects to include in the response. Use 'file' to include the generated report file and 'progress' to include the generation progress status."),
     quiz_report_includes_all_versions: bool | None = Field(None, description="When true, the report includes all student submissions across multiple attempts. When false (default), only the most recent submission per student is considered. This parameter is ignored for item_analysis reports."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a new report for a quiz with analysis of student performance or individual quiz items. Returns a cached report if one matching the specified criteria exists and no new submissions have been received."""
 
     # Construct request model with validation
@@ -18430,7 +18573,7 @@ async def get_quiz_report(
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve the report."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz report to retrieve."),
     include: Literal["file", "progress"] | None = Field(None, description="Specifies which related objects to include in the response. Use 'file' to include file data and/or 'progress' to include progress object data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single quiz report for a specific quiz within a course. Optionally includes associated file and progress object data."""
 
     # Construct request model with validation
@@ -18473,7 +18616,7 @@ async def cancel_or_delete_quiz_report(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which the report is being generated or has been generated."),
     id_: str = Field(..., alias="id", description="The unique identifier of the report to cancel or delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel a queued quiz report generation or delete an already-generated report. Check the report's workflow_state before attempting this operation—generation can only be aborted when the progress is in a 'queued' state."""
 
     # Construct request model with validation
@@ -18513,7 +18656,7 @@ async def get_quiz_statistics(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve statistics."),
     all_versions: bool | None = Field(None, description="When true, includes statistics across all submission attempts; when false or omitted, returns statistics for only the latest quiz version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve statistics for a quiz, optionally including data from all submission attempts or just the latest version. Returns aggregated performance metrics and submission data for the specified quiz."""
 
     # Construct request model with validation
@@ -18556,7 +18699,7 @@ async def get_quiz_submission(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve the submission."),
     include: list[Literal["submission", "quiz", "user"]] | None = Field(None, description="Optional associations to include in the response. Specify which related data (such as answers, scoring details, or user information) should be embedded in the submission object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the quiz submission for the current user in a specific course. Returns the submission details including answers and scores if available."""
 
     # Construct request model with validation
@@ -18602,7 +18745,7 @@ async def list_quiz_submissions(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve submissions."),
     include: list[Literal["submission", "quiz", "user"]] | None = Field(None, description="Optional associations to include in the response. Specify which related data should be embedded with each submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all submissions for a quiz. The response varies based on user permissions: instructors see submissions from all students, while students see only their own submissions. In-progress submissions are returned alone; otherwise, all completed attempts are included."""
 
     # Construct request model with validation
@@ -18648,7 +18791,7 @@ async def start_quiz_submission(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz to start taking."),
     preview: bool | None = Field(None, description="When true, creates a preview submission that does not count toward the user's course record. Only available to teachers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Begin a quiz-taking session by creating a quiz submission. This allows you to answer questions and submit your responses for grading."""
 
     # Construct request model with validation
@@ -18693,7 +18836,7 @@ async def upload_quiz_submission_file(
     quiz_id: str = Field(..., description="The unique identifier of the quiz to which the file will be submitted."),
     name: str | None = Field(None, description="The name to assign to the uploaded file. If not provided, the original filename will be used."),
     on_duplicate: str | None = Field(None, description="Strategy for handling files with duplicate names. Specifies whether to overwrite, rename, or reject the upload when a file with the same name already exists."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to associate with a quiz submission. This initiates the file upload workflow for attaching supporting documents or answers to a quiz."""
 
     # Construct request model with validation
@@ -18738,7 +18881,7 @@ async def retrieve_quiz_submission(
     quiz_id: str = Field(..., description="The unique identifier of the quiz within the course."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz submission to retrieve."),
     include: list[Literal["submission", "quiz", "user"]] | None = Field(None, description="Optional associations to include in the response, such as user details, submission history, or question data. Specify as a comma-separated list of association names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific quiz submission for a student in a course. Returns detailed submission data including answers and scoring information."""
 
     # Construct request model with validation
@@ -18787,7 +18930,7 @@ async def grade_quiz_submission(
     quiz_submissions_attempt: list[int] = Field(..., description="The attempt number of the quiz submission to update. The attempt must already be marked as complete."),
     quiz_submissions_fudge_points: list[float] | None = Field(None, description="Points to add or subtract from the submission's total score. Use positive values to increase the score or negative values to decrease it."),
     quiz_submissions_questions: list[_models.QuizSubmission] | None = Field(None, description="Question-level scores and comments keyed by question ID. Each entry contains a score value and optional comment text for student feedback."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grade a student's quiz submission by updating individual question scores, adding feedback comments, or adjusting the total score. The submission attempt must be completed before grading."""
 
     # Construct request model with validation
@@ -18832,7 +18975,7 @@ async def submit_quiz(
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz submission being completed."),
     attempt: str = Field(..., description="The attempt number being submitted. Must be the latest attempt; earlier attempts cannot be modified."),
     validation_token: str = Field(..., description="The validation token provided when the quiz submission was created. Required to authorize the submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a quiz for grading by marking the submission as complete. Once submitted, the quiz cannot be modified and will be graded automatically."""
 
     _attempt = _parse_int(attempt)
@@ -18879,7 +19022,7 @@ async def list_submission_events(
     quiz_id: str = Field(..., description="The unique identifier of the quiz within the course."),
     id_: str = Field(..., alias="id", description="The unique identifier of the submission to retrieve events for."),
     attempt: str | None = Field(None, description="The submission attempt number to retrieve events for. Attempts are numbered sequentially starting from 1. If not specified, the most recent attempt will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all events captured during a specific quiz submission attempt, such as user interactions and system events. If no attempt is specified, events from the latest attempt will be returned."""
 
     _attempt = _parse_int(attempt)
@@ -18925,7 +19068,7 @@ async def record_quiz_submission_events(
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which events are being recorded."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz submission to which these events belong."),
     quiz_submission_events: list[list[dict[str, Any]]] = Field(..., description="An ordered array of submission events captured during the quiz session. Each event represents a user interaction or system action that occurred during the assessment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Store a set of events captured during a quiz taking session. Events are recorded against a specific quiz submission and used to track user interactions and behavior during the assessment."""
 
     # Construct request model with validation
@@ -18969,7 +19112,7 @@ async def get_quiz_submission_time(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve submission timing data."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz submission (attempt) to retrieve timing information for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current timing data for an active quiz submission, including the end timestamp and remaining time available for the attempt."""
 
     # Construct request model with validation
@@ -19008,7 +19151,7 @@ async def get_quiz_submission_time(
 async def list_students_by_recent_login(
     course_id: str = Field(..., description="The unique identifier of the course to retrieve student login activity for."),
     per_page: int | None = Field(None, description="The maximum number of student records to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of students in a course ordered by their most recent login activity. Each record includes a timestamp of the student's last login to Canvas. Requires 'View usage reports' permission."""
 
     # Construct request model with validation
@@ -19047,7 +19190,7 @@ async def list_students_by_recent_login(
 
 # Tags: courses
 @mcp.tool()
-async def reset_course(course_id: str = Field(..., description="The unique identifier of the course to reset.")) -> dict[str, Any]:
+async def reset_course(course_id: str = Field(..., description="The unique identifier of the course to reset.")) -> dict[str, Any] | ToolResult:
     """Reset a course by deleting its current content and creating a new equivalent course with all sections and users preserved. The course structure remains intact while all course materials are removed."""
 
     # Construct request model with validation
@@ -19083,7 +19226,7 @@ async def reset_course(course_id: str = Field(..., description="The unique ident
 
 # Tags: outcome_groups
 @mcp.tool()
-async def get_root_outcome_group_course(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the root outcome group.")) -> dict[str, Any]:
+async def get_root_outcome_group_course(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the root outcome group.")) -> dict[str, Any] | ToolResult:
     """Retrieve the root outcome group for a specific course. This operation redirects to the root outcome group's URL for the given course context."""
 
     # Construct request model with validation
@@ -19122,7 +19265,7 @@ async def get_root_outcome_group_course(course_id: str = Field(..., description=
 async def list_rubrics_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the rubrics to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of rubrics to return per page. Allows control over result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active rubrics for the specified course. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -19166,7 +19309,7 @@ async def get_rubric_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the rubric to retrieve."),
     include: Literal["assessments", "graded_assessments", "peer_assessments"] | None = Field(None, description="Specifies which type of rubric assessments to include in the response. Omit to exclude assessments entirely."),
     style: Literal["full", "comments_only"] | None = Field(None, description="Controls the detail level of assessment data returned. Only applicable when assessments are included. Use 'full' for complete criteria data and comments, or 'comments_only' for assessment comments only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific rubric for a course. Optionally include associated assessments and customize the level of assessment detail returned."""
 
     # Construct request model with validation
@@ -19212,7 +19355,7 @@ async def search_course_users(
     user_ids: list[int] | None = Field(None, description="Restrict results to only users with the specified IDs. Multiple user IDs can be provided. Cannot be used together with search_term."),
     enrollment_state: list[Literal["active", "invited", "rejected", "completed", "inactive"]] | None = Field(None, description="Filter users by enrollment workflow state. Only users with enrollments in the specified states will be returned. Active and invited enrollments are included by default."),
     per_page: int | None = Field(None, description="Number of users to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve a paginated list of users enrolled in a course, with optional filtering by name/ID and enrollment state. Optionally include detailed user information such as email, enrollments with grades, avatar, and bio."""
 
     # Construct request model with validation
@@ -19260,7 +19403,7 @@ async def list_sections(
     course_id: str = Field(..., description="The unique identifier of the course."),
     include: list[Literal["students", "avatar_url", "enrollments", "total_students", "passback_status"]] | None = Field(None, description="Optional associations to include in the response. Select 'students' to include student data (requires permission to view users or grades), 'avatar_url' to include student profile images, 'enrollments' to include section enrollment details for each student (requires 'students' to also be selected), 'total_students' to return counts of active and invited students, or 'passback_status' to include grade passback information."),
     per_page: int | None = Field(None, description="Number of items to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of sections for a course. Optionally include student associations, enrollment data, and grade passback status."""
 
     # Construct request model with validation
@@ -19311,7 +19454,7 @@ async def create_section(
     course_section_sis_section_id: str | None = Field(None, description="The SIS (Student Information System) identifier for this section. Requires manage_sis permission to set; ignored if caller lacks this permission."),
     course_section_start_at: str | None = Field(None, description="The date and time when this section begins. Enrollments can be restricted to occur only within the section's start and end dates."),
     enable_sis_reactivation: bool | None = Field(None, description="When true, attempts to reactivate a previously deleted section with a matching sis_section_id before creating a new one."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new section within a course. Sections organize course content and can have independent enrollment periods and SIS integration identifiers."""
 
     # Construct request model with validation
@@ -19355,7 +19498,7 @@ async def get_section(
     course_id: str = Field(..., description="The unique identifier of the course containing the section."),
     id_: str = Field(..., alias="id", description="The unique identifier of the section to retrieve."),
     include: list[Literal["students", "avatar_url", "enrollments", "total_students", "passback_status"]] | None = Field(None, description="Optional associations and data to include in the response. Multiple values can be specified to include students with avatars, enrollment information, student counts, and grade passback status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific course section, including optional student data, enrollment details, and grade passback status."""
 
     # Construct request model with validation
@@ -19397,7 +19540,7 @@ async def get_section(
 
 # Tags: courses
 @mcp.tool()
-async def get_course_settings(course_id: str = Field(..., description="The unique identifier of the course whose settings you want to retrieve.")) -> dict[str, Any]:
+async def get_course_settings(course_id: str = Field(..., description="The unique identifier of the course whose settings you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration settings for a specific course. Returns key settings that control course behavior and properties."""
 
     # Construct request model with validation
@@ -19449,7 +19592,7 @@ async def list_submissions(
     order_direction: Literal["ascending", "descending"] | None = Field(None, description="Sort direction for ordered results. Defaults to ascending. Ignored when grouped mode is enabled."),
     include: list[Literal["submission_history", "submission_comments", "rubric_assessment", "assignment", "total_scores", "visibility", "course", "user"]] | None = Field(None, description="Include related associations in the response. The 'total_scores' option requires grouped mode to be enabled."),
     per_page: int | None = Field(None, description="Number of items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of submissions for specified students and assignments in a course. Results can be filtered by submission status, grading status, and date ranges, with optional grouping by student."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -19505,7 +19648,7 @@ async def bulk_grade_submissions(
     rubric_criterion_id: str | None = Field(None, description="The ID of the rubric criterion being assessed"),
     rubric_criterion_points: float | None = Field(None, description="The points awarded for this rubric criterion"),
     rubric_criterion_comments: str | None = Field(None, description="Comments or feedback for this rubric criterion"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update grades and comments for multiple student submissions in a course asynchronously. Requires permission to manage grades in the course or section."""
 
     # Call helper functions
@@ -19554,7 +19697,7 @@ async def list_course_tabs(
     course_id: str = Field(..., description="The unique identifier of the course or group."),
     include: list[Literal["external"]] | None = Field(None, description="Optionally include external tool tabs in the returned list. Only applies to courses, not groups. Specify as an array with the value 'external' to include external tools."),
     per_page: int | None = Field(None, description="Number of items to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of navigation tabs available for a course or group. Optionally include external tool tabs in the results."""
 
     # Construct request model with validation
@@ -19601,7 +19744,7 @@ async def update_course_tab(
     tab_id: str = Field(..., description="The unique identifier of the tab to update."),
     hidden: bool | None = Field(None, description="Whether the tab should be hidden from course navigation. When true, the tab will not be visible to users."),
     position: str | None = Field(None, description="The new position of the tab in the course navigation order. Position is 1-based, where 1 represents the first position."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a course tab's visibility and position. Note that Home and Settings tabs cannot be modified and will be ignored if targeted."""
 
     _position = _parse_int(position)
@@ -19642,7 +19785,7 @@ async def update_course_tab(
 
 # Tags: courses
 @mcp.tool()
-async def list_course_todos(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve todo items.")) -> dict[str, Any]:
+async def list_course_todos(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve todo items.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current user's todo items for a specific course. Returns a list of pending tasks and assignments associated with the course."""
 
     # Construct request model with validation
@@ -19684,7 +19827,7 @@ async def set_file_usage_rights(
     usage_rights_use_justification: Literal["own_copyright", "used_by_permission", "fair_use", "public_domain", "creative_commons"] = Field(..., description="The intellectual property justification for using the files in Canvas."),
     folder_ids: list[str] | None = Field(None, description="List of folder IDs to search for files to apply usage rights to. New files uploaded to these folders will not automatically inherit these rights. Order is not significant."),
     publish: bool | None = Field(None, description="Whether to publish the specified files or folders upon save. Only applies if usage rights have been specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set copyright and license information for course files and folders. Specifies the intellectual property justification for using files in Canvas and optionally publishes them upon save."""
 
     # Construct request model with validation
@@ -19727,7 +19870,7 @@ async def remove_file_usage_rights(
     course_id: str = Field(..., description="The unique identifier of the course containing the files."),
     file_ids: list[str] = Field(..., description="List of file IDs from which to remove usage rights. At least one of file_ids or folder_ids must be provided."),
     folder_ids: list[str] | None = Field(None, description="List of folder IDs. Usage rights will be removed from all files contained within these folders. At least one of file_ids or folder_ids must be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove copyright and license information from files in a course. Supports removing usage rights from specific files and/or all files within specified folders."""
 
     # Construct request model with validation
@@ -19777,7 +19920,7 @@ async def list_course_users(
     include: list[Literal["email", "enrollments", "locked", "avatar_url", "test_student", "bio", "custom_links", "current_grading_period_scores", "sections"]] | None = Field(None, description="Include additional user and enrollment data. Options include enrollments with grades, enrollment lock status, avatar URLs, user bios, test student accounts, custom plugin links, and current grading period scores."),
     user_ids: list[int] | None = Field(None, description="Limit results to users with the specified IDs. Multiple user IDs can be provided. Cannot be used together with search_term filtering."),
     enrollment_state: list[Literal["active", "invited", "rejected", "completed", "inactive"]] | None = Field(None, description="Filter users by enrollment workflow state. Returns users with 'active' and 'invited' enrollments by default when not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users enrolled in a course with optional enrollment details, grades, and user profile information."""
 
     # Construct request model with validation
@@ -19824,7 +19967,7 @@ async def list_course_users(
 async def get_user(
     course_id: str = Field(..., description="The unique identifier of the course containing the user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a single user within a course. Returns user data with the same fields available in the list users operation."""
 
     # Construct request model with validation
@@ -19863,7 +20006,7 @@ async def get_user(
 async def update_student_last_attended_date(
     course_id: str = Field(..., description="The unique identifier of the course in which to update the student's last attended date."),
     user_id: str = Field(..., description="The unique identifier of the student whose last attended date should be updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Records the last date a student attended a course by updating their enrollment record. This timestamp helps track student engagement and attendance patterns."""
 
     # Construct request model with validation
@@ -19902,7 +20045,7 @@ async def update_student_last_attended_date(
 async def get_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the course to retrieve."),
     include: list[Literal["needs_grading_count", "syllabus_body", "public_description", "total_scores", "current_grading_period_scores", "term", "account", "course_progress", "sections", "storage_quota_used_mb", "total_students", "passback_status", "favorites", "teachers", "observed_users", "all_courses", "permissions", "course_image"]] | None = Field(None, description="Optional array of additional data to include in the response. Use 'all_courses' to include recently deleted courses, 'permissions' to include the current user's course permissions, 'observed_users' to include observed users in enrollments, and 'course_image' to include course image data when available and enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific course by its ID. Supports optional parameters to include additional data such as permissions, observed users, and course images."""
 
     # Construct request model with validation
@@ -19980,7 +20123,7 @@ async def update_course(
     course_time_zone: str | None = Field(None, description="Set the time zone for the course using IANA time zone identifiers or Ruby on Rails time zone names."),
     course_use_blueprint_restrictions_by_object_type: bool | None = Field(None, description="Enable object-type-specific blueprint restrictions instead of using the default blueprint restrictions parameter."),
     offer: bool | None = Field(None, description="Immediately publish the course and make it available to students upon update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing course's settings, content, and enrollment configuration. Users with content management rights can only edit the syllabus body."""
 
     _course_account_id = _parse_int(course_account_id)
@@ -20027,7 +20170,7 @@ async def update_course(
 async def conclude_or_delete_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the course to delete or conclude."),
     event: Literal["delete", "conclude"] = Field(..., description="The action to perform on the course: delete to permanently remove it, or conclude to mark it as completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete or conclude an existing course. Choose between permanently deleting the course or marking it as concluded based on your institutional needs."""
 
     # Construct request model with validation
@@ -20066,7 +20209,7 @@ async def conclude_or_delete_course(
 
 # Tags: late_policy
 @mcp.tool()
-async def get_late_policy(id_: str = Field(..., alias="id", description="The unique identifier of the course for which to retrieve the late policy.")) -> dict[str, Any]:
+async def get_late_policy(id_: str = Field(..., alias="id", description="The unique identifier of the course for which to retrieve the late policy.")) -> dict[str, Any] | ToolResult:
     """Retrieves the late policy configuration for a specific course, including any penalties or submission deadlines."""
 
     # Construct request model with validation
@@ -20111,7 +20254,7 @@ async def create_late_policy(
     late_policy_late_submission_minimum_percent_enabled: bool | None = Field(None, description="Enable or disable the minimum grade floor for late submissions in this course's late policy."),
     late_policy_missing_submission_deduction: float | None = Field(None, description="The percentage point deduction applied to submissions that are never submitted by the deadline."),
     late_policy_missing_submission_deduction_enabled: bool | None = Field(None, description="Enable or disable the missing submission deduction penalty for this course's late policy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a late policy for a course to define penalties for late and missing submissions. Each course can have only one late policy; attempting to create a second policy will return an error."""
 
     # Construct request model with validation
@@ -20160,7 +20303,7 @@ async def update_course_late_policy(
     late_policy_late_submission_minimum_percent_enabled: bool | None = Field(None, description="Enable or disable the minimum grade floor for late submissions in this course."),
     late_policy_missing_submission_deduction: float | None = Field(None, description="The percentage point deduction applied to submissions marked as missing. Specify as a numeric value representing the deduction amount."),
     late_policy_missing_submission_deduction_enabled: bool | None = Field(None, description="Enable or disable the missing submission deduction penalty for this course."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the late policy settings for a course, including deductions for late and missing submissions. Changes are applied immediately with no response body returned on success."""
 
     # Construct request model with validation
@@ -20200,7 +20343,7 @@ async def update_course_late_policy(
 
 # Tags: e_pub_exports
 @mcp.tool()
-async def list_courses_with_latest_epub_export() -> dict[str, Any]:
+async def list_courses_with_latest_epub_export() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all courses the user is actively participating in, along with the latest ePub export for each course. This allows users to access their course materials in ePub format."""
 
     # Extract parameters for API call
@@ -20232,7 +20375,7 @@ async def submit_error_report(
     error_comments: str | None = Field(None, description="Detailed description of the problem experienced, providing context and specifics about the issue."),
     error_email: str | None = Field(None, description="Email address of the user submitting the report for follow-up communication."),
     error_url: str | None = Field(None, description="The URL or page where the error was encountered."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit an error report documenting a problem experienced by the user. This mirrors the functionality of the in-app 'help → report a problem' dialog."""
 
     # Construct request model with validation
@@ -20274,7 +20417,7 @@ async def submit_error_report(
 async def get_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
     include: list[Literal["user"]] | None = Field(None, description="Optional array of additional information to include in the response. Specify 'user' to include uploader and last editor details, or 'usage_rights' to include copyright and license information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a file attachment with its standard metadata. Optionally includes additional information such as uploader details and usage rights."""
 
     # Construct request model with validation
@@ -20322,7 +20465,7 @@ async def update_file(
     locked: bool | None = Field(None, description="Lock the file to prevent modifications or deletions."),
     name: str | None = Field(None, description="Set a new display name for the file."),
     on_duplicate: Literal["overwrite", "rename"] | None = Field(None, description="Specify how to handle naming conflicts when the file is moved or renamed to a location with an existing file of the same name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update file properties including name, visibility, lock status, and conflict resolution behavior. Allows renaming, hiding, locking files, and handling duplicate name scenarios."""
 
     # Construct request model with validation
@@ -20364,7 +20507,7 @@ async def update_file(
 async def delete_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to delete."),
     replace: bool | None = Field(None, description="When true, replaces the file contents with a generic 'file has been removed' message and destroys all generated previews instead of completely deleting the file. Requires manage files and become other users permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently remove a file from the system. Optionally replace the file contents with a generic removal notice and destroy any generated previews."""
 
     # Construct request model with validation
@@ -20406,7 +20549,7 @@ async def delete_file(
 async def get_file_preview_url(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to preview."),
     submission_id: str | None = Field(None, description="The ID of the submission associated with the file. Provide this to access files submitted to an assignment; Canvas will verify the file belongs to the submission and you have permission to view it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the public URL for inline preview of a file. Optionally provide a submission ID to access files submitted to an assignment, which Canvas will verify for access rights."""
 
     _submission_id = _parse_int(submission_id)
@@ -20451,7 +20594,7 @@ async def copy_file(
     dest_folder_id: str = Field(..., description="The ID of the destination folder where the file will be copied."),
     source_file_id: str = Field(..., description="The ID of the source file to be copied."),
     on_duplicate: Literal["overwrite", "rename"] | None = Field(None, description="Specifies the behavior when a file with the same name already exists at the destination. If not provided and a duplicate exists, the operation will fail."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copy a file from one location to a destination folder within the same institution. Supports copying files across different contexts such as courses and users."""
 
     # Construct request model with validation
@@ -20494,7 +20637,7 @@ async def copy_file(
 async def copy_folder(
     dest_folder_id: str = Field(..., description="The ID of the destination folder where the source folder will be copied."),
     source_folder_id: str = Field(..., description="The ID of the source folder to be copied, including all of its contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copy a folder and its contents to a destination folder within Canvas. The source and destination must belong to the same institution; if a folder with the same name already exists at the destination, the copied folder will be automatically renamed."""
 
     # Construct request model with validation
@@ -20534,7 +20677,7 @@ async def copy_folder(
 
 # Tags: files
 @mcp.tool()
-async def upload_file(folder_id: str = Field(..., description="The unique identifier of the folder where the file will be uploaded. You must have 'Manage Files' permission on the course or group containing this folder.")) -> dict[str, Any]:
+async def upload_file(folder_id: str = Field(..., description="The unique identifier of the folder where the file will be uploaded. You must have 'Manage Files' permission on the course or group containing this folder.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a specified folder. This is the first step in the file upload workflow; refer to the File Upload Documentation for complete workflow details."""
 
     # Construct request model with validation
@@ -20576,7 +20719,7 @@ async def create_folder_nested(
     hidden: bool | None = Field(None, description="Hide the folder from standard views when enabled."),
     locked: bool | None = Field(None, description="Prevent modifications to the folder when enabled."),
     position: str | None = Field(None, description="The sort position for the folder in its parent context, where lower values appear first."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new folder within the specified parent folder. Optionally configure visibility, lock status, and sort position."""
 
     _position = _parse_int(position)
@@ -20618,7 +20761,7 @@ async def create_folder_nested(
 
 # Tags: files
 @mcp.tool()
-async def get_folder_nested(id_: str = Field(..., alias="id", description="The folder identifier. Use 'root' to retrieve the root folder for a context.")) -> dict[str, Any]:
+async def get_folder_nested(id_: str = Field(..., alias="id", description="The folder identifier. Use 'root' to retrieve the root folder for a context.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific folder by ID. Use 'root' as the ID to get the root folder for a context (e.g., course root folder)."""
 
     # Construct request model with validation
@@ -20660,7 +20803,7 @@ async def update_folder(
     locked: bool | None = Field(None, description="Lock or unlock the folder to prevent accidental modifications."),
     name: str | None = Field(None, description="Rename the folder to a new display name."),
     position: str | None = Field(None, description="Set the folder's position in the sort order. Lower values appear first."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates folder properties including name, visibility, lock status, and sort position. Modify one or more attributes of an existing folder."""
 
     _position = _parse_int(position)
@@ -20704,7 +20847,7 @@ async def update_folder(
 async def delete_folder(
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to delete."),
     force: bool | None = Field(None, description="Set to true to allow deletion of a folder that contains items. When false or omitted, only empty folders can be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a folder from the system. By default, only empty folders can be deleted; set the force flag to delete folders containing items."""
 
     # Construct request model with validation
@@ -20751,7 +20894,7 @@ async def list_files(
     sort: Literal["name", "size", "created_at", "updated_at", "content_type", "user"] | None = Field(None, description="Sort results by the specified field. Defaults to 'name'. Using 'user' as the sort field automatically includes user information in the response."),
     order: Literal["asc", "desc"] | None = Field(None, description="The order direction for sorted results. Defaults to ascending order."),
     per_page: int | None = Field(None, description="The maximum number of files to return per page. Defaults to 10 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of files from a folder or course with optional filtering, searching, and sorting capabilities."""
 
     # Construct request model with validation
@@ -20797,7 +20940,7 @@ async def list_files(
 async def list_subfolders(
     id_: str = Field(..., alias="id", description="The unique identifier of the parent folder whose subfolders you want to list."),
     per_page: int | None = Field(None, description="The maximum number of subfolders to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of subfolders contained within a specified folder. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -20836,7 +20979,7 @@ async def list_subfolders(
 
 # Tags: outcome_groups
 @mcp.tool()
-async def get_outcome_group(id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve.")) -> dict[str, Any]:
+async def get_outcome_group(id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific outcome group by its ID. Returns detailed information about the outcome group configuration and settings."""
 
     # Construct request model with validation
@@ -20878,7 +21021,7 @@ async def update_outcome_group_global(
     parent_outcome_group_id: str | None = Field(None, description="The ID of the new parent outcome group. The parent must belong to the same context and cannot be a descendant of this outcome group."),
     title: str | None = Field(None, description="The new title for the outcome group."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard associated with this outcome group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing outcome group by updating its title, description, parent group, or vendor GUID. Unspecified fields remain unchanged, and the new parent group must be in the same context without creating circular dependencies."""
 
     _parent_outcome_group_id = _parse_int(parent_outcome_group_id)
@@ -20919,7 +21062,7 @@ async def update_outcome_group_global(
 
 # Tags: outcome_groups
 @mcp.tool()
-async def delete_outcome_group(id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to delete.")) -> dict[str, Any]:
+async def delete_outcome_group(id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an outcome group and its descendant groups. Linked outcomes are only deleted if all their links are removed; deletion fails if any aligned outcomes would have no remaining links."""
 
     # Construct request model with validation
@@ -20959,7 +21102,7 @@ async def import_outcome_group_global(
     id_: str = Field(..., alias="id", description="The ID of the outcome group where the import will be performed."),
     source_outcome_group_id: str = Field(..., description="The ID of the source outcome group to import from. The source must be global, from the same context, or from an associated account, and cannot be a root outcome group."),
     async_: bool | None = Field(None, alias="async", description="Whether to perform the import asynchronously. When true, returns a Progress object that can be queried for status; the imported outcome group ID and URL will be available in the progress results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import an outcome group by creating a new subgroup with the same structure and outcome links as the source group. This operation recursively imports all subgroups while preserving organizational hierarchy without duplicating the outcomes themselves."""
 
     _source_outcome_group_id = _parse_int(source_outcome_group_id)
@@ -21005,7 +21148,7 @@ async def list_outcomes(
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group whose linked outcomes should be retrieved."),
     outcome_style: str | None = Field(None, description="Controls the detail level of returned outcomes. Use 'abbrev' for basic information or 'full' for comprehensive details."),
     per_page: int | None = Field(None, description="The maximum number of outcomes to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of outcomes linked to a specific outcome group. Use the outcome_style parameter to control the level of detail returned for each outcome."""
 
     # Construct request model with validation
@@ -21055,7 +21198,7 @@ async def link_outcome_global(
     outcome_id: str | None = Field(None, description="The ID of an existing outcome to link. The outcome must be available in this context: owned by the group's context, an associated account, or a global outcome. When present, other parameters except move_from are ignored."),
     title: str | None = Field(None, description="The title of the new outcome being created. Required when outcome_id is not provided. Ignored if linking an existing outcome."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard, useful for mapping to external standards frameworks."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing outcome to an outcome group, or create and link a new outcome. When linking an existing outcome, only the outcome_id is required. When creating a new outcome, provide at least a title, and optionally description, ratings, and mastery points."""
 
     _calculation_int = _parse_int(calculation_int)
@@ -21111,7 +21254,7 @@ async def link_outcome_global_existing(
     move_from: str | None = Field(None, description="The ID of the previous outcome group when moving an outcome. Only used when linking an existing outcome (outcome_id is present)."),
     title: str | None = Field(None, description="The title of the new outcome being created. Required when outcome_id is not provided."),
     vendor_guid: str | None = Field(None, description="A custom GUID identifier for the learning standard, useful for mapping to external standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing outcome to an outcome group, or create and link a new outcome. When linking an existing outcome, only the outcome_id is required. When creating a new outcome, provide at least a title, and optionally description, ratings, and mastery points."""
 
     _outcome_id = _parse_int(outcome_id)
@@ -21158,7 +21301,7 @@ async def link_outcome_global_existing(
 async def unlink_outcome_global(
     id_: str = Field(..., alias="id", description="The ID of the outcome group from which to unlink the outcome."),
     outcome_id: str = Field(..., description="The ID of the outcome to unlink from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an outcome from a global outcome group. The outcome is only deleted if this is its last link across all groups and contexts; aligned outcomes cannot be deleted and will cause the operation to fail if this is their final link."""
 
     # Construct request model with validation
@@ -21197,7 +21340,7 @@ async def unlink_outcome_global(
 async def list_outcome_subgroups_global(
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group whose child subgroups should be listed."),
     per_page: int | None = Field(None, description="The maximum number of subgroups to return per page. Allows control over response size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of immediate child outcome groups within a specified outcome group. Use pagination parameters to control result size and navigate through large datasets."""
 
     # Construct request model with validation
@@ -21241,7 +21384,7 @@ async def create_outcome_subgroup_global(
     title: str = Field(..., description="The name or label for the new subgroup."),
     description: str | None = Field(None, description="A detailed description of the new subgroup to provide context and additional information."),
     vendor_guid: str | None = Field(None, description="An optional custom globally unique identifier for associating this subgroup with a specific learning standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new empty subgroup within an outcome group. The subgroup is initialized with the provided title and optional description."""
 
     # Construct request model with validation
@@ -21281,7 +21424,7 @@ async def create_outcome_subgroup_global(
 
 # Tags: outcome_groups
 @mcp.tool()
-async def get_root_outcome_group() -> dict[str, Any]:
+async def get_root_outcome_group() -> dict[str, Any] | ToolResult:
     """Retrieve the root outcome group for the global context. This is a convenience endpoint that redirects to the root outcome group's URL."""
 
     # Extract parameters for API call
@@ -21308,7 +21451,7 @@ async def get_root_outcome_group() -> dict[str, Any]:
 
 # Tags: group_categories
 @mcp.tool()
-async def get_group_category(group_category_id: str = Field(..., description="The unique identifier of the group category to retrieve.")) -> dict[str, Any]:
+async def get_group_category(group_category_id: str = Field(..., description="The unique identifier of the group category to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific group category by its ID. Returns a 401 error if the caller lacks permission to access the requested category."""
 
     # Construct request model with validation
@@ -21352,7 +21495,7 @@ async def update_group_category(
     name: str | None = Field(None, description="The display name for this group category."),
     self_signup: Literal["enabled", "restricted"] | None = Field(None, description="Controls whether students can self-enroll in groups (course-only setting). 'enabled' allows signup for any group, 'restricted' limits signup to groups in the same section, or null to disable self signup entirely."),
     sis_group_category_id: str | None = Field(None, description="The unique SIS (Student Information System) identifier for this group category."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modifies an existing group category's settings, including auto-assignment rules, group limits, and student signup options."""
 
     _create_group_count = _parse_int(create_group_count)
@@ -21394,7 +21537,7 @@ async def update_group_category(
 
 # Tags: group_categories
 @mcp.tool()
-async def delete_group_category(group_category_id: str = Field(..., description="The unique identifier of the group category to delete.")) -> dict[str, Any]:
+async def delete_group_category(group_category_id: str = Field(..., description="The unique identifier of the group category to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group category and all groups contained within it. Note that protected group categories such as 'communities' and 'student_organized' cannot be deleted."""
 
     # Construct request model with validation
@@ -21433,7 +21576,7 @@ async def delete_group_category(group_category_id: str = Field(..., description=
 async def distribute_unassigned_members(
     group_category_id: str = Field(..., description="The unique identifier of the group category containing the student groups and unassigned members to distribute."),
     sync: bool | None = Field(None, description="Set to true to perform the distribution synchronously and wait for completion. By default, the distribution runs asynchronously in the background."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Distribute all unassigned members evenly across existing student groups within a category. The operation can run asynchronously (default) or synchronously based on your preference."""
 
     # Construct request model with validation
@@ -21481,7 +21624,7 @@ async def create_group_in_category(
     name: str | None = Field(None, description="The name of the group."),
     sis_group_id: str | None = Field(None, description="The SIS ID for the group. Requires manage_sis permission to set."),
     storage_quota_mb: str | None = Field(None, description="The maximum file storage allowed for the group in megabytes. Ignored if the caller lacks manage_storage_quotas permission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new group within a specified group category. Groups can be configured with custom access levels, storage quotas, and SIS integration."""
 
     _storage_quota_mb = _parse_int(storage_quota_mb)
@@ -21528,7 +21671,7 @@ async def list_group_category_users(
     search_term: str | None = Field(None, description="Filter users by partial name match or exact user ID. Minimum 3 characters required."),
     unassigned: bool | None = Field(None, description="When set to true, returns only users that are not yet assigned to the group category."),
     per_page: int | None = Field(None, description="Number of users to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users within a specific group category, with optional filtering by name/ID and assignment status."""
 
     # Construct request model with validation
@@ -21574,7 +21717,7 @@ async def create_group(
     name: str | None = Field(None, description="The display name of the group."),
     sis_group_id: str | None = Field(None, description="A unique identifier for the group in your Student Information System. Requires manage_sis permission to set."),
     storage_quota_mb: str | None = Field(None, description="The maximum file storage capacity for the group in megabytes. This parameter is ignored if you lack the manage_storage_quotas permission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new community group with customizable settings for access control, storage, and identification. All groups created through this endpoint are community groups."""
 
     _storage_quota_mb = _parse_int(storage_quota_mb)
@@ -21618,7 +21761,7 @@ async def create_group(
 async def get_group(
     group_id: str = Field(..., description="The unique identifier of the group to retrieve."),
     include: list[Literal["permissions", "tabs"]] | None = Field(None, description="Optional list of related data to include in the response. Use 'permissions' to include the current user's permissions for this group, or 'tabs' to include the list of configured tabs for the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific group. Returns group data or 401 if the caller lacks permission to access it."""
 
     # Construct request model with validation
@@ -21670,7 +21813,7 @@ async def update_group(
     name: str | None = Field(None, description="The display name of the group."),
     sis_group_id: str | None = Field(None, description="The SIS (Student Information System) identifier for the group. Requires manage_sis permission to set."),
     storage_quota_mb: str | None = Field(None, description="The maximum file storage allowed for the group in megabytes. This parameter is ignored if you lack manage_storage_quotas permission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modifies an existing group's properties including name, description, avatar, membership, and access settings. To set a group avatar, first upload the image file and use the returned attachment ID."""
 
     _avatar_id = _parse_int(avatar_id)
@@ -21712,7 +21855,7 @@ async def update_group(
 
 # Tags: groups
 @mcp.tool()
-async def delete_group(group_id: str = Field(..., description="The unique identifier of the group to delete.")) -> dict[str, Any]:
+async def delete_group(group_id: str = Field(..., description="The unique identifier of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group and removes all associated members. This action cannot be undone."""
 
     # Construct request model with validation
@@ -21751,7 +21894,7 @@ async def delete_group(group_id: str = Field(..., description="The unique identi
 async def list_group_activities(
     group_id: str = Field(..., description="The unique identifier of the group whose activity stream you want to retrieve."),
     per_page: int | None = Field(None, description="The number of activity items to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current user's activity stream for a specific group, showing recent actions and events in paginated results."""
 
     # Construct request model with validation
@@ -21790,7 +21933,7 @@ async def list_group_activities(
 
 # Tags: groups
 @mcp.tool()
-async def get_group_activity_summary(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve the activity stream summary.")) -> dict[str, Any]:
+async def get_group_activity_summary(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve the activity stream summary.")) -> dict[str, Any] | ToolResult:
     """Retrieves a summary of the current user's activity stream within a specific group. This provides an overview of recent group-related activities."""
 
     # Construct request model with validation
@@ -21829,7 +21972,7 @@ async def get_group_activity_summary(group_id: str = Field(..., description="The
 async def get_assignment_override_for_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve the assignment override."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the group override."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the assignment override for a specific group. Returns a redirect to the override if it exists, otherwise returns a 404 error."""
 
     # Construct request model with validation
@@ -21868,7 +22011,7 @@ async def get_assignment_override_for_group(
 async def list_group_collaborations(
     group_id: str = Field(..., description="The unique identifier of the group for which to list collaborations."),
     per_page: int | None = Field(None, description="The maximum number of collaboration items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external tool collaborations accessible to the current user within a specific group. Only returns ExternalToolCollaboration type collaborations."""
 
     # Construct request model with validation
@@ -21910,7 +22053,7 @@ async def list_group_collaborations(
 async def list_conferences_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve conferences."),
     per_page: int | None = Field(None, description="The maximum number of conferences to return per page. Allows control over result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of conferences for the specified group. Results are returned in a JSON object with the key 'conferences' containing the conference array."""
 
     # Construct request model with validation
@@ -21952,7 +22095,7 @@ async def list_conferences_group(
 async def list_content_exports_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to list content exports."),
     per_page: int | None = Field(None, description="The maximum number of content exports to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of past and pending content export jobs for a group, ordered with newest exports first."""
 
     # Construct request model with validation
@@ -22007,7 +22150,7 @@ async def initiate_group_content_export(
     select_module_items: list[str] | None = Field(None, description="List of module item IDs to export. Supported for common_cartridge export type."),
     select_pages: list[str] | None = Field(None, description="List of page IDs to export. Supported for common_cartridge export type."),
     select_rubrics: list[str] | None = Field(None, description="List of rubric IDs to export. Supported for common_cartridge export type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content export job for a group in the specified format. Track progress using the Progress API endpoint linked in the response, then retrieve the download URL once the export completes."""
 
     # Call helper functions
@@ -22053,7 +22196,7 @@ async def initiate_group_content_export(
 async def get_content_export_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content export to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific content export within a group, including its status, configuration, and results."""
 
     # Construct request model with validation
@@ -22092,7 +22235,7 @@ async def get_content_export_group(
 async def list_content_licenses_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve available licenses."),
     per_page: int | None = Field(None, description="The number of license items to return per page. Allows control over result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content licenses available for a specific group. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -22134,7 +22277,7 @@ async def list_content_licenses_group(
 async def list_content_migrations_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to list content migrations."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content migrations for a specific group. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -22190,7 +22333,7 @@ async def initiate_content_migration_group(
     settings_overwrite_quizzes: bool | None = Field(None, description="Whether to replace existing quizzes that have matching identifiers in the source content package."),
     settings_question_bank_id: str | None = Field(None, description="The ID of an existing question bank to import quiz questions into if the content package does not specify a target question bank."),
     settings_source_course_id: str | None = Field(None, description="The source course ID to copy content from. Required when performing a course copy migration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content migration for a group. For migrations requiring file uploads, processing begins after upload completion. For migrations like course copy, processing starts immediately. Use the Progress API endpoint provided in the response to monitor migration status."""
 
     _date_shift_options_day_substitutions_x = _parse_int(date_shift_options_day_substitutions_x)
@@ -22233,7 +22376,7 @@ async def initiate_content_migration_group(
 
 # Tags: content_migrations
 @mcp.tool()
-async def list_migration_systems_group(group_id: str = Field(..., description="The unique identifier of the group for which to list available migration systems.")) -> dict[str, Any]:
+async def list_migration_systems_group(group_id: str = Field(..., description="The unique identifier of the group for which to list available migration systems.")) -> dict[str, Any] | ToolResult:
     """Retrieve the currently available migration system types for a specific group. The list of available migration types may change over time."""
 
     # Construct request model with validation
@@ -22273,7 +22416,7 @@ async def list_migration_issues_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
     per_page: int | None = Field(None, description="Number of migration issues to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of migration issues for a specific content migration within a group. Use this to monitor and track issues encountered during the content migration process."""
 
     # Construct request model with validation
@@ -22316,7 +22459,7 @@ async def get_migration_issue_in_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration that contains the migration issue."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific migration issue to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific migration issue within a content migration for a group. Returns comprehensive data about the individual issue including its status and error information."""
 
     # Construct request model with validation
@@ -22357,7 +22500,7 @@ async def resolve_migration_issue_group(
     content_migration_id: str = Field(..., description="The ID of the content migration that contains the migration issue."),
     id_: str = Field(..., alias="id", description="The ID of the migration issue to update."),
     workflow_state: Literal["active", "resolved"] = Field(..., description="The new workflow state for the migration issue. Set to 'active' to mark the issue as ongoing, or 'resolved' to mark it as completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the workflow state of a migration issue within a content migration. Use this to mark issues as active or resolved during the migration process."""
 
     # Construct request model with validation
@@ -22399,7 +22542,7 @@ async def resolve_migration_issue_group(
 async def get_content_migration_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific content migration within a group. Returns comprehensive data on the migration status, progress, and configuration."""
 
     # Construct request model with validation
@@ -22438,7 +22581,7 @@ async def get_content_migration_group(
 async def update_content_migration_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing content migration for a group. Most settings cannot be changed after the migration process has started, but you can supply new file upload values to retry a failed upload."""
 
     # Construct request model with validation
@@ -22483,7 +22626,7 @@ async def list_discussion_topics_group(
     search_term: str | None = Field(None, description="Return only topics whose titles partially match this search term."),
     exclude_context_module_locked_topics: bool | None = Field(None, description="If true, excludes topics locked by module progression for students. Defaults to false."),
     per_page: int | None = Field(None, description="The number of items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of discussion topics for a group. Supports filtering, searching, and sorting with optional metadata about dates, sections, and assignment overrides."""
 
     # Construct request model with validation
@@ -22544,7 +22687,7 @@ async def create_discussion_topic_group(
     sort_by_rating: bool | None = Field(None, description="Sort discussion entries by rating score in descending order. Only applies when allow_rating is enabled."),
     specific_sections: str | None = Field(None, description="Limit this discussion to specific course sections using a comma-separated list of section IDs. Use 'all' or omit this parameter to make the discussion available to all sections. Only applicable for course announcements, not group discussions."),
     title: str | None = Field(None, description="The title of the discussion topic."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new discussion topic in a group or course. Optionally configure as an assignment, announcement, or podcast-enabled discussion with customizable posting rules and visibility settings."""
 
     _group_category_id = _parse_int(group_category_id)
@@ -22589,7 +22732,7 @@ async def create_discussion_topic_group(
 async def reorder_pinned_discussion_topics_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the pinned discussion topics to reorder."),
     order: list[int] = Field(..., description="An ordered array of pinned discussion topic IDs in the desired sequence. All pinned topics for the group must be included, specified as comma-separated IDs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder pinned discussion topics within a group by specifying their desired sequence. All pinned topics must be included in the reorder request."""
 
     # Construct request model with validation
@@ -22633,7 +22776,7 @@ async def get_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
     include: list[Literal["all_dates", "sections", "sections_user_count", "overrides"]] | None = Field(None, description="Optional array of additional data to include in the response. Use 'all_dates' to include all assignment dates for graded discussions, 'sections' to include associated course sections, 'sections_user_count' to include user counts per section or total users in the topic's context, and 'overrides' to include assignment overrides."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific discussion topic within a group, including optional metadata such as assignment dates, section associations, and assignment overrides."""
 
     # Construct request model with validation
@@ -22694,7 +22837,7 @@ async def update_discussion_topic_group(
     sort_by_rating: bool | None = Field(None, description="Sort discussion entries by rating in descending order. Only applies when allow_rating is enabled."),
     specific_sections: str | None = Field(None, description="Restrict the discussion to specific course sections using a comma-separated list of section IDs. Use 'all' or omit this parameter to make the discussion available to all sections. Only applicable for course announcements, not group discussions."),
     title: str | None = Field(None, description="The title or subject of the discussion topic."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing discussion topic within a course or group, including settings for ratings, posting restrictions, assignment linkage, and visibility options."""
 
     _group_category_id = _parse_int(group_category_id)
@@ -22738,7 +22881,7 @@ async def update_discussion_topic_group(
 async def delete_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a discussion topic from a group. If the topic is associated with an assignment, the assignment will also be deleted."""
 
     # Construct request model with validation
@@ -22778,7 +22921,7 @@ async def list_discussion_entries_group(
     group_id: str = Field(..., description="The ID of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The ID of the discussion topic to retrieve entries from."),
     per_page: int | None = Field(None, description="Number of top-level entries to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve paginated top-level entries from a discussion topic, including the 10 most recent replies for each entry. May require the user to have posted in the topic first."""
 
     # Construct request model with validation
@@ -22822,7 +22965,7 @@ async def create_discussion_entry_group(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic where the entry will be posted."),
     attachment: str | None = Field(None, description="An optional file attachment to include with the entry. Attachments larger than 1 kilobyte are subject to quota restrictions."),
     message: str | None = Field(None, description="The text content of the entry being posted to the discussion topic."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new entry in a discussion topic within a group. Returns the created entry with all metadata and details."""
 
     # Construct request model with validation
@@ -22867,7 +23010,7 @@ async def rate_discussion_entry_group(
     topic_id: str = Field(..., description="The ID of the discussion topic containing the entry to rate."),
     entry_id: str = Field(..., description="The ID of the discussion entry to rate."),
     rating: str | None = Field(None, description="A rating value to set on this entry. Only 0 and 1 are accepted, where 0 typically indicates disapproval and 1 indicates approval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rate a discussion entry within a group topic. Accepts a rating value of 0 or 1 to indicate approval or disapproval."""
 
     _rating = _parse_int(rating)
@@ -22914,7 +23057,7 @@ async def mark_discussion_entry_as_read_in_group(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the discussion entry to mark as read."),
     forced_read_state: bool | None = Field(None, description="Optional boolean flag to set the entry's forced read state. When specified, overrides the read status; when omitted, no change is made to the forced read state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion entry as read within a group discussion topic. Optionally set the entry's forced read state."""
 
     # Construct request model with validation
@@ -22958,7 +23101,7 @@ async def mark_discussion_entry_unread_group(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the discussion entry to mark as unread."),
     forced_read_state: bool | None = Field(None, description="Optional boolean flag to set the entry's forced read state. When specified, overrides the unread marking behavior; when omitted, no change is applied to the forced read state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion entry as unread in a group discussion topic. Optionally set the entry's forced read state."""
 
     # Construct request model with validation
@@ -23002,7 +23145,7 @@ async def list_discussion_replies_group(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the top-level entry whose replies should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of replies to return per page. Replies are ordered newest-first by creation timestamp.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve paginated replies to a top-level entry in a group discussion topic. May require the user to have posted in the topic first; returns 403 Forbidden if this requirement is not met."""
 
     # Construct request model with validation
@@ -23047,7 +23190,7 @@ async def create_discussion_reply_group(
     entry_id: str = Field(..., description="The unique identifier of the entry to which the reply is being added."),
     attachment: str | None = Field(None, description="An optional file attachment to include with the reply. Attachments larger than 1 kilobyte are subject to quota restrictions."),
     message: str | None = Field(None, description="The text content of the reply message."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a reply to a discussion topic entry within a group. Returns the created reply object on success. Note: Some topics may require the user to have posted an initial entry before replying."""
 
     # Construct request model with validation
@@ -23092,7 +23235,7 @@ async def update_discussion_entry_group(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
     id_: str = Field(..., alias="id", description="The unique identifier of the entry to update."),
     message: str | None = Field(None, description="The updated text content for the discussion entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing discussion entry within a group topic. The entry must have been created by the current user, or the current user must have admin rights to the discussion; otherwise a 401 error is returned."""
 
     # Construct request model with validation
@@ -23135,7 +23278,7 @@ async def delete_discussion_entry_group(
     group_id: str = Field(..., description="The ID of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The ID of the discussion topic containing the entry to delete."),
     id_: str = Field(..., alias="id", description="The ID of the entry to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a discussion entry from a group discussion topic. The entry author or an admin can delete entries; deletion clears the message content and user ID while marking the entry as deleted."""
 
     # Construct request model with validation
@@ -23176,7 +23319,7 @@ async def list_discussion_entries_group_by_ids(
     topic_id: str = Field(..., description="The unique identifier of the discussion topic from which to retrieve entries."),
     ids: list[str] | None = Field(None, description="Optional list of specific entry IDs to retrieve. Entries are returned in ascending ID order (smallest ID first). If not provided, entries are returned based on pagination settings."),
     per_page: int | None = Field(None, description="Number of entries to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of discussion entries from a specific topic within a group. May require the user to have posted in the topic first, returning a 403 Forbidden response if this requirement is not met."""
 
     # Construct request model with validation
@@ -23221,7 +23364,7 @@ async def list_discussion_entries_group_by_ids(
 async def mark_discussion_topic_as_read_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as read."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic as read for a group. This updates the read status of the initial topic text without requiring any request body."""
 
     # Construct request model with validation
@@ -23260,7 +23403,7 @@ async def mark_discussion_topic_as_read_group(
 async def mark_discussion_topic_unread(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as unread."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic as unread in a group. This resets the read status of the initial topic text, allowing it to appear as unread in the user's discussion list."""
 
     # Construct request model with validation
@@ -23300,7 +23443,7 @@ async def mark_discussion_entries_as_read(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as read."),
     forced_read_state: bool | None = Field(None, description="Optional boolean flag to set the forced_read_state for all entries in the discussion topic. When omitted, the forced_read_state remains unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic and all its entries as read for a group. Optionally set the forced_read_state for all entries."""
 
     # Construct request model with validation
@@ -23343,7 +23486,7 @@ async def mark_all_discussion_entries_as_unread(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as unread."),
     forced_read_state: bool | None = Field(None, description="Optional boolean flag to set the forced read state for all entries. When specified, all entries will have their forced_read_state set to this value; when omitted, no change is made to the forced read state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a discussion topic and all its entries as unread for a group. Optionally set the forced read state for all entries."""
 
     # Construct request model with validation
@@ -23385,7 +23528,7 @@ async def mark_all_discussion_entries_as_unread(
 async def subscribe_to_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to subscribe to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe to a discussion topic within a group to receive notifications about new entries and updates."""
 
     # Construct request model with validation
@@ -23424,7 +23567,7 @@ async def subscribe_to_discussion_topic_group(
 async def unsubscribe_from_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to unsubscribe from."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unsubscribe from a discussion topic to stop receiving notifications about new entries. Returns 204 No Content on success."""
 
     # Construct request model with validation
@@ -23463,7 +23606,7 @@ async def unsubscribe_from_discussion_topic_group(
 async def get_discussion_topic_group_view(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete cached structure of a discussion topic including all entries, participants, and metadata. May require the user to have posted in the topic; returns 503 if the cached structure is not yet available."""
 
     # Construct request model with validation
@@ -23502,7 +23645,7 @@ async def get_discussion_topic_group_view(
 async def list_external_feeds_group(
     group_id: str = Field(..., description="The unique identifier of the group or course for which to retrieve external feeds."),
     per_page: int | None = Field(None, description="The maximum number of external feeds to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of external feeds associated with a specific course or group. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -23546,7 +23689,7 @@ async def create_external_feed_group(
     url: str = Field(..., description="The URL of the external RSS or Atom feed to subscribe to."),
     header_match: bool | None = Field(None, description="If provided, only feed entries containing this string in their title will be imported into the group."),
     verbosity: Literal["full", "truncate", "link_only"] | None = Field(None, description="Controls the verbosity level of imported feed entries. Determines how much content is retained from each feed item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new external feed for a course or group by subscribing to an RSS or Atom feed URL. Optionally filter imported entries by title and control the verbosity of imported content."""
 
     # Construct request model with validation
@@ -23589,7 +23732,7 @@ async def create_external_feed_group(
 async def delete_external_feed(
     group_id: str = Field(..., description="The unique identifier of the group containing the external feed."),
     external_feed_id: str = Field(..., description="The unique identifier of the external feed to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes an external feed from a group. This action cannot be undone."""
 
     # Construct request model with validation
@@ -23631,7 +23774,7 @@ async def list_external_tools_group(
     selectable: bool | None = Field(None, description="When true, returns only tools configured as selectable for end users."),
     include_parents: bool | None = Field(None, description="When true, includes external tools installed in all parent accounts above the current group context."),
     per_page: int | None = Field(None, description="Number of tools to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external tools available in a group context. Optionally filter by name, selectability, and include tools from parent accounts."""
 
     # Construct request model with validation
@@ -23670,7 +23813,7 @@ async def list_external_tools_group(
 
 # Tags: groups
 @mcp.tool()
-async def upload_file_group(group_id: str = Field(..., description="The unique identifier of the group where the file will be uploaded.")) -> dict[str, Any]:
+async def upload_file_group(group_id: str = Field(..., description="The unique identifier of the group where the file will be uploaded.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a group. This initiates the file upload workflow; refer to the File Upload Documentation for complete details on multi-step uploads."""
 
     # Construct request model with validation
@@ -23706,7 +23849,7 @@ async def upload_file_group(group_id: str = Field(..., description="The unique i
 
 # Tags: files
 @mcp.tool()
-async def get_group_quota(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve quota information.")) -> dict[str, Any]:
+async def get_group_quota(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve quota information.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total and used storage quota for a group. Use this to monitor storage consumption and capacity limits."""
 
     # Construct request model with validation
@@ -23746,7 +23889,7 @@ async def get_file_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the file."),
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
     include: list[Literal["user"]] | None = Field(None, description="Optional array of additional metadata to include in the response. Specify 'user' to include uploader and last editor information, or 'usage_rights' to include copyright and license details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific file attachment from a group with optional metadata about the uploader and usage rights."""
 
     # Construct request model with validation
@@ -23791,7 +23934,7 @@ async def get_file_group(
 async def list_folders_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the folders to list."),
     per_page: int | None = Field(None, description="The maximum number of folders to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all folders within a group, including all subfolders as a flat list."""
 
     # Construct request model with validation
@@ -23836,7 +23979,7 @@ async def create_folder_group(
     hidden: bool | None = Field(None, description="Whether to hide the folder from standard views."),
     locked: bool | None = Field(None, description="Whether to lock the folder to prevent modifications."),
     position: str | None = Field(None, description="The sort position of the folder in the group's folder list. Higher values appear later in the sort order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new folder within the specified group. Optionally configure visibility, lock status, and sort position."""
 
     _position = _parse_int(position)
@@ -23878,7 +24021,7 @@ async def create_folder_group(
 
 # Tags: files
 @mcp.tool()
-async def list_folder_path_group(group_id: str = Field(..., description="The unique identifier of the group containing the folder path to resolve.")) -> dict[str, Any]:
+async def list_folder_path_group(group_id: str = Field(..., description="The unique identifier of the group containing the folder path to resolve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete folder hierarchy for a given path within a group. Returns all folders from the root to the specified folder, or just the root folder if an empty path is provided."""
 
     # Construct request model with validation
@@ -23917,7 +24060,7 @@ async def list_folder_path_group(group_id: str = Field(..., description="The uni
 async def get_folder_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the folder."),
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to retrieve. Use 'root' to get the root folder for the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific folder within a group. Use 'root' as the folder ID to get the root folder for the group."""
 
     # Construct request model with validation
@@ -23953,7 +24096,7 @@ async def get_folder_group(
 
 # Tags: pages
 @mcp.tool()
-async def get_group_front_page(group_id: str = Field(..., description="The unique identifier of the group whose front page content should be retrieved.")) -> dict[str, Any]:
+async def get_group_front_page(group_id: str = Field(..., description="The unique identifier of the group whose front page content should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the front page content for a specific group. Returns the formatted front page display for the given group."""
 
     # Construct request model with validation
@@ -23996,7 +24139,7 @@ async def update_group_front_page(
     wiki_page_notify_of_update: bool | None = Field(None, description="Whether to notify group participants when this page is modified."),
     wiki_page_published: bool | None = Field(None, description="Whether the page is published and visible (true) or in draft state (false)."),
     wiki_page_title: str | None = Field(None, description="The title for the front page. Changing the title will update the page's URL, which will be returned in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update or create a group's front page with custom title, content, and publishing settings. Changes to the page title will update its URL."""
 
     # Construct request model with validation
@@ -24038,7 +24181,7 @@ async def update_group_front_page(
 async def send_group_invitations(
     group_id: str = Field(..., description="The unique identifier of the group to which invitations will be sent."),
     invitees: list[str] = Field(..., description="A list of email addresses to receive group invitations. Order is not significant. Each entry must be a valid email address."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends invitations to specified email addresses, allowing recipients to join the group. Each invitee will receive a notification with instructions to accept and join."""
 
     # Construct request model with validation
@@ -24082,7 +24225,7 @@ async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to list."),
     filter_states: list[Literal["accepted", "invited", "requested"]] | None = Field(None, description="Filter results to only include memberships with specific workflow states. When omitted, all membership states are returned."),
     per_page: int | None = Field(None, description="The number of members to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of members belonging to a specific group. Results can be filtered by membership workflow states."""
 
     # Construct request model with validation
@@ -24124,7 +24267,7 @@ async def list_group_members(
 
 # Tags: groups
 @mcp.tool()
-async def join_group(group_id: str = Field(..., description="The unique identifier of the group to join or request membership for.")) -> dict[str, Any]:
+async def join_group(group_id: str = Field(..., description="The unique identifier of the group to join or request membership for.")) -> dict[str, Any] | ToolResult:
     """Join a group or request membership depending on the group's join settings. If a membership or join request already exists, it is returned without modification."""
 
     # Construct request model with validation
@@ -24163,7 +24306,7 @@ async def join_group(group_id: str = Field(..., description="The unique identifi
 async def get_group_membership(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership."),
     membership_id: str = Field(..., description="The unique identifier of the membership record to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific group membership by its ID. Returns detailed information about the membership relationship between a user and a group."""
 
     # Construct request model with validation
@@ -24204,7 +24347,7 @@ async def update_group_membership(
     membership_id: str = Field(..., description="The unique identifier of the membership record to update."),
     moderator: str | None = Field(None, description="Grant or revoke moderator rights for the group member. Set to true to promote to moderator or false to remove moderator status."),
     workflow_state: Literal["accepted"] | None = Field(None, description="The desired state of the membership. Use 'accepted' to approve a pending membership request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a group membership by accepting a membership request or modifying moderator rights for an existing member."""
 
     # Construct request model with validation
@@ -24246,7 +24389,7 @@ async def update_group_membership(
 async def leave_group(
     group_id: str = Field(..., description="The unique identifier of the group to leave."),
     membership_id: str = Field(..., description="The unique identifier of the membership record to remove, or use 'self' to reference your own membership."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove yourself from a group membership. Note that some groups (such as course groups created by teachers) may not allow members to leave."""
 
     # Construct request model with validation
@@ -24289,7 +24432,7 @@ async def list_pages(
     search_term: str | None = Field(None, description="Filter pages by partial title match. Returns pages whose titles contain this search term."),
     published: bool | None = Field(None, description="Filter pages by publication status. When true, returns only published pages; when false, excludes published pages; when omitted, returns all pages regardless of status."),
     per_page: int | None = Field(None, description="Maximum number of pages to return per request. Useful for controlling response size and implementing pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of wiki pages associated with a group or course. Supports filtering by publication status and search terms, with customizable sorting and pagination."""
 
     # Construct request model with validation
@@ -24336,7 +24479,7 @@ async def create_wiki_page_group(
     wiki_page_front_page: bool | None = Field(None, description="If true, sets this page as the front page of the wiki (only applies to published pages)."),
     wiki_page_notify_of_update: bool | None = Field(None, description="If true, all participants will receive notifications when this page is created or updated."),
     wiki_page_published: bool | None = Field(None, description="If true, the page is published and visible to users; if false, the page is saved as a draft."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new wiki page within a group. The page can be published immediately or saved as a draft, with configurable editing permissions and optional notifications."""
 
     # Construct request model with validation
@@ -24379,7 +24522,7 @@ async def create_wiki_page_group(
 async def get_page(
     group_id: str = Field(..., description="The unique identifier of the group containing the wiki page."),
     url: str = Field(..., description="The URL path or identifier of the wiki page to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the content of a specific wiki page within a group. Returns the page content and metadata for the requested URL."""
 
     # Construct request model with validation
@@ -24424,7 +24567,7 @@ async def update_wiki_page_group(
     wiki_page_notify_of_update: bool | None = Field(None, description="Set to true to notify participants when this page is updated."),
     wiki_page_published: bool | None = Field(None, description="Set to true to publish the page, or false to save it as a draft."),
     wiki_page_title: str | None = Field(None, description="The display title for the wiki page. Changing the title will automatically update the page's URL."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update or create a wiki page within a group, including its title, content, publishing status, and access permissions. Changing a page's title will update its URL, which is returned in the response."""
 
     # Construct request model with validation
@@ -24466,7 +24609,7 @@ async def update_wiki_page_group(
 async def delete_wiki_page(
     group_id: str = Field(..., description="The unique identifier of the group containing the wiki page to delete."),
     url: str = Field(..., description="The URL or path identifier of the wiki page to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a wiki page from a group. This operation permanently removes the specified page from the group's wiki."""
 
     # Construct request model with validation
@@ -24506,7 +24649,7 @@ async def list_page_revisions_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL or path identifier of the page whose revisions you want to list."),
     per_page: int | None = Field(None, description="The number of revision items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of revisions for a specific page within a group. You must have update rights on the page to access its revision history."""
 
     # Construct request model with validation
@@ -24549,7 +24692,7 @@ async def get_page_revision_latest_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL or path identifier of the page whose latest revision should be retrieved."),
     summary: bool | None = Field(None, description="When enabled, excludes the page content from the response and returns only metadata about the revision."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metadata and optionally content of the latest revision for a specific page. Requires edit rights to access historic page versions."""
 
     # Construct request model with validation
@@ -24593,7 +24736,7 @@ async def get_page_revision_group(
     url: str = Field(..., description="The URL path or identifier of the page."),
     revision_id: str = Field(..., description="The unique identifier of the specific revision to retrieve."),
     summary: bool | None = Field(None, description="When enabled, excludes the page content from the response and returns only metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metadata and content of a specific revision of a page. Requires edit rights to access historic versions."""
 
     # Construct request model with validation
@@ -24636,7 +24779,7 @@ async def revert_page_to_revision_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page to revert."),
     revision_id: str = Field(..., description="The revision ID to revert to. Must be a valid revision ID from the page's revision history."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revert a wiki page to a previous revision. Use the list revisions API to identify available revisions for the page."""
 
     _revision_id = _parse_int(revision_id)
@@ -24677,7 +24820,7 @@ async def revert_page_to_revision_group(
 async def check_group_permissions(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve permission information."),
     permissions: list[str] | None = Field(None, description="Optional list of specific permission names to validate against the authenticated user's role in the group. Permission names correspond to those defined in role creation. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves permission information for the authenticated user within a specified group. Optionally validates specific permissions against the user's role."""
 
     # Construct request model with validation
@@ -24722,7 +24865,7 @@ async def check_group_permissions(
 async def list_potential_collaborators(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve potential collaborators."),
     per_page: int | None = Field(None, description="The maximum number of items to return per page. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users who can be added as collaborators to a group. For courses, this includes all enrolled users; for groups, this includes existing group members plus course administrators."""
 
     # Construct request model with validation
@@ -24764,7 +24907,7 @@ async def list_potential_collaborators(
 async def preview_group_html(
     group_id: str = Field(..., description="The unique identifier of the group whose processing rules should be applied to the HTML content."),
     html: str | None = Field(None, description="The HTML content to process and preview. If not provided, an empty or default preview will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Preview HTML content after processing with group-specific rules and transformations. Use this to validate how HTML will be rendered within the group context."""
 
     # Construct request model with validation
@@ -24808,7 +24951,7 @@ async def list_group_tabs(
     group_id: str = Field(..., description="The unique identifier of the group."),
     include: list[Literal["external"]] | None = Field(None, description="Optionally include external tool tabs in the returned list. Note: This parameter only affects courses, not groups."),
     per_page: int | None = Field(None, description="The number of items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of navigation tabs available for a group. Optionally include external tool tabs in the results."""
 
     # Construct request model with validation
@@ -24856,7 +24999,7 @@ async def assign_file_usage_rights(
     usage_rights_use_justification: Literal["own_copyright", "used_by_permission", "fair_use", "public_domain", "creative_commons"] = Field(..., description="The intellectual property justification for using the files in Canvas."),
     folder_ids: list[str] | None = Field(None, description="List of folder IDs to search for files to assign usage rights to. New files uploaded to these folders will not automatically inherit these rights. Order is not significant."),
     publish: bool | None = Field(None, description="Whether to publish the files or folders upon saving, provided that usage rights have been specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign copyright and license information to files or files within folders. Optionally publish the files upon saving if usage rights are specified."""
 
     # Construct request model with validation
@@ -24899,7 +25042,7 @@ async def remove_usage_rights(
     group_id: str = Field(..., description="The unique identifier of the group containing the files and folders from which usage rights will be removed."),
     file_ids: list[str] = Field(..., description="List of file identifiers from which to remove usage rights. At least one file_id or folder_id must be provided."),
     folder_ids: list[str] | None = Field(None, description="List of folder identifiers. Usage rights will be removed from all files contained within these folders. At least one file_id or folder_id must be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove copyright and license information from specified files and folders within a group. This operation clears all associated usage rights metadata from the targeted resources."""
 
     # Construct request model with validation
@@ -24947,7 +25090,7 @@ async def list_group_users(
     search_term: str | None = Field(None, description="Filter users by partial name match or exact user ID. Minimum 3 characters required."),
     include: list[Literal["avatar_url"]] | None = Field(None, description="Additional user data to include in the response. Specify which optional fields to return."),
     per_page: int | None = Field(None, description="Number of users to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users belonging to a specific group. Optionally filter by name or user ID and customize the response with additional user data."""
 
     # Construct request model with validation
@@ -24992,7 +25135,7 @@ async def list_group_users(
 async def get_group_membership_user(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership."),
     user_id: str = Field(..., description="The unique identifier of the user whose membership in the group should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific group membership record for a user within a group. Returns membership details including status and associated metadata."""
 
     # Construct request model with validation
@@ -25033,7 +25176,7 @@ async def update_group_membership_user(
     user_id: str = Field(..., description="The unique identifier of the user whose membership is being updated."),
     moderator: str | None = Field(None, description="Grant or revoke moderator rights for the user in the group. Set to true to grant moderator status, false to remove it."),
     workflow_state: Literal["accepted"] | None = Field(None, description="The new workflow state for the membership. Use 'accepted' to approve a pending membership request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a group membership by accepting a membership request or modifying moderator rights for a user."""
 
     # Construct request model with validation
@@ -25075,7 +25218,7 @@ async def update_group_membership_user(
 async def remove_user_from_group(
     group_id: str = Field(..., description="The unique identifier of the group from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to remove from the group. Use 'self' to refer to the currently authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a group. Note that some groups (such as course groups created by teachers) may not allow users to leave. You can use 'self' as the user_id to remove the current authenticated user."""
 
     # Construct request model with validation
@@ -25111,7 +25254,7 @@ async def remove_user_from_group(
 
 # Tags: outcomes
 @mcp.tool()
-async def get_outcome(id_: str = Field(..., alias="id", description="The unique identifier of the outcome to retrieve.")) -> dict[str, Any]:
+async def get_outcome(id_: str = Field(..., alias="id", description="The unique identifier of the outcome to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific outcome by its ID. Returns comprehensive information about the requested outcome."""
 
     # Construct request model with validation
@@ -25156,7 +25299,7 @@ async def update_outcome(
     mastery_points: str | None = Field(None, description="The point threshold at which a student is considered to have mastered the embedded rubric criterion. Defaults to the maximum points in the highest rating if not specified."),
     title: str | None = Field(None, description="The primary name or identifier for the outcome."),
     vendor_guid: str | None = Field(None, description="A custom globally unique identifier for linking to external learning standards or systems."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing outcome by updating its properties, calculation method, or embedded rubric ratings. Unspecified fields remain unchanged, and new ratings completely replace any existing rubric criterion."""
 
     _calculation_int = _parse_int(calculation_int)
@@ -25201,7 +25344,7 @@ async def update_outcome(
 async def list_planner_items(
     context_codes: list[str] | None = Field(None, description="Filter results by specific course and group contexts. Specify as context type followed by underscore and ID (e.g., course_42, group_123). If omitted, returns items from all contexts associated with the current user. Concluded courses are excluded unless included in the request."),
     per_page: int | None = Field(None, description="Number of items to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of planner items for the current user, including courses, assignments, discussion topics, and planner notes with their visibility settings and submission status."""
 
     # Construct request model with validation
@@ -25242,7 +25385,7 @@ async def list_planner_items(
 
 # Tags: planner_override
 @mcp.tool()
-async def list_planner_overrides() -> dict[str, Any]:
+async def list_planner_overrides() -> dict[str, Any] | ToolResult:
     """Retrieve all planner overrides configured for the current user. Planner overrides allow customization of planning behavior and preferences."""
 
     # Extract parameters for API call
@@ -25274,7 +25417,7 @@ async def override_planner_item(
     marked_complete: bool | None = Field(None, description="Mark the item as completed in the planner when set to true."),
     plannable_id: str | None = Field(None, description="The unique identifier of the planner item being overridden."),
     plannable_type: Literal["announcement", "assignment", "discussion_topic", "quiz", "wiki_page", "planner_note"] | None = Field(None, description="The category of the item being overridden. Determines what type of planner content is affected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a planner override to customize how a specific item appears in the user's planner. Use this to dismiss items from the opportunities list or mark them as completed."""
 
     _plannable_id = _parse_int(plannable_id)
@@ -25315,7 +25458,7 @@ async def override_planner_item(
 
 # Tags: planner_override
 @mcp.tool()
-async def get_planner_override(id_: str = Field(..., alias="id", description="The unique identifier of the planner override to retrieve.")) -> dict[str, Any]:
+async def get_planner_override(id_: str = Field(..., alias="id", description="The unique identifier of the planner override to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific planner override by ID for the current user. Use this to view details of an existing override configuration."""
 
     # Construct request model with validation
@@ -25355,7 +25498,7 @@ async def update_planner_override(
     id_: str = Field(..., alias="id", description="The unique identifier of the planner override to update."),
     dismissed: str | None = Field(None, description="Controls whether the planner item appears in the opportunities list. Set to true to hide the item from view."),
     marked_complete: str | None = Field(None, description="Controls whether the planner item is marked as completed. Set to true to mark the item as done."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a planner override to control its visibility and completion status for the current user. Allows dismissing items from the opportunities list or marking them as completed."""
 
     # Construct request model with validation
@@ -25394,7 +25537,7 @@ async def update_planner_override(
 
 # Tags: planner_override
 @mcp.tool()
-async def delete_override(id_: str = Field(..., alias="id", description="The unique identifier of the planner override to delete.")) -> dict[str, Any]:
+async def delete_override(id_: str = Field(..., alias="id", description="The unique identifier of the planner override to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a planner override for the current user. This removes any custom scheduling rules or exceptions previously set for the specified override."""
 
     # Construct request model with validation
@@ -25433,7 +25576,7 @@ async def delete_override(id_: str = Field(..., alias="id", description="The uni
 async def list_notes(
     context_codes: list[str] | None = Field(None, description="Filter notes by one or more context codes. Each code specifies a context type (course, user, etc.) and its ID using the format: type_id. If omitted, returns notes from all contexts the user has access to. Including the user's own context code will include personal notes not tied to any course."),
     per_page: int | None = Field(None, description="Number of notes to return per page for pagination. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of planner notes for the user across specified contexts or all accessible contexts. Notes can be associated with courses or the user's personal context."""
 
     # Construct request model with validation
@@ -25481,7 +25624,7 @@ async def create_planner_note(
     linked_object_type: str | None = Field(None, description="The type of learning object being linked to this planner note. Must be used with linked_object_id and course_id."),
     title: str | None = Field(None, description="The title of the planner note. If not provided and a learning object is linked, the learning object's title will be used."),
     todo_date: str | None = Field(None, description="The date when this planner note should appear in the planner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a planner note for the current user. Optionally associate it with a course, link it to a learning object, and set when it should appear in the planner."""
 
     _course_id = _parse_int(course_id)
@@ -25523,7 +25666,7 @@ async def create_planner_note(
 
 # Tags: planner_note
 @mcp.tool()
-async def get_planner_note(id_: str = Field(..., alias="id", description="The unique identifier of the planner note to retrieve.")) -> dict[str, Any]:
+async def get_planner_note(id_: str = Field(..., alias="id", description="The unique identifier of the planner note to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific planner note by ID for the current user. Returns the full details of the requested planner note."""
 
     # Construct request model with validation
@@ -25565,7 +25708,7 @@ async def update_planner_note(
     details: str | None = Field(None, description="The text content of the planner note."),
     title: str | None = Field(None, description="The title of the planner note."),
     todo_date: str | None = Field(None, description="The date when this planner note should appear in the planner. Specify the date in year-month-day format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a planner note for the current user. Modify the title, details, associated course, or scheduled date of an existing planner note."""
 
     _course_id = _parse_int(course_id)
@@ -25606,7 +25749,7 @@ async def update_planner_note(
 
 # Tags: planner_note
 @mcp.tool()
-async def delete_note(id_: str = Field(..., alias="id", description="The unique identifier of the planner note to delete.")) -> dict[str, Any]:
+async def delete_note(id_: str = Field(..., alias="id", description="The unique identifier of the planner note to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a planner note for the current user. Permanently removes the specified note from the planner."""
 
     # Construct request model with validation
@@ -25642,7 +25785,7 @@ async def delete_note(id_: str = Field(..., alias="id", description="The unique 
 
 # Tags: poll_sessions
 @mcp.tool()
-async def list_closed_poll_sessions() -> dict[str, Any]:
+async def list_closed_poll_sessions() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all closed poll sessions that the current user has access to. This operation allows you to view historical poll sessions that are no longer active."""
 
     # Extract parameters for API call
@@ -25669,7 +25812,7 @@ async def list_closed_poll_sessions() -> dict[str, Any]:
 
 # Tags: poll_sessions
 @mcp.tool()
-async def list_poll_sessions() -> dict[str, Any]:
+async def list_poll_sessions() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all opened poll sessions available to the current user. Use this to discover active polls that can be participated in."""
 
     # Extract parameters for API call
@@ -25696,7 +25839,7 @@ async def list_poll_sessions() -> dict[str, Any]:
 
 # Tags: polls
 @mcp.tool()
-async def list_polls() -> dict[str, Any]:
+async def list_polls() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of polls for the current user. Use this to display available polls or iterate through all polls with pagination support."""
 
     # Extract parameters for API call
@@ -25726,7 +25869,7 @@ async def list_polls() -> dict[str, Any]:
 async def create_poll(
     polls_question: list[str] = Field(..., description="The question or title for the poll. This is the main prompt that poll respondents will answer."),
     polls_description: list[str] | None = Field(None, description="A brief description or instructions for the poll. Provide context or guidance for poll respondents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new poll for the current user with a question and optional description or instructions."""
 
     # Construct request model with validation
@@ -25765,7 +25908,7 @@ async def create_poll(
 
 # Tags: polls
 @mcp.tool()
-async def get_poll(id_: str = Field(..., alias="id", description="The unique identifier of the poll to retrieve.")) -> dict[str, Any]:
+async def get_poll(id_: str = Field(..., alias="id", description="The unique identifier of the poll to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific poll by its unique identifier. Returns the complete poll object including all associated metadata."""
 
     # Construct request model with validation
@@ -25805,7 +25948,7 @@ async def update_poll(
     id_: str = Field(..., alias="id", description="The unique identifier of the poll to update."),
     polls_question: list[str] = Field(..., description="The main question or title of the poll that respondents will answer."),
     polls_description: list[str] | None = Field(None, description="A brief description or instructions for the poll to help respondents understand its purpose."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing poll belonging to the current user. Modify the poll's question and optional description."""
 
     # Construct request model with validation
@@ -25844,7 +25987,7 @@ async def update_poll(
 
 # Tags: polls
 @mcp.tool()
-async def delete_poll(id_: str = Field(..., alias="id", description="The unique identifier of the poll to delete.")) -> dict[str, Any]:
+async def delete_poll(id_: str = Field(..., alias="id", description="The unique identifier of the poll to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a poll by its ID. Returns a 204 No Content response on successful deletion."""
 
     # Construct request model with validation
@@ -25883,7 +26026,7 @@ async def delete_poll(id_: str = Field(..., alias="id", description="The unique 
 async def list_poll_choices(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choices to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of poll choices to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all choices available in a specific poll. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -25927,7 +26070,7 @@ async def add_poll_choice(
     poll_choices_text: list[str] = Field(..., description="The text content displayed for this poll choice to respondents."),
     poll_choices_is_correct: list[bool] | None = Field(None, description="Whether this poll choice represents a correct answer. Used for quiz-style polls to mark correct responses."),
     poll_choices_position: list[int] | None = Field(None, description="The display order position for this choice relative to other choices in the same poll. Lower values appear first."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new choice option to a poll. The choice includes descriptive text and optional metadata for correct answer marking and display ordering."""
 
     # Construct request model with validation
@@ -25970,7 +26113,7 @@ async def add_poll_choice(
 async def get_poll_choice(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choice."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll choice to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific poll choice by its ID within a poll. Returns detailed information about the selected poll choice option."""
 
     # Construct request model with validation
@@ -26012,7 +26155,7 @@ async def update_poll_choice(
     poll_choices_text: list[str] = Field(..., description="The descriptive text content of the poll choice that will be displayed to users."),
     poll_choices_is_correct: list[bool] | None = Field(None, description="Whether this poll choice should be marked as correct. Defaults to false if not specified."),
     poll_choices_position: list[int] | None = Field(None, description="The display order of this poll choice relative to its sibling choices. Lower values appear first."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing poll choice within a poll. Modify the choice text, correctness status, and display order."""
 
     # Construct request model with validation
@@ -26054,7 +26197,7 @@ async def update_poll_choice(
 async def delete_poll_choice(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choice to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll choice to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific poll choice from a poll. Returns a 204 No Content response on successful deletion."""
 
     # Construct request model with validation
@@ -26093,7 +26236,7 @@ async def delete_poll_choice(
 async def list_poll_sessions_by_poll(
     poll_id: str = Field(..., description="The unique identifier of the poll for which to retrieve sessions."),
     per_page: int | None = Field(None, description="The maximum number of poll sessions to return per page. Allows control over result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of poll sessions associated with a specific poll. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -26137,7 +26280,7 @@ async def create_poll_session(
     poll_sessions_course_id: list[int] = Field(..., description="The ID(s) of the course(s) this poll session is associated with. Provided as an array to support multi-course associations."),
     poll_sessions_course_section_id: list[int] | None = Field(None, description="The ID(s) of the course section(s) this poll session is associated with. Provided as an array to support multi-section associations. Optional if the session applies to the entire course."),
     poll_sessions_has_public_results: list[bool] | None = Field(None, description="Whether poll results are viewable by students. Provided as an array to support multiple visibility configurations if needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new poll session for a specific poll, associating it with a course and optionally a course section and result visibility settings."""
 
     # Construct request model with validation
@@ -26180,7 +26323,7 @@ async def create_poll_session(
 async def get_poll_session_results(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to retrieve results for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the results and details for a specific poll session. Returns comprehensive poll session data including responses and aggregated results."""
 
     # Construct request model with validation
@@ -26222,7 +26365,7 @@ async def update_poll_session(
     poll_sessions_course_id: list[int] | None = Field(None, description="The ID of the course this session is associated with. Provide as an array of course IDs."),
     poll_sessions_course_section_id: list[int] | None = Field(None, description="The ID of the course section this session is associated with. Provide as an array of section IDs."),
     poll_sessions_has_public_results: list[bool] | None = Field(None, description="Whether poll results are viewable by students. Provide as an array of boolean values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing poll session for a specific poll, including course association, section assignment, and result visibility settings."""
 
     # Construct request model with validation
@@ -26264,7 +26407,7 @@ async def update_poll_session(
 async def delete_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific poll session. Returns a 204 No Content response on successful deletion."""
 
     # Construct request model with validation
@@ -26303,7 +26446,7 @@ async def delete_poll_session(
 async def close_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session to be closed."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to close."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Close an opened poll session to stop accepting responses. Once closed, the poll session cannot accept new votes or changes."""
 
     # Construct request model with validation
@@ -26342,7 +26485,7 @@ async def close_poll_session(
 async def open_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session to be opened."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to open."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Opens a poll session to make it active and ready for participants to respond. This enables voting on the specified poll."""
 
     # Construct request model with validation
@@ -26382,7 +26525,7 @@ async def submit_poll_response(
     poll_id: str = Field(..., description="The unique identifier of the poll to which the submission belongs."),
     poll_session_id: str = Field(..., description="The unique identifier of the poll session for which the submission is being made."),
     poll_submissions_poll_choice_id: list[int] = Field(..., description="An array of poll choice IDs representing the selected answer(s) for this submission. The order of choices may be significant depending on poll type (e.g., ranked choice polls)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a response to an active poll session by selecting one or more poll choices. Each submission records the participant's answer to the poll."""
 
     # Construct request model with validation
@@ -26426,7 +26569,7 @@ async def get_poll_submission(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the submission."),
     poll_session_id: str = Field(..., description="The unique identifier of the poll session associated with the submission."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll submission to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific poll submission by its ID within a poll session. Returns the complete submission details including responses and metadata."""
 
     # Construct request model with validation
@@ -26462,7 +26605,7 @@ async def get_poll_submission(
 
 # Tags: progress
 @mcp.tool()
-async def get_job_progress(id_: str = Field(..., alias="id", description="The unique identifier of the asynchronous job to query.")) -> dict[str, Any]:
+async def get_job_progress(id_: str = Field(..., alias="id", description="The unique identifier of the asynchronous job to query.")) -> dict[str, Any] | ToolResult:
     """Retrieve completion status and progress information for an asynchronous job. Returns current progress metrics and job state."""
 
     # Construct request model with validation
@@ -26501,7 +26644,7 @@ async def get_job_progress(id_: str = Field(..., alias="id", description="The un
 async def list_quiz_submission_questions(
     quiz_submission_id: str = Field(..., description="The unique identifier of the quiz submission containing the questions to retrieve."),
     include: list[Literal["quiz_question"]] | None = Field(None, description="Optional list of related associations to include in the response. Order and format depend on available association types for quiz submission questions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all question records associated with a specific quiz submission. Use the include parameter to optionally load related associations."""
 
     # Construct request model with validation
@@ -26548,7 +26691,7 @@ async def submit_quiz_answers(
     attempt: str = Field(..., description="The attempt number of the quiz submission. Must be the latest attempt index, as earlier attempts cannot be modified."),
     validation_token: str = Field(..., description="The unique validation token received when the quiz submission was created. Required to authenticate the answer submission."),
     quiz_questions: list[_models.QuizQuestion] | None = Field(None, description="Array of quiz question answers to submit or update. Order and format should match the quiz question structure."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit or update answers to one or more questions in a quiz submission. Answers can only be modified for the latest attempt of the quiz."""
 
     _attempt = _parse_int(attempt)
@@ -26595,7 +26738,7 @@ async def flag_question(
     id_: str = Field(..., alias="id", description="The unique identifier of the question within the quiz to flag."),
     attempt: str = Field(..., description="The current attempt number of the quiz submission. Must be the latest attempt index, as questions from earlier attempts cannot be modified."),
     validation_token: str = Field(..., description="The unique validation token provided when the quiz submission was created, required to authorize modifications to the submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a quiz question with a flag to indicate you want to return to it later during the current quiz attempt."""
 
     _attempt = _parse_int(attempt)
@@ -26641,7 +26784,7 @@ async def remove_question_flag(
     id_: str = Field(..., alias="id", description="The unique identifier of the question to unflag within the quiz submission."),
     attempt: str = Field(..., description="The current attempt number of the quiz submission. Must be the latest attempt index, as questions from earlier attempts cannot be modified."),
     validation_token: str = Field(..., description="The unique validation token provided when the quiz submission was created. Required to authorize modifications to the submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a flag previously set on a quiz question during an active quiz submission. This allows you to unmark questions you've flagged for review."""
 
     _attempt = _parse_int(attempt)
@@ -26687,7 +26830,7 @@ async def search_courses(
     public_only: bool | None = Field(None, description="Filter to return only courses with public content visibility."),
     open_enrollment_only: bool | None = Field(None, description="Filter to return only courses that allow self-enrollment without approval."),
     per_page: int | None = Field(None, description="Number of courses to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve a paginated list of courses from the public index. Filter results by search terms, enrollment type, and content visibility."""
 
     # Construct request model with validation
@@ -26730,7 +26873,7 @@ async def search_recipients(
     context: str | None = Field(None, description="Limit search results to a specific course or group context using the format course_ID or group_ID."),
     exclude: list[str] | None = Field(None, description="Array of recipient IDs to exclude from results. User IDs and course/group IDs should be prefixed with course_ or group_ respectively."),
     permissions: list[str] | None = Field(None, description="Array of permission strings to check against matched contexts. Determines which permissions are returned in the response without filtering out contexts that lack the specified permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for valid message recipients including users, courses, and groups that the current user can contact. Results can be filtered by search terms, context, and permissions."""
 
     # Construct request model with validation
@@ -26775,7 +26918,7 @@ async def search_recipients(
 async def get_assignment_override_for_section(
     course_section_id: str = Field(..., description="The unique identifier of the course section for which to retrieve the assignment override."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the section-specific override."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the assignment override for a specific section. Returns a redirect to the override if it exists, otherwise returns a 404 error."""
 
     # Construct request model with validation
@@ -26814,7 +26957,7 @@ async def get_assignment_override_for_section(
 async def get_section_standalone(
     id_: str = Field(..., alias="id", description="The unique identifier of the section to retrieve."),
     include: list[Literal["students", "avatar_url", "enrollments", "total_students", "passback_status"]] | None = Field(None, description="Optional associations to include in the response. Select 'students' to include student roster (requires user or grade viewing permissions), 'avatar_url' to include student profile images, 'enrollments' to include enrollment details for each student (requires 'students' to also be selected), 'total_students' to include active and invited student counts, or 'passback_status' to include grade passback status information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific course section, including optional student data, enrollment details, and grade passback status."""
 
     # Construct request model with validation
@@ -26864,7 +27007,7 @@ async def update_section(
     course_section_restrict_enrollments_to_section_dates: bool | None = Field(None, description="When enabled, restricts user enrollments to only occur between the section's start and end dates."),
     course_section_sis_section_id: str | None = Field(None, description="The SIS (Student Information System) identifier for the section. Requires manage_sis permission to set or modify."),
     course_section_start_at: str | None = Field(None, description="The date and time when the section begins. Enrollments and access can be restricted to this date if enrollment date restrictions are enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing course section with new details such as name, dates, enrollment restrictions, and SIS identifiers."""
 
     # Construct request model with validation
@@ -26903,7 +27046,7 @@ async def update_section(
 
 # Tags: sections
 @mcp.tool()
-async def delete_section(id_: str = Field(..., alias="id", description="The unique identifier of the section to delete.")) -> dict[str, Any]:
+async def delete_section(id_: str = Field(..., alias="id", description="The unique identifier of the section to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing section and return the deleted section object. This operation permanently removes the section from the system."""
 
     # Construct request model with validation
@@ -26939,7 +27082,7 @@ async def delete_section(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: sections
 @mcp.tool()
-async def remove_section_crosslist(id_: str = Field(..., alias="id", description="The unique identifier of the section to remove from cross-listing.")) -> dict[str, Any]:
+async def remove_section_crosslist(id_: str = Field(..., alias="id", description="The unique identifier of the section to remove from cross-listing.")) -> dict[str, Any] | ToolResult:
     """Remove cross-listing from a section, restoring it to its original course. This operation undoes a previous cross-listing assignment."""
 
     # Construct request model with validation
@@ -26978,7 +27121,7 @@ async def remove_section_crosslist(id_: str = Field(..., alias="id", description
 async def move_section_to_course(
     id_: str = Field(..., alias="id", description="The ID of the section to be moved."),
     new_course_id: str = Field(..., description="The ID of the destination course where the section will be moved. Must be within the same root account as the current section."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move a section to another course within the same institution. The destination course may be in a different department or account, but must share the same root account."""
 
     # Construct request model with validation
@@ -27018,7 +27161,7 @@ async def list_peer_reviews_section(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve peer reviews."),
     include: list[Literal["submission_comments", "user"]] | None = Field(None, description="Optional associations to include with each peer review object. Specify as an array of association names to expand related data in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all peer reviews for a specific assignment within a section. Optionally include associated data through the include parameter."""
 
     # Construct request model with validation
@@ -27064,7 +27207,7 @@ async def get_submission_summary(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submission statistics."),
     grouped: bool | None = Field(None, description="When true, submission counts are calculated with consideration for student group membership; when false or omitted, counts are based on individual students."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves submission statistics for an assignment, categorizing submissions into graded, ungraded, and not submitted based on gradeable students. Optionally accounts for student groups when enabled."""
 
     # Construct request model with validation
@@ -27109,7 +27252,7 @@ async def list_assignment_submissions_section(
     include: list[Literal["submission_history", "submission_comments", "rubric_assessment", "assignment", "visibility", "course", "user", "group"]] | None = Field(None, description="Associations to include in the response. Use 'group' to add group_id and group_name to each submission."),
     grouped: bool | None = Field(None, description="If true, submissions will be grouped by student groups in the response."),
     per_page: int | None = Field(None, description="The maximum number of submissions to return per page for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all submissions for a specific assignment within a section. Optionally group submissions by student groups and include associated data."""
 
     # Construct request model with validation
@@ -27160,7 +27303,7 @@ async def submit_assignment_section(
     submission_file_ids: list[int] | None = Field(None, description="Array of file IDs from the submitting user's or group's file storage to include in the submission. Only valid when submission_type is 'online_upload'."),
     submission_media_comment_id: str | None = Field(None, description="The media comment ID to submit with the assignment. Only valid when submission_type is 'media_recording'. Note: Media comment creation and listing APIs are not yet available."),
     submission_url: str | None = Field(None, description="URL to submit as the assignment. Must use 'http' or 'https' scheme; if no scheme is provided, 'http' will be assumed. Only valid when submission_type is 'online_url' or 'basic_lti_launch'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit an assignment for a course section. Supports multiple submission types including text, URLs, file uploads, and media recordings. You must be enrolled as a student in the course/section to submit."""
 
     # Construct request model with validation
@@ -27211,7 +27354,7 @@ async def grade_submissions_section(
     rubric_criterion_id: str | None = Field(None, description="The ID of the rubric criterion being assessed"),
     rubric_criterion_points: float | None = Field(None, description="The points awarded for this rubric criterion"),
     rubric_criterion_comments: str | None = Field(None, description="Comments or feedback for this rubric criterion"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update grades and comments for multiple student submissions on an assignment asynchronously. Requires permission to manage grades in the course or section."""
 
     # Call helper functions
@@ -27261,7 +27404,7 @@ async def list_peer_reviews_section_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve peer reviews."),
     submission_id: str = Field(..., description="The unique identifier of the submission for which to retrieve peer reviews."),
     include: list[Literal["submission_comments", "user"]] | None = Field(None, description="Optional list of associations to include with each peer review response. Specify which related data should be expanded in the results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all peer reviews submitted for a specific assignment submission. Use the optional include parameter to expand associated data with each peer review."""
 
     # Construct request model with validation
@@ -27308,7 +27451,7 @@ async def assign_peer_reviewer_section(
     assignment_id: str = Field(..., description="The assignment ID for which the peer review is being created."),
     submission_id: str = Field(..., description="The submission ID that will be reviewed."),
     user_id: str = Field(..., description="The user ID of the person to assign as the peer reviewer for this submission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign a peer reviewer to an assignment submission. Creates a peer review record that designates a specific user as the reviewer for the given submission."""
 
     _user_id = _parse_int(user_id)
@@ -27355,7 +27498,7 @@ async def remove_peer_review_section(
     assignment_id: str = Field(..., description="The assignment identifier for which the peer review is being removed."),
     submission_id: str = Field(..., description="The submission identifier that received the peer review."),
     user_id: str = Field(..., description="The user ID of the reviewer whose peer review assessment should be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a peer review submission by deleting a specific reviewer's assessment for an assignment. This operation removes the reviewer's feedback and marks their review as deleted."""
 
     _user_id = _parse_int(user_id)
@@ -27401,7 +27544,7 @@ async def get_submission_by_user_section(
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the submission."),
     user_id: str = Field(..., description="The unique identifier of the user whose submission is being retrieved."),
     include: list[Literal["submission_history", "submission_comments", "rubric_assessment", "visibility", "course", "user"]] | None = Field(None, description="Optional list of related data to include in the response, such as grades, comments, or rubric assessments. Order and format depend on API capabilities."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single student submission for a specific assignment within a section. Optionally include associated data such as grades, comments, or attachments."""
 
     # Construct request model with validation
@@ -27457,7 +27600,7 @@ async def grade_submission_section(
     submission_posted_grade: str | None = Field(None, description="Assigns a score to the submission. Accepts points (e.g., 13.5), percentage (e.g., 40%), letter grade (e.g., A-), or pass/fail status (pass, complete, fail, incomplete). Extra credit is allowed. Letter grades require the assignment to have a defined grading scheme."),
     submission_seconds_late_override: str | None = Field(None, description="Overrides the seconds late for the submission when late policy status is set to 'late'."),
     comment_media_comment: str | None = Field(None, description="Media comment in format 'id:type' (e.g., 'media_123:audio' or 'media_456:video')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grade and/or comment on a student's assignment submission. Supports adding textual comments, attaching files, assigning rubric assessments, and updating grade status."""
 
     # Call helper functions
@@ -27505,7 +27648,7 @@ async def upload_submission_file_section(
     section_id: str = Field(..., description="The section ID that contains the assignment."),
     assignment_id: str = Field(..., description="The assignment ID where the file is being submitted."),
     user_id: str = Field(..., description="The user ID of the student submitting the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to a student submission. This is the first step in the file upload workflow; upon completion, use the returned file ID to submit the online_upload assignment."""
 
     # Construct request model with validation
@@ -27545,7 +27688,7 @@ async def mark_submission_as_read_section(
     section_id: str = Field(..., description="The unique identifier for the course section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier for the assignment within the section."),
     user_id: str = Field(..., description="The unique identifier for the student whose submission is being marked as read."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a student submission as read by the instructor. This updates the read status without modifying the submission content."""
 
     # Construct request model with validation
@@ -27585,7 +27728,7 @@ async def mark_submission_unread(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment whose submission should be marked as unread."),
     user_id: str = Field(..., description="The unique identifier of the user (student) whose submission should be marked as unread."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a student's submission as unread for a specific assignment in a section. This removes the read status, allowing instructors to re-review submissions."""
 
     # Construct request model with validation
@@ -27629,7 +27772,7 @@ async def list_section_enrollments(
     grading_period_id: str | None = Field(None, description="Return grades for the specified grading period. If omitted, grades for the entire course are returned."),
     enrollment_term_id: str | None = Field(None, description="Return only enrollments for the specified enrollment term. Accepts either the enrollment term ID or a SIS ID prefixed with 'sis_term_id:'. This parameter applies only to user enrollments endpoints."),
     sis_user_id: list[str] | None = Field(None, description="Return only enrollments for the specified SIS user ID(s). Accepts a single ID or array of IDs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all enrollments in a section, including students, teachers, TAs, and observers. Only root admins can view other users' enrollments; regular users can only access their own."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -27686,7 +27829,7 @@ async def enroll_user_in_section(
     enrollment_notify: bool | None = Field(None, description="When enabled, sends a notification to the enrolled user about their new enrollment. Notifications are disabled by default."),
     enrollment_self_enrolled: bool | None = Field(None, description="When enabled, marks the enrollment as self-initiated, allowing students to drop the course independently. Defaults to false."),
     enrollment_self_enrollment_code: str | None = Field(None, description="A valid self-enrollment code for users without enrollment management permissions to self-enroll as a student in the default section. When used, user_id must be 'self', enrollment_state is set to active, and other parameters are ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enroll a user in a course section with specified role and enrollment settings. The user can be enrolled as a student, teacher, TA, observer, or designer with optional notifications and access restrictions."""
 
     _enrollment_associated_user_id = _parse_int(enrollment_associated_user_id)
@@ -27744,7 +27887,7 @@ async def list_submissions_section(
     order_direction: Literal["ascending", "descending"] | None = Field(None, description="Sort direction for ordered results. Does not apply when grouped mode is enabled."),
     include: list[Literal["submission_history", "submission_comments", "rubric_assessment", "assignment", "total_scores", "visibility", "course", "user"]] | None = Field(None, description="Include related associations in the response. The 'total_scores' association requires grouped mode to be enabled."),
     per_page: int | None = Field(None, description="Number of submissions to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of submissions for students and assignments within a section. Results can be filtered by student, assignment, submission status, and grading dates, with optional grouping by student."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -27800,7 +27943,7 @@ async def update_submission_grades(
     rubric_criterion_id: str | None = Field(None, description="The ID of the rubric criterion being assessed"),
     rubric_criterion_points: float | None = Field(None, description="The points awarded for this rubric criterion"),
     rubric_criterion_comments: str | None = Field(None, description="Comments or feedback for this rubric criterion"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update grades and comments for multiple student submissions in a section. This operation processes grading changes asynchronously and requires grade management permissions for the course or section."""
 
     # Call helper functions
@@ -27845,7 +27988,7 @@ async def update_submission_grades(
 
 # Tags: services
 @mcp.tool()
-async def create_kaltura_session() -> dict[str, Any]:
+async def create_kaltura_session() -> dict[str, Any] | ToolResult:
     """Initiate a new Kaltura session to enable media recording and uploading to your Canvas instance's Kaltura integration. This session must be created before any media operations can be performed."""
 
     # Extract parameters for API call
@@ -27872,7 +28015,7 @@ async def create_kaltura_session() -> dict[str, Any]:
 
 # Tags: shared_brand_configs
 @mcp.tool()
-async def revoke_brand_config_share(id_: str = Field(..., alias="id", description="The unique identifier of the shared brand config to revoke access to.")) -> dict[str, Any]:
+async def revoke_brand_config_share(id_: str = Field(..., alias="id", description="The unique identifier of the shared brand config to revoke access to.")) -> dict[str, Any] | ToolResult:
     """Revoke sharing of a brand config theme by deleting the shared configuration. This removes the theme from the shared options for you and all account members."""
 
     # Construct request model with validation
@@ -27911,7 +28054,7 @@ async def revoke_brand_config_share(id_: str = Field(..., alias="id", descriptio
 async def list_activity_stream(
     only_active_courses: bool | None = Field(None, description="Limit results to courses where the user is actively participating. When enabled, excludes archived or inactive courses from the activity stream."),
     per_page: int | None = Field(None, description="Number of activity stream items to return per page. Supports pagination for managing large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current user's global activity stream with pagination support. Returns a variety of activity types including discussions, messages, submissions, and conferences, each with shared metadata and type-specific attributes."""
 
     # Construct request model with validation
@@ -27949,7 +28092,7 @@ async def list_activity_stream(
 
 # Tags: users
 @mcp.tool()
-async def list_activity_stream_current_user() -> dict[str, Any]:
+async def list_activity_stream_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the current user's global activity stream with paginated results. Returns a variety of activity types including discussions, announcements, conversations, messages, submissions, conferences, collaborations, and assessment requests, each with shared and type-specific attributes."""
 
     # Extract parameters for API call
@@ -27976,7 +28119,7 @@ async def list_activity_stream_current_user() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def hide_all_activity_stream_items() -> dict[str, Any]:
+async def hide_all_activity_stream_items() -> dict[str, Any] | ToolResult:
     """Hide all activity stream items for the authenticated user. This action removes all items from the user's activity stream view."""
 
     # Extract parameters for API call
@@ -28003,7 +28146,7 @@ async def hide_all_activity_stream_items() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def get_activity_stream_summary() -> dict[str, Any]:
+async def get_activity_stream_summary() -> dict[str, Any] | ToolResult:
     """Retrieves a summary of the current user's global activity stream, providing an overview of recent activities across all connected resources and applications."""
 
     # Extract parameters for API call
@@ -28030,7 +28173,7 @@ async def get_activity_stream_summary() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def hide_activity_stream_item(id_: str = Field(..., alias="id", description="The unique identifier of the activity stream item to hide.")) -> dict[str, Any]:
+async def hide_activity_stream_item(id_: str = Field(..., alias="id", description="The unique identifier of the activity stream item to hide.")) -> dict[str, Any] | ToolResult:
     """Hide a specific item from the user's activity stream. Hidden items will no longer appear in the activity stream view."""
 
     # Construct request model with validation
@@ -28066,7 +28209,7 @@ async def hide_activity_stream_item(id_: str = Field(..., alias="id", descriptio
 
 # Tags: bookmarks
 @mcp.tool()
-async def list_bookmarks() -> dict[str, Any]:
+async def list_bookmarks() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all bookmarks for the authenticated user. Results are returned in pages for efficient browsing and navigation."""
 
     # Extract parameters for API call
@@ -28098,7 +28241,7 @@ async def create_bookmark(
     name: str | None = Field(None, description="A human-readable name or title for the bookmark to help identify it in your collection."),
     position: str | None = Field(None, description="The position where the bookmark should be placed in the list. Lower numbers appear first. If not specified, the bookmark is added at the end."),
     url: str | None = Field(None, description="The URL or web address that the bookmark points to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new bookmark with optional metadata including name, URL, and position in the bookmark list. If no position is specified, the bookmark is added at the bottom."""
 
     _position = _parse_int(position)
@@ -28139,7 +28282,7 @@ async def create_bookmark(
 
 # Tags: bookmarks
 @mcp.tool()
-async def get_bookmark(id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to retrieve.")) -> dict[str, Any]:
+async def get_bookmark(id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific bookmark by its ID. Returns the bookmark's metadata and associated content."""
 
     # Construct request model with validation
@@ -28181,7 +28324,7 @@ async def update_bookmark(
     name: str | None = Field(None, description="The display name or title of the bookmark."),
     position: str | None = Field(None, description="The ordinal position of the bookmark in the list. If not specified, the bookmark is placed at the bottom."),
     url: str | None = Field(None, description="The web address (URL) that the bookmark points to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing bookmark with new metadata, URL, name, or position. Allows modification of bookmark properties while maintaining its identity."""
 
     _position = _parse_int(position)
@@ -28222,7 +28365,7 @@ async def update_bookmark(
 
 # Tags: bookmarks
 @mcp.tool()
-async def delete_bookmark(id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to delete.")) -> dict[str, Any]:
+async def delete_bookmark(id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a bookmark by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -28258,7 +28401,7 @@ async def delete_bookmark(id_: str = Field(..., alias="id", description="The uni
 
 # Tags: communication_channels
 @mcp.tool()
-async def delete_push_notification_endpoint() -> dict[str, Any]:
+async def delete_push_notification_endpoint() -> dict[str, Any] | ToolResult:
     """Remove the user's push notification endpoint, disabling push notifications for this device or application. This operation targets the authenticated user's push communication channel."""
 
     # Extract parameters for API call
@@ -28289,7 +28432,7 @@ async def update_notification_preference(
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel (e.g., email address, phone number) for which to update the notification preference."),
     notification: str = Field(..., description="The unique identifier of the notification type whose preference should be updated."),
     notification_preferences_frequency: str = Field(..., description="The desired frequency at which notifications should be delivered for this communication channel and notification type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the notification frequency preference for a specific communication channel. Allows users to customize how often they receive notifications through their chosen communication method."""
 
     # Construct request model with validation
@@ -28328,7 +28471,7 @@ async def update_notification_preference(
 
 # Tags: users
 @mcp.tool()
-async def list_course_nicknames() -> dict[str, Any]:
+async def list_course_nicknames() -> dict[str, Any] | ToolResult:
     """Retrieve all course nicknames you have created. Returns a list of custom names you've assigned to your courses for easier identification."""
 
     # Extract parameters for API call
@@ -28355,7 +28498,7 @@ async def list_course_nicknames() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def delete_course_nicknames() -> dict[str, Any]:
+async def delete_course_nicknames() -> dict[str, Any] | ToolResult:
     """Remove all stored course nicknames for the authenticated user. This operation clears any custom names previously assigned to courses."""
 
     # Extract parameters for API call
@@ -28382,7 +28525,7 @@ async def delete_course_nicknames() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def get_course_nickname(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the nickname.")) -> dict[str, Any]:
+async def get_course_nickname(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the nickname.")) -> dict[str, Any] | ToolResult:
     """Retrieves the custom nickname assigned to a specific course. Returns the nickname if one has been set for the course."""
 
     # Construct request model with validation
@@ -28421,7 +28564,7 @@ async def get_course_nickname(course_id: str = Field(..., description="The uniqu
 async def set_course_nickname(
     course_id: str = Field(..., description="The unique identifier of the course to nickname."),
     nickname: str = Field(..., description="The custom nickname to assign to the course. Must be non-empty and shorter than 60 characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set a custom nickname for a course that will replace the course's name in API responses and selected Canvas web interface locations. The nickname must be non-empty and under 60 characters."""
 
     # Construct request model with validation
@@ -28460,7 +28603,7 @@ async def set_course_nickname(
 
 # Tags: users
 @mcp.tool()
-async def delete_course_nickname(course_id: str = Field(..., description="The unique identifier of the course whose nickname should be removed.")) -> dict[str, Any]:
+async def delete_course_nickname(course_id: str = Field(..., description="The unique identifier of the course whose nickname should be removed.")) -> dict[str, Any] | ToolResult:
     """Remove the custom nickname for a course, reverting to the course's actual name in subsequent API calls."""
 
     # Construct request model with validation
@@ -28499,7 +28642,7 @@ async def delete_course_nickname(course_id: str = Field(..., description="The un
 async def list_favorite_courses(
     exclude_blueprint_courses: bool | None = Field(None, description="Exclude courses that are configured as blueprint courses from the results."),
     per_page: int | None = Field(None, description="Number of courses to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of favorite courses for the current user. If no favorites have been selected, returns a selection of currently enrolled courses instead."""
 
     # Construct request model with validation
@@ -28537,7 +28680,7 @@ async def list_favorite_courses(
 
 # Tags: favorites
 @mcp.tool()
-async def reset_course_favorites() -> dict[str, Any]:
+async def reset_course_favorites() -> dict[str, Any] | ToolResult:
     """Reset the current user's course favorites to the default automatically generated list based on their enrolled courses. This removes any custom favorite selections and restores the system-generated defaults."""
 
     # Extract parameters for API call
@@ -28564,7 +28707,7 @@ async def reset_course_favorites() -> dict[str, Any]:
 
 # Tags: favorites
 @mcp.tool()
-async def favorite_course(id_: str = Field(..., alias="id", description="The course ID or SIS ID to add to favorites. The current user must be registered in the course.")) -> dict[str, Any]:
+async def favorite_course(id_: str = Field(..., alias="id", description="The course ID or SIS ID to add to favorites. The current user must be registered in the course.")) -> dict[str, Any] | ToolResult:
     """Add a course to the current user's favorites. The operation is idempotent—if the course is already favorited, no change occurs."""
 
     # Construct request model with validation
@@ -28600,7 +28743,7 @@ async def favorite_course(id_: str = Field(..., alias="id", description="The cou
 
 # Tags: favorites
 @mcp.tool()
-async def unfavorite_course(id_: str = Field(..., alias="id", description="The unique identifier of the course to remove from favorites. Can be either the Canvas course ID or the SIS ID.")) -> dict[str, Any]:
+async def unfavorite_course(id_: str = Field(..., alias="id", description="The unique identifier of the course to remove from favorites. Can be either the Canvas course ID or the SIS ID.")) -> dict[str, Any] | ToolResult:
     """Remove a course from the current user's favorites list. This operation allows users to unfavorite courses they previously marked as favorites."""
 
     # Construct request model with validation
@@ -28636,7 +28779,7 @@ async def unfavorite_course(id_: str = Field(..., alias="id", description="The u
 
 # Tags: favorites
 @mcp.tool()
-async def list_favorite_groups() -> dict[str, Any]:
+async def list_favorite_groups() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of favorite groups for the current user. If no favorites have been selected, returns a default selection of groups the user is a member of."""
 
     # Extract parameters for API call
@@ -28663,7 +28806,7 @@ async def list_favorite_groups() -> dict[str, Any]:
 
 # Tags: favorites
 @mcp.tool()
-async def clear_group_favorites() -> dict[str, Any]:
+async def clear_group_favorites() -> dict[str, Any] | ToolResult:
     """Clear the current user's group favorites and restore them to the default automatically generated list based on enrolled groups."""
 
     # Extract parameters for API call
@@ -28690,7 +28833,7 @@ async def clear_group_favorites() -> dict[str, Any]:
 
 # Tags: favorites
 @mcp.tool()
-async def favorite_group(id_: str = Field(..., alias="id", description="The ID or SIS ID of the group to add to favorites. The current user must be a member of this group.")) -> dict[str, Any]:
+async def favorite_group(id_: str = Field(..., alias="id", description="The ID or SIS ID of the group to add to favorites. The current user must be a member of this group.")) -> dict[str, Any] | ToolResult:
     """Add a group to the current user's favorites. The user must be a member of the group; if already favorited, the operation has no effect."""
 
     # Construct request model with validation
@@ -28726,7 +28869,7 @@ async def favorite_group(id_: str = Field(..., alias="id", description="The ID o
 
 # Tags: favorites
 @mcp.tool()
-async def unfavorite_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to remove from favorites. Can be either the group's ID or its SIS ID.")) -> dict[str, Any]:
+async def unfavorite_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to remove from favorites. Can be either the group's ID or its SIS ID.")) -> dict[str, Any] | ToolResult:
     """Remove a group from the current user's favorites list. The group will no longer appear in the user's favorited groups."""
 
     # Construct request model with validation
@@ -28766,7 +28909,7 @@ async def list_groups(
     context_type: Literal["Account", "Course"] | None = Field(None, description="Filter groups to only those within a specific context type. Use 'Account' for account-level groups or 'Course' for course-level groups."),
     include: list[Literal["tabs"]] | None = Field(None, description="Specify additional data to include with each group. Use 'tabs' to include the list of tabs configured for each group."),
     per_page: int | None = Field(None, description="Number of groups to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active groups for the current user, optionally filtered by context type and enriched with additional metadata."""
 
     # Construct request model with validation
@@ -28810,7 +28953,7 @@ async def list_groups(
 async def list_todos(
     include: list[Literal["ungraded_quizzes"]] | None = Field(None, description="Optionally include ungraded quizzes such as practice quizzes and surveys in the results. When included, these items are returned under a quiz key instead of an assignment key."),
     per_page: int | None = Field(None, description="The number of TODO items to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of the current user's TODO items from their dashboard. Items can be hidden temporarily or permanently using the provided ignore URLs."""
 
     # Construct request model with validation
@@ -28851,7 +28994,7 @@ async def list_todos(
 
 # Tags: users
 @mcp.tool()
-async def get_todo_item_counts(include: list[Literal["ungraded_quizzes"]] | None = Field(None, description="Optionally include ungraded quizzes (such as practice quizzes and surveys) in the counts. When included, quiz data is returned under a quiz key instead of an assignment key.")) -> dict[str, Any]:
+async def get_todo_item_counts(include: list[Literal["ungraded_quizzes"]] | None = Field(None, description="Optionally include ungraded quizzes (such as practice quizzes and surveys) in the counts. When included, quiz data is returned under a quiz key instead of an assignment key.")) -> dict[str, Any] | ToolResult:
     """Retrieve counts of pending todo items for the authenticated user, including assignments needing grading or submission. Note: counts are based on the first 100 todo items; if the user has more than 100 items, counts may be unreliable and capped at 100."""
 
     # Construct request model with validation
@@ -28892,7 +29035,7 @@ async def get_todo_item_counts(include: list[Literal["ungraded_quizzes"]] | None
 
 # Tags: users
 @mcp.tool()
-async def list_upcoming_events() -> dict[str, Any]:
+async def list_upcoming_events() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of the current user's upcoming assignments and calendar events in chronological order."""
 
     # Extract parameters for API call
@@ -28919,7 +29062,7 @@ async def list_upcoming_events() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def get_user_permissions(id_: str = Field(..., alias="id", description="The unique identifier of the user whose details should be retrieved.")) -> dict[str, Any]:
+async def get_user_permissions(id_: str = Field(..., alias="id", description="The unique identifier of the user whose details should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific user, including their profile data and a non-comprehensive list of permissions."""
 
     # Construct request model with validation
@@ -28962,7 +29105,7 @@ async def update_user(
     user_locale: str | None = Field(None, description="The user's preferred language in RFC-5646 format, selected from Canvas-supported languages."),
     user_time_zone: str | None = Field(None, description="The user's time zone, specified as either an IANA time zone identifier or Ruby on Rails time zone name."),
     user_names: str | None = Field(None, description="User names in format: full_name|short_name|sortable_name"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update user profile information including avatar, email, language preference, and time zone. Note: to modify a user's login credentials, use the dedicated logins endpoint."""
 
     # Call helper functions
@@ -29004,7 +29147,7 @@ async def update_user(
 
 # Tags: users
 @mcp.tool()
-async def list_user_colors(id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom colors should be retrieved.")) -> dict[str, Any]:
+async def list_user_colors(id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom colors should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all custom colors that have been saved for a specific user. Returns a complete list of the user's color preferences and customizations."""
 
     # Construct request model with validation
@@ -29043,7 +29186,7 @@ async def list_user_colors(id_: str = Field(..., alias="id", description="The un
 async def get_custom_color(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom colors are being retrieved."),
     asset_string: str = Field(..., description="The context identifier in the format 'context_id' that specifies where the custom colors apply (e.g., 'course_42' for a course context)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the custom colors saved for a user within a specific context (such as a course). Use the asset_string parameter to specify the context in the format 'context_id' (e.g., 'course_42')."""
 
     # Construct request model with validation
@@ -29083,7 +29226,7 @@ async def set_custom_color(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom color is being updated."),
     asset_string: str = Field(..., description="The context identifier in the format 'context_id' (e.g., 'course_42') that specifies where the custom color applies."),
     hexcode: str | None = Field(None, description="The hexadecimal color code to set for the context. Omit the '#' prefix unless it is URL-encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or update a custom color for a user in a specific context, such as a calendar or course. The color applies to the given context across the application."""
 
     # Construct request model with validation
@@ -29126,7 +29269,7 @@ async def merge_user_into_another_user(
     id_: str = Field(..., alias="id", description="The ID of the user to be merged and deleted."),
     destination_account_id: str = Field(..., description="The ID or domain of the account containing the destination user. Required when finding users by SIS IDs across different accounts."),
     destination_user_id: str = Field(..., description="The ID of the user that will receive all data from the merged user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a user into another user account, consolidating all data into the destination user and deleting the source user. This operation requires permissions to manage both users and is irreversible."""
 
     # Construct request model with validation
@@ -29165,7 +29308,7 @@ async def merge_user_into_another_user(
 async def merge_user(
     id_: str = Field(..., alias="id", description="The ID of the user to be merged and deleted."),
     destination_user_id: str = Field(..., description="The ID of the destination user that will receive all data from the merged user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a user into another user, transferring all associated data to the destination user. This operation is irreversible and requires permissions to manage both users."""
 
     # Construct request model with validation
@@ -29201,7 +29344,7 @@ async def merge_user(
 
 # Tags: users
 @mcp.tool()
-async def split_user(id_: str = Field(..., alias="id", description="The ID of the merged user to split into separate users. The caller must have permissions to manage all user logins associated with this user.")) -> dict[str, Any]:
+async def split_user(id_: str = Field(..., alias="id", description="The ID of the merged user to split into separate users. The caller must have permissions to manage all user logins associated with this user.")) -> dict[str, Any] | ToolResult:
     """Split a previously merged user back into separate user accounts. This operation attempts to restore users to their pre-merge state within 180 days of the original merge, though some data may not be fully recoverable."""
 
     # Construct request model with validation
@@ -29240,7 +29383,7 @@ async def split_user(id_: str = Field(..., alias="id", description="The ID of th
 async def list_avatars(
     user_id: str = Field(..., description="The unique identifier of the user whose avatar options to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of avatar records to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available avatar options for a user. Each avatar record includes a unique token that can be used to set the avatar via the user update endpoint."""
 
     # Construct request model with validation
@@ -29284,7 +29427,7 @@ async def list_calendar_events(
     context_codes: list[str] | None = Field(None, description="Optional list of context codes to filter events by specific courses, groups, or users. Use format: context_type_context_id (e.g., course_42). Limited to 10 codes; additional codes are ignored. If omitted, defaults to the current user's personal calendar only."),
     excludes: list[list[dict[str, Any]]] | None = Field(None, description="Optional array of event attributes to exclude from the response. Specify which fields should be omitted to reduce payload size."),
     per_page: int | None = Field(None, description="Number of items to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve paginated calendar events and assignments for a specified user. Requires observer or administrator access to view events for users other than yourself."""
 
     # Construct request model with validation
@@ -29330,7 +29473,7 @@ async def list_calendar_events(
 async def list_communication_channels(
     user_id: str = Field(..., description="The unique identifier of the user whose communication channels you want to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of communication channels to return per page. Useful for controlling response size and implementing pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of communication channels for a user, sorted by position. Use this to display all available contact methods configured for the user."""
 
     # Construct request model with validation
@@ -29375,7 +29518,7 @@ async def add_communication_channel(
     communication_channel_type: Literal["email", "sms", "push"] = Field(..., description="The type of communication channel to create."),
     communication_channel_token: str | None = Field(None, description="A device token or registration ID obtained from a push notification provider (e.g., Amazon SNS). Required only for push notification channels. The server must be configured with SNS credentials and the developer key must have an SNS ARN configured."),
     skip_confirmation: bool | None = Field(None, description="If true, automatically validates the channel without sending a confirmation message. Only available to site admins and account admins. When false, the user must confirm the channel via email or SMS before it becomes active."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new communication channel (email, SMS, or push notification) for a user. The channel may require confirmation by the user unless automatically validated by an admin."""
 
     # Construct request model with validation
@@ -29418,7 +29561,7 @@ async def add_communication_channel(
 async def list_notification_preference_categories(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preferences are being queried."),
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel (e.g., email, SMS, push) for which to fetch preference categories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all notification preference categories available for a specific communication channel. Use this to display category options when configuring notification preferences for a user."""
 
     # Construct request model with validation
@@ -29457,7 +29600,7 @@ async def list_notification_preference_categories(
 async def list_notification_preferences(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preferences you want to retrieve."),
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel for which to fetch notification preferences."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all notification preferences configured for a specific communication channel. This allows you to view which notification types are enabled or disabled for that channel."""
 
     # Construct request model with validation
@@ -29497,7 +29640,7 @@ async def get_notification_preference(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preference is being retrieved."),
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel (e.g., email, SMS, push notification) for which the preference applies."),
     notification: str = Field(..., description="The notification type identifier for which to fetch the preference setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the notification preference settings for a specific notification type on a given communication channel. This allows you to check whether notifications are enabled or disabled for that channel."""
 
     # Construct request model with validation
@@ -29536,7 +29679,7 @@ async def get_notification_preference(
 async def delete_communication_channel(
     user_id: str = Field(..., description="The unique identifier of the user who owns the communication channel."),
     id_: str = Field(..., alias="id", description="The unique identifier of the communication channel to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an existing communication channel for a user. This operation permanently removes the specified communication channel and cannot be undone."""
 
     # Construct request model with validation
@@ -29576,7 +29719,7 @@ async def delete_communication_channel_by_address(
     user_id: str = Field(..., description="The unique identifier of the user whose communication channel will be deleted."),
     type_: str = Field(..., alias="type", description="The type of communication channel to delete (e.g., email, phone, SMS)."),
     address: str = Field(..., description="The address or identifier of the specific communication channel instance to delete (e.g., email address, phone number)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an existing communication channel for a user. Removes the specified communication channel by type and address."""
 
     # Construct request model with validation
@@ -29616,7 +29759,7 @@ async def list_notification_preferences_by_type(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preferences are being retrieved."),
     type_: str = Field(..., alias="type", description="The type of communication channel (e.g., email, SMS, push). Specifies which channel category's preferences to fetch."),
     address: str = Field(..., description="The specific address or identifier for the communication channel (e.g., email address, phone number, device ID)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all notification preferences for a specific communication channel. Returns the preference settings configured for the given user, channel type, and address."""
 
     # Construct request model with validation
@@ -29657,7 +29800,7 @@ async def get_notification_preference_by_address(
     type_: str = Field(..., alias="type", description="The type of communication channel (e.g., email, SMS, push notification)."),
     address: str = Field(..., description="The specific address or endpoint for the communication channel (e.g., email address, phone number, device token)."),
     notification: str = Field(..., description="The notification type or category for which the preference is being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the notification preference setting for a specific communication channel and notification type. Returns the preference configuration for the given user's communication address."""
 
     # Construct request model with validation
@@ -29696,7 +29839,7 @@ async def get_notification_preference_by_address(
 async def list_content_exports_user(
     user_id: str = Field(..., description="The unique identifier of the user whose content exports should be listed."),
     per_page: int | None = Field(None, description="The maximum number of content exports to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of past and pending content export jobs for a user, ordered with newest exports first."""
 
     # Construct request model with validation
@@ -29740,7 +29883,7 @@ async def initiate_content_export(
     export_type: Literal["common_cartridge", "qti", "zip"] = Field(..., description="The format for the exported content. Common Cartridge exports all content types, QTI exports quizzes only, and ZIP exports files and folders."),
     select: Literal["folders", "files", "attachments", "quizzes", "assignments", "announcements", "calendar_events", "discussion_topics", "modules", "module_items", "pages", "rubrics"] | None = Field(None, description="Specify which content objects to include in the export by object type and ID. Supported object types vary by export format: Common Cartridge supports all types, ZIP supports folders and files, and QTI supports quizzes. Provide object IDs as integers or strings."),
     skip_notifications: bool | None = Field(None, description="Suppress notification emails to the user about the export completion. Defaults to false if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content export job for a user's course, group, or files. Track progress using the Progress API and retrieve the download URL once the export completes."""
 
     # Construct request model with validation
@@ -29783,7 +29926,7 @@ async def initiate_content_export(
 async def get_content_export_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content export to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific content export for a user, including its status and metadata."""
 
     # Construct request model with validation
@@ -29822,7 +29965,7 @@ async def get_content_export_user(
 async def list_content_licenses_user(
     user_id: str = Field(..., description="The unique identifier of the user whose content licenses you want to retrieve."),
     per_page: int | None = Field(None, description="The number of license items to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content licenses available for a specific user. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -29864,7 +30007,7 @@ async def list_content_licenses_user(
 async def list_content_migrations_user(
     user_id: str = Field(..., description="The unique identifier of the user whose content migrations should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page. Allows control over result set size for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of content migrations for a specific user. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -29920,7 +30063,7 @@ async def initiate_content_migration_user(
     settings_overwrite_quizzes: bool | None = Field(None, description="Whether to replace existing quizzes that have matching identifiers in the content package."),
     settings_question_bank_id: str | None = Field(None, description="The ID of an existing question bank to import questions into if the content package does not specify a target question bank."),
     settings_source_course_id: str | None = Field(None, description="The source course ID to copy from during a course copy migration. Required when migration_type is course_copy_importer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a content migration for a user. For migrations requiring file uploads, processing begins after the upload completes. For migrations like course copy, processing starts immediately. Use the Progress API endpoint provided in the response to monitor migration status."""
 
     _date_shift_options_day_substitutions_x = _parse_int(date_shift_options_day_substitutions_x)
@@ -29963,7 +30106,7 @@ async def initiate_content_migration_user(
 
 # Tags: content_migrations
 @mcp.tool()
-async def list_migration_systems_user(user_id: str = Field(..., description="The unique identifier of the user whose available migration systems should be listed.")) -> dict[str, Any]:
+async def list_migration_systems_user(user_id: str = Field(..., description="The unique identifier of the user whose available migration systems should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves the currently available migration system types for a user. The list of available migration types may change over time."""
 
     # Construct request model with validation
@@ -30003,7 +30146,7 @@ async def list_migration_issues_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
     per_page: int | None = Field(None, description="The number of migration issues to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of migration issues for a specific content migration. Use this to monitor and track problems encountered during the content migration process."""
 
     # Construct request model with validation
@@ -30046,7 +30189,7 @@ async def get_migration_issue_in_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration job that contains the migration issue."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific migration issue to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific migration issue encountered during a content migration for a user. Returns comprehensive data about the issue including its status and error information."""
 
     # Construct request model with validation
@@ -30087,7 +30230,7 @@ async def resolve_migration_issue_user(
     content_migration_id: str = Field(..., description="The ID of the content migration that contains the issue."),
     id_: str = Field(..., alias="id", description="The ID of the migration issue to update."),
     workflow_state: Literal["active", "resolved"] = Field(..., description="The new workflow state for the migration issue. Set to 'active' to flag an unresolved issue or 'resolved' to mark it as completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the workflow state of a migration issue to mark it as active or resolved. Use this to track and manage issues discovered during content migrations."""
 
     # Construct request model with validation
@@ -30129,7 +30272,7 @@ async def resolve_migration_issue_user(
 async def get_content_migration_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific content migration for a user. Use this to check the status and details of an individual migration job."""
 
     # Construct request model with validation
@@ -30168,7 +30311,7 @@ async def get_content_migration_user(
 async def update_content_migration_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing content migration for a user. Allows you to modify migration settings and supply new file upload values if the initial upload encountered problems, though changes made after the migration process has started may not take effect."""
 
     # Construct request model with validation
@@ -30210,7 +30353,7 @@ async def list_courses_by_user(
     state: list[Literal["unpublished", "available", "completed", "deleted"]] | None = Field(None, description="Filter results to only include courses in the specified state(s). By default, returns 'available' for students and observers, or all states except 'deleted' for other enrollment types."),
     enrollment_state: Literal["active", "invited_or_pending", "completed"] | None = Field(None, description="Filter results to only include courses where the user has an enrollment with the specified state. Respects section, course, and term date overrides."),
     per_page: int | None = Field(None, description="Number of courses to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active courses for a user. Requires observer or administrator access to view courses for users other than yourself."""
 
     # Construct request model with validation
@@ -30264,7 +30407,7 @@ async def list_assignments_by_user(
     assignment_ids: list[str] | None = Field(None, description="If provided, return only the assignments with IDs in this list."),
     order_by: Literal["position", "name"] | None = Field(None, description="Sort assignments by the specified field."),
     per_page: int | None = Field(None, description="Maximum number of assignments to return per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of assignments for a specific user in a course. Returns assignments filtered by visibility permissions, with optional sorting, bucketing, and association data."""
 
     # Construct request model with validation
@@ -30310,7 +30453,7 @@ async def list_assignments_by_user(
 async def retrieve_custom_data(
     user_id: str = Field(..., description="The unique identifier of the user whose custom data should be retrieved."),
     ns: str = Field(..., description="The namespace scope from which to retrieve the data. Use a reverse DNS format or other unique identifier to avoid conflicts with other Canvas applications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve custom user data stored in a specified namespace. Returns the JSON data object associated with the given scope, or an error if the namespace is invalid or contains no data."""
 
     # Construct request model with validation
@@ -30353,7 +30496,7 @@ async def store_custom_data(
     user_id: str = Field(..., description="The Canvas user ID or 'self' to reference the authenticated user. Requires account administrator permissions to access another user's custom data."),
     data: Any = Field(..., description="The data to store at the specified scope. Can be a string, number, boolean, null, array, or nested JSON object. Content-Type determines supported data types: application/x-www-form-urlencoded supports strings only; application/json supports all JSON types."),
     ns: str = Field(..., description="Required namespace identifier to prevent data collisions between applications. Use a reverse DNS format (e.g., com.organization.app-name) to ensure uniqueness."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Store arbitrary JSON data associated with a user, organized by namespace and scope. Supports nested data structures with automatic subscope generation for object keys."""
 
     # Construct request model with validation
@@ -30395,7 +30538,7 @@ async def store_custom_data(
 async def delete_custom_data(
     user_id: str = Field(..., description="The unique identifier of the user whose custom data should be deleted."),
     ns: str = Field(..., description="The namespace identifying the data scope to delete from. Should be a unique identifier such as a reverse DNS (e.g., com.organization.app-name) to avoid conflicts with other Canvas applications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete custom user data for a specified namespace and optional scope path. Removes the data at the given scope and automatically cleans up empty parent containers."""
 
     # Construct request model with validation
@@ -30442,7 +30585,7 @@ async def list_user_enrollments(
     enrollment_term_id: str | None = Field(None, description="Filter enrollments to a specific enrollment term. Accepts either the term ID or a SIS ID prefixed with 'sis_term_id:'. Only applies when querying user enrollments."),
     sis_user_id: list[str] | None = Field(None, description="Filter enrollments by one or more SIS user IDs. Accepts a single ID or array of IDs."),
     per_page: int | None = Field(None, description="Number of enrollment records to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of enrollments for a specific user across courses, sections, or contexts. Returns all enrollment types including student, teacher, TA, and observer roles. Note: Only root admins can view other users' enrollments; users can only view their own."""
 
     _grading_period_id = _parse_int(grading_period_id)
@@ -30492,7 +30635,7 @@ async def list_user_enrollments(
 async def list_user_features(
     user_id: str = Field(..., description="The unique identifier of the user whose features you want to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all features available to a specific user. Features can apply at the account, course, or user level."""
 
     # Construct request model with validation
@@ -30534,7 +30677,7 @@ async def list_user_features(
 async def list_enabled_features_user(
     user_id: str = Field(..., description="The unique identifier of the user whose enabled features should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows pagination through large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all features that are enabled for a specific user. Only feature names are returned."""
 
     # Construct request model with validation
@@ -30576,7 +30719,7 @@ async def list_enabled_features_user(
 async def get_feature_flag_user(
     user_id: str = Field(..., description="The unique identifier of the user for which to retrieve the feature flag."),
     feature: str = Field(..., description="The unique identifier of the feature flag to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the feature flag configuration that applies to a specific user, which may be defined directly on the user or inherited from a parent account. The returned object's context_id and context_type fields indicate the source of the flag definition."""
 
     # Construct request model with validation
@@ -30612,7 +30755,7 @@ async def get_feature_flag_user(
 
 # Tags: users
 @mcp.tool()
-async def upload_file_personal(user_id: str = Field(..., description="The ID of the user whose files section will receive the upload. Use the special value 'self' to refer to the current authenticated user.")) -> dict[str, Any]:
+async def upload_file_personal(user_id: str = Field(..., description="The ID of the user whose files section will receive the upload. Use the special value 'self' to refer to the current authenticated user.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a user's personal files section. This is the first step in the file upload workflow; refer to the File Upload Documentation for complete details on multi-step uploads and supported file types."""
 
     # Construct request model with validation
@@ -30648,7 +30791,7 @@ async def upload_file_personal(user_id: str = Field(..., description="The ID of 
 
 # Tags: files
 @mcp.tool()
-async def get_user_storage_quota(user_id: str = Field(..., description="The unique identifier of the user whose quota information should be retrieved.")) -> dict[str, Any]:
+async def get_user_storage_quota(user_id: str = Field(..., description="The unique identifier of the user whose quota information should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total and used storage quota for a specific user. Returns quota information including storage limits and current usage."""
 
     # Construct request model with validation
@@ -30688,7 +30831,7 @@ async def get_file_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns or has access to the file."),
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
     include: list[Literal["user"]] | None = Field(None, description="Optional array of related information to include in the response. Specify 'user' to include uploader/editor details or 'usage_rights' to include copyright and license information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific file attachment with its metadata. Optionally includes related information such as the uploading user or usage rights."""
 
     # Construct request model with validation
@@ -30733,7 +30876,7 @@ async def get_file_user(
 async def list_folders_user(
     user_id: str = Field(..., description="The unique identifier of the user whose folders should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of folders to return per page. Valid range is 1 to 100 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all folders for a specific user, including all subfolders in a flat structure."""
 
     # Construct request model with validation
@@ -30778,7 +30921,7 @@ async def create_folder_user(
     hidden: bool | None = Field(None, description="Hide the folder from standard view when enabled."),
     locked: bool | None = Field(None, description="Prevent modifications to the folder when enabled."),
     position: str | None = Field(None, description="The sort position of the folder in the user's folder list. Higher values appear later in the sort order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new folder for a user. Optionally configure visibility, lock status, and sort position."""
 
     _position = _parse_int(position)
@@ -30820,7 +30963,7 @@ async def create_folder_user(
 
 # Tags: files
 @mcp.tool()
-async def get_folder_path_user(user_id: str = Field(..., description="The unique identifier of the user whose folder structure should be resolved.")) -> dict[str, Any]:
+async def get_folder_path_user(user_id: str = Field(..., description="The unique identifier of the user whose folder structure should be resolved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete folder hierarchy for a given path, starting from the root folder and ending at the requested folder. Returns all intermediate folders in the path hierarchy."""
 
     # Construct request model with validation
@@ -30859,7 +31002,7 @@ async def get_folder_path_user(user_id: str = Field(..., description="The unique
 async def get_folder_user(
     user_id: str = Field(..., description="The ID of the user who owns or has access to the folder."),
     id_: str = Field(..., alias="id", description="The ID of the folder to retrieve. Use 'root' to get the root folder for the user's context."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific folder. Use 'root' as the folder ID to get the root folder for a given context (e.g., course)."""
 
     # Construct request model with validation
@@ -30898,7 +31041,7 @@ async def get_folder_user(
 async def list_logins_user(
     user_id: str = Field(..., description="The unique identifier of the user whose login history you want to retrieve."),
     per_page: int | None = Field(None, description="Number of login records to return per page. Allows you to control pagination size.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of login events for a specific user account. Use this to audit user access history and login activity."""
 
     # Construct request model with validation
@@ -30940,7 +31083,7 @@ async def list_logins_user(
 async def delete_login(
     user_id: str = Field(..., description="The unique identifier of the user who owns the login to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the login record to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an existing user login session or credential. This removes the login record associated with the specified user."""
 
     # Construct request model with validation
@@ -30980,7 +31123,7 @@ async def list_overdue_assignments(
     user_id: str = Field(..., description="The unique identifier of the student whose missing submissions should be retrieved."),
     include: list[Literal["planner_overrides", "course"]] | None = Field(None, description="Optional fields to include in the response. Specify 'planner_overrides' to include the student's planner override for each assignment, or 'course' to include the assignment's course information."),
     per_page: int | None = Field(None, description="The number of assignments to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of past-due assignments for a student that have no submission. The requesting user must be the student, an administrator, or a parent observer using the parent app."""
 
     # Construct request model with validation
@@ -31026,7 +31169,7 @@ async def list_observees(
     user_id: str = Field(..., description="The unique identifier of the user whose observees should be listed."),
     include: list[Literal["avatar_url"]] | None = Field(None, description="Optional attributes to include in the response. Specify 'avatar_url' to include the avatar URL for each observee."),
     per_page: int | None = Field(None, description="The number of observees to return per page for pagination.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users that the specified user is observing. All users can list their own observees; administrators can list observees for other users."""
 
     # Construct request model with validation
@@ -31073,7 +31216,7 @@ async def create_observee(
     access_token: str | None = Field(None, description="The access token of the user to be observed. Required unless observee credentials or pairing code are provided."),
     pairing_code: str | None = Field(None, description="A pairing code generated for the user to be observed. Required when the Observer pairing code feature flag is enabled."),
     root_account_id: str | None = Field(None, description="The root account ID to associate with the observation link. Defaults to the current domain account. Specify 'all' to create links for each root account associated with both the observer and observee."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register the current user to observe another user by providing the observee's credentials, access token, or pairing code. Administrators can also create observation links using the observee's ID."""
 
     _root_account_id = _parse_int(root_account_id)
@@ -31117,7 +31260,7 @@ async def create_observee(
 async def get_observee(
     user_id: str = Field(..., description="The ID of the user whose observee relationship is being queried."),
     observee_id: str = Field(..., description="The ID of the observed user whose information is being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about an observed user. All users can view their own observees."""
 
     # Construct request model with validation
@@ -31157,7 +31300,7 @@ async def create_observation_link(
     user_id: str = Field(..., description="The unique identifier of the user who will be observing."),
     observee_id: str = Field(..., description="The unique identifier of the user to be observed."),
     root_account_id: str | None = Field(None, description="The root account to associate with this observation link. If omitted, observation links will be created for all root accounts shared by both users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Establishes an observation relationship between two users, allowing one user to observe another. Optionally scopes the observation link to a specific root account."""
 
     _root_account_id = _parse_int(root_account_id)
@@ -31202,7 +31345,7 @@ async def unobserve_user(
     user_id: str = Field(..., description="The ID of the user who is observing (the observer)."),
     observee_id: str = Field(..., description="The ID of the user to stop observing (the observee)."),
     root_account_id: str | None = Field(None, description="If specified, removes the observee link only for the given root account, leaving links for other root accounts intact."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an observee relationship, unregistering a user from being observed by the specified observer. Optionally scoped to a specific root account."""
 
     _root_account_id = _parse_int(root_account_id)
@@ -31248,7 +31391,7 @@ async def list_page_views(
     start_time: str | None = Field(None, description="Filter results to include only page views on or after this timestamp. Use ISO 8601 date-time format."),
     end_time: str | None = Field(None, description="Filter results to include only page views on or before this timestamp. Use ISO 8601 date-time format."),
     per_page: int | None = Field(None, description="The maximum number of page view records to return per request. Defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of page views for a user in descending chronological order (newest to oldest). Results can be filtered by a time range and customized for pagination."""
 
     # Construct request model with validation
@@ -31287,7 +31430,7 @@ async def list_page_views(
 
 # Tags: users
 @mcp.tool()
-async def get_user_profile(user_id: str = Field(..., description="The unique identifier of the user whose profile should be retrieved.")) -> dict[str, Any]:
+async def get_user_profile(user_id: str = Field(..., description="The unique identifier of the user whose profile should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve a user's profile information including name and profile picture. When requesting your own profile, additional data such as calendar feed URL and LTI user ID are included."""
 
     # Construct request model with validation
@@ -31329,7 +31472,7 @@ async def assign_usage_rights(
     usage_rights_use_justification: Literal["own_copyright", "used_by_permission", "fair_use", "public_domain", "creative_commons"] = Field(..., description="The intellectual property justification for using the files in Canvas."),
     folder_ids: list[str] | None = Field(None, description="List of folder IDs to search for files to assign usage rights to. New files uploaded to these folders will not automatically inherit these rights. Order is not significant."),
     publish: bool | None = Field(None, description="Whether to publish the files or folders upon saving, provided that usage rights have been specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign copyright and license information to files, specifying the intellectual property justification for their use in Canvas. Optionally publish files upon assignment."""
 
     # Construct request model with validation
@@ -31372,7 +31515,7 @@ async def remove_file_usage_rights_user(
     user_id: str = Field(..., description="The unique identifier of the user whose files' usage rights will be removed."),
     file_ids: list[str] = Field(..., description="List of file identifiers from which to remove usage rights. Order is not significant."),
     folder_ids: list[str] | None = Field(None, description="List of folder identifiers. Usage rights will be removed from all files contained within these folders. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove copyright and license information from specified files and folders. This operation strips all associated usage rights metadata from the target files."""
 
     # Construct request model with validation

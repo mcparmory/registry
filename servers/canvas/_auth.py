@@ -1,7 +1,7 @@
 """
 Authentication module for Canvas MCP server.
 
-Generated: 2026-04-14 18:17:23 UTC
+Generated: 2026-04-23 21:06:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -11,19 +11,436 @@ This module contains:
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
+import json
 import logging
 import os
+import time
+import webbrowser
+from pathlib import Path
+
+from authlib.common.security import generate_token
+from authlib.integrations.httpx_client import OAuth2Client
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "OAuth2Auth",
     "BearerTokenAuth",
     "OPERATION_AUTH_MAP",
 ]
 
 # ============================================================================
+# Callback Port Configuration
+# ============================================================================
+
+# OAuth2/OIDC callback server ports (configured in .env)
+# Each auth scheme uses a different port to avoid conflicts when multiple
+# schemes are active simultaneously (e.g., OAuth2 + OIDC).
+OAUTH2_CALLBACK_PORT = int(os.environ.get("OAUTH2_CALLBACK_PORT", 9400))
+
+# ============================================================================
 # Authentication Classes
 # ============================================================================
+
+class OAuth2Auth:
+    """
+    OAuth 2.0 authentication for Canvas API.
+
+    Flow: authorizationCode
+    Uses: authlib for OAuth2 protocol handling
+
+    NOTE: Authorization scheme prefix ("Bearer ") is automatically inserted.
+    Access tokens are obtained automatically through OAuth2 flow.
+
+    Configuration (environment variables):
+        - OAUTH2_CLIENT_ID: OAuth2 client ID (required)
+        - OAUTH2_CLIENT_SECRET: OAuth2 client secret (required)
+        - OAUTH2_SCOPES: Comma-separated scopes (required)
+    Redirect URI:
+        - Fixed: http://localhost:<OAUTH2_CALLBACK_PORT>/callback
+        - Configured via OAUTH2_CALLBACK_PORT in .env (default: 9400)
+        - Must match redirect URI in your OAuth application configuration
+    Token Storage:
+        Location: ./tokens/oauth2_tokens.json
+        Permissions: 0o600 (owner read/write only)
+        Format: JSON with access_token, refresh_token, expires_at
+
+    URLs:
+        Authorization URL: https://{canvas_domain}/login/oauth2/auth
+        Token URL: https://{canvas_domain}/login/oauth2/token
+
+    Available Scopes (configure via OAUTH2_SCOPES):
+        (Check API documentation for available scopes)
+    """
+
+    def __init__(self):
+        """Initialize OAuth2 authentication with authlib."""
+        # Store flow type for lifecycle management
+        self.flow_type = "authorizationCode"
+
+        # Load configuration from environment
+        self.client_id = os.getenv("OAUTH2_CLIENT_ID", "").strip()
+        self.client_secret = os.getenv("OAUTH2_CLIENT_SECRET", "").strip()
+
+        # Validate required credentials
+        if not self.client_id or not self.client_secret:
+            raise ValueError(
+                "OAUTH2_CLIENT_ID and OAUTH2_CLIENT_SECRET must be set. "
+                "Leave empty in .env to disable OAuth2."
+            )
+
+        # Detect common placeholder patterns
+        placeholders = ["placeholder", "your-", "example", "change-me", "todo"]
+        if any(p in self.client_id.lower() for p in placeholders):
+            raise ValueError(
+                f"OAUTH2_CLIENT_ID appears to be a placeholder ({self.client_id[:20]}...). "
+                "Please set real credentials or leave empty to disable OAuth2."
+            )
+        if any(p in self.client_secret.lower() for p in placeholders):
+            raise ValueError(
+                "OAUTH2_CLIENT_SECRET appears to be a placeholder. "
+                "Please set real credentials or leave empty to disable OAuth2."
+            )
+
+        # Parse scopes from environment (required)
+        scopes_env = os.getenv("OAUTH2_SCOPES", "").strip()
+        self.scopes = [s.strip() for s in scopes_env.split(",") if s.strip()]
+        # Redirect URI for authorization flows
+        self.callback_port = int(os.getenv("OAUTH2_CALLBACK_PORT", "9400"))
+        self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
+
+        # OAuth2 token URL (required for all flows that fetch tokens)
+        self.token_url = "https://{canvas_domain}/login/oauth2/token"
+        self.auth_url = "https://{canvas_domain}/login/oauth2/auth"
+        self.refresh_url = None
+
+        # Token storage (secure file-based, unique per scheme)
+        self.token_dir = Path(__file__).parent / "tokens"
+        self.token_file = self.token_dir / "oauth2_tokens.json"
+        self.client: OAuth2Client | None = None
+        self.token: dict | None = None
+        self._auth_lock = asyncio.Lock()  # Prevents concurrent auth flows (dual browser tabs)
+
+        # Load existing token if available
+        self._load_token()
+
+    def _load_token(self) -> None:
+        """Load saved token from disk."""
+        if self.token_file.exists():
+            try:
+                data = json.loads(self.token_file.read_text())
+                if data.get("access_token"):
+                    self.token = data
+            except (json.JSONDecodeError, IOError):
+                pass
+
+    def _save_token(self, token: dict) -> None:
+        """Save token to disk with restricted permissions."""
+        normalized = dict(token)
+        # Only set expires_at when expires_in is positive. A value of 0 (some
+        # providers return this for non-expiring tokens) would otherwise mark
+        # the token as immediately expired on every request.
+        if "expires_at" not in normalized:
+            expires_in = normalized.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                normalized["expires_at"] = time.time() + int(expires_in)
+        self.token_dir.mkdir(parents=True, exist_ok=True)
+        self.token_file.write_text(json.dumps(normalized, indent=2))
+        self.token_file.chmod(0o600)
+        self.token = normalized
+
+    def _create_client(self) -> OAuth2Client:
+        """Create authlib OAuth2Client."""
+        return OAuth2Client(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            token_endpoint_auth_method="client_secret_post",
+        )
+
+    def _is_token_expired(self) -> bool:
+        """Check if current token is expired or about to expire."""
+        if not self.token:
+            return False  # Caller handles missing token separately
+        expires_at = self.token.get("expires_at")
+        if expires_at is None:
+            return False  # No expiry info — assume valid
+        return time.time() > (expires_at - 300)  # 5-minute buffer
+
+    async def _refresh_token(self) -> bool:
+        """Try to refresh the access token using the refresh token."""
+        if not self.token or not self.token.get("refresh_token"):
+            return False
+        if not self.token_url:
+            return False
+
+        loop = asyncio.get_running_loop()
+        refresh_token_val = self.token["refresh_token"]
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                new_token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.refresh_token(
+                        self.token_url,
+                        refresh_token=refresh_token_val,
+                    ),
+                )
+                if new_token and new_token.get("access_token"):
+                    self._save_token(dict(new_token))
+                    return True
+            except Exception as exc:
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                logger.debug("Token refresh failed (%s): %s", auth_method, exc)
+                break
+        return False
+
+    async def authorize(self, port: int | None = None) -> dict:
+        """
+        Run OAuth2 authorization code flow with async local callback server.
+
+        Starts an asyncio TCP server on localhost to receive the callback,
+        opens the browser to the authorization URL, and waits for the user
+        to authorize. Retries up to 5 adjacent ports if the primary port is in use.
+
+        Args:
+            port: Local callback server port (default: from OAUTH2_CALLBACK_PORT env or 9400)
+
+        Returns:
+            OAuth2 token dict with access_token, refresh_token, etc.
+
+        Raises:
+            ValueError: If authorization fails or is denied
+            TimeoutError: If user doesn't complete authorization in 120 seconds
+        """
+        import errno
+        import html as _html
+        import urllib.parse
+
+        base_port = port or self.callback_port
+
+        # PKCE
+        code_verifier = generate_token(48)
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        state = generate_token(30)
+
+        callback_done: asyncio.Event = asyncio.Event()
+        result: dict = {}
+
+        async def _handle_connection(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                request_line = (await reader.readline()).decode(errors="replace").strip()
+                while True:
+                    line = await reader.readline()
+                    if not line or line == b"\r\n":
+                        break
+
+                path = request_line.split(" ", 2)[1] if request_line.startswith("GET ") else ""
+                parsed = urllib.parse.urlparse(path)
+                params = urllib.parse.parse_qs(parsed.query)
+
+                if parsed.path == "/callback" and ("code" in params or "error" in params):
+                    if "error" in params:
+                        result["error"] = params["error"][0]
+                        result["error_description"] = params.get("error_description", [""])[0]
+                        status = "400 Bad Request"
+                        title = "Authorization failed"
+                        body = f"<p style='color:#ff8787'>{_html.escape(result.get('error_description') or result['error'])}</p>"
+                    else:
+                        cb_state = params.get("state", [None])[0]
+                        if cb_state != state:
+                            result["error"] = "state_mismatch"
+                            result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
+                            status = "400 Bad Request"
+                            title = "Authorization failed"
+                            body = "<p style='color:#ff8787'>State mismatch — possible CSRF attack.</p>"
+                        else:
+                            result["code"] = params["code"][0]
+                            status = "200 OK"
+                            title = "Authorization successful"
+                            body = "<p>You can close this window.</p>"
+                    callback_done.set()
+                else:
+                    status, title, body = "200 OK", "Please wait\u2026", ""
+
+                html = (
+                    "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    f"<title>{title}</title>"
+                    "<style>*{margin:0;padding:0;box-sizing:border-box}"
+                    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+                    "background:#1a1a1a;color:#e8e8e8;display:flex;align-items:center;"
+                    "justify-content:center;min-height:100vh}"
+                    ".card{background:#242424;border:1px solid #333;border-radius:16px;"
+                    "padding:48px 40px;text-align:center;max-width:420px;width:90%;"
+                    "box-shadow:0 8px 32px rgba(0,0,0,.4)}"
+                    ".logo{width:64px;height:64px;margin-bottom:32px;border-radius:12px}"
+                    "h1{font-size:28px;font-weight:600;margin-bottom:10px}"
+                    "p{font-size:15px;color:#888;line-height:1.5}"
+                    ".footer{margin-top:32px;padding-top:20px;border-top:1px solid #333}"
+                    ".footer a{color:#ff5722;text-decoration:none;font-size:13px}</style>"
+                    "</head><body><div class='card'>"
+                    "<img src='https://wjxawmrpsfuivlicnepc.supabase.co/storage/v1/object/public/newsletter/logo-blacksmith.png'"
+                    " alt='MCP Blacksmith' class='logo'>"
+                    f"<h1>{title}</h1>{body}"
+                    "<div class='footer'><a href='https://mcpblacksmith.com'>mcpblacksmith.com</a></div>"
+                    "</div></body></html>"
+                )
+                payload = html.encode()
+                response = (
+                    f"HTTP/1.1 {status}\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(payload)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode() + payload
+                writer.write(response)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        # Bind to port with retry on EADDRINUSE
+        bound_port = base_port
+        server = None
+        for attempt in range(5):
+            try:
+                server = await asyncio.start_server(
+                    _handle_connection, "localhost", base_port + attempt
+                )
+                bound_port = base_port + attempt
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE or attempt == 4:
+                    raise
+        if server is None:
+            raise OSError(f"Could not bind to any port in range {base_port}–{base_port + 4}")
+
+        redirect_uri = f"http://localhost:{bound_port}/callback"
+
+        auth_params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(self.scopes),
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        auth_url = f"{self.auth_url}?{urllib.parse.urlencode(auth_params)}"
+
+        async with server:
+            logger.info("OAuth2 callback server listening on port %d", bound_port)
+            print(f"\nAuthorize this application:\n\n  {auth_url}\n")
+            webbrowser.open(auth_url)
+            try:
+                await asyncio.wait_for(callback_done.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    "Authorization timed out (120s). "
+                    "Please try again and complete authorization in the browser."
+                )
+
+        if "error" in result:
+            raise ValueError(
+                f"Authorization denied: {result['error']} — {result.get('error_description', '')}"
+            )
+        if "code" not in result:
+            raise ValueError("Authorization failed: no code received after callback")
+
+        # Token exchange with client_secret_post / client_secret_basic fallback
+        loop = asyncio.get_running_loop()
+        token = None
+        last_exc: Exception | None = None
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.fetch_token(
+                        self.token_url,
+                        code=result["code"],
+                        redirect_uri=redirect_uri,
+                        code_verifier=code_verifier,
+                    ),
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                raise
+
+        if not token or not token.get("access_token"):
+            raise ValueError(
+                "Token exchange failed — no access_token received"
+                + (f": {last_exc}" if last_exc else "")
+            )
+
+        # Scope validation — warn only, don't fail
+        returned_scope = token.get("scope", "")
+        if returned_scope:
+            missing = set(self.scopes) - set(returned_scope.split())
+            if missing:
+                logger.warning(
+                    "OAuth2 provider returned fewer scopes than requested. "
+                    "Missing: %s. Some API operations may fail.",
+                    ", ".join(sorted(missing)),
+                )
+
+        self._save_token(dict(token))
+        return dict(token)
+
+    async def get_auth_headers(self) -> dict:
+        """
+        Get authorization headers for API requests.
+
+        Handles token lifecycle:
+        1. If no token, trigger authorization flow
+        2. If token expired, try refresh first
+        3. If refresh fails, re-authorize
+
+        Returns:
+            Dict with Authorization header (Bearer token)
+        """
+        # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
+        async with self._auth_lock:
+            # Re-check after acquiring lock (another call may have completed auth)
+            if not self.token:
+                await self.authorize()
+
+            # Token expired — try refresh, then re-authorize
+            # elif: skip expiry check if authorize() just ran above (prevents double browser tab)
+            elif self._is_token_expired():
+                if not await self._refresh_token():
+                    await self.authorize()
+
+        if not self.token or not self.token.get("access_token"):
+            raise ValueError("Failed to obtain access token after authorization attempt")
+
+        return {"Authorization": f"Bearer {self.token['access_token']}"}
+
+    def get_auth_params(self) -> dict:
+        """OAuth2 uses headers, not query params."""
+        return {}
 
 class BearerTokenAuth:
     """
@@ -79,700 +496,700 @@ This dictionary defines which authentication schemes are required for each opera
 using OR/AND relationships (outer list = OR, inner list = AND).
 """
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
-    "get_assignment_lti": [["bearerAuth"]],
-    "get_originality_report": [["bearerAuth"]],
-    "update_originality_report": [["bearerAuth"]],
-    "get_submission": [["bearerAuth"]],
-    "list_submission_attempts": [["bearerAuth"]],
-    "submit_originality_report": [["bearerAuth"]],
-    "get_originality_report_submission": [["bearerAuth"]],
-    "update_originality_report_submission": [["bearerAuth"]],
-    "get_group_members_lti": [["bearerAuth"]],
-    "list_webhook_subscriptions": [["bearerAuth"]],
-    "get_webhook_subscription": [["bearerAuth"]],
-    "delete_webhook_subscription": [["bearerAuth"]],
-    "get_lti_user": [["bearerAuth"]],
-    "list_sis_export_assignments": [["bearerAuth"]],
-    "list_sis_export_assignments_by_course": [["bearerAuth"]],
-    "disable_sis_grade_exports": [["bearerAuth"]],
-    "list_accounts": [["bearerAuth"]],
-    "search_domains": [["bearerAuth"]],
-    "list_active_notifications": [["bearerAuth"]],
-    "create_notification": [["bearerAuth"]],
-    "get_notification": [["bearerAuth"]],
-    "update_notification": [["bearerAuth"]],
-    "dismiss_notification": [["bearerAuth"]],
-    "list_admins": [["bearerAuth"]],
-    "promote_account_admin": [["bearerAuth"]],
-    "list_department_participation_completed": [["bearerAuth"]],
-    "list_department_grade_distribution_completed": [["bearerAuth"]],
-    "get_department_statistics": [["bearerAuth"]],
-    "list_department_participation_data": [["bearerAuth"]],
-    "list_department_grade_distribution": [["bearerAuth"]],
-    "get_department_statistics_current": [["bearerAuth"]],
-    "list_department_participation_by_term": [["bearerAuth"]],
-    "list_department_grade_distributions": [["bearerAuth"]],
-    "get_department_statistics_term": [["bearerAuth"]],
-    "list_authentication_providers": [["bearerAuth"]],
-    "get_authentication_provider": [["bearerAuth"]],
-    "list_content_migrations": [["bearerAuth"]],
-    "initiate_content_migration": [["bearerAuth"]],
-    "list_migration_systems": [["bearerAuth"]],
-    "list_migration_issues": [["bearerAuth"]],
-    "get_migration_issue": [["bearerAuth"]],
-    "resolve_migration_issue": [["bearerAuth"]],
-    "get_content_migration": [["bearerAuth"]],
-    "update_content_migration": [["bearerAuth"]],
-    "list_courses_by_account": [["bearerAuth"]],
-    "create_course": [["bearerAuth"]],
-    "bulk_update_courses": [["bearerAuth"]],
-    "get_course_account": [["bearerAuth"]],
-    "get_enrollment": [["bearerAuth"]],
-    "list_external_tools": [["bearerAuth"]],
-    "create_external_tool": [["bearerAuth"]],
-    "get_external_tool_sessionless_launch_url": [["bearerAuth"]],
-    "get_external_tool": [["bearerAuth"]],
-    "update_external_tool": [["bearerAuth"]],
-    "remove_external_tool": [["bearerAuth"]],
-    "list_account_features": [["bearerAuth"]],
-    "list_enabled_features": [["bearerAuth"]],
-    "get_feature_flag": [["bearerAuth"]],
-    "list_grading_periods": [["bearerAuth"]],
-    "delete_grading_period": [["bearerAuth"]],
-    "list_grading_standards": [["bearerAuth"]],
-    "create_grading_standard": [["bearerAuth"]],
-    "get_grading_standard": [["bearerAuth"]],
-    "list_group_categories": [["bearerAuth"]],
-    "create_group_category": [["bearerAuth"]],
-    "list_groups_in_account": [["bearerAuth"]],
-    "list_logins": [["bearerAuth"]],
-    "create_login": [["bearerAuth"]],
-    "update_user_login": [["bearerAuth"]],
-    "list_outcome_links": [["bearerAuth"]],
-    "list_outcome_groups": [["bearerAuth"]],
-    "get_outcome_group_account": [["bearerAuth"]],
-    "update_outcome_group": [["bearerAuth"]],
-    "delete_outcome_group_account": [["bearerAuth"]],
-    "copy_outcome_group": [["bearerAuth"]],
-    "list_outcomes_account": [["bearerAuth"]],
-    "link_outcome": [["bearerAuth"]],
-    "link_outcome_existing": [["bearerAuth"]],
-    "unlink_outcome": [["bearerAuth"]],
-    "list_subgroups": [["bearerAuth"]],
-    "create_outcome_subgroup": [["bearerAuth"]],
-    "import_outcomes": [["bearerAuth"]],
-    "get_outcome_import_status": [["bearerAuth"]],
-    "list_proficiency_ratings": [["bearerAuth"]],
-    "set_proficiency_ratings": [["bearerAuth"]],
-    "check_account_permissions": [["bearerAuth"]],
-    "list_reports": [["bearerAuth"]],
-    "list_reports_by_type": [["bearerAuth"]],
-    "generate_report": [["bearerAuth"]],
-    "get_report_status": [["bearerAuth"]],
-    "delete_report": [["bearerAuth"]],
-    "list_roles": [["bearerAuth"]],
-    "get_role": [["bearerAuth"]],
-    "deactivate_role": [["bearerAuth"]],
-    "reactivate_role": [["bearerAuth"]],
-    "get_root_outcome_group_account": [["bearerAuth"]],
-    "list_rubrics": [["bearerAuth"]],
-    "get_rubric": [["bearerAuth"]],
-    "list_scopes": [["bearerAuth"]],
-    "register_user": [["bearerAuth"]],
-    "create_shared_theme": [["bearerAuth"]],
-    "update_shared_theme": [["bearerAuth"]],
-    "list_sis_import_errors": [["bearerAuth"]],
-    "list_sis_imports": [["bearerAuth"]],
-    "abort_pending_sis_imports": [["bearerAuth"]],
-    "get_sis_import_status": [["bearerAuth"]],
-    "abort_sis_import": [["bearerAuth"]],
-    "list_sis_import_errors_by_import": [["bearerAuth"]],
-    "restore_sis_import_workflow_states": [["bearerAuth"]],
-    "list_sub_accounts": [["bearerAuth"]],
-    "create_sub_account": [["bearerAuth"]],
-    "delete_sub_account": [["bearerAuth"]],
-    "list_enrollment_terms": [["bearerAuth"]],
-    "create_term": [["bearerAuth"]],
-    "update_enrollment_term": [["bearerAuth"]],
-    "delete_enrollment_term": [["bearerAuth"]],
-    "list_account_users": [["bearerAuth"]],
-    "create_user": [["bearerAuth"]],
-    "remove_user_from_account": [["bearerAuth"]],
-    "get_account": [["bearerAuth"]],
-    "update_account": [["bearerAuth"]],
-    "list_announcements": [["bearerAuth"]],
-    "list_appointment_groups": [["bearerAuth"]],
-    "create_appointment_group": [["bearerAuth"]],
-    "list_next_appointments": [["bearerAuth"]],
-    "get_appointment_group": [["bearerAuth"]],
-    "update_appointment_group": [["bearerAuth"]],
-    "cancel_appointment_group": [["bearerAuth"]],
-    "list_appointment_group_participants": [["bearerAuth"]],
-    "list_appointment_group_participants_users": [["bearerAuth"]],
-    "list_authentication_events_by_account": [["bearerAuth"]],
-    "list_authentication_events_by_login": [["bearerAuth"]],
-    "list_authentication_events_by_user": [["bearerAuth"]],
-    "list_course_events": [["bearerAuth"]],
-    "list_grade_changes_by_assignment": [["bearerAuth"]],
-    "list_grade_changes_by_course": [["bearerAuth"]],
-    "list_grade_changes_by_grader": [["bearerAuth"]],
-    "list_grade_changes_by_student": [["bearerAuth"]],
-    "list_events": [["bearerAuth"]],
-    "create_calendar_event": [["bearerAuth"]],
-    "get_calendar_event": [["bearerAuth"]],
-    "update_event": [["bearerAuth"]],
-    "delete_calendar_event": [["bearerAuth"]],
-    "reserve_appointment_slot": [["bearerAuth"]],
-    "reserve_time_slot": [["bearerAuth"]],
-    "list_collaboration_members": [["bearerAuth"]],
-    "list_messages": [["bearerAuth"]],
-    "list_conversations": [["bearerAuth"]],
-    "create_conversation_thread": [["bearerAuth"]],
-    "update_conversations_batch": [["bearerAuth"]],
-    "list_conversation_batches": [["bearerAuth"]],
-    "list_message_recipients": [["bearerAuth"]],
-    "mark_all_conversations_as_read": [["bearerAuth"]],
-    "get_unread_conversation_count": [["bearerAuth"]],
-    "retrieve_conversation": [["bearerAuth"]],
-    "update_conversation": [["bearerAuth"]],
-    "delete_conversation": [["bearerAuth"]],
-    "send_message": [["bearerAuth"]],
-    "add_conversation_recipients": [["bearerAuth"]],
-    "remove_messages": [["bearerAuth"]],
-    "list_accounts_by_course_admin": [["bearerAuth"]],
-    "list_courses": [["bearerAuth"]],
-    "list_course_activities": [["bearerAuth"]],
-    "get_course_activity_summary": [["bearerAuth"]],
-    "get_course_participation_analytics": [["bearerAuth"]],
-    "list_assignment_analytics": [["bearerAuth"]],
-    "list_course_student_summaries": [["bearerAuth"]],
-    "get_student_course_participation": [["bearerAuth"]],
-    "list_student_assignment_analytics": [["bearerAuth"]],
-    "get_course_student_messaging_analytics": [["bearerAuth"]],
-    "list_assignment_groups": [["bearerAuth"]],
-    "create_assignment_group": [["bearerAuth"]],
-    "get_assignment_group": [["bearerAuth"]],
-    "update_assignment_group": [["bearerAuth"]],
-    "delete_assignment_group": [["bearerAuth"]],
-    "list_assignments": [["bearerAuth"]],
-    "create_assignment": [["bearerAuth"]],
-    "list_gradeable_students_for_assignments": [["bearerAuth"]],
-    "retrieve_assignment_overrides": [["bearerAuth"]],
-    "create_assignment_overrides": [["bearerAuth"]],
-    "update_assignment_overrides": [["bearerAuth"]],
-    "check_provisional_grade_status_anonymous": [["bearerAuth"]],
-    "list_gradeable_students": [["bearerAuth"]],
-    "list_moderated_students": [["bearerAuth"]],
-    "select_moderation_students": [["bearerAuth"]],
-    "list_assignment_overrides": [["bearerAuth"]],
-    "create_assignment_override": [["bearerAuth"]],
-    "get_assignment_override": [["bearerAuth"]],
-    "update_assignment_override": [["bearerAuth"]],
-    "remove_assignment_override": [["bearerAuth"]],
-    "list_peer_reviews": [["bearerAuth"]],
-    "finalize_provisional_grades": [["bearerAuth"]],
-    "publish_assignment_grades": [["bearerAuth"]],
-    "check_provisional_grade_status": [["bearerAuth"]],
-    "copy_provisional_grade_to_final_mark": [["bearerAuth"]],
-    "finalize_provisional_grade": [["bearerAuth"]],
-    "get_assignment_submission_summary": [["bearerAuth"]],
-    "list_assignment_submissions": [["bearerAuth"]],
-    "submit_assignment": [["bearerAuth"]],
-    "grade_submissions": [["bearerAuth"]],
-    "list_peer_reviews_submission": [["bearerAuth"]],
-    "assign_peer_reviewer": [["bearerAuth"]],
-    "remove_peer_review": [["bearerAuth"]],
-    "get_submission_by_user": [["bearerAuth"]],
-    "grade_submission": [["bearerAuth"]],
-    "upload_submission_comment_file": [["bearerAuth"]],
-    "upload_submission_file": [["bearerAuth"]],
-    "mark_submission_as_read": [["bearerAuth"]],
-    "mark_submission_as_unread": [["bearerAuth"]],
-    "get_assignment": [["bearerAuth"]],
-    "update_assignment": [["bearerAuth"]],
-    "delete_assignment": [["bearerAuth"]],
-    "list_blueprint_subscriptions": [["bearerAuth"]],
-    "list_blueprint_imports": [["bearerAuth"]],
-    "get_blueprint_import": [["bearerAuth"]],
-    "list_blueprint_migration_details": [["bearerAuth"]],
-    "get_blueprint_template": [["bearerAuth"]],
-    "list_blueprint_associated_courses": [["bearerAuth"]],
-    "list_blueprint_migrations": [["bearerAuth"]],
-    "push_blueprint_to_associated_courses": [["bearerAuth"]],
-    "get_blueprint_migration": [["bearerAuth"]],
-    "list_blueprint_migration_changes": [["bearerAuth"]],
-    "update_blueprint_object_restrictions": [["bearerAuth"]],
-    "list_blueprint_unsynced_changes": [["bearerAuth"]],
-    "update_blueprint_template_associations": [["bearerAuth"]],
-    "get_course_timetable": [["bearerAuth"]],
-    "schedule_course_timetable": [["bearerAuth"]],
-    "create_or_update_timetable_events": [["bearerAuth"]],
-    "list_collaborations": [["bearerAuth"]],
-    "list_conferences": [["bearerAuth"]],
-    "list_content_exports": [["bearerAuth"]],
-    "initiate_course_export": [["bearerAuth"]],
-    "get_content_export": [["bearerAuth"]],
-    "list_content_licenses": [["bearerAuth"]],
-    "list_content_migrations_course": [["bearerAuth"]],
-    "initiate_content_migration_course": [["bearerAuth"]],
-    "list_migration_systems_course": [["bearerAuth"]],
-    "list_migration_issues_course": [["bearerAuth"]],
-    "get_migration_issue_in_course": [["bearerAuth"]],
-    "resolve_migration_issue_course": [["bearerAuth"]],
-    "get_content_migration_course": [["bearerAuth"]],
-    "update_content_migration_course": [["bearerAuth"]],
-    "duplicate_course_content": [["bearerAuth"]],
-    "update_gradebook_column_data": [["bearerAuth"]],
-    "list_custom_gradebook_columns": [["bearerAuth"]],
-    "create_gradebook_column": [["bearerAuth"]],
-    "reorder_custom_columns": [["bearerAuth"]],
-    "update_gradebook_column": [["bearerAuth"]],
-    "delete_gradebook_column": [["bearerAuth"]],
-    "list_column_entries": [["bearerAuth"]],
-    "set_gradebook_column_entry": [["bearerAuth"]],
-    "list_discussion_topics": [["bearerAuth"]],
-    "create_discussion_topic": [["bearerAuth"]],
-    "reorder_pinned_discussion_topics": [["bearerAuth"]],
-    "get_discussion_topic": [["bearerAuth"]],
-    "update_discussion_topic": [["bearerAuth"]],
-    "delete_discussion_topic": [["bearerAuth"]],
-    "list_discussion_entries": [["bearerAuth"]],
-    "create_discussion_entry": [["bearerAuth"]],
-    "rate_discussion_entry": [["bearerAuth"]],
-    "mark_discussion_entry_as_read": [["bearerAuth"]],
-    "mark_discussion_entry_unread": [["bearerAuth"]],
-    "list_discussion_replies": [["bearerAuth"]],
-    "create_discussion_reply": [["bearerAuth"]],
-    "update_discussion_entry": [["bearerAuth"]],
-    "delete_discussion_entry": [["bearerAuth"]],
-    "list_discussion_entries_by_ids": [["bearerAuth"]],
-    "mark_discussion_topic_as_read": [["bearerAuth"]],
-    "unread_discussion_topic": [["bearerAuth"]],
-    "mark_all_discussion_entries_as_read": [["bearerAuth"]],
-    "mark_discussion_entries_as_unread": [["bearerAuth"]],
-    "subscribe_to_discussion_topic": [["bearerAuth"]],
-    "unsubscribe_from_discussion_topic": [["bearerAuth"]],
-    "get_discussion_topic_view": [["bearerAuth"]],
-    "list_assignment_due_dates": [["bearerAuth"]],
-    "list_enrollments": [["bearerAuth"]],
-    "enroll_user_in_course": [["bearerAuth"]],
-    "modify_enrollment": [["bearerAuth"]],
-    "accept_course_enrollment": [["bearerAuth"]],
-    "reactivate_enrollment": [["bearerAuth"]],
-    "reject_enrollment": [["bearerAuth"]],
-    "initiate_epub_export": [["bearerAuth"]],
-    "get_epub_export": [["bearerAuth"]],
-    "list_external_feeds": [["bearerAuth"]],
-    "create_external_feed": [["bearerAuth"]],
-    "remove_external_feed": [["bearerAuth"]],
-    "list_external_tools_course": [["bearerAuth"]],
-    "create_external_tool_course": [["bearerAuth"]],
-    "get_external_tool_sessionless_launch_url_course": [["bearerAuth"]],
-    "get_external_tool_course": [["bearerAuth"]],
-    "update_external_tool_course": [["bearerAuth"]],
-    "remove_external_tool_course": [["bearerAuth"]],
-    "list_course_features": [["bearerAuth"]],
-    "get_feature_flag_course": [["bearerAuth"]],
-    "list_course_files": [["bearerAuth"]],
-    "get_course_storage_quota": [["bearerAuth"]],
-    "get_file_course": [["bearerAuth"]],
-    "list_folders": [["bearerAuth"]],
-    "create_folder": [["bearerAuth"]],
-    "get_folder_path": [["bearerAuth"]],
-    "get_folder": [["bearerAuth"]],
-    "get_course_front_page": [["bearerAuth"]],
-    "update_course_front_page": [["bearerAuth"]],
-    "list_gradebook_history_days": [["bearerAuth"]],
-    "list_submission_versions": [["bearerAuth"]],
-    "list_gradebook_history_details": [["bearerAuth"]],
-    "list_submission_versions_by_grader": [["bearerAuth"]],
-    "list_grading_periods_course": [["bearerAuth"]],
-    "get_grading_period": [["bearerAuth"]],
-    "update_grading_period": [["bearerAuth"]],
-    "delete_grading_period_course": [["bearerAuth"]],
-    "list_grading_standards_course": [["bearerAuth"]],
-    "create_grading_standard_course": [["bearerAuth"]],
-    "get_grading_standard_course": [["bearerAuth"]],
-    "list_group_categories_course": [["bearerAuth"]],
-    "create_group_category_course": [["bearerAuth"]],
-    "list_groups_in_course": [["bearerAuth"]],
-    "list_assessments": [["bearerAuth"]],
-    "create_or_find_live_assessment": [["bearerAuth"]],
-    "list_assessment_results": [["bearerAuth"]],
-    "submit_live_assessment_result": [["bearerAuth"]],
-    "get_module_item_sequence": [["bearerAuth"]],
-    "list_modules": [["bearerAuth"]],
-    "create_module": [["bearerAuth"]],
-    "get_module": [["bearerAuth"]],
-    "update_module": [["bearerAuth"]],
-    "delete_module": [["bearerAuth"]],
-    "relock_module_progressions": [["bearerAuth"]],
-    "list_module_items": [["bearerAuth"]],
-    "add_module_item": [["bearerAuth"]],
-    "get_module_item": [["bearerAuth"]],
-    "update_module_item": [["bearerAuth"]],
-    "delete_module_item": [["bearerAuth"]],
-    "toggle_module_item_completion": [["bearerAuth"]],
-    "mark_module_item_read": [["bearerAuth"]],
-    "assign_mastery_path": [["bearerAuth"]],
-    "list_outcome_aligned_assignments": [["bearerAuth"]],
-    "list_outcome_links_course": [["bearerAuth"]],
-    "list_outcome_groups_course": [["bearerAuth"]],
-    "get_outcome_group_course": [["bearerAuth"]],
-    "update_outcome_group_course": [["bearerAuth"]],
-    "delete_outcome_group_course": [["bearerAuth"]],
-    "import_outcome_group": [["bearerAuth"]],
-    "list_outcomes_course": [["bearerAuth"]],
-    "link_outcome_course": [["bearerAuth"]],
-    "link_outcome_course_existing": [["bearerAuth"]],
-    "remove_outcome_from_group": [["bearerAuth"]],
-    "list_outcome_subgroups": [["bearerAuth"]],
-    "create_outcome_subgroup_course": [["bearerAuth"]],
-    "import_outcomes_course": [["bearerAuth"]],
-    "get_outcome_import_status_course": [["bearerAuth"]],
-    "list_outcome_results": [["bearerAuth"]],
-    "list_outcome_rollups": [["bearerAuth"]],
-    "list_course_pages": [["bearerAuth"]],
-    "create_wiki_page": [["bearerAuth"]],
-    "get_course_page": [["bearerAuth"]],
-    "update_wiki_page": [["bearerAuth"]],
-    "delete_page": [["bearerAuth"]],
-    "duplicate_page": [["bearerAuth"]],
-    "list_page_revisions": [["bearerAuth"]],
-    "get_page_revision_latest": [["bearerAuth"]],
-    "get_page_revision": [["bearerAuth"]],
-    "revert_page_to_revision": [["bearerAuth"]],
-    "check_course_permissions": [["bearerAuth"]],
-    "list_course_collaborators": [["bearerAuth"]],
-    "preview_course_html": [["bearerAuth"]],
-    "grant_quiz_extensions": [["bearerAuth"]],
-    "list_quizzes": [["bearerAuth"]],
-    "create_quiz": [["bearerAuth"]],
-    "list_quiz_override_dates": [["bearerAuth"]],
-    "get_quiz": [["bearerAuth"]],
-    "update_quiz": [["bearerAuth"]],
-    "delete_quiz": [["bearerAuth"]],
-    "reorder_quiz_questions": [["bearerAuth"]],
-    "send_quiz_message_to_users": [["bearerAuth"]],
-    "grant_quiz_extensions_specific": [["bearerAuth"]],
-    "create_question_group": [["bearerAuth"]],
-    "get_quiz_group": [["bearerAuth"]],
-    "update_question_group": [["bearerAuth"]],
-    "delete_question_group": [["bearerAuth"]],
-    "reorder_question_groups": [["bearerAuth"]],
-    "list_quiz_ip_filters": [["bearerAuth"]],
-    "list_quiz_questions": [["bearerAuth"]],
-    "create_quiz_question": [["bearerAuth"]],
-    "get_quiz_question": [["bearerAuth"]],
-    "update_quiz_question": [["bearerAuth"]],
-    "remove_quiz_question": [["bearerAuth"]],
-    "list_quiz_reports": [["bearerAuth"]],
-    "generate_quiz_report": [["bearerAuth"]],
-    "get_quiz_report": [["bearerAuth"]],
-    "cancel_or_delete_quiz_report": [["bearerAuth"]],
-    "get_quiz_statistics": [["bearerAuth"]],
-    "get_quiz_submission": [["bearerAuth"]],
-    "list_quiz_submissions": [["bearerAuth"]],
-    "start_quiz_submission": [["bearerAuth"]],
-    "upload_quiz_submission_file": [["bearerAuth"]],
-    "retrieve_quiz_submission": [["bearerAuth"]],
-    "grade_quiz_submission": [["bearerAuth"]],
-    "submit_quiz": [["bearerAuth"]],
-    "list_submission_events": [["bearerAuth"]],
-    "record_quiz_submission_events": [["bearerAuth"]],
-    "get_quiz_submission_time": [["bearerAuth"]],
-    "list_students_by_recent_login": [["bearerAuth"]],
-    "reset_course": [["bearerAuth"]],
-    "get_root_outcome_group_course": [["bearerAuth"]],
-    "list_rubrics_course": [["bearerAuth"]],
-    "get_rubric_course": [["bearerAuth"]],
-    "search_course_users": [["bearerAuth"]],
-    "list_sections": [["bearerAuth"]],
-    "create_section": [["bearerAuth"]],
-    "get_section": [["bearerAuth"]],
-    "get_course_settings": [["bearerAuth"]],
-    "list_submissions": [["bearerAuth"]],
-    "bulk_grade_submissions": [["bearerAuth"]],
-    "list_course_tabs": [["bearerAuth"]],
-    "update_course_tab": [["bearerAuth"]],
-    "list_course_todos": [["bearerAuth"]],
-    "set_file_usage_rights": [["bearerAuth"]],
-    "remove_file_usage_rights": [["bearerAuth"]],
-    "list_course_users": [["bearerAuth"]],
-    "get_user": [["bearerAuth"]],
-    "update_student_last_attended_date": [["bearerAuth"]],
-    "get_course": [["bearerAuth"]],
-    "update_course": [["bearerAuth"]],
-    "conclude_or_delete_course": [["bearerAuth"]],
-    "get_late_policy": [["bearerAuth"]],
-    "create_late_policy": [["bearerAuth"]],
-    "update_course_late_policy": [["bearerAuth"]],
-    "list_courses_with_latest_epub_export": [["bearerAuth"]],
-    "submit_error_report": [["bearerAuth"]],
-    "get_file": [["bearerAuth"]],
-    "update_file": [["bearerAuth"]],
-    "delete_file": [["bearerAuth"]],
-    "get_file_preview_url": [["bearerAuth"]],
-    "copy_file": [["bearerAuth"]],
-    "copy_folder": [["bearerAuth"]],
-    "upload_file": [["bearerAuth"]],
-    "create_folder_nested": [["bearerAuth"]],
-    "get_folder_nested": [["bearerAuth"]],
-    "update_folder": [["bearerAuth"]],
-    "delete_folder": [["bearerAuth"]],
-    "list_files": [["bearerAuth"]],
-    "list_subfolders": [["bearerAuth"]],
-    "get_outcome_group": [["bearerAuth"]],
-    "update_outcome_group_global": [["bearerAuth"]],
-    "delete_outcome_group": [["bearerAuth"]],
-    "import_outcome_group_global": [["bearerAuth"]],
-    "list_outcomes": [["bearerAuth"]],
-    "link_outcome_global": [["bearerAuth"]],
-    "link_outcome_global_existing": [["bearerAuth"]],
-    "unlink_outcome_global": [["bearerAuth"]],
-    "list_outcome_subgroups_global": [["bearerAuth"]],
-    "create_outcome_subgroup_global": [["bearerAuth"]],
-    "get_root_outcome_group": [["bearerAuth"]],
-    "get_group_category": [["bearerAuth"]],
-    "update_group_category": [["bearerAuth"]],
-    "delete_group_category": [["bearerAuth"]],
-    "distribute_unassigned_members": [["bearerAuth"]],
-    "create_group_in_category": [["bearerAuth"]],
-    "list_group_category_users": [["bearerAuth"]],
-    "create_group": [["bearerAuth"]],
-    "get_group": [["bearerAuth"]],
-    "update_group": [["bearerAuth"]],
-    "delete_group": [["bearerAuth"]],
-    "list_group_activities": [["bearerAuth"]],
-    "get_group_activity_summary": [["bearerAuth"]],
-    "get_assignment_override_for_group": [["bearerAuth"]],
-    "list_group_collaborations": [["bearerAuth"]],
-    "list_conferences_group": [["bearerAuth"]],
-    "list_content_exports_group": [["bearerAuth"]],
-    "initiate_group_content_export": [["bearerAuth"]],
-    "get_content_export_group": [["bearerAuth"]],
-    "list_content_licenses_group": [["bearerAuth"]],
-    "list_content_migrations_group": [["bearerAuth"]],
-    "initiate_content_migration_group": [["bearerAuth"]],
-    "list_migration_systems_group": [["bearerAuth"]],
-    "list_migration_issues_group": [["bearerAuth"]],
-    "get_migration_issue_in_group": [["bearerAuth"]],
-    "resolve_migration_issue_group": [["bearerAuth"]],
-    "get_content_migration_group": [["bearerAuth"]],
-    "update_content_migration_group": [["bearerAuth"]],
-    "list_discussion_topics_group": [["bearerAuth"]],
-    "create_discussion_topic_group": [["bearerAuth"]],
-    "reorder_pinned_discussion_topics_group": [["bearerAuth"]],
-    "get_discussion_topic_group": [["bearerAuth"]],
-    "update_discussion_topic_group": [["bearerAuth"]],
-    "delete_discussion_topic_group": [["bearerAuth"]],
-    "list_discussion_entries_group": [["bearerAuth"]],
-    "create_discussion_entry_group": [["bearerAuth"]],
-    "rate_discussion_entry_group": [["bearerAuth"]],
-    "mark_discussion_entry_as_read_in_group": [["bearerAuth"]],
-    "mark_discussion_entry_unread_group": [["bearerAuth"]],
-    "list_discussion_replies_group": [["bearerAuth"]],
-    "create_discussion_reply_group": [["bearerAuth"]],
-    "update_discussion_entry_group": [["bearerAuth"]],
-    "delete_discussion_entry_group": [["bearerAuth"]],
-    "list_discussion_entries_group_by_ids": [["bearerAuth"]],
-    "mark_discussion_topic_as_read_group": [["bearerAuth"]],
-    "mark_discussion_topic_unread": [["bearerAuth"]],
-    "mark_discussion_entries_as_read": [["bearerAuth"]],
-    "mark_all_discussion_entries_as_unread": [["bearerAuth"]],
-    "subscribe_to_discussion_topic_group": [["bearerAuth"]],
-    "unsubscribe_from_discussion_topic_group": [["bearerAuth"]],
-    "get_discussion_topic_group_view": [["bearerAuth"]],
-    "list_external_feeds_group": [["bearerAuth"]],
-    "create_external_feed_group": [["bearerAuth"]],
-    "delete_external_feed": [["bearerAuth"]],
-    "list_external_tools_group": [["bearerAuth"]],
-    "upload_file_group": [["bearerAuth"]],
-    "get_group_quota": [["bearerAuth"]],
-    "get_file_group": [["bearerAuth"]],
-    "list_folders_group": [["bearerAuth"]],
-    "create_folder_group": [["bearerAuth"]],
-    "list_folder_path_group": [["bearerAuth"]],
-    "get_folder_group": [["bearerAuth"]],
-    "get_group_front_page": [["bearerAuth"]],
-    "update_group_front_page": [["bearerAuth"]],
-    "send_group_invitations": [["bearerAuth"]],
-    "list_group_members": [["bearerAuth"]],
-    "join_group": [["bearerAuth"]],
-    "get_group_membership": [["bearerAuth"]],
-    "update_group_membership": [["bearerAuth"]],
-    "leave_group": [["bearerAuth"]],
-    "list_pages": [["bearerAuth"]],
-    "create_wiki_page_group": [["bearerAuth"]],
-    "get_page": [["bearerAuth"]],
-    "update_wiki_page_group": [["bearerAuth"]],
-    "delete_wiki_page": [["bearerAuth"]],
-    "list_page_revisions_group": [["bearerAuth"]],
-    "get_page_revision_latest_group": [["bearerAuth"]],
-    "get_page_revision_group": [["bearerAuth"]],
-    "revert_page_to_revision_group": [["bearerAuth"]],
-    "check_group_permissions": [["bearerAuth"]],
-    "list_potential_collaborators": [["bearerAuth"]],
-    "preview_group_html": [["bearerAuth"]],
-    "list_group_tabs": [["bearerAuth"]],
-    "assign_file_usage_rights": [["bearerAuth"]],
-    "remove_usage_rights": [["bearerAuth"]],
-    "list_group_users": [["bearerAuth"]],
-    "get_group_membership_user": [["bearerAuth"]],
-    "update_group_membership_user": [["bearerAuth"]],
-    "remove_user_from_group": [["bearerAuth"]],
-    "get_outcome": [["bearerAuth"]],
-    "update_outcome": [["bearerAuth"]],
-    "list_planner_items": [["bearerAuth"]],
-    "list_planner_overrides": [["bearerAuth"]],
-    "override_planner_item": [["bearerAuth"]],
-    "get_planner_override": [["bearerAuth"]],
-    "update_planner_override": [["bearerAuth"]],
-    "delete_override": [["bearerAuth"]],
-    "list_notes": [["bearerAuth"]],
-    "create_planner_note": [["bearerAuth"]],
-    "get_planner_note": [["bearerAuth"]],
-    "update_planner_note": [["bearerAuth"]],
-    "delete_note": [["bearerAuth"]],
-    "list_closed_poll_sessions": [["bearerAuth"]],
-    "list_poll_sessions": [["bearerAuth"]],
-    "list_polls": [["bearerAuth"]],
-    "create_poll": [["bearerAuth"]],
-    "get_poll": [["bearerAuth"]],
-    "update_poll": [["bearerAuth"]],
-    "delete_poll": [["bearerAuth"]],
-    "list_poll_choices": [["bearerAuth"]],
-    "add_poll_choice": [["bearerAuth"]],
-    "get_poll_choice": [["bearerAuth"]],
-    "update_poll_choice": [["bearerAuth"]],
-    "delete_poll_choice": [["bearerAuth"]],
-    "list_poll_sessions_by_poll": [["bearerAuth"]],
-    "create_poll_session": [["bearerAuth"]],
-    "get_poll_session_results": [["bearerAuth"]],
-    "update_poll_session": [["bearerAuth"]],
-    "delete_poll_session": [["bearerAuth"]],
-    "close_poll_session": [["bearerAuth"]],
-    "open_poll_session": [["bearerAuth"]],
-    "submit_poll_response": [["bearerAuth"]],
-    "get_poll_submission": [["bearerAuth"]],
-    "get_job_progress": [["bearerAuth"]],
-    "list_quiz_submission_questions": [["bearerAuth"]],
-    "submit_quiz_answers": [["bearerAuth"]],
-    "flag_question": [["bearerAuth"]],
-    "remove_question_flag": [["bearerAuth"]],
-    "search_courses": [["bearerAuth"]],
-    "search_recipients": [["bearerAuth"]],
-    "get_assignment_override_for_section": [["bearerAuth"]],
-    "get_section_standalone": [["bearerAuth"]],
-    "update_section": [["bearerAuth"]],
-    "delete_section": [["bearerAuth"]],
-    "remove_section_crosslist": [["bearerAuth"]],
-    "move_section_to_course": [["bearerAuth"]],
-    "list_peer_reviews_section": [["bearerAuth"]],
-    "get_submission_summary": [["bearerAuth"]],
-    "list_assignment_submissions_section": [["bearerAuth"]],
-    "submit_assignment_section": [["bearerAuth"]],
-    "grade_submissions_section": [["bearerAuth"]],
-    "list_peer_reviews_section_submission": [["bearerAuth"]],
-    "assign_peer_reviewer_section": [["bearerAuth"]],
-    "remove_peer_review_section": [["bearerAuth"]],
-    "get_submission_by_user_section": [["bearerAuth"]],
-    "grade_submission_section": [["bearerAuth"]],
-    "upload_submission_file_section": [["bearerAuth"]],
-    "mark_submission_as_read_section": [["bearerAuth"]],
-    "mark_submission_unread": [["bearerAuth"]],
-    "list_section_enrollments": [["bearerAuth"]],
-    "enroll_user_in_section": [["bearerAuth"]],
-    "list_submissions_section": [["bearerAuth"]],
-    "update_submission_grades": [["bearerAuth"]],
-    "create_kaltura_session": [["bearerAuth"]],
-    "revoke_brand_config_share": [["bearerAuth"]],
-    "list_activity_stream": [["bearerAuth"]],
-    "list_activity_stream_current_user": [["bearerAuth"]],
-    "hide_all_activity_stream_items": [["bearerAuth"]],
-    "get_activity_stream_summary": [["bearerAuth"]],
-    "hide_activity_stream_item": [["bearerAuth"]],
-    "list_bookmarks": [["bearerAuth"]],
-    "create_bookmark": [["bearerAuth"]],
-    "get_bookmark": [["bearerAuth"]],
-    "update_bookmark": [["bearerAuth"]],
-    "delete_bookmark": [["bearerAuth"]],
-    "delete_push_notification_endpoint": [["bearerAuth"]],
-    "update_notification_preference": [["bearerAuth"]],
-    "list_course_nicknames": [["bearerAuth"]],
-    "delete_course_nicknames": [["bearerAuth"]],
-    "get_course_nickname": [["bearerAuth"]],
-    "set_course_nickname": [["bearerAuth"]],
-    "delete_course_nickname": [["bearerAuth"]],
-    "list_favorite_courses": [["bearerAuth"]],
-    "reset_course_favorites": [["bearerAuth"]],
-    "favorite_course": [["bearerAuth"]],
-    "unfavorite_course": [["bearerAuth"]],
-    "list_favorite_groups": [["bearerAuth"]],
-    "clear_group_favorites": [["bearerAuth"]],
-    "favorite_group": [["bearerAuth"]],
-    "unfavorite_group": [["bearerAuth"]],
-    "list_groups": [["bearerAuth"]],
-    "list_todos": [["bearerAuth"]],
-    "get_todo_item_counts": [["bearerAuth"]],
-    "list_upcoming_events": [["bearerAuth"]],
-    "get_user_permissions": [["bearerAuth"]],
-    "update_user": [["bearerAuth"]],
-    "list_user_colors": [["bearerAuth"]],
-    "get_custom_color": [["bearerAuth"]],
-    "set_custom_color": [["bearerAuth"]],
-    "merge_user_into_another_user": [["bearerAuth"]],
-    "merge_user": [["bearerAuth"]],
-    "split_user": [["bearerAuth"]],
-    "list_avatars": [["bearerAuth"]],
-    "list_calendar_events": [["bearerAuth"]],
-    "list_communication_channels": [["bearerAuth"]],
-    "add_communication_channel": [["bearerAuth"]],
-    "list_notification_preference_categories": [["bearerAuth"]],
-    "list_notification_preferences": [["bearerAuth"]],
-    "get_notification_preference": [["bearerAuth"]],
-    "delete_communication_channel": [["bearerAuth"]],
-    "delete_communication_channel_by_address": [["bearerAuth"]],
-    "list_notification_preferences_by_type": [["bearerAuth"]],
-    "get_notification_preference_by_address": [["bearerAuth"]],
-    "list_content_exports_user": [["bearerAuth"]],
-    "initiate_content_export": [["bearerAuth"]],
-    "get_content_export_user": [["bearerAuth"]],
-    "list_content_licenses_user": [["bearerAuth"]],
-    "list_content_migrations_user": [["bearerAuth"]],
-    "initiate_content_migration_user": [["bearerAuth"]],
-    "list_migration_systems_user": [["bearerAuth"]],
-    "list_migration_issues_user": [["bearerAuth"]],
-    "get_migration_issue_in_user": [["bearerAuth"]],
-    "resolve_migration_issue_user": [["bearerAuth"]],
-    "get_content_migration_user": [["bearerAuth"]],
-    "update_content_migration_user": [["bearerAuth"]],
-    "list_courses_by_user": [["bearerAuth"]],
-    "list_assignments_by_user": [["bearerAuth"]],
-    "retrieve_custom_data": [["bearerAuth"]],
-    "store_custom_data": [["bearerAuth"]],
-    "delete_custom_data": [["bearerAuth"]],
-    "list_user_enrollments": [["bearerAuth"]],
-    "list_user_features": [["bearerAuth"]],
-    "list_enabled_features_user": [["bearerAuth"]],
-    "get_feature_flag_user": [["bearerAuth"]],
-    "upload_file_personal": [["bearerAuth"]],
-    "get_user_storage_quota": [["bearerAuth"]],
-    "get_file_user": [["bearerAuth"]],
-    "list_folders_user": [["bearerAuth"]],
-    "create_folder_user": [["bearerAuth"]],
-    "get_folder_path_user": [["bearerAuth"]],
-    "get_folder_user": [["bearerAuth"]],
-    "list_logins_user": [["bearerAuth"]],
-    "delete_login": [["bearerAuth"]],
-    "list_overdue_assignments": [["bearerAuth"]],
-    "list_observees": [["bearerAuth"]],
-    "create_observee": [["bearerAuth"]],
-    "get_observee": [["bearerAuth"]],
-    "create_observation_link": [["bearerAuth"]],
-    "unobserve_user": [["bearerAuth"]],
-    "list_page_views": [["bearerAuth"]],
-    "get_user_profile": [["bearerAuth"]],
-    "assign_usage_rights": [["bearerAuth"]],
-    "remove_file_usage_rights_user": [["bearerAuth"]]
+    "get_assignment_lti": [["OAuth2"], ["bearerAuth"]],
+    "get_originality_report": [["OAuth2"], ["bearerAuth"]],
+    "update_originality_report": [["OAuth2"], ["bearerAuth"]],
+    "get_submission": [["OAuth2"], ["bearerAuth"]],
+    "list_submission_attempts": [["OAuth2"], ["bearerAuth"]],
+    "submit_originality_report": [["OAuth2"], ["bearerAuth"]],
+    "get_originality_report_submission": [["OAuth2"], ["bearerAuth"]],
+    "update_originality_report_submission": [["OAuth2"], ["bearerAuth"]],
+    "get_group_members_lti": [["OAuth2"], ["bearerAuth"]],
+    "list_webhook_subscriptions": [["OAuth2"], ["bearerAuth"]],
+    "get_webhook_subscription": [["OAuth2"], ["bearerAuth"]],
+    "delete_webhook_subscription": [["OAuth2"], ["bearerAuth"]],
+    "get_lti_user": [["OAuth2"], ["bearerAuth"]],
+    "list_sis_export_assignments": [["OAuth2"], ["bearerAuth"]],
+    "list_sis_export_assignments_by_course": [["OAuth2"], ["bearerAuth"]],
+    "disable_sis_grade_exports": [["OAuth2"], ["bearerAuth"]],
+    "list_accounts": [["OAuth2"], ["bearerAuth"]],
+    "search_domains": [["OAuth2"], ["bearerAuth"]],
+    "list_active_notifications": [["OAuth2"], ["bearerAuth"]],
+    "create_notification": [["OAuth2"], ["bearerAuth"]],
+    "get_notification": [["OAuth2"], ["bearerAuth"]],
+    "update_notification": [["OAuth2"], ["bearerAuth"]],
+    "dismiss_notification": [["OAuth2"], ["bearerAuth"]],
+    "list_admins": [["OAuth2"], ["bearerAuth"]],
+    "promote_account_admin": [["OAuth2"], ["bearerAuth"]],
+    "list_department_participation_completed": [["OAuth2"], ["bearerAuth"]],
+    "list_department_grade_distribution_completed": [["OAuth2"], ["bearerAuth"]],
+    "get_department_statistics": [["OAuth2"], ["bearerAuth"]],
+    "list_department_participation_data": [["OAuth2"], ["bearerAuth"]],
+    "list_department_grade_distribution": [["OAuth2"], ["bearerAuth"]],
+    "get_department_statistics_current": [["OAuth2"], ["bearerAuth"]],
+    "list_department_participation_by_term": [["OAuth2"], ["bearerAuth"]],
+    "list_department_grade_distributions": [["OAuth2"], ["bearerAuth"]],
+    "get_department_statistics_term": [["OAuth2"], ["bearerAuth"]],
+    "list_authentication_providers": [["OAuth2"], ["bearerAuth"]],
+    "get_authentication_provider": [["OAuth2"], ["bearerAuth"]],
+    "list_content_migrations": [["OAuth2"], ["bearerAuth"]],
+    "initiate_content_migration": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_systems": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_issues": [["OAuth2"], ["bearerAuth"]],
+    "get_migration_issue": [["OAuth2"], ["bearerAuth"]],
+    "resolve_migration_issue": [["OAuth2"], ["bearerAuth"]],
+    "get_content_migration": [["OAuth2"], ["bearerAuth"]],
+    "update_content_migration": [["OAuth2"], ["bearerAuth"]],
+    "list_courses_by_account": [["OAuth2"], ["bearerAuth"]],
+    "create_course": [["OAuth2"], ["bearerAuth"]],
+    "bulk_update_courses": [["OAuth2"], ["bearerAuth"]],
+    "get_course_account": [["OAuth2"], ["bearerAuth"]],
+    "get_enrollment": [["OAuth2"], ["bearerAuth"]],
+    "list_external_tools": [["OAuth2"], ["bearerAuth"]],
+    "create_external_tool": [["OAuth2"], ["bearerAuth"]],
+    "get_external_tool_sessionless_launch_url": [["OAuth2"], ["bearerAuth"]],
+    "get_external_tool": [["OAuth2"], ["bearerAuth"]],
+    "update_external_tool": [["OAuth2"], ["bearerAuth"]],
+    "remove_external_tool": [["OAuth2"], ["bearerAuth"]],
+    "list_account_features": [["OAuth2"], ["bearerAuth"]],
+    "list_enabled_features": [["OAuth2"], ["bearerAuth"]],
+    "get_feature_flag": [["OAuth2"], ["bearerAuth"]],
+    "list_grading_periods": [["OAuth2"], ["bearerAuth"]],
+    "delete_grading_period": [["OAuth2"], ["bearerAuth"]],
+    "list_grading_standards": [["OAuth2"], ["bearerAuth"]],
+    "create_grading_standard": [["OAuth2"], ["bearerAuth"]],
+    "get_grading_standard": [["OAuth2"], ["bearerAuth"]],
+    "list_group_categories": [["OAuth2"], ["bearerAuth"]],
+    "create_group_category": [["OAuth2"], ["bearerAuth"]],
+    "list_groups_in_account": [["OAuth2"], ["bearerAuth"]],
+    "list_logins": [["OAuth2"], ["bearerAuth"]],
+    "create_login": [["OAuth2"], ["bearerAuth"]],
+    "update_user_login": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_links": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_groups": [["OAuth2"], ["bearerAuth"]],
+    "get_outcome_group_account": [["OAuth2"], ["bearerAuth"]],
+    "update_outcome_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_outcome_group_account": [["OAuth2"], ["bearerAuth"]],
+    "copy_outcome_group": [["OAuth2"], ["bearerAuth"]],
+    "list_outcomes_account": [["OAuth2"], ["bearerAuth"]],
+    "link_outcome": [["OAuth2"], ["bearerAuth"]],
+    "link_outcome_existing": [["OAuth2"], ["bearerAuth"]],
+    "unlink_outcome": [["OAuth2"], ["bearerAuth"]],
+    "list_subgroups": [["OAuth2"], ["bearerAuth"]],
+    "create_outcome_subgroup": [["OAuth2"], ["bearerAuth"]],
+    "import_outcomes": [["OAuth2"], ["bearerAuth"]],
+    "get_outcome_import_status": [["OAuth2"], ["bearerAuth"]],
+    "list_proficiency_ratings": [["OAuth2"], ["bearerAuth"]],
+    "set_proficiency_ratings": [["OAuth2"], ["bearerAuth"]],
+    "check_account_permissions": [["OAuth2"], ["bearerAuth"]],
+    "list_reports": [["OAuth2"], ["bearerAuth"]],
+    "list_reports_by_type": [["OAuth2"], ["bearerAuth"]],
+    "generate_report": [["OAuth2"], ["bearerAuth"]],
+    "get_report_status": [["OAuth2"], ["bearerAuth"]],
+    "delete_report": [["OAuth2"], ["bearerAuth"]],
+    "list_roles": [["OAuth2"], ["bearerAuth"]],
+    "get_role": [["OAuth2"], ["bearerAuth"]],
+    "deactivate_role": [["OAuth2"], ["bearerAuth"]],
+    "reactivate_role": [["OAuth2"], ["bearerAuth"]],
+    "get_root_outcome_group_account": [["OAuth2"], ["bearerAuth"]],
+    "list_rubrics": [["OAuth2"], ["bearerAuth"]],
+    "get_rubric": [["OAuth2"], ["bearerAuth"]],
+    "list_scopes": [["OAuth2"], ["bearerAuth"]],
+    "register_user": [["OAuth2"], ["bearerAuth"]],
+    "create_shared_theme": [["OAuth2"], ["bearerAuth"]],
+    "update_shared_theme": [["OAuth2"], ["bearerAuth"]],
+    "list_sis_import_errors": [["OAuth2"], ["bearerAuth"]],
+    "list_sis_imports": [["OAuth2"], ["bearerAuth"]],
+    "abort_pending_sis_imports": [["OAuth2"], ["bearerAuth"]],
+    "get_sis_import_status": [["OAuth2"], ["bearerAuth"]],
+    "abort_sis_import": [["OAuth2"], ["bearerAuth"]],
+    "list_sis_import_errors_by_import": [["OAuth2"], ["bearerAuth"]],
+    "restore_sis_import_workflow_states": [["OAuth2"], ["bearerAuth"]],
+    "list_sub_accounts": [["OAuth2"], ["bearerAuth"]],
+    "create_sub_account": [["OAuth2"], ["bearerAuth"]],
+    "delete_sub_account": [["OAuth2"], ["bearerAuth"]],
+    "list_enrollment_terms": [["OAuth2"], ["bearerAuth"]],
+    "create_term": [["OAuth2"], ["bearerAuth"]],
+    "update_enrollment_term": [["OAuth2"], ["bearerAuth"]],
+    "delete_enrollment_term": [["OAuth2"], ["bearerAuth"]],
+    "list_account_users": [["OAuth2"], ["bearerAuth"]],
+    "create_user": [["OAuth2"], ["bearerAuth"]],
+    "remove_user_from_account": [["OAuth2"], ["bearerAuth"]],
+    "get_account": [["OAuth2"], ["bearerAuth"]],
+    "update_account": [["OAuth2"], ["bearerAuth"]],
+    "list_announcements": [["OAuth2"], ["bearerAuth"]],
+    "list_appointment_groups": [["OAuth2"], ["bearerAuth"]],
+    "create_appointment_group": [["OAuth2"], ["bearerAuth"]],
+    "list_next_appointments": [["OAuth2"], ["bearerAuth"]],
+    "get_appointment_group": [["OAuth2"], ["bearerAuth"]],
+    "update_appointment_group": [["OAuth2"], ["bearerAuth"]],
+    "cancel_appointment_group": [["OAuth2"], ["bearerAuth"]],
+    "list_appointment_group_participants": [["OAuth2"], ["bearerAuth"]],
+    "list_appointment_group_participants_users": [["OAuth2"], ["bearerAuth"]],
+    "list_authentication_events_by_account": [["OAuth2"], ["bearerAuth"]],
+    "list_authentication_events_by_login": [["OAuth2"], ["bearerAuth"]],
+    "list_authentication_events_by_user": [["OAuth2"], ["bearerAuth"]],
+    "list_course_events": [["OAuth2"], ["bearerAuth"]],
+    "list_grade_changes_by_assignment": [["OAuth2"], ["bearerAuth"]],
+    "list_grade_changes_by_course": [["OAuth2"], ["bearerAuth"]],
+    "list_grade_changes_by_grader": [["OAuth2"], ["bearerAuth"]],
+    "list_grade_changes_by_student": [["OAuth2"], ["bearerAuth"]],
+    "list_events": [["OAuth2"], ["bearerAuth"]],
+    "create_calendar_event": [["OAuth2"], ["bearerAuth"]],
+    "get_calendar_event": [["OAuth2"], ["bearerAuth"]],
+    "update_event": [["OAuth2"], ["bearerAuth"]],
+    "delete_calendar_event": [["OAuth2"], ["bearerAuth"]],
+    "reserve_appointment_slot": [["OAuth2"], ["bearerAuth"]],
+    "reserve_time_slot": [["OAuth2"], ["bearerAuth"]],
+    "list_collaboration_members": [["OAuth2"], ["bearerAuth"]],
+    "list_messages": [["OAuth2"], ["bearerAuth"]],
+    "list_conversations": [["OAuth2"], ["bearerAuth"]],
+    "create_conversation_thread": [["OAuth2"], ["bearerAuth"]],
+    "update_conversations_batch": [["OAuth2"], ["bearerAuth"]],
+    "list_conversation_batches": [["OAuth2"], ["bearerAuth"]],
+    "list_message_recipients": [["OAuth2"], ["bearerAuth"]],
+    "mark_all_conversations_as_read": [["OAuth2"], ["bearerAuth"]],
+    "get_unread_conversation_count": [["OAuth2"], ["bearerAuth"]],
+    "retrieve_conversation": [["OAuth2"], ["bearerAuth"]],
+    "update_conversation": [["OAuth2"], ["bearerAuth"]],
+    "delete_conversation": [["OAuth2"], ["bearerAuth"]],
+    "send_message": [["OAuth2"], ["bearerAuth"]],
+    "add_conversation_recipients": [["OAuth2"], ["bearerAuth"]],
+    "remove_messages": [["OAuth2"], ["bearerAuth"]],
+    "list_accounts_by_course_admin": [["OAuth2"], ["bearerAuth"]],
+    "list_courses": [["OAuth2"], ["bearerAuth"]],
+    "list_course_activities": [["OAuth2"], ["bearerAuth"]],
+    "get_course_activity_summary": [["OAuth2"], ["bearerAuth"]],
+    "get_course_participation_analytics": [["OAuth2"], ["bearerAuth"]],
+    "list_assignment_analytics": [["OAuth2"], ["bearerAuth"]],
+    "list_course_student_summaries": [["OAuth2"], ["bearerAuth"]],
+    "get_student_course_participation": [["OAuth2"], ["bearerAuth"]],
+    "list_student_assignment_analytics": [["OAuth2"], ["bearerAuth"]],
+    "get_course_student_messaging_analytics": [["OAuth2"], ["bearerAuth"]],
+    "list_assignment_groups": [["OAuth2"], ["bearerAuth"]],
+    "create_assignment_group": [["OAuth2"], ["bearerAuth"]],
+    "get_assignment_group": [["OAuth2"], ["bearerAuth"]],
+    "update_assignment_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_assignment_group": [["OAuth2"], ["bearerAuth"]],
+    "list_assignments": [["OAuth2"], ["bearerAuth"]],
+    "create_assignment": [["OAuth2"], ["bearerAuth"]],
+    "list_gradeable_students_for_assignments": [["OAuth2"], ["bearerAuth"]],
+    "retrieve_assignment_overrides": [["OAuth2"], ["bearerAuth"]],
+    "create_assignment_overrides": [["OAuth2"], ["bearerAuth"]],
+    "update_assignment_overrides": [["OAuth2"], ["bearerAuth"]],
+    "check_provisional_grade_status_anonymous": [["OAuth2"], ["bearerAuth"]],
+    "list_gradeable_students": [["OAuth2"], ["bearerAuth"]],
+    "list_moderated_students": [["OAuth2"], ["bearerAuth"]],
+    "select_moderation_students": [["OAuth2"], ["bearerAuth"]],
+    "list_assignment_overrides": [["OAuth2"], ["bearerAuth"]],
+    "create_assignment_override": [["OAuth2"], ["bearerAuth"]],
+    "get_assignment_override": [["OAuth2"], ["bearerAuth"]],
+    "update_assignment_override": [["OAuth2"], ["bearerAuth"]],
+    "remove_assignment_override": [["OAuth2"], ["bearerAuth"]],
+    "list_peer_reviews": [["OAuth2"], ["bearerAuth"]],
+    "finalize_provisional_grades": [["OAuth2"], ["bearerAuth"]],
+    "publish_assignment_grades": [["OAuth2"], ["bearerAuth"]],
+    "check_provisional_grade_status": [["OAuth2"], ["bearerAuth"]],
+    "copy_provisional_grade_to_final_mark": [["OAuth2"], ["bearerAuth"]],
+    "finalize_provisional_grade": [["OAuth2"], ["bearerAuth"]],
+    "get_assignment_submission_summary": [["OAuth2"], ["bearerAuth"]],
+    "list_assignment_submissions": [["OAuth2"], ["bearerAuth"]],
+    "submit_assignment": [["OAuth2"], ["bearerAuth"]],
+    "grade_submissions": [["OAuth2"], ["bearerAuth"]],
+    "list_peer_reviews_submission": [["OAuth2"], ["bearerAuth"]],
+    "assign_peer_reviewer": [["OAuth2"], ["bearerAuth"]],
+    "remove_peer_review": [["OAuth2"], ["bearerAuth"]],
+    "get_submission_by_user": [["OAuth2"], ["bearerAuth"]],
+    "grade_submission": [["OAuth2"], ["bearerAuth"]],
+    "upload_submission_comment_file": [["OAuth2"], ["bearerAuth"]],
+    "upload_submission_file": [["OAuth2"], ["bearerAuth"]],
+    "mark_submission_as_read": [["OAuth2"], ["bearerAuth"]],
+    "mark_submission_as_unread": [["OAuth2"], ["bearerAuth"]],
+    "get_assignment": [["OAuth2"], ["bearerAuth"]],
+    "update_assignment": [["OAuth2"], ["bearerAuth"]],
+    "delete_assignment": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_subscriptions": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_imports": [["OAuth2"], ["bearerAuth"]],
+    "get_blueprint_import": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_migration_details": [["OAuth2"], ["bearerAuth"]],
+    "get_blueprint_template": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_associated_courses": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_migrations": [["OAuth2"], ["bearerAuth"]],
+    "push_blueprint_to_associated_courses": [["OAuth2"], ["bearerAuth"]],
+    "get_blueprint_migration": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_migration_changes": [["OAuth2"], ["bearerAuth"]],
+    "update_blueprint_object_restrictions": [["OAuth2"], ["bearerAuth"]],
+    "list_blueprint_unsynced_changes": [["OAuth2"], ["bearerAuth"]],
+    "update_blueprint_template_associations": [["OAuth2"], ["bearerAuth"]],
+    "get_course_timetable": [["OAuth2"], ["bearerAuth"]],
+    "schedule_course_timetable": [["OAuth2"], ["bearerAuth"]],
+    "create_or_update_timetable_events": [["OAuth2"], ["bearerAuth"]],
+    "list_collaborations": [["OAuth2"], ["bearerAuth"]],
+    "list_conferences": [["OAuth2"], ["bearerAuth"]],
+    "list_content_exports": [["OAuth2"], ["bearerAuth"]],
+    "initiate_course_export": [["OAuth2"], ["bearerAuth"]],
+    "get_content_export": [["OAuth2"], ["bearerAuth"]],
+    "list_content_licenses": [["OAuth2"], ["bearerAuth"]],
+    "list_content_migrations_course": [["OAuth2"], ["bearerAuth"]],
+    "initiate_content_migration_course": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_systems_course": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_issues_course": [["OAuth2"], ["bearerAuth"]],
+    "get_migration_issue_in_course": [["OAuth2"], ["bearerAuth"]],
+    "resolve_migration_issue_course": [["OAuth2"], ["bearerAuth"]],
+    "get_content_migration_course": [["OAuth2"], ["bearerAuth"]],
+    "update_content_migration_course": [["OAuth2"], ["bearerAuth"]],
+    "duplicate_course_content": [["OAuth2"], ["bearerAuth"]],
+    "update_gradebook_column_data": [["OAuth2"], ["bearerAuth"]],
+    "list_custom_gradebook_columns": [["OAuth2"], ["bearerAuth"]],
+    "create_gradebook_column": [["OAuth2"], ["bearerAuth"]],
+    "reorder_custom_columns": [["OAuth2"], ["bearerAuth"]],
+    "update_gradebook_column": [["OAuth2"], ["bearerAuth"]],
+    "delete_gradebook_column": [["OAuth2"], ["bearerAuth"]],
+    "list_column_entries": [["OAuth2"], ["bearerAuth"]],
+    "set_gradebook_column_entry": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_topics": [["OAuth2"], ["bearerAuth"]],
+    "create_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "reorder_pinned_discussion_topics": [["OAuth2"], ["bearerAuth"]],
+    "get_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "update_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "delete_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_entries": [["OAuth2"], ["bearerAuth"]],
+    "create_discussion_entry": [["OAuth2"], ["bearerAuth"]],
+    "rate_discussion_entry": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_entry_as_read": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_entry_unread": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_replies": [["OAuth2"], ["bearerAuth"]],
+    "create_discussion_reply": [["OAuth2"], ["bearerAuth"]],
+    "update_discussion_entry": [["OAuth2"], ["bearerAuth"]],
+    "delete_discussion_entry": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_entries_by_ids": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_topic_as_read": [["OAuth2"], ["bearerAuth"]],
+    "unread_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "mark_all_discussion_entries_as_read": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_entries_as_unread": [["OAuth2"], ["bearerAuth"]],
+    "subscribe_to_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "unsubscribe_from_discussion_topic": [["OAuth2"], ["bearerAuth"]],
+    "get_discussion_topic_view": [["OAuth2"], ["bearerAuth"]],
+    "list_assignment_due_dates": [["OAuth2"], ["bearerAuth"]],
+    "list_enrollments": [["OAuth2"], ["bearerAuth"]],
+    "enroll_user_in_course": [["OAuth2"], ["bearerAuth"]],
+    "modify_enrollment": [["OAuth2"], ["bearerAuth"]],
+    "accept_course_enrollment": [["OAuth2"], ["bearerAuth"]],
+    "reactivate_enrollment": [["OAuth2"], ["bearerAuth"]],
+    "reject_enrollment": [["OAuth2"], ["bearerAuth"]],
+    "initiate_epub_export": [["OAuth2"], ["bearerAuth"]],
+    "get_epub_export": [["OAuth2"], ["bearerAuth"]],
+    "list_external_feeds": [["OAuth2"], ["bearerAuth"]],
+    "create_external_feed": [["OAuth2"], ["bearerAuth"]],
+    "remove_external_feed": [["OAuth2"], ["bearerAuth"]],
+    "list_external_tools_course": [["OAuth2"], ["bearerAuth"]],
+    "create_external_tool_course": [["OAuth2"], ["bearerAuth"]],
+    "get_external_tool_sessionless_launch_url_course": [["OAuth2"], ["bearerAuth"]],
+    "get_external_tool_course": [["OAuth2"], ["bearerAuth"]],
+    "update_external_tool_course": [["OAuth2"], ["bearerAuth"]],
+    "remove_external_tool_course": [["OAuth2"], ["bearerAuth"]],
+    "list_course_features": [["OAuth2"], ["bearerAuth"]],
+    "get_feature_flag_course": [["OAuth2"], ["bearerAuth"]],
+    "list_course_files": [["OAuth2"], ["bearerAuth"]],
+    "get_course_storage_quota": [["OAuth2"], ["bearerAuth"]],
+    "get_file_course": [["OAuth2"], ["bearerAuth"]],
+    "list_folders": [["OAuth2"], ["bearerAuth"]],
+    "create_folder": [["OAuth2"], ["bearerAuth"]],
+    "get_folder_path": [["OAuth2"], ["bearerAuth"]],
+    "get_folder": [["OAuth2"], ["bearerAuth"]],
+    "get_course_front_page": [["OAuth2"], ["bearerAuth"]],
+    "update_course_front_page": [["OAuth2"], ["bearerAuth"]],
+    "list_gradebook_history_days": [["OAuth2"], ["bearerAuth"]],
+    "list_submission_versions": [["OAuth2"], ["bearerAuth"]],
+    "list_gradebook_history_details": [["OAuth2"], ["bearerAuth"]],
+    "list_submission_versions_by_grader": [["OAuth2"], ["bearerAuth"]],
+    "list_grading_periods_course": [["OAuth2"], ["bearerAuth"]],
+    "get_grading_period": [["OAuth2"], ["bearerAuth"]],
+    "update_grading_period": [["OAuth2"], ["bearerAuth"]],
+    "delete_grading_period_course": [["OAuth2"], ["bearerAuth"]],
+    "list_grading_standards_course": [["OAuth2"], ["bearerAuth"]],
+    "create_grading_standard_course": [["OAuth2"], ["bearerAuth"]],
+    "get_grading_standard_course": [["OAuth2"], ["bearerAuth"]],
+    "list_group_categories_course": [["OAuth2"], ["bearerAuth"]],
+    "create_group_category_course": [["OAuth2"], ["bearerAuth"]],
+    "list_groups_in_course": [["OAuth2"], ["bearerAuth"]],
+    "list_assessments": [["OAuth2"], ["bearerAuth"]],
+    "create_or_find_live_assessment": [["OAuth2"], ["bearerAuth"]],
+    "list_assessment_results": [["OAuth2"], ["bearerAuth"]],
+    "submit_live_assessment_result": [["OAuth2"], ["bearerAuth"]],
+    "get_module_item_sequence": [["OAuth2"], ["bearerAuth"]],
+    "list_modules": [["OAuth2"], ["bearerAuth"]],
+    "create_module": [["OAuth2"], ["bearerAuth"]],
+    "get_module": [["OAuth2"], ["bearerAuth"]],
+    "update_module": [["OAuth2"], ["bearerAuth"]],
+    "delete_module": [["OAuth2"], ["bearerAuth"]],
+    "relock_module_progressions": [["OAuth2"], ["bearerAuth"]],
+    "list_module_items": [["OAuth2"], ["bearerAuth"]],
+    "add_module_item": [["OAuth2"], ["bearerAuth"]],
+    "get_module_item": [["OAuth2"], ["bearerAuth"]],
+    "update_module_item": [["OAuth2"], ["bearerAuth"]],
+    "delete_module_item": [["OAuth2"], ["bearerAuth"]],
+    "toggle_module_item_completion": [["OAuth2"], ["bearerAuth"]],
+    "mark_module_item_read": [["OAuth2"], ["bearerAuth"]],
+    "assign_mastery_path": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_aligned_assignments": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_links_course": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_groups_course": [["OAuth2"], ["bearerAuth"]],
+    "get_outcome_group_course": [["OAuth2"], ["bearerAuth"]],
+    "update_outcome_group_course": [["OAuth2"], ["bearerAuth"]],
+    "delete_outcome_group_course": [["OAuth2"], ["bearerAuth"]],
+    "import_outcome_group": [["OAuth2"], ["bearerAuth"]],
+    "list_outcomes_course": [["OAuth2"], ["bearerAuth"]],
+    "link_outcome_course": [["OAuth2"], ["bearerAuth"]],
+    "link_outcome_course_existing": [["OAuth2"], ["bearerAuth"]],
+    "remove_outcome_from_group": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_subgroups": [["OAuth2"], ["bearerAuth"]],
+    "create_outcome_subgroup_course": [["OAuth2"], ["bearerAuth"]],
+    "import_outcomes_course": [["OAuth2"], ["bearerAuth"]],
+    "get_outcome_import_status_course": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_results": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_rollups": [["OAuth2"], ["bearerAuth"]],
+    "list_course_pages": [["OAuth2"], ["bearerAuth"]],
+    "create_wiki_page": [["OAuth2"], ["bearerAuth"]],
+    "get_course_page": [["OAuth2"], ["bearerAuth"]],
+    "update_wiki_page": [["OAuth2"], ["bearerAuth"]],
+    "delete_page": [["OAuth2"], ["bearerAuth"]],
+    "duplicate_page": [["OAuth2"], ["bearerAuth"]],
+    "list_page_revisions": [["OAuth2"], ["bearerAuth"]],
+    "get_page_revision_latest": [["OAuth2"], ["bearerAuth"]],
+    "get_page_revision": [["OAuth2"], ["bearerAuth"]],
+    "revert_page_to_revision": [["OAuth2"], ["bearerAuth"]],
+    "check_course_permissions": [["OAuth2"], ["bearerAuth"]],
+    "list_course_collaborators": [["OAuth2"], ["bearerAuth"]],
+    "preview_course_html": [["OAuth2"], ["bearerAuth"]],
+    "grant_quiz_extensions": [["OAuth2"], ["bearerAuth"]],
+    "list_quizzes": [["OAuth2"], ["bearerAuth"]],
+    "create_quiz": [["OAuth2"], ["bearerAuth"]],
+    "list_quiz_override_dates": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz": [["OAuth2"], ["bearerAuth"]],
+    "update_quiz": [["OAuth2"], ["bearerAuth"]],
+    "delete_quiz": [["OAuth2"], ["bearerAuth"]],
+    "reorder_quiz_questions": [["OAuth2"], ["bearerAuth"]],
+    "send_quiz_message_to_users": [["OAuth2"], ["bearerAuth"]],
+    "grant_quiz_extensions_specific": [["OAuth2"], ["bearerAuth"]],
+    "create_question_group": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz_group": [["OAuth2"], ["bearerAuth"]],
+    "update_question_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_question_group": [["OAuth2"], ["bearerAuth"]],
+    "reorder_question_groups": [["OAuth2"], ["bearerAuth"]],
+    "list_quiz_ip_filters": [["OAuth2"], ["bearerAuth"]],
+    "list_quiz_questions": [["OAuth2"], ["bearerAuth"]],
+    "create_quiz_question": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz_question": [["OAuth2"], ["bearerAuth"]],
+    "update_quiz_question": [["OAuth2"], ["bearerAuth"]],
+    "remove_quiz_question": [["OAuth2"], ["bearerAuth"]],
+    "list_quiz_reports": [["OAuth2"], ["bearerAuth"]],
+    "generate_quiz_report": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz_report": [["OAuth2"], ["bearerAuth"]],
+    "cancel_or_delete_quiz_report": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz_statistics": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz_submission": [["OAuth2"], ["bearerAuth"]],
+    "list_quiz_submissions": [["OAuth2"], ["bearerAuth"]],
+    "start_quiz_submission": [["OAuth2"], ["bearerAuth"]],
+    "upload_quiz_submission_file": [["OAuth2"], ["bearerAuth"]],
+    "retrieve_quiz_submission": [["OAuth2"], ["bearerAuth"]],
+    "grade_quiz_submission": [["OAuth2"], ["bearerAuth"]],
+    "submit_quiz": [["OAuth2"], ["bearerAuth"]],
+    "list_submission_events": [["OAuth2"], ["bearerAuth"]],
+    "record_quiz_submission_events": [["OAuth2"], ["bearerAuth"]],
+    "get_quiz_submission_time": [["OAuth2"], ["bearerAuth"]],
+    "list_students_by_recent_login": [["OAuth2"], ["bearerAuth"]],
+    "reset_course": [["OAuth2"], ["bearerAuth"]],
+    "get_root_outcome_group_course": [["OAuth2"], ["bearerAuth"]],
+    "list_rubrics_course": [["OAuth2"], ["bearerAuth"]],
+    "get_rubric_course": [["OAuth2"], ["bearerAuth"]],
+    "search_course_users": [["OAuth2"], ["bearerAuth"]],
+    "list_sections": [["OAuth2"], ["bearerAuth"]],
+    "create_section": [["OAuth2"], ["bearerAuth"]],
+    "get_section": [["OAuth2"], ["bearerAuth"]],
+    "get_course_settings": [["OAuth2"], ["bearerAuth"]],
+    "list_submissions": [["OAuth2"], ["bearerAuth"]],
+    "bulk_grade_submissions": [["OAuth2"], ["bearerAuth"]],
+    "list_course_tabs": [["OAuth2"], ["bearerAuth"]],
+    "update_course_tab": [["OAuth2"], ["bearerAuth"]],
+    "list_course_todos": [["OAuth2"], ["bearerAuth"]],
+    "set_file_usage_rights": [["OAuth2"], ["bearerAuth"]],
+    "remove_file_usage_rights": [["OAuth2"], ["bearerAuth"]],
+    "list_course_users": [["OAuth2"], ["bearerAuth"]],
+    "get_user": [["OAuth2"], ["bearerAuth"]],
+    "update_student_last_attended_date": [["OAuth2"], ["bearerAuth"]],
+    "get_course": [["OAuth2"], ["bearerAuth"]],
+    "update_course": [["OAuth2"], ["bearerAuth"]],
+    "conclude_or_delete_course": [["OAuth2"], ["bearerAuth"]],
+    "get_late_policy": [["OAuth2"], ["bearerAuth"]],
+    "create_late_policy": [["OAuth2"], ["bearerAuth"]],
+    "update_course_late_policy": [["OAuth2"], ["bearerAuth"]],
+    "list_courses_with_latest_epub_export": [["OAuth2"], ["bearerAuth"]],
+    "submit_error_report": [["OAuth2"], ["bearerAuth"]],
+    "get_file": [["OAuth2"], ["bearerAuth"]],
+    "update_file": [["OAuth2"], ["bearerAuth"]],
+    "delete_file": [["OAuth2"], ["bearerAuth"]],
+    "get_file_preview_url": [["OAuth2"], ["bearerAuth"]],
+    "copy_file": [["OAuth2"], ["bearerAuth"]],
+    "copy_folder": [["OAuth2"], ["bearerAuth"]],
+    "upload_file": [["OAuth2"], ["bearerAuth"]],
+    "create_folder_nested": [["OAuth2"], ["bearerAuth"]],
+    "get_folder_nested": [["OAuth2"], ["bearerAuth"]],
+    "update_folder": [["OAuth2"], ["bearerAuth"]],
+    "delete_folder": [["OAuth2"], ["bearerAuth"]],
+    "list_files": [["OAuth2"], ["bearerAuth"]],
+    "list_subfolders": [["OAuth2"], ["bearerAuth"]],
+    "get_outcome_group": [["OAuth2"], ["bearerAuth"]],
+    "update_outcome_group_global": [["OAuth2"], ["bearerAuth"]],
+    "delete_outcome_group": [["OAuth2"], ["bearerAuth"]],
+    "import_outcome_group_global": [["OAuth2"], ["bearerAuth"]],
+    "list_outcomes": [["OAuth2"], ["bearerAuth"]],
+    "link_outcome_global": [["OAuth2"], ["bearerAuth"]],
+    "link_outcome_global_existing": [["OAuth2"], ["bearerAuth"]],
+    "unlink_outcome_global": [["OAuth2"], ["bearerAuth"]],
+    "list_outcome_subgroups_global": [["OAuth2"], ["bearerAuth"]],
+    "create_outcome_subgroup_global": [["OAuth2"], ["bearerAuth"]],
+    "get_root_outcome_group": [["OAuth2"], ["bearerAuth"]],
+    "get_group_category": [["OAuth2"], ["bearerAuth"]],
+    "update_group_category": [["OAuth2"], ["bearerAuth"]],
+    "delete_group_category": [["OAuth2"], ["bearerAuth"]],
+    "distribute_unassigned_members": [["OAuth2"], ["bearerAuth"]],
+    "create_group_in_category": [["OAuth2"], ["bearerAuth"]],
+    "list_group_category_users": [["OAuth2"], ["bearerAuth"]],
+    "create_group": [["OAuth2"], ["bearerAuth"]],
+    "get_group": [["OAuth2"], ["bearerAuth"]],
+    "update_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_group": [["OAuth2"], ["bearerAuth"]],
+    "list_group_activities": [["OAuth2"], ["bearerAuth"]],
+    "get_group_activity_summary": [["OAuth2"], ["bearerAuth"]],
+    "get_assignment_override_for_group": [["OAuth2"], ["bearerAuth"]],
+    "list_group_collaborations": [["OAuth2"], ["bearerAuth"]],
+    "list_conferences_group": [["OAuth2"], ["bearerAuth"]],
+    "list_content_exports_group": [["OAuth2"], ["bearerAuth"]],
+    "initiate_group_content_export": [["OAuth2"], ["bearerAuth"]],
+    "get_content_export_group": [["OAuth2"], ["bearerAuth"]],
+    "list_content_licenses_group": [["OAuth2"], ["bearerAuth"]],
+    "list_content_migrations_group": [["OAuth2"], ["bearerAuth"]],
+    "initiate_content_migration_group": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_systems_group": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_issues_group": [["OAuth2"], ["bearerAuth"]],
+    "get_migration_issue_in_group": [["OAuth2"], ["bearerAuth"]],
+    "resolve_migration_issue_group": [["OAuth2"], ["bearerAuth"]],
+    "get_content_migration_group": [["OAuth2"], ["bearerAuth"]],
+    "update_content_migration_group": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_topics_group": [["OAuth2"], ["bearerAuth"]],
+    "create_discussion_topic_group": [["OAuth2"], ["bearerAuth"]],
+    "reorder_pinned_discussion_topics_group": [["OAuth2"], ["bearerAuth"]],
+    "get_discussion_topic_group": [["OAuth2"], ["bearerAuth"]],
+    "update_discussion_topic_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_discussion_topic_group": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_entries_group": [["OAuth2"], ["bearerAuth"]],
+    "create_discussion_entry_group": [["OAuth2"], ["bearerAuth"]],
+    "rate_discussion_entry_group": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_entry_as_read_in_group": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_entry_unread_group": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_replies_group": [["OAuth2"], ["bearerAuth"]],
+    "create_discussion_reply_group": [["OAuth2"], ["bearerAuth"]],
+    "update_discussion_entry_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_discussion_entry_group": [["OAuth2"], ["bearerAuth"]],
+    "list_discussion_entries_group_by_ids": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_topic_as_read_group": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_topic_unread": [["OAuth2"], ["bearerAuth"]],
+    "mark_discussion_entries_as_read": [["OAuth2"], ["bearerAuth"]],
+    "mark_all_discussion_entries_as_unread": [["OAuth2"], ["bearerAuth"]],
+    "subscribe_to_discussion_topic_group": [["OAuth2"], ["bearerAuth"]],
+    "unsubscribe_from_discussion_topic_group": [["OAuth2"], ["bearerAuth"]],
+    "get_discussion_topic_group_view": [["OAuth2"], ["bearerAuth"]],
+    "list_external_feeds_group": [["OAuth2"], ["bearerAuth"]],
+    "create_external_feed_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_external_feed": [["OAuth2"], ["bearerAuth"]],
+    "list_external_tools_group": [["OAuth2"], ["bearerAuth"]],
+    "upload_file_group": [["OAuth2"], ["bearerAuth"]],
+    "get_group_quota": [["OAuth2"], ["bearerAuth"]],
+    "get_file_group": [["OAuth2"], ["bearerAuth"]],
+    "list_folders_group": [["OAuth2"], ["bearerAuth"]],
+    "create_folder_group": [["OAuth2"], ["bearerAuth"]],
+    "list_folder_path_group": [["OAuth2"], ["bearerAuth"]],
+    "get_folder_group": [["OAuth2"], ["bearerAuth"]],
+    "get_group_front_page": [["OAuth2"], ["bearerAuth"]],
+    "update_group_front_page": [["OAuth2"], ["bearerAuth"]],
+    "send_group_invitations": [["OAuth2"], ["bearerAuth"]],
+    "list_group_members": [["OAuth2"], ["bearerAuth"]],
+    "join_group": [["OAuth2"], ["bearerAuth"]],
+    "get_group_membership": [["OAuth2"], ["bearerAuth"]],
+    "update_group_membership": [["OAuth2"], ["bearerAuth"]],
+    "leave_group": [["OAuth2"], ["bearerAuth"]],
+    "list_pages": [["OAuth2"], ["bearerAuth"]],
+    "create_wiki_page_group": [["OAuth2"], ["bearerAuth"]],
+    "get_page": [["OAuth2"], ["bearerAuth"]],
+    "update_wiki_page_group": [["OAuth2"], ["bearerAuth"]],
+    "delete_wiki_page": [["OAuth2"], ["bearerAuth"]],
+    "list_page_revisions_group": [["OAuth2"], ["bearerAuth"]],
+    "get_page_revision_latest_group": [["OAuth2"], ["bearerAuth"]],
+    "get_page_revision_group": [["OAuth2"], ["bearerAuth"]],
+    "revert_page_to_revision_group": [["OAuth2"], ["bearerAuth"]],
+    "check_group_permissions": [["OAuth2"], ["bearerAuth"]],
+    "list_potential_collaborators": [["OAuth2"], ["bearerAuth"]],
+    "preview_group_html": [["OAuth2"], ["bearerAuth"]],
+    "list_group_tabs": [["OAuth2"], ["bearerAuth"]],
+    "assign_file_usage_rights": [["OAuth2"], ["bearerAuth"]],
+    "remove_usage_rights": [["OAuth2"], ["bearerAuth"]],
+    "list_group_users": [["OAuth2"], ["bearerAuth"]],
+    "get_group_membership_user": [["OAuth2"], ["bearerAuth"]],
+    "update_group_membership_user": [["OAuth2"], ["bearerAuth"]],
+    "remove_user_from_group": [["OAuth2"], ["bearerAuth"]],
+    "get_outcome": [["OAuth2"], ["bearerAuth"]],
+    "update_outcome": [["OAuth2"], ["bearerAuth"]],
+    "list_planner_items": [["OAuth2"], ["bearerAuth"]],
+    "list_planner_overrides": [["OAuth2"], ["bearerAuth"]],
+    "override_planner_item": [["OAuth2"], ["bearerAuth"]],
+    "get_planner_override": [["OAuth2"], ["bearerAuth"]],
+    "update_planner_override": [["OAuth2"], ["bearerAuth"]],
+    "delete_override": [["OAuth2"], ["bearerAuth"]],
+    "list_notes": [["OAuth2"], ["bearerAuth"]],
+    "create_planner_note": [["OAuth2"], ["bearerAuth"]],
+    "get_planner_note": [["OAuth2"], ["bearerAuth"]],
+    "update_planner_note": [["OAuth2"], ["bearerAuth"]],
+    "delete_note": [["OAuth2"], ["bearerAuth"]],
+    "list_closed_poll_sessions": [["OAuth2"], ["bearerAuth"]],
+    "list_poll_sessions": [["OAuth2"], ["bearerAuth"]],
+    "list_polls": [["OAuth2"], ["bearerAuth"]],
+    "create_poll": [["OAuth2"], ["bearerAuth"]],
+    "get_poll": [["OAuth2"], ["bearerAuth"]],
+    "update_poll": [["OAuth2"], ["bearerAuth"]],
+    "delete_poll": [["OAuth2"], ["bearerAuth"]],
+    "list_poll_choices": [["OAuth2"], ["bearerAuth"]],
+    "add_poll_choice": [["OAuth2"], ["bearerAuth"]],
+    "get_poll_choice": [["OAuth2"], ["bearerAuth"]],
+    "update_poll_choice": [["OAuth2"], ["bearerAuth"]],
+    "delete_poll_choice": [["OAuth2"], ["bearerAuth"]],
+    "list_poll_sessions_by_poll": [["OAuth2"], ["bearerAuth"]],
+    "create_poll_session": [["OAuth2"], ["bearerAuth"]],
+    "get_poll_session_results": [["OAuth2"], ["bearerAuth"]],
+    "update_poll_session": [["OAuth2"], ["bearerAuth"]],
+    "delete_poll_session": [["OAuth2"], ["bearerAuth"]],
+    "close_poll_session": [["OAuth2"], ["bearerAuth"]],
+    "open_poll_session": [["OAuth2"], ["bearerAuth"]],
+    "submit_poll_response": [["OAuth2"], ["bearerAuth"]],
+    "get_poll_submission": [["OAuth2"], ["bearerAuth"]],
+    "get_job_progress": [["OAuth2"], ["bearerAuth"]],
+    "list_quiz_submission_questions": [["OAuth2"], ["bearerAuth"]],
+    "submit_quiz_answers": [["OAuth2"], ["bearerAuth"]],
+    "flag_question": [["OAuth2"], ["bearerAuth"]],
+    "remove_question_flag": [["OAuth2"], ["bearerAuth"]],
+    "search_courses": [["OAuth2"], ["bearerAuth"]],
+    "search_recipients": [["OAuth2"], ["bearerAuth"]],
+    "get_assignment_override_for_section": [["OAuth2"], ["bearerAuth"]],
+    "get_section_standalone": [["OAuth2"], ["bearerAuth"]],
+    "update_section": [["OAuth2"], ["bearerAuth"]],
+    "delete_section": [["OAuth2"], ["bearerAuth"]],
+    "remove_section_crosslist": [["OAuth2"], ["bearerAuth"]],
+    "move_section_to_course": [["OAuth2"], ["bearerAuth"]],
+    "list_peer_reviews_section": [["OAuth2"], ["bearerAuth"]],
+    "get_submission_summary": [["OAuth2"], ["bearerAuth"]],
+    "list_assignment_submissions_section": [["OAuth2"], ["bearerAuth"]],
+    "submit_assignment_section": [["OAuth2"], ["bearerAuth"]],
+    "grade_submissions_section": [["OAuth2"], ["bearerAuth"]],
+    "list_peer_reviews_section_submission": [["OAuth2"], ["bearerAuth"]],
+    "assign_peer_reviewer_section": [["OAuth2"], ["bearerAuth"]],
+    "remove_peer_review_section": [["OAuth2"], ["bearerAuth"]],
+    "get_submission_by_user_section": [["OAuth2"], ["bearerAuth"]],
+    "grade_submission_section": [["OAuth2"], ["bearerAuth"]],
+    "upload_submission_file_section": [["OAuth2"], ["bearerAuth"]],
+    "mark_submission_as_read_section": [["OAuth2"], ["bearerAuth"]],
+    "mark_submission_unread": [["OAuth2"], ["bearerAuth"]],
+    "list_section_enrollments": [["OAuth2"], ["bearerAuth"]],
+    "enroll_user_in_section": [["OAuth2"], ["bearerAuth"]],
+    "list_submissions_section": [["OAuth2"], ["bearerAuth"]],
+    "update_submission_grades": [["OAuth2"], ["bearerAuth"]],
+    "create_kaltura_session": [["OAuth2"], ["bearerAuth"]],
+    "revoke_brand_config_share": [["OAuth2"], ["bearerAuth"]],
+    "list_activity_stream": [["OAuth2"], ["bearerAuth"]],
+    "list_activity_stream_current_user": [["OAuth2"], ["bearerAuth"]],
+    "hide_all_activity_stream_items": [["OAuth2"], ["bearerAuth"]],
+    "get_activity_stream_summary": [["OAuth2"], ["bearerAuth"]],
+    "hide_activity_stream_item": [["OAuth2"], ["bearerAuth"]],
+    "list_bookmarks": [["OAuth2"], ["bearerAuth"]],
+    "create_bookmark": [["OAuth2"], ["bearerAuth"]],
+    "get_bookmark": [["OAuth2"], ["bearerAuth"]],
+    "update_bookmark": [["OAuth2"], ["bearerAuth"]],
+    "delete_bookmark": [["OAuth2"], ["bearerAuth"]],
+    "delete_push_notification_endpoint": [["OAuth2"], ["bearerAuth"]],
+    "update_notification_preference": [["OAuth2"], ["bearerAuth"]],
+    "list_course_nicknames": [["OAuth2"], ["bearerAuth"]],
+    "delete_course_nicknames": [["OAuth2"], ["bearerAuth"]],
+    "get_course_nickname": [["OAuth2"], ["bearerAuth"]],
+    "set_course_nickname": [["OAuth2"], ["bearerAuth"]],
+    "delete_course_nickname": [["OAuth2"], ["bearerAuth"]],
+    "list_favorite_courses": [["OAuth2"], ["bearerAuth"]],
+    "reset_course_favorites": [["OAuth2"], ["bearerAuth"]],
+    "favorite_course": [["OAuth2"], ["bearerAuth"]],
+    "unfavorite_course": [["OAuth2"], ["bearerAuth"]],
+    "list_favorite_groups": [["OAuth2"], ["bearerAuth"]],
+    "clear_group_favorites": [["OAuth2"], ["bearerAuth"]],
+    "favorite_group": [["OAuth2"], ["bearerAuth"]],
+    "unfavorite_group": [["OAuth2"], ["bearerAuth"]],
+    "list_groups": [["OAuth2"], ["bearerAuth"]],
+    "list_todos": [["OAuth2"], ["bearerAuth"]],
+    "get_todo_item_counts": [["OAuth2"], ["bearerAuth"]],
+    "list_upcoming_events": [["OAuth2"], ["bearerAuth"]],
+    "get_user_permissions": [["OAuth2"], ["bearerAuth"]],
+    "update_user": [["OAuth2"], ["bearerAuth"]],
+    "list_user_colors": [["OAuth2"], ["bearerAuth"]],
+    "get_custom_color": [["OAuth2"], ["bearerAuth"]],
+    "set_custom_color": [["OAuth2"], ["bearerAuth"]],
+    "merge_user_into_another_user": [["OAuth2"], ["bearerAuth"]],
+    "merge_user": [["OAuth2"], ["bearerAuth"]],
+    "split_user": [["OAuth2"], ["bearerAuth"]],
+    "list_avatars": [["OAuth2"], ["bearerAuth"]],
+    "list_calendar_events": [["OAuth2"], ["bearerAuth"]],
+    "list_communication_channels": [["OAuth2"], ["bearerAuth"]],
+    "add_communication_channel": [["OAuth2"], ["bearerAuth"]],
+    "list_notification_preference_categories": [["OAuth2"], ["bearerAuth"]],
+    "list_notification_preferences": [["OAuth2"], ["bearerAuth"]],
+    "get_notification_preference": [["OAuth2"], ["bearerAuth"]],
+    "delete_communication_channel": [["OAuth2"], ["bearerAuth"]],
+    "delete_communication_channel_by_address": [["OAuth2"], ["bearerAuth"]],
+    "list_notification_preferences_by_type": [["OAuth2"], ["bearerAuth"]],
+    "get_notification_preference_by_address": [["OAuth2"], ["bearerAuth"]],
+    "list_content_exports_user": [["OAuth2"], ["bearerAuth"]],
+    "initiate_content_export": [["OAuth2"], ["bearerAuth"]],
+    "get_content_export_user": [["OAuth2"], ["bearerAuth"]],
+    "list_content_licenses_user": [["OAuth2"], ["bearerAuth"]],
+    "list_content_migrations_user": [["OAuth2"], ["bearerAuth"]],
+    "initiate_content_migration_user": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_systems_user": [["OAuth2"], ["bearerAuth"]],
+    "list_migration_issues_user": [["OAuth2"], ["bearerAuth"]],
+    "get_migration_issue_in_user": [["OAuth2"], ["bearerAuth"]],
+    "resolve_migration_issue_user": [["OAuth2"], ["bearerAuth"]],
+    "get_content_migration_user": [["OAuth2"], ["bearerAuth"]],
+    "update_content_migration_user": [["OAuth2"], ["bearerAuth"]],
+    "list_courses_by_user": [["OAuth2"], ["bearerAuth"]],
+    "list_assignments_by_user": [["OAuth2"], ["bearerAuth"]],
+    "retrieve_custom_data": [["OAuth2"], ["bearerAuth"]],
+    "store_custom_data": [["OAuth2"], ["bearerAuth"]],
+    "delete_custom_data": [["OAuth2"], ["bearerAuth"]],
+    "list_user_enrollments": [["OAuth2"], ["bearerAuth"]],
+    "list_user_features": [["OAuth2"], ["bearerAuth"]],
+    "list_enabled_features_user": [["OAuth2"], ["bearerAuth"]],
+    "get_feature_flag_user": [["OAuth2"], ["bearerAuth"]],
+    "upload_file_personal": [["OAuth2"], ["bearerAuth"]],
+    "get_user_storage_quota": [["OAuth2"], ["bearerAuth"]],
+    "get_file_user": [["OAuth2"], ["bearerAuth"]],
+    "list_folders_user": [["OAuth2"], ["bearerAuth"]],
+    "create_folder_user": [["OAuth2"], ["bearerAuth"]],
+    "get_folder_path_user": [["OAuth2"], ["bearerAuth"]],
+    "get_folder_user": [["OAuth2"], ["bearerAuth"]],
+    "list_logins_user": [["OAuth2"], ["bearerAuth"]],
+    "delete_login": [["OAuth2"], ["bearerAuth"]],
+    "list_overdue_assignments": [["OAuth2"], ["bearerAuth"]],
+    "list_observees": [["OAuth2"], ["bearerAuth"]],
+    "create_observee": [["OAuth2"], ["bearerAuth"]],
+    "get_observee": [["OAuth2"], ["bearerAuth"]],
+    "create_observation_link": [["OAuth2"], ["bearerAuth"]],
+    "unobserve_user": [["OAuth2"], ["bearerAuth"]],
+    "list_page_views": [["OAuth2"], ["bearerAuth"]],
+    "get_user_profile": [["OAuth2"], ["bearerAuth"]],
+    "assign_usage_rights": [["OAuth2"], ["bearerAuth"]],
+    "remove_file_usage_rights_user": [["OAuth2"], ["bearerAuth"]]
 }

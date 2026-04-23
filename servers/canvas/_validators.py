@@ -1,7 +1,7 @@
 """
 Canvas MCP Server - Validators
 
-Generated: 2026-04-14 18:17:23 UTC
+Generated: 2026-04-23 21:06:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
