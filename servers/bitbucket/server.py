@@ -6,7 +6,7 @@ API Info:
 - Contact: Bitbucket Support <support@bitbucket.org> (https://support.atlassian.com/bitbucket-cloud/)
 - Terms of Service: https://www.atlassian.com/legal/customer-agreement
 
-Generated: 2026-04-14 18:16:06 UTC
+Generated: 2026-04-23 21:02:39 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.bitbucket.org/2.0")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -851,16 +964,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -874,6 +988,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -916,6 +1031,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -927,7 +1057,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1086,7 +1215,7 @@ mcp = FastMCP("Bitbucket", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhook_event_types() -> dict[str, Any]:
+async def list_webhook_event_types() -> dict[str, Any] | ToolResult:
     """Retrieves all webhook resource and subject types on which webhooks can be registered. Each returned type includes an events link for browsing the paginated list of specific events that subject type can emit. No authentication required."""
 
     # Extract parameters for API call
@@ -1113,7 +1242,7 @@ async def list_webhook_event_types() -> dict[str, Any]:
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhook_event_types_by_subject(subject_type: Literal["repository", "workspace"] = Field(..., description="The entity type for which to retrieve subscribable webhook events. Note: team and user subject types are deprecated; use workspace instead.")) -> dict[str, Any]:
+async def list_webhook_event_types_by_subject(subject_type: Literal["repository", "workspace"] = Field(..., description="The entity type for which to retrieve subscribable webhook events. Note: team and user subject types are deprecated; use workspace instead.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all valid webhook event types available for subscription on a given subject type (repository or workspace). This is public data requiring no authentication or scopes."""
 
     # Construct request model with validation
@@ -1154,7 +1283,7 @@ async def list_workspace_repositories(
     role: Literal["admin", "contributor", "member", "owner"] | None = Field(None, description="Filters repositories based on the authenticated user's access level: member (read access), contributor (write access), admin (administrator access), or owner (all repositories owned by the user)."),
     q: str | None = Field(None, description="A query string to filter repositories using Bitbucket's filtering syntax, allowing you to narrow results by repository properties."),
     sort: str | None = Field(None, description="The field name by which to sort the returned repositories, following Bitbucket's sorting syntax for ordering results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all repositories within a specified workspace. Results can be filtered by the authenticated user's role and further narrowed using query and sort parameters."""
 
     # Construct request model with validation
@@ -1196,7 +1325,7 @@ async def list_workspace_repositories(
 async def get_repository(
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed metadata for a specific repository within a workspace. Returns the full repository object including settings, links, and configuration."""
 
     # Construct request model with validation
@@ -1236,7 +1365,7 @@ async def create_repository(
     repo_slug: str = Field(..., description="The slug or UUID of the repository to create. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID in which to create the repository. UUIDs must be surrounded by curly-braces."),
     body: _models.Repository | None = Field(None, description="Optional request body containing repository configuration such as SCM type and project assignment. If no project is specified, the repository is automatically assigned to the oldest project in the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new repository in the specified workspace. Optionally assigns the repository to a project by providing a project key or UUID in the request body."""
 
     # Construct request model with validation
@@ -1280,7 +1409,7 @@ async def update_repository(
     repo_slug: str = Field(..., description="The slug or UUID of the repository to update. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID containing the repository. UUIDs must be surrounded by curly-braces."),
     body: _models.Repository | None = Field(None, description="The repository fields to update, such as name, description, or visibility settings. Refer to the repository POST endpoint documentation for the full request body structure."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing repository's settings and metadata within a workspace, or creates one if it does not exist. Renaming the repository will change its URL slug and return the new location in the response's Location header if no slug conflict occurs."""
 
     # Construct request model with validation
@@ -1324,7 +1453,7 @@ async def delete_repository(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository to delete. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
     redirect_to: str | None = Field(None, description="An optional redirect path to display a friendly relocation message in the Bitbucket UI when a repository has moved. Note that GET requests to the original endpoint will still return a 404 regardless."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes the specified repository from a workspace. This action is irreversible and does not affect any existing forks of the repository."""
 
     # Construct request model with validation
@@ -1368,7 +1497,7 @@ async def list_branch_restrictions(
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
     kind: str | None = Field(None, description="Filters results to only return branch restrictions of the specified type, such as push or merge restrictions."),
     pattern: str | None = Field(None, description="Filters results to only return branch restrictions that apply to branches matching the specified pattern."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all branch restrictions configured for a repository. Optionally filter results by restriction kind or branch name pattern."""
 
     # Construct request model with validation
@@ -1411,7 +1540,7 @@ async def create_branch_restriction(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
     body: _models.Branchrestriction | None = Field(None, description="The branch restriction rule definition, including the restriction kind, branch matching strategy (glob pattern or branching model type), and optionally the users and groups exempt from the restriction."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new branch restriction rule for a repository, controlling actions such as pushing, merging, or deleting branches based on matching patterns or branching model types."""
 
     # Construct request model with validation
@@ -1455,7 +1584,7 @@ async def get_branch_restriction(
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the branch restriction rule to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific branch restriction rule for a repository by its unique ID. Use this to inspect the configuration of an individual branch protection or access control rule."""
 
     # Construct request model with validation
@@ -1496,7 +1625,7 @@ async def update_branch_restriction(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUID values must be surrounded by curly-braces."),
     body: _models.Branchrestriction | None = Field(None, description="The request body containing the branch restriction rule fields to update. Only fields present in the body will be modified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing branch restriction rule for a repository. Only fields included in the request body are modified; omitted fields retain their current values."""
 
     # Construct request model with validation
@@ -1540,7 +1669,7 @@ async def delete_branch_restriction(
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the branch restriction rule to delete."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing branch restriction rule from a repository. This action cannot be undone and will immediately remove the associated access or push controls."""
 
     # Construct request model with validation
@@ -1579,7 +1708,7 @@ async def delete_branch_restriction(
 async def get_branching_model(
     repo_slug: str = Field(..., description="The repository identifier, either the URL-friendly slug or the repository UUID enclosed in curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID enclosed in curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the active branching model for a repository, including the development branch, optional production branch, and all enabled branch types. This is a read-only view; use the branching model settings endpoint to modify the configuration."""
 
     # Construct request model with validation
@@ -1618,7 +1747,7 @@ async def get_branching_model(
 async def get_branching_model_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository whose branching model settings are being retrieved. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the raw branching model configuration for a repository, including development and production branch settings, branch type definitions, and default branch deletion behavior. Use the active branching model endpoint instead if you need to see the configuration resolved against actual current branches."""
 
     # Construct request model with validation
@@ -1657,7 +1786,7 @@ async def get_branching_model_settings(
 async def update_branching_model_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the branching model configuration for a repository, including development branch, production branch, branch type prefixes, and default branch deletion behavior. Only properties explicitly passed in the request body will be modified; omitted properties remain unchanged."""
 
     # Construct request model with validation
@@ -1697,7 +1826,7 @@ async def get_commit(
     commit: str = Field(..., description="The full SHA1 hash of the commit to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific commit in a repository using its SHA1 identifier. Returns commit metadata including author, timestamp, and associated changes."""
 
     # Construct request model with validation
@@ -1737,7 +1866,7 @@ async def approve_commit(
     commit: str = Field(..., description="The full SHA1 hash identifying the specific commit to approve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository containing the commit. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approves a specific commit as the authenticated user, recording their explicit approval. Requires the user to have direct access to the repository, as public visibility alone does not grant approval permissions."""
 
     # Construct request model with validation
@@ -1777,7 +1906,7 @@ async def unapprove_commit(
     commit: str = Field(..., description="The SHA1 hash uniquely identifying the commit to unapprove."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that contains the commit."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID (surrounded by curly-braces) that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the authenticated user's approval from a specified commit in a repository. This action requires explicit access to the repository; public visibility alone does not grant approval or unapproval rights."""
 
     # Construct request model with validation
@@ -1819,7 +1948,7 @@ async def list_commit_comments(
     workspace: str = Field(..., description="The workspace slug or UUID that uniquely identifies the workspace containing the repository. UUIDs must be surrounded by curly-braces."),
     q: str | None = Field(None, description="A query string to filter the returned comments using Bitbucket's filtering and sorting syntax, allowing you to narrow results by specific field conditions."),
     sort: str | None = Field(None, description="The field name by which to sort the returned comments, following Bitbucket's filtering and sorting syntax. Overrides the default oldest-to-newest ordering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all comments (both global and inline) for a specific commit in a repository. Results are sorted oldest to newest by default and can be filtered or reordered using query parameters."""
 
     # Construct request model with validation
@@ -1863,7 +1992,7 @@ async def create_commit_comment(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that identifies the repository within the workspace."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID (surrounded by curly-braces) that identifies the workspace containing the repository."),
     body: _models.CommitComment | None = Field(None, description="The comment payload, including the comment content and an optional parent comment ID to post a reply in an existing thread."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Posts a new comment on a specific commit in a repository. Supports threaded replies by referencing a parent comment ID in the request body."""
 
     # Construct request model with validation
@@ -1908,7 +2037,7 @@ async def get_commit_comment(
     commit: str = Field(..., description="The full SHA1 hash of the commit whose comment is being retrieved."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug (URL-friendly identifier) or the workspace UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific comment on a commit by its comment ID. Returns the full comment details including content, author, and timestamps."""
 
     _comment_id = _parse_int(comment_id)
@@ -1952,7 +2081,7 @@ async def update_commit_comment(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that uniquely identifies the repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that uniquely identifies the workspace containing the repository."),
     body: _models.CommitComment | None = Field(None, description="The request body containing the updated comment content, structured as a commit comment object with a raw text content field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the text content of an existing comment on a specific commit. Only the comment's content can be modified; other properties remain unchanged."""
 
     _comment_id = _parse_int(comment_id)
@@ -1999,7 +2128,7 @@ async def delete_commit_comment(
     commit: str = Field(..., description="The full SHA1 hash of the commit whose comment is being deleted."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific comment on a commit in a repository. If the comment has visible replies, it will be soft-deleted — its content is blanked and marked as deleted — to preserve the integrity of the comment thread."""
 
     _comment_id = _parse_int(comment_id)
@@ -2043,7 +2172,7 @@ async def get_commit_property(
     commit: str = Field(..., description="The identifier of the commit whose application property is being retrieved."),
     app_key: str = Field(..., description="The unique key identifying the Connect app that owns the property."),
     property_name: str = Field(..., description="The name of the application property to retrieve from the specified commit."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific application property value stored against a commit in a Bitbucket repository. Useful for reading custom metadata attached to a commit by a Connect app."""
 
     # Construct request model with validation
@@ -2085,7 +2214,7 @@ async def update_commit_property(
     commit: str = Field(..., description="The commit identifier (hash) against which the application property is stored."),
     app_key: str = Field(..., description="The unique key identifying the Connect app that owns the property."),
     property_name: str = Field(..., description="The name of the application property to update, scoped to the specified Connect app."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the value of an application property stored against a specific commit in a repository. Application properties allow Connect apps to associate custom metadata with Bitbucket resources."""
 
     # Construct request model with validation
@@ -2127,7 +2256,7 @@ async def delete_commit_property(
     commit: str = Field(..., description="The commit identifier (hash) whose associated application property will be deleted."),
     app_key: str = Field(..., description="The unique key identifying the Bitbucket Connect app that owns the property being deleted."),
     property_name: str = Field(..., description="The name of the application property to delete from the specified commit."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific application property value stored against a commit in a Bitbucket repository. This permanently removes the key-value metadata associated with the given Connect app and property name."""
 
     # Construct request model with validation
@@ -2168,7 +2297,7 @@ async def list_commit_pull_requests(
     repo_slug: str = Field(..., description="The repository identifier, either the repository slug or the UUID enclosed in curly braces."),
     commit: str = Field(..., description="The full SHA1 hash of the commit whose associated pull requests should be retrieved."),
     pagelen: str | None = Field(None, description="The number of pull requests to return per page; controls pagination page size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all pull requests that include a specific commit as part of their review. Requires the Pull Request Commit Links app to be installed on the repository."""
 
     _pagelen = _parse_int(pagelen)
@@ -2213,7 +2342,7 @@ async def list_commit_reports(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     commit: str = Field(..., description="The full commit hash identifying the specific commit whose reports should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of code insight reports linked to a specific commit in a repository. Useful for reviewing quality, security, or test results associated with a given commit."""
 
     # Construct request model with validation
@@ -2254,7 +2383,7 @@ async def get_commit_report(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the commit and report."),
     commit: str = Field(..., description="The full commit hash identifying the specific commit the report is associated with."),
     report_id: str = Field(..., alias="reportId", description="The unique identifier of the report, accepted as either a UUID or an external ID assigned by the reporting tool."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single code insight report for a specific commit in a repository. Returns the full report details matching the provided report ID."""
 
     # Construct request model with validation
@@ -2296,7 +2425,7 @@ async def create_or_update_commit_report(
     commit: str = Field(..., description="The full commit hash that this report is associated with."),
     report_id: str = Field(..., alias="reportId", description="A unique identifier for the report scoped to this commit — either a UUID or an external ID. To avoid collisions with other systems, prefix external IDs with your system name (e.g., mySystem-001)."),
     body: _models.PutRepositoriesCommitReportsBody | None = Field(None, description="The report payload containing metadata and result data. Supports fields: title, details, report_type (SECURITY, COVERAGE, TEST, BUG), reporter, link, result (PASSED, FAILED, PENDING), and a data array of typed metric entries. Each data entry specifies a title, type (BOOLEAN, DATE, DURATION, LINK, NUMBER, PERCENTAGE, TEXT), and a value whose format depends on the type — see the data field format table for type-specific value requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates a Code Insights report for a specific commit in a repository. Use a unique report ID per commit, optionally prefixed with your system name to avoid collisions."""
 
     # Construct request model with validation
@@ -2341,7 +2470,7 @@ async def delete_commit_report(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the commit and its associated report."),
     commit: str = Field(..., description="The full commit hash identifying the commit to which the report belongs."),
     report_id: str = Field(..., alias="reportId", description="The unique identifier of the report to delete, accepted as either the report's UUID or its external ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a single code insights report associated with a specific commit in a repository. The report is identified by its unique report ID."""
 
     # Construct request model with validation
@@ -2382,7 +2511,7 @@ async def list_commit_report_annotations(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     commit: str = Field(..., description="The full commit hash identifying the specific commit whose report annotations should be retrieved."),
     report_id: str = Field(..., alias="reportId", description="The unique identifier of the report, accepted as either a UUID or an external ID, for which annotations will be listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of annotations associated with a specific code insights report for a given commit in a repository."""
 
     # Construct request model with validation
@@ -2424,7 +2553,7 @@ async def bulk_create_annotations(
     commit: str = Field(..., description="The full commit hash for which the report and its annotations are being uploaded."),
     report_id: str = Field(..., alias="reportId", description="The UUID or external ID of the report to which these annotations belong."),
     body: list[_models.ReportAnnotation] | None = Field(None, description="Array of annotation objects to create or update. Each annotation must include a unique external_id and may specify fields such as annotation_type (VULNERABILITY, CODE_SMELL, BUG), severity (CRITICAL, HIGH, MEDIUM, LOW), result (PASSED, FAILED, IGNORED, SKIPPED), and an optional file path and line number. Up to 100 annotations can be submitted per request.", min_length=1, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk create or update up to 100 annotations for a specific commit report in a repository. Annotations represent individual findings (e.g., vulnerabilities, bugs, code smells) and can be optionally linked to a specific file and line number."""
 
     # Construct request model with validation
@@ -2470,7 +2599,7 @@ async def get_commit_report_annotation(
     commit: str = Field(..., description="The full commit hash identifying the commit to which the report belongs."),
     report_id: str = Field(..., alias="reportId", description="The unique identifier of the report, accepted as either its UUID or its external ID string."),
     annotation_id: str = Field(..., alias="annotationId", description="The unique identifier of the annotation to retrieve, accepted as either its UUID or its external ID string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single annotation by its ID from a specific code insight report on a given commit. Useful for inspecting individual findings or diagnostics attached to a commit report."""
 
     # Construct request model with validation
@@ -2513,7 +2642,7 @@ async def upsert_commit_report_annotation(
     report_id: str = Field(..., alias="reportId", description="The unique identifier of the report to annotate, either its UUID or the external ID used when the report was created."),
     annotation_id: str = Field(..., alias="annotationId", description="The unique identifier for this annotation, either its UUID or an external ID; prefix external IDs with your system name to avoid collisions."),
     body: _models.PutRepositoriesCommitReportsAnnotationsBody | None = Field(None, description="The annotation payload containing fields such as title, summary, annotation_type (VULNERABILITY, CODE_SMELL, BUG), severity (CRITICAL, HIGH, MEDIUM, LOW), result (PASSED, FAILED, IGNORED, SKIPPED), and optional file path and line number."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates a single annotation on a specific commit report, representing an individual finding such as a vulnerability, bug, or code smell, optionally linked to a file and line number."""
 
     # Construct request model with validation
@@ -2559,7 +2688,7 @@ async def delete_commit_annotation(
     commit: str = Field(..., description="The commit hash or identifier that the target annotation belongs to."),
     report_id: str = Field(..., alias="reportId", description="The unique identifier of the report containing the annotation, either its UUID or external ID."),
     annotation_id: str = Field(..., alias="annotationId", description="The unique identifier of the annotation to delete, either its UUID or external ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a single annotation from a specific commit report in a repository. The annotation is identified by its unique ID within the specified report."""
 
     # Construct request model with validation
@@ -2602,7 +2731,7 @@ async def list_commit_statuses(
     refname: str | None = Field(None, description="Filters results to only include commit statuses created with the specified ref name, or those created without any ref name."),
     q: str | None = Field(None, description="A query string to filter results using Bitbucket's filtering and sorting syntax, allowing you to narrow the returned statuses by field values."),
     sort: str | None = Field(None, description="The field by which to sort the returned statuses using Bitbucket's filtering and sorting syntax. Defaults to created_on if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all statuses (such as CI/CD build results) associated with a specific commit in a Bitbucket repository. Supports filtering by ref name, query string, and custom sorting."""
 
     # Construct request model with validation
@@ -2646,7 +2775,7 @@ async def create_commit_build_status(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (e.g. my-repo) or as a UUID surrounded by curly braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. my-workspace) or as a UUID surrounded by curly braces."),
     body: _models.Commitstatus | None = Field(None, description="The build status payload containing fields such as key, state, description, url, and optionally refname. The key uniquely identifies the build status; if it already exists, the existing record will be overwritten. Set refname to the pull request source branch to associate the status with a pull request. The url field supports URI templates with context variables repository and commit."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or overwrites a build status for a specific commit in a repository, allowing CI/CD systems to report build results. Optionally associate the status with a pull request by specifying the source branch via the refname field."""
 
     # Construct request model with validation
@@ -2691,7 +2820,7 @@ async def get_commit_build_status(
     key: str = Field(..., description="The unique key identifying the specific build status entry associated with the commit."),
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific build status for a given commit using its unique key. Useful for checking the CI/CD pipeline result associated with a particular commit in a repository."""
 
     # Construct request model with validation
@@ -2733,7 +2862,7 @@ async def update_commit_build_status(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug (URL-friendly identifier) or the workspace UUID surrounded by curly-braces."),
     body: _models.Commitstatus | None = Field(None, description="The request body containing the build status fields to update, such as state, name, description, url, or refname."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing build status entry for a specific commit in a repository. Allows modification of state, name, description, URL, and ref name, while the unique key remains immutable."""
 
     # Construct request model with validation
@@ -2776,7 +2905,7 @@ async def update_commit_build_status(
 async def list_commits(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all commits for a repository in reverse chronological (topological) order, similar to `git log --all`. Supports filtering by included/excluded refs and an optional file or directory path to scope results."""
 
     # Construct request model with validation
@@ -2815,7 +2944,7 @@ async def list_commits(
 async def list_commits_with_filters(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of commits for a repository, accepting include and exclude branch/commit parameters in the request body to avoid URL length limitations. This is functionally identical to the GET commits endpoint but does not support creating new commits."""
 
     # Construct request model with validation
@@ -2855,7 +2984,7 @@ async def list_commits_by_revision(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository within the workspace. UUID values must be surrounded by curly-braces."),
     revision: str = Field(..., description="The starting point for the commit log; accepts a full or abbreviated commit SHA1 or a ref name such as a branch or tag."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of commits for a given branch, tag, or commit SHA in reverse chronological order, similar to `git log`. Supports filtering by additional include/exclude refs and an optional file or directory path to narrow results to commits affecting that path."""
 
     # Construct request model with validation
@@ -2895,7 +3024,7 @@ async def list_commits_by_revision_post(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     revision: str = Field(..., description="The starting point for the commit history, specified as a full or abbreviated commit SHA1 hash or a ref name such as a branch or tag."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (workspace ID) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the commit history for a specific revision (SHA1 or branch/tag name) in a repository, using the request body to pass include and exclude filters instead of URL parameters to avoid length limitations."""
 
     # Construct request model with validation
@@ -2934,7 +3063,7 @@ async def list_commits_by_revision_post(
 async def list_default_reviewers(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (workspace short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of users automatically added as reviewers on every new pull request for the specified repository. To include reviewers inherited from the parent project, use the effective-default-reviewers endpoint instead."""
 
     # Construct request model with validation
@@ -2974,7 +3103,7 @@ async def get_default_reviewer(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     target_username: str = Field(..., description="The username or UUID of the default reviewer to look up. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific default reviewer for a repository, confirming they are on the default reviewers list. A 404 response indicates the specified user is not a default reviewer for the repository."""
 
     # Construct request model with validation
@@ -3014,7 +3143,7 @@ async def add_default_reviewer(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     target_username: str = Field(..., description="The username or UUID of the user to add as a default reviewer for the repository."),
     workspace: str = Field(..., description="The workspace slug or UUID that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a specified user to the repository's list of default reviewers for pull requests. This operation is idempotent — adding a user who is already a default reviewer has no effect."""
 
     # Construct request model with validation
@@ -3054,7 +3183,7 @@ async def remove_default_reviewer(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     target_username: str = Field(..., description="The username or UUID of the default reviewer to remove from the repository."),
     workspace: str = Field(..., description="The workspace slug or UUID that contains the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specified user from the default reviewers list for a repository. After removal, the user will no longer be automatically added as a reviewer on new pull requests."""
 
     # Construct request model with validation
@@ -3093,7 +3222,7 @@ async def remove_default_reviewer(
 async def list_deploy_keys(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all deploy keys associated with a specific repository in a workspace. Deploy keys provide read or read/write access to a repository without requiring user credentials."""
 
     # Construct request model with validation
@@ -3132,7 +3261,7 @@ async def list_deploy_keys(
 async def add_deploy_key(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new SSH deploy key to a repository, granting read or write access without requiring user credentials. Note that deploy keys authenticated via an OAuth consumer will be invalidated if that consumer is modified."""
 
     # Construct request model with validation
@@ -3172,7 +3301,7 @@ async def get_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID that owns the deploy key. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier (slug) or UUID in which the repository resides. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific deploy key associated with a repository, identified by its unique key ID. Useful for inspecting deploy key details such as label, public key value, and permissions."""
 
     # Construct request model with validation
@@ -3212,7 +3341,7 @@ async def update_deploy_key(
     key_id: str = Field(..., description="The numeric ID of the deploy key to update."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that contains the deploy key."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing deploy key in a repository, allowing the label and comment to be changed while keeping the same public key value."""
 
     # Construct request model with validation
@@ -3252,7 +3381,7 @@ async def delete_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to delete."),
     repo_slug: str = Field(..., description="The repository slug or UUID that owns the deploy key. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID where the repository resides. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a deploy key from a repository, revoking its access. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3291,7 +3420,7 @@ async def delete_deploy_key(
 async def list_deployments(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of all deployments for a specified repository. Returns deployment history and status information for the given workspace and repository."""
 
     # Construct request model with validation
@@ -3331,7 +3460,7 @@ async def get_deployment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the deployment."),
     deployment_uuid: str = Field(..., description="The unique identifier (UUID) of the deployment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific deployment in a repository. Use this to inspect the status, configuration, and metadata of a single deployment by its unique identifier."""
 
     # Construct request model with validation
@@ -3371,7 +3500,7 @@ async def list_environment_variables(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     environment_uuid: str = Field(..., description="The unique identifier of the deployment environment whose variables should be listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all deployment variables configured for a specific environment in a repository. Returns environment-level variables used during deployments."""
 
     # Construct request model with validation
@@ -3412,7 +3541,7 @@ async def create_environment_variable(
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     environment_uuid: str = Field(..., description="The unique identifier of the deployment environment in which the variable will be created."),
     body: _models.PostRepositoriesDeploymentsConfigEnvironmentsVariablesBody | None = Field(None, description="The variable definition to create, including its key, value, and whether it should be treated as secured (masked)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new variable scoped to a specific deployment environment in a repository. Use this to define environment-level configuration or secrets for deployment pipelines."""
 
     # Construct request model with validation
@@ -3458,7 +3587,7 @@ async def update_environment_variable(
     environment_uuid: str = Field(..., description="The UUID of the deployment environment whose variable is being updated."),
     variable_uuid: str = Field(..., description="The UUID of the specific variable to update within the deployment environment."),
     body: _models.PutRepositoriesDeploymentsConfigEnvironmentsVariablesBody | None = Field(None, description="The request body containing the updated variable fields, such as key, value, or secured flag."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing deployment environment level variable for a specific environment in a repository. Use this to modify the key, value, or secured status of a previously created variable."""
 
     # Construct request model with validation
@@ -3503,7 +3632,7 @@ async def delete_environment_variable(
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace."),
     environment_uuid: str = Field(..., description="The unique identifier (UUID) of the deployment environment from which the variable will be deleted."),
     variable_uuid: str = Field(..., description="The unique identifier (UUID) of the variable to permanently delete from the environment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific variable from a deployment environment in a repository. This removes the variable and its value from the environment's configuration."""
 
     # Construct request model with validation
@@ -3549,7 +3678,7 @@ async def get_repository_diff(
     binary: bool | None = Field(None, description="When true, binary files are included in the diff output. Defaults to true if omitted."),
     renames: bool | None = Field(None, description="When true, rename detection is performed to identify moved or renamed files. Defaults to true if omitted."),
     topic: bool | None = Field(None, description="When true, returns a two-way three-dot diff showing changes between the source commit and the merge base of the source and destination commits. When false, returns a simple two-dot diff between source and destination. Defaults to true if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a raw git-style diff for a repository, either for a single commit against its first parent or between two commits using dot notation. Supports three-dot topic diffs, file path filtering, and whitespace/rename/binary options."""
 
     # Construct request model with validation
@@ -3596,7 +3725,7 @@ async def get_diffstat(
     path: str | None = Field(None, description="Restricts the diffstat to one or more specific file paths; repeat this parameter to include multiple paths."),
     renames: bool | None = Field(None, description="Controls whether file rename detection is performed; defaults to true when omitted."),
     topic: bool | None = Field(None, description="When true, returns a three-dot diff between the source commit and the merge base of the source and destination commits. When false, returns a simple two-dot diff between the two commits."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves file-level change statistics for a commit or commit range, returning a record per modified path with the type of change and lines added or removed. Supports single-commit diffs against the first parent, two-commit diffs, and three-dot topic branch diffs."""
 
     # Construct request model with validation
@@ -3638,7 +3767,7 @@ async def get_diffstat(
 async def list_download_artifacts(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all download artifacts associated with a specific repository in a workspace. Returns a list of available download links for the repository."""
 
     # Construct request model with validation
@@ -3677,7 +3806,7 @@ async def list_download_artifacts(
 async def upload_download_artifact(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload one or more download artifacts to a repository using a multipart/form-data POST request. If a file with the same name already exists, it will be replaced."""
 
     # Construct request model with validation
@@ -3717,7 +3846,7 @@ async def get_download_artifact(
     filename: str = Field(..., description="The exact filename of the download artifact to retrieve from the repository's downloads section."),
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID enclosed in curly braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID enclosed in curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the actual file contents of a download artifact from a repository, redirecting to the file's direct download URL. Returns the raw file data rather than artifact metadata."""
 
     # Construct request model with validation
@@ -3757,7 +3886,7 @@ async def delete_download_artifact(
     filename: str = Field(..., description="The exact name of the download artifact file to delete, including its file extension."),
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific download artifact file from a repository. This action cannot be undone and removes the file from the repository's public downloads section."""
 
     # Construct request model with validation
@@ -3796,7 +3925,7 @@ async def delete_download_artifact(
 async def get_effective_branching_model(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the effective (currently applied) branching model for a repository, reflecting any inherited workspace-level settings combined with repository-specific overrides."""
 
     # Construct request model with validation
@@ -3835,7 +3964,7 @@ async def get_effective_branching_model(
 async def list_effective_default_reviewers(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the effective default reviewers for a repository, combining reviewers defined at the repository level with those inherited from its parent project. These users are automatically added as reviewers on every new pull request created in the repository."""
 
     # Construct request model with validation
@@ -3874,7 +4003,7 @@ async def list_effective_default_reviewers(
 async def list_environments(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace whose environments will be listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all deployment environments configured for a specified repository within a workspace. Useful for inspecting available environments such as production, staging, or test."""
 
     # Construct request model with validation
@@ -3914,7 +4043,7 @@ async def create_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace where the environment will be created."),
     body: _models.PostRepositoriesEnvironmentsBody | None = Field(None, description="The request body containing the environment configuration details, such as name and environment type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new deployment environment (e.g., production, staging, test) within a specified repository. Environments are used to manage deployment configurations and variables."""
 
     # Construct request model with validation
@@ -3958,7 +4087,7 @@ async def get_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the target environment."),
     environment_uuid: str = Field(..., description="The unique UUID of the deployment environment to retrieve, surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific deployment environment within a repository. Use this to inspect environment configuration, status, and metadata by its unique identifier."""
 
     # Construct request model with validation
@@ -3998,7 +4127,7 @@ async def delete_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     environment_uuid: str = Field(..., description="The unique UUID of the deployment environment to delete, surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a deployment environment from a repository. This action cannot be undone and will remove all associated environment configuration."""
 
     # Construct request model with validation
@@ -4038,7 +4167,7 @@ async def update_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     environment_uuid: str = Field(..., description="The unique identifier (UUID) of the deployment environment to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Apply configuration changes to a specific deployment environment in a repository. Use this to modify environment settings such as variables or deployment rules."""
 
     # Construct request model with validation
@@ -4082,7 +4211,7 @@ async def list_file_history(
     renames: str | None = Field(None, description="Controls whether Bitbucket follows the file across renames when traversing history; defaults to true, set to false to disable rename tracking."),
     q: str | None = Field(None, description="A filter expression to narrow down the returned commits using Bitbucket's filtering and sorting syntax."),
     sort: str | None = Field(None, description="The name of a response property to sort results by, using Bitbucket's filtering and sorting syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of commits that modified a specific file in a repository, returned in reverse chronological order. Supports rename tracking, filtering, and sorting to precisely scope the results."""
 
     # Construct request model with validation
@@ -4127,7 +4256,7 @@ async def list_repository_forks(
     role: Literal["admin", "contributor", "member", "owner"] | None = Field(None, description="Filters returned forks based on the authenticated user's role: member (explicit read access), contributor (explicit write access), admin (explicit administrator access), or owner (repositories owned by the current user)."),
     q: str | None = Field(None, description="A query string to filter and narrow down the list of returned forks using Bitbucket's filtering and sorting syntax."),
     sort: str | None = Field(None, description="The field name by which the returned fork results should be sorted, following Bitbucket's filtering and sorting syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all forks for a specified repository in a given workspace. Results can be filtered by the authenticated user's role, a query string, and sorted by a specified field."""
 
     # Construct request model with validation
@@ -4170,7 +4299,7 @@ async def fork_repository(
     repo_slug: str = Field(..., description="The slug or UUID of the repository to fork. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The slug or UUID of the workspace that owns the source repository. UUIDs must be surrounded by curly-braces."),
     body: _models.Repository | None = Field(None, description="Optional request body following the repository JSON schema to configure the fork. Must include a workspace slug to specify the fork destination, and a name to distinguish it from the parent. Overridable fields include name, description, fork_policy, language, mainbranch, is_private, has_issues, has_wiki, and project. Fields scm, parent, and full_name cannot be overridden."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new fork of the specified repository into a target workspace, optionally overriding properties such as name, description, visibility, and issue tracker settings. The fork inherits most parent properties by default, but scm, parent, and full_name cannot be changed."""
 
     # Construct request model with validation
@@ -4213,7 +4342,7 @@ async def fork_repository(
 async def list_repository_webhooks(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID enclosed in curly-braces, uniquely identifying the target repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug (ID) or the workspace UUID enclosed in curly-braces, identifying the workspace that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all webhooks installed on a specific repository. Useful for auditing or managing event-driven integrations configured for the repo."""
 
     # Construct request model with validation
@@ -4253,7 +4382,7 @@ async def get_repository_webhook(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID surrounded by curly-braces."),
     uid: str = Field(..., description="The unique identifier of the installed webhook to retrieve."),
     workspace: str = Field(..., description="The workspace slug (ID) or the workspace UUID surrounded by curly-braces that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific webhook installed on a repository, identified by its unique ID. Use this to inspect webhook configuration, events, and status for a given repository."""
 
     # Construct request model with validation
@@ -4293,7 +4422,7 @@ async def update_repository_webhook(
     repo_slug: str = Field(..., description="The repository identifier, either its slug (short name) or its UUID surrounded by curly-braces."),
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to update."),
     workspace: str = Field(..., description="The workspace identifier, either its slug or its UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing webhook subscription on a repository, allowing mutation of its description, URL, secret, active status, and events. The secret field controls HMAC signature generation for the X-Hub-Signature header; omit it to leave unchanged, or pass null to remove it."""
 
     # Construct request model with validation
@@ -4333,7 +4462,7 @@ async def delete_repository_webhook(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific webhook subscription from a repository, stopping all future event deliveries to the configured endpoint."""
 
     # Construct request model with validation
@@ -4373,7 +4502,7 @@ async def get_merge_base(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     revspec: str = Field(..., description="A range of exactly two commits specified using double-dot notation, identifying the two commits whose common ancestor should be found."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Finds the best common ancestor commit between two commits in a repository, useful for determining the divergence point of branches or commits. If multiple best common ancestors exist, one is returned arbitrarily."""
 
     # Construct request model with validation
@@ -4412,7 +4541,7 @@ async def get_merge_base(
 async def get_repository_override_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the inheritance state for a repository's settings, indicating which settings are overridden at the repository level versus inherited from the workspace."""
 
     # Construct request model with validation
@@ -4451,7 +4580,7 @@ async def get_repository_override_settings(
 async def set_repository_override_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configures the inheritance state for a repository's settings, determining which settings are overridden at the repository level versus inherited from the workspace."""
 
     # Construct request model with validation
@@ -4491,7 +4620,7 @@ async def get_repository_patch(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     spec: str = Field(..., description="A single commit SHA or a two-commit range using double-dot notation to generate a patch series. For a range, the first commit is the source and the second is the destination."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a raw patch for a single commit (diffed against its first parent) or a patch series for a two-commit range, including commit headers such as author and message. Unlike diffs, patches carry full commit metadata and are returned as plain text in the repository's native encoding."""
 
     # Construct request model with validation
@@ -4530,7 +4659,7 @@ async def get_repository_patch(
 async def list_repository_group_permissions(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of explicit group permissions configured for a specific repository. Only explicitly set group permissions are returned; inherited or default permissions are not included."""
 
     # Construct request model with validation
@@ -4570,7 +4699,7 @@ async def get_repository_group_permission(
     group_slug: str = Field(..., description="The slug identifier of the group whose repository permission is being retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that identifies the target repository."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID (surrounded by curly-braces) that contains the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the explicit permission level assigned to a specific group for a given repository. Requires admin permission on the repository; returns one of: admin, write, read, or none."""
 
     # Construct request model with validation
@@ -4609,7 +4738,7 @@ async def get_repository_group_permission(
 async def list_repository_user_permissions(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of explicit user-level permissions configured for a specific repository. Only directly assigned user permissions are returned; inherited or group-based permissions are not included."""
 
     # Construct request model with validation
@@ -4649,7 +4778,7 @@ async def get_user_repository_permission(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID format must be surrounded by curly-braces."),
     selected_user_id: str = Field(..., description="The unique identifier of the user whose permission is being retrieved. Accepts either an Atlassian Account ID or a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID that contains the repository. UUID format must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the explicit permission level assigned to a specific user for a given repository. Requires admin permission on the repository; returns one of: admin, write, read, or none."""
 
     # Construct request model with validation
@@ -4689,7 +4818,7 @@ async def delete_user_repository_permission(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     selected_user_id: str = Field(..., description="The account identifier for the user whose repository permission will be deleted, provided as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, provided as either the workspace slug or a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes an explicit user-level permission for a specific repository, removing any custom access grant assigned to that user. Requires admin permission on the repository and authentication via app passwords."""
 
     # Construct request model with validation
@@ -4741,7 +4870,7 @@ async def list_pipelines(
     sort: Literal["creator.uuid", "created_on", "run_creation_date"] | None = Field(None, description="The field by which to sort the returned pipelines. Must be one of creator.uuid, created_on, or run_creation_date."),
     page: str | None = Field(None, description="The page number to retrieve in the paginated result set, starting at 1."),
     pagelen: str | None = Field(None, description="The maximum number of pipeline results to return per page, between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of pipelines for a specific repository, with support for filtering by branch, commit, status, trigger type, and more, as well as sorting of results."""
 
     _page = _parse_int(page)
@@ -4787,7 +4916,7 @@ async def trigger_pipeline(
     workspace: str = Field(..., description="The workspace identifier — either the slug (short name) or the UUID surrounded by curly braces — that owns the repository."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or identifier within the workspace where the pipeline will be triggered."),
     body: _models.PostRepositoriesPipelinesBody | None = Field(None, description="The pipeline trigger payload defining the target and optional variables. The target type determines the trigger mode: use 'pipeline_ref_target' for branch or tag triggers, 'pipeline_commit_target' for a specific commit with a custom selector, or 'pipeline_pullrequest_target' for pull request pipelines. Optionally include a 'variables' array of key-value pairs (with optional 'secured' flag) to inject build-time variables into custom pipelines."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates and initiates a pipeline run for a repository, supporting multiple trigger modes including branch-based, commit-specific, custom selector, pull request, and variable-injected pipelines as defined in the repository's bitbucket-pipelines.yml file."""
 
     # Construct request model with validation
@@ -4830,7 +4959,7 @@ async def trigger_pipeline(
 async def list_pipeline_caches(
     workspace: str = Field(..., description="The slug or UUID of the workspace that owns the repository."),
     repo_slug: str = Field(..., description="The slug or UUID of the repository whose pipeline caches are being listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pipeline caches configured for a repository, providing visibility into cached dependencies and build artifacts used to speed up pipeline runs."""
 
     # Construct request model with validation
@@ -4870,7 +4999,7 @@ async def delete_pipeline_caches(
     workspace: str = Field(..., description="The workspace slug or UUID identifying the account that owns the repository."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository whose pipeline caches will be deleted."),
     name: str = Field(..., description="The name of the pipeline cache to delete; all versions matching this name will be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete all cached versions for a specific pipeline cache by name in a repository. This removes the named cache entries from the repository's pipelines configuration."""
 
     # Construct request model with validation
@@ -4913,7 +5042,7 @@ async def delete_pipeline_cache(
     workspace: str = Field(..., description="The workspace slug or UUID identifying the account that owns the repository."),
     repo_slug: str = Field(..., description="The repository slug identifying the repository whose pipeline cache will be deleted."),
     cache_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline cache to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific pipeline cache from a repository, freeing up cached resources associated with the given cache UUID."""
 
     # Construct request model with validation
@@ -4953,7 +5082,7 @@ async def get_pipeline_cache_content_uri(
     workspace: str = Field(..., description="The slug or UUID of the Bitbucket workspace that owns the repository."),
     repo_slug: str = Field(..., description="The slug or UUID of the repository containing the pipeline cache."),
     cache_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline cache whose content URI you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the download URI for the content of a specific pipeline cache in a repository. Use this URI to access or download the cached build artifacts."""
 
     # Construct request model with validation
@@ -4992,7 +5121,7 @@ async def get_pipeline_cache_content_uri(
 async def list_repository_runners(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all pipeline runners configured for a specific repository. Runners are used to execute Bitbucket Pipelines builds within the given workspace and repository."""
 
     # Construct request model with validation
@@ -5031,7 +5160,7 @@ async def list_repository_runners(
 async def create_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace where the runner will be created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new runner for a specific repository in Bitbucket Pipelines, enabling custom build infrastructure to be registered and used for pipeline executions within that repository."""
 
     # Construct request model with validation
@@ -5071,7 +5200,7 @@ async def get_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     runner_uuid: str = Field(..., description="The unique UUID of the runner to retrieve, used to identify a specific Pipelines runner within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details of a specific Pipelines runner configured for a repository, identified by its UUID."""
 
     # Construct request model with validation
@@ -5111,7 +5240,7 @@ async def update_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     runner_uuid: str = Field(..., description="The unique identifier (UUID) of the runner to update, surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the configuration of a specific runner associated with a repository. Identifies the target runner by its UUID within the given workspace and repository."""
 
     # Construct request model with validation
@@ -5151,7 +5280,7 @@ async def delete_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     runner_uuid: str = Field(..., description="The unique UUID of the runner to delete, used to precisely identify the target runner within the repository's Pipelines configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific runner from a repository's Pipelines configuration. The runner is identified by its UUID and will no longer be available for pipeline jobs in that repository."""
 
     # Construct request model with validation
@@ -5191,7 +5320,7 @@ async def get_pipeline(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     pipeline_uuid: str = Field(..., description="The unique UUID of the pipeline run to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific pipeline run within a repository, including its status, steps, and configuration."""
 
     # Construct request model with validation
@@ -5231,7 +5360,7 @@ async def list_pipeline_steps(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the pipeline."),
     pipeline_uuid: str = Field(..., description="The unique UUID of the pipeline whose steps are to be listed, formatted as a standard UUID string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all steps for a specified pipeline in a repository, providing visibility into each stage of the pipeline's execution."""
 
     # Construct request model with validation
@@ -5272,7 +5401,7 @@ async def get_pipeline_step(
     repo_slug: str = Field(..., description="The repository slug, which is the URL-friendly name of the repository within the specified workspace."),
     pipeline_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline whose step is being retrieved."),
     step_uuid: str = Field(..., description="The unique identifier (UUID) of the specific step within the pipeline to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific step within a pipeline, including its status, timing, and configuration. Useful for monitoring or inspecting individual steps of a CI/CD pipeline run."""
 
     # Construct request model with validation
@@ -5313,7 +5442,7 @@ async def get_pipeline_step_log(
     repo_slug: str = Field(..., description="The repository slug, which is the URL-friendly name of the repository within the workspace."),
     pipeline_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline whose step log is being retrieved."),
     step_uuid: str = Field(..., description="The unique identifier (UUID) of the specific pipeline step whose log file should be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the full log file for a specific step within a pipeline. Supports HTTP Range requests to efficiently stream or paginate potentially large log files."""
 
     # Construct request model with validation
@@ -5355,7 +5484,7 @@ async def get_pipeline_step_log_container(
     pipeline_uuid: str = Field(..., description="The UUID of the pipeline whose step logs are being retrieved."),
     step_uuid: str = Field(..., description="The UUID of the step within the pipeline whose container logs are being retrieved."),
     log_uuid: str = Field(..., description="The UUID identifying which container log to retrieve — use the step UUID for the main build container, or the service container UUID for a service container."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the log file for a build container or service container within a specific pipeline step. Supports HTTP Range requests to efficiently handle large log files."""
 
     # Construct request model with validation
@@ -5396,7 +5525,7 @@ async def get_pipeline_step_test_report(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     pipeline_uuid: str = Field(..., description="The UUID of the pipeline whose step test reports are being retrieved."),
     step_uuid: str = Field(..., description="The UUID of the specific pipeline step for which test reports are being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a summary of test reports for a specific step within a pipeline, providing an overview of test results such as pass/fail counts and coverage metrics."""
 
     # Construct request model with validation
@@ -5437,7 +5566,7 @@ async def list_pipeline_step_test_cases(
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     pipeline_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline whose step test cases are being retrieved."),
     step_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline step whose test cases are being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all test cases from the test report for a specific step within a pipeline. Useful for inspecting individual test outcomes after a CI pipeline run."""
 
     # Construct request model with validation
@@ -5479,7 +5608,7 @@ async def list_test_case_reasons(
     pipeline_uuid: str = Field(..., description="The UUID of the pipeline containing the step and test case."),
     step_uuid: str = Field(..., description="The UUID of the pipeline step that contains the test case."),
     test_case_uuid: str = Field(..., description="The UUID of the specific test case whose reasons are being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the reasons (output details) for a specific test case within a pipeline step, providing diagnostic information such as failure messages or stack traces."""
 
     # Construct request model with validation
@@ -5519,7 +5648,7 @@ async def stop_pipeline(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug (short name) or the workspace UUID enclosed in curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the pipeline to stop."),
     pipeline_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline to stop, enclosed in curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stops a running pipeline and all of its in-progress steps that have not yet completed. Use this to immediately halt pipeline execution within a specific repository."""
 
     # Construct request model with validation
@@ -5558,7 +5687,7 @@ async def stop_pipeline(
 async def get_pipelines_config(
     workspace: str = Field(..., description="The slug or UUID of the workspace that owns the repository."),
     repo_slug: str = Field(..., description="The slug or UUID of the repository whose Pipelines configuration is being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Pipelines configuration for a specific repository, including settings that control how pipelines are enabled and executed."""
 
     # Construct request model with validation
@@ -5598,7 +5727,7 @@ async def set_pipeline_next_build_number(
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug identifying which repository's pipeline build number sequence to update."),
     body: _models.PutRepositoriesPipelinesConfigBuildNumberBody | None = Field(None, description="Request body containing the next build number to assign. Must be strictly higher than the current latest build number for this repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the next build number to be assigned to a pipeline in the specified repository. The configured value must be strictly greater than the current latest build number."""
 
     # Construct request model with validation
@@ -5641,7 +5770,7 @@ async def set_pipeline_next_build_number(
 async def list_pipeline_schedules(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all configured pipeline schedules for a given repository. Returns the list of schedules that define when pipelines are automatically triggered."""
 
     # Construct request model with validation
@@ -5681,7 +5810,7 @@ async def create_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace for which the pipeline schedule will be created."),
     body: _models.PostRepositoriesPipelinesConfigSchedulesBody | None = Field(None, description="The schedule configuration payload defining the timing, target branch, and other schedule properties for the pipeline."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new pipeline schedule for the specified repository, allowing automated pipeline runs at defined intervals or times."""
 
     # Construct request model with validation
@@ -5725,7 +5854,7 @@ async def get_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     schedule_uuid: str = Field(..., description="The UUID that uniquely identifies the pipeline schedule to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific pipeline schedule by its UUID for a given repository. Returns the full schedule configuration including timing and status details."""
 
     # Construct request model with validation
@@ -5766,7 +5895,7 @@ async def update_pipeline_schedule(
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     schedule_uuid: str = Field(..., description="The unique identifier (UUID) of the pipeline schedule to update."),
     body: _models.PutRepositoriesPipelinesConfigSchedulesBody | None = Field(None, description="The updated schedule configuration payload containing the fields to modify on the existing schedule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing pipeline schedule for a repository. Use this to modify the timing or configuration of a scheduled pipeline run."""
 
     # Construct request model with validation
@@ -5810,7 +5939,7 @@ async def delete_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     schedule_uuid: str = Field(..., description="The unique UUID of the pipeline schedule to delete, used to identify the specific schedule within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific pipeline schedule from a repository. This removes the scheduled trigger and prevents any future automated pipeline runs associated with it."""
 
     # Construct request model with validation
@@ -5850,7 +5979,7 @@ async def list_schedule_executions(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     schedule_uuid: str = Field(..., description="The UUID of the pipeline schedule whose executions should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the execution history for a specific pipeline schedule in a repository. Returns a list of past executions triggered by the given schedule."""
 
     # Construct request model with validation
@@ -5889,7 +6018,7 @@ async def list_schedule_executions(
 async def get_repository_ssh_key_pair(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the SSH key pair configured for a repository's pipeline, returning only the public key. The private key is write-only and is never exposed through the API or logs."""
 
     # Construct request model with validation
@@ -5929,7 +6058,7 @@ async def set_repository_ssh_key_pair(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     body: _models.PutRepositoriesPipelinesConfigSshKeyPairBody | None = Field(None, description="The SSH key pair payload containing the public and private key to set for the repository's pipeline configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates the SSH key pair for a repository's pipeline configuration. The private key will be set as the default SSH identity in the build container."""
 
     # Construct request model with validation
@@ -5972,7 +6101,7 @@ async def set_repository_ssh_key_pair(
 async def delete_repository_ssh_key_pair(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes the SSH key pair configured for a repository's pipelines. This removes both the public and private keys associated with the repository's pipeline SSH configuration."""
 
     # Construct request model with validation
@@ -6011,7 +6140,7 @@ async def delete_repository_ssh_key_pair(
 async def list_pipeline_ssh_known_hosts(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all SSH known hosts configured at the repository level for Pipelines. Known hosts are used to verify remote server identities during pipeline SSH connections."""
 
     # Construct request model with validation
@@ -6051,7 +6180,7 @@ async def create_ssh_known_host(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     body: _models.PostRepositoriesPipelinesConfigSshKnownHostsBody | None = Field(None, description="The known host object to create, containing the hostname and its associated public key details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a known SSH host to a repository's Pipelines configuration, enabling trusted host verification during pipeline execution."""
 
     # Construct request model with validation
@@ -6095,7 +6224,7 @@ async def get_pipeline_ssh_known_host(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID enclosed in curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     known_host_uuid: str = Field(..., description="The UUID of the SSH known host entry to retrieve, uniquely identifying it within the repository's Pipelines SSH configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific SSH known host entry configured at the repository level for Pipelines, identified by its UUID."""
 
     # Construct request model with validation
@@ -6136,7 +6265,7 @@ async def update_pipeline_known_host(
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     known_host_uuid: str = Field(..., description="The unique UUID of the SSH known host entry to update, used to identify the specific record within the repository's pipeline configuration."),
     body: _models.PutRepositoriesPipelinesConfigSshKnownHostsBody | None = Field(None, description="The request body containing the updated SSH known host details, such as the hostname and public key fingerprint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing SSH known host entry in a repository's pipeline configuration, allowing you to modify the host details for secure pipeline connections."""
 
     # Construct request model with validation
@@ -6180,7 +6309,7 @@ async def delete_known_host(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     known_host_uuid: str = Field(..., description="The unique UUID of the known host entry to delete, used to identify the specific record within the repository's Pipelines SSH configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific SSH known host entry from a repository's Pipelines configuration. This removes the trusted host record identified by its UUID, preventing Pipelines from automatically trusting that host during SSH operations."""
 
     # Construct request model with validation
@@ -6219,7 +6348,7 @@ async def delete_known_host(
 async def list_repository_pipeline_variables(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pipeline variables configured at the repository level for a given workspace and repository. Useful for inspecting environment variables available to pipelines without exposing secured values."""
 
     # Construct request model with validation
@@ -6259,7 +6388,7 @@ async def create_repository_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     body: _models.PostRepositoriesPipelinesConfigVariablesBody | None = Field(None, description="The pipeline variable object to create, including its key, value, and whether it should be secured (masked in logs)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new pipeline environment variable at the repository level, making it available to all pipelines within the specified repository."""
 
     # Construct request model with validation
@@ -6303,7 +6432,7 @@ async def get_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
     variable_uuid: str = Field(..., description="The UUID of the pipeline configuration variable to retrieve, uniquely identifying it within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific pipeline configuration variable for a repository by its UUID. Use this to inspect the details of a single repository-level pipeline variable."""
 
     # Construct request model with validation
@@ -6344,7 +6473,7 @@ async def update_repository_pipeline_variable(
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
     variable_uuid: str = Field(..., description="The unique UUID of the pipeline variable to update, used to identify the exact variable to modify."),
     body: _models.PutRepositoriesPipelinesConfigVariablesBody | None = Field(None, description="The updated variable object containing the new values or configuration to apply to the repository pipeline variable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing pipeline variable at the repository level, allowing modification of its value or configuration. Targets a specific variable by its UUID within the given workspace and repository."""
 
     # Construct request model with validation
@@ -6388,7 +6517,7 @@ async def delete_repository_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the pipeline variable to delete."),
     variable_uuid: str = Field(..., description="The UUID of the pipeline variable to delete, uniquely identifying the variable within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific pipeline variable from a repository. This removes the variable and its value from the repository's pipeline configuration."""
 
     # Construct request model with validation
@@ -6429,7 +6558,7 @@ async def get_repository_property(
     repo_slug: str = Field(..., description="The slug of the repository from which the property value will be retrieved."),
     app_key: str = Field(..., description="The unique key identifying the Connect app that owns the property."),
     property_name: str = Field(..., description="The name of the application property to retrieve from the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific application property value stored against a repository for a given Connect app. Useful for reading custom metadata or configuration values associated with a repository."""
 
     # Construct request model with validation
@@ -6470,7 +6599,7 @@ async def update_repository_property(
     repo_slug: str = Field(..., description="The slug identifier of the repository within the specified workspace."),
     app_key: str = Field(..., description="The unique key identifying the Connect app that owns this property."),
     property_name: str = Field(..., description="The name of the application property to update, scoped to the specified Connect app."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the value of a named application property stored against a specific repository. Properties are scoped to a Connect app and allow apps to persist custom metadata on repositories."""
 
     # Construct request model with validation
@@ -6511,7 +6640,7 @@ async def delete_repository_property(
     repo_slug: str = Field(..., description="The slug identifier of the repository from which the property will be deleted."),
     app_key: str = Field(..., description="The unique key identifying the Connect app that owns the property to be deleted."),
     property_name: str = Field(..., description="The name of the application property to delete from the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific application property value stored against a repository. Removes the property identified by the app key and property name from the target repository."""
 
     # Construct request model with validation
@@ -6551,7 +6680,7 @@ async def list_pull_requests(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
     state: Literal["OPEN", "MERGED", "DECLINED", "SUPERSEDED"] | None = Field(None, description="Filters results to pull requests in the specified state. Repeat this parameter multiple times to include pull requests from more than one state simultaneously."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pull requests for a specified repository, defaulting to open pull requests. Supports filtering by one or more states, as well as additional filtering and sorting options."""
 
     # Construct request model with validation
@@ -6594,7 +6723,7 @@ async def create_pull_request(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the target repository where the pull request will be created."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that owns the repository."),
     body: _models.Pullrequest | None = Field(None, description="The pull request payload including required fields such as title and source branch, plus optional fields like destination branch, reviewers list (array of user UUID objects), description, close_source_branch flag, and draft flag."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new pull request in the specified repository, authored by the authenticated user, merging a source branch into a destination branch (defaults to the repository's main branch if not specified)."""
 
     # Construct request model with validation
@@ -6637,7 +6766,7 @@ async def create_pull_request(
 async def list_pull_request_activity(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated activity log for all pull requests in a repository, including comments, updates (state changes), approvals, and request changes. Inline comments on files or code lines include an additional inline property with location details."""
 
     # Construct request model with validation
@@ -6677,7 +6806,7 @@ async def get_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace; UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific pull request within a repository, including its status, reviewers, and associated commits."""
 
     # Construct request model with validation
@@ -6718,7 +6847,7 @@ async def update_pull_request(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that contains the pull request."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that owns the repository."),
     body: _models.Pullrequest | None = Field(None, description="The request body containing the pull request fields to update, such as title, description, source branch, or destination branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an open pull request's metadata, such as its title, description, or source and destination branches. Only pull requests in an open state can be modified."""
 
     # Construct request model with validation
@@ -6762,7 +6891,7 @@ async def list_pull_request_activity_by_id(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request whose activity log should be retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated activity log for a specific pull request, including reviewer comments, updates, approvals, and change requests. Inline comments on files or code lines include an additional inline property with location details."""
 
     # Construct request model with validation
@@ -6802,7 +6931,7 @@ async def approve_pull_request(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request to approve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approves the specified pull request on behalf of the authenticated user. This records the user's approval and contributes to any required approval count for merging."""
 
     # Construct request model with validation
@@ -6842,7 +6971,7 @@ async def unapprove_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request to unapprove."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the authenticated user's approval from the specified pull request. Use this to retract a previously submitted approval on a pull request in the given repository."""
 
     # Construct request model with validation
@@ -6882,7 +7011,7 @@ async def list_pull_request_comments(
     pull_request_id: int = Field(..., description="The unique numeric ID of the pull request whose comments should be retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all comments on a pull request, including global comments, inline comments, and replies. Results are sorted oldest to newest by default and support filtering and sorting via query parameters."""
 
     # Construct request model with validation
@@ -6923,7 +7052,7 @@ async def create_pull_request_comment(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
     body: _models.PullrequestComment | None = Field(None, description="The request body containing the comment content and any optional metadata such as inline positioning or parent comment reference."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new comment on a specified pull request in a Bitbucket repository. Returns the newly created comment object upon success."""
 
     # Construct request model with validation
@@ -6968,7 +7097,7 @@ async def get_pull_request_comment(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug (URL-friendly name) or the workspace UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific comment from a pull request by its comment ID. Returns the full comment details including content, author, and timestamps."""
 
     _comment_id = _parse_int(comment_id)
@@ -7012,7 +7141,7 @@ async def update_pull_request_comment(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
     body: _models.PullrequestComment | None = Field(None, description="The request body containing the updated comment content to replace the existing comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the content of an existing comment on a specific pull request. Only the comment body can be modified through this operation."""
 
     _comment_id = _parse_int(comment_id)
@@ -7059,7 +7188,7 @@ async def delete_pull_request_comment(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug (URL-friendly name) or the workspace UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific comment from a pull request. This action is irreversible and removes the comment from the pull request discussion thread."""
 
     _comment_id = _parse_int(comment_id)
@@ -7102,7 +7231,7 @@ async def resolve_pull_request_comment(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment thread."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that uniquely identifies the repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that uniquely identifies the workspace containing the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Marks a pull request comment thread as resolved, collapsing the discussion and indicating the concern has been addressed."""
 
     _comment_id = _parse_int(comment_id)
@@ -7145,7 +7274,7 @@ async def reopen_pull_request_comment_thread(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment thread."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reopens a previously resolved comment thread on a pull request by removing its resolved status. This allows further discussion to continue on the specified comment."""
 
     _comment_id = _parse_int(comment_id)
@@ -7187,7 +7316,7 @@ async def list_pull_request_commits(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose commits are being retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository; UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of commits associated with a specific pull request. These are the commits that will be merged into the destination branch upon pull request acceptance."""
 
     # Construct request model with validation
@@ -7227,7 +7356,7 @@ async def decline_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric ID of the pull request to decline."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Declines an open pull request in the specified repository, rejecting the proposed changes. Use this to formally close a pull request without merging."""
 
     # Construct request model with validation
@@ -7267,7 +7396,7 @@ async def get_pull_request_diff(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose diff you want to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository containing the pull request. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the file diff for a specific pull request, showing all line-level changes between the source and destination branches. Redirects to the repository diff endpoint using the revspec corresponding to the pull request."""
 
     # Construct request model with validation
@@ -7307,7 +7436,7 @@ async def get_pull_request_diffstat(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose diff stat you want to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the diff stat for a specific pull request, showing a summary of file changes (additions, deletions, modifications) by redirecting to the repository diffstat endpoint using the pull request's revision spec."""
 
     # Construct request model with validation
@@ -7351,7 +7480,7 @@ async def merge_pull_request(
     message: str | None = Field(None, description="Custom commit message to use on the resulting merge commit; limited to 128 KiB in size."),
     close_source_branch: bool | None = Field(None, description="Whether to delete the source branch after a successful merge; falls back to the value set when the pull request was created if not provided, which defaults to false."),
     merge_strategy: Literal["merge_commit", "squash", "fast_forward", "squash_fast_forward", "rebase_fast_forward", "rebase_merge"] | None = Field(None, description="The strategy used to merge the pull request into the target branch; controls how commits are combined or rewritten."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merges a pull request in the specified repository, combining the source branch into the target branch using the chosen merge strategy. Supports synchronous and asynchronous execution modes."""
 
     # Construct request model with validation
@@ -7398,7 +7527,7 @@ async def get_pull_request_merge_task_status(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the repository containing the pull request."),
     task_id: str = Field(..., description="The task ID returned by the merge endpoint when the merge operation was accepted asynchronously with a 202 response."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) identifying the workspace that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks the status of an asynchronous pull request merge task using a task ID returned from a long-running merge operation. Returns PENDING while in progress, SUCCESS with the merged pull request object on completion, or an error if the merge failed."""
 
     # Construct request model with validation
@@ -7438,7 +7567,7 @@ async def get_pull_request_patch(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request within the repository."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace; UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the patch file for a specific pull request, redirecting to the repository patch endpoint using the pull request's revision specification."""
 
     # Construct request model with validation
@@ -7478,7 +7607,7 @@ async def request_pull_request_changes(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request on which changes are being requested."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository containing the pull request. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Request changes on a pull request in a Bitbucket repository, indicating that the pull request requires modifications before it can be approved or merged."""
 
     # Construct request model with validation
@@ -7518,7 +7647,7 @@ async def remove_pull_request_change_request(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request from which the change request will be removed."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the repository containing the pull request."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) identifying the workspace that owns the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the authenticated user's change request from a pull request, withdrawing their objection and allowing the PR to proceed toward merge."""
 
     # Construct request model with validation
@@ -7560,7 +7689,7 @@ async def list_pull_request_statuses(
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUID values must be surrounded by curly-braces."),
     q: str | None = Field(None, description="A query string to filter the returned statuses using Bitbucket's filtering and sorting syntax, allowing you to narrow down results by specific fields or conditions."),
     sort: str | None = Field(None, description="The field name by which to sort the returned statuses using Bitbucket's filtering and sorting syntax. Defaults to created_on if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all commit statuses (such as CI/CD build results) associated with a specific pull request in a Bitbucket repository. Supports filtering and sorting to narrow down results."""
 
     # Construct request model with validation
@@ -7606,7 +7735,7 @@ async def list_pull_request_tasks(
     q: str | None = Field(None, description="A query string to filter the returned tasks using Bitbucket's filtering and sorting syntax."),
     sort: str | None = Field(None, description="The field by which results should be sorted using Bitbucket's filtering and sorting syntax. Defaults to created_on if not specified."),
     pagelen: int | None = Field(None, description="The number of task objects to include per page of results. Accepts values between 1 and 100; defaults to 10."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of tasks associated with a specific pull request in a repository. Supports filtering and sorting results by the 'task' field."""
 
     # Construct request model with validation
@@ -7652,7 +7781,7 @@ async def create_pull_request_task(
     raw: str = Field(..., description="The text content of the task to be created on the pull request."),
     comment: _models.PostRepositoriesPullrequestsTasksBodyComment | None = Field(None, description="An optional reference to a pull request comment by its ID; when provided, the task will be displayed beneath that comment in the pull request view."),
     pending: bool | None = Field(None, description="Indicates whether the task should be created in a pending (incomplete) state; when omitted, the default state is applied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new task on a specified pull request in a Bitbucket repository. Tasks can optionally be linked to a specific comment, causing them to appear beneath that comment in the pull request view."""
 
     # Construct request model with validation
@@ -7697,7 +7826,7 @@ async def get_pull_request_task(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     task_id: str = Field(..., description="The unique numeric ID of the task to retrieve."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific task associated with a pull request in the given repository. Returns full task details for the specified task ID."""
 
     _task_id = _parse_int(task_id)
@@ -7742,7 +7871,7 @@ async def update_pull_request_task(
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) identifying the workspace that owns the repository."),
     raw: str = Field(..., description="The updated text content of the task."),
     state: Literal["RESOLVED", "UNRESOLVED"] | None = Field(None, description="The resolution state of the task, indicating whether it is open or completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing task on a specific pull request, allowing changes to the task content and resolution state."""
 
     _task_id = _parse_int(task_id)
@@ -7789,7 +7918,7 @@ async def delete_pull_request_task(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     task_id: str = Field(..., description="The unique numeric ID of the task to delete."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific task from a pull request. This action cannot be undone and removes the task from the pull request's task list."""
 
     _task_id = _parse_int(task_id)
@@ -7833,7 +7962,7 @@ async def get_pull_request_property(
     pullrequest_id: str = Field(..., description="The unique numeric identifier of the pull request within the repository."),
     app_key: str = Field(..., description="The key identifying the Connect app that owns the property, used to namespace properties and avoid conflicts between apps."),
     property_name: str = Field(..., description="The name of the application property to retrieve, scoped under the specified Connect app key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific application property value stored against a pull request in a Bitbucket repository. Useful for reading custom metadata attached to a pull request by a Connect app."""
 
     # Construct request model with validation
@@ -7875,7 +8004,7 @@ async def update_pull_request_property(
     pullrequest_id: str = Field(..., description="The unique numeric identifier of the pull request whose property is being updated."),
     app_key: str = Field(..., description="The key identifying the Connect app that owns this property, used to namespace properties and prevent collisions between apps."),
     property_name: str = Field(..., description="The name of the application property to update, scoped under the specified app key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the value of a named application property stored against a specific pull request. Application properties allow Connect apps to attach custom metadata to Bitbucket resources."""
 
     # Construct request model with validation
@@ -7917,7 +8046,7 @@ async def delete_pull_request_property(
     pullrequest_id: str = Field(..., description="The unique numeric identifier of the pull request whose property should be deleted."),
     app_key: str = Field(..., description="The key identifying the Connect app that owns the property being deleted."),
     property_name: str = Field(..., description="The name of the application property to delete from the pull request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific application property value stored against a pull request. Use this to remove custom metadata associated with a pull request by a Connect app."""
 
     # Construct request model with validation
@@ -7958,7 +8087,7 @@ async def list_repository_refs(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID enclosed in curly braces."),
     q: str | None = Field(None, description="A query string to filter the returned refs using Bitbucket's filtering and sorting syntax, allowing you to narrow results by properties such as name or type."),
     sort: str | None = Field(None, description="The field by which to sort results using Bitbucket's filtering and sorting syntax; specifying 'name' applies natural sort order so numerical segments are ordered numerically rather than lexicographically."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all branches and tags (refs) for a given repository in a Bitbucket workspace. Results default to lexical ordering but can be sorted naturally by name using the sort parameter."""
 
     # Construct request model with validation
@@ -8002,7 +8131,7 @@ async def list_branches(
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
     q: str | None = Field(None, description="A filter expression to narrow down the list of branches returned, following Bitbucket's filtering and sorting syntax."),
     sort: str | None = Field(None, description="The field by which to sort the returned branches, following Bitbucket's filtering and sorting syntax. Sorting by name applies natural ordering so numerical segments are interpreted as numbers rather than strings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all open branches for the specified repository, returned in the order the source control manager provides them. Supports filtering and natural sorting by branch name via query parameters."""
 
     # Construct request model with validation
@@ -8044,7 +8173,7 @@ async def list_branches(
 async def create_branch(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (workspace ID) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new branch in the specified repository by providing a branch name and a target commit hash. Requires authentication with appropriate repository access."""
 
     # Construct request model with validation
@@ -8084,7 +8213,7 @@ async def get_branch(
     name: str = Field(..., description="The name of the branch to retrieve. For Git repositories, omit any prefix such as 'refs/heads' and provide only the bare branch name."),
     repo_slug: str = Field(..., description="The repository identifier, either as a human-readable slug or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a human-readable slug or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific branch within a repository by its name. Authentication is required, and private repositories require appropriate account authorization."""
 
     # Construct request model with validation
@@ -8124,7 +8253,7 @@ async def delete_branch(
     name: str = Field(..., description="The name of the branch to delete, provided without any prefix such as refs/heads."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace; UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a branch from the specified repository. The main branch cannot be deleted; branch names should be provided without any prefix such as refs/heads."""
 
     # Construct request model with validation
@@ -8165,7 +8294,7 @@ async def list_repository_tags(
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
     q: str | None = Field(None, description="A query string to filter the returned tags using Bitbucket's filtering and sorting syntax."),
     sort: str | None = Field(None, description="The field by which to sort results using Bitbucket's filtering and sorting syntax. Sorting by the name field applies natural ordering, treating numeric segments as numbers rather than strings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tags for a given repository in a workspace. Supports filtering and sorting, including natural sort order for version-style tag names when sorting by name."""
 
     # Construct request model with validation
@@ -8208,7 +8337,7 @@ async def create_tag(
     repo_slug: str = Field(..., description="The repository identifier, either the repository slug or the repository UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID surrounded by curly-braces."),
     body: _models.Tag | None = Field(None, description="JSON document containing the tag name, the target commit hash, and an optional annotation message. A full commit hash is preferred over a short prefix to avoid ambiguity."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new annotated tag in the specified repository, associating it with a target commit hash. An optional message may be provided; if omitted, a default message is generated automatically."""
 
     # Construct request model with validation
@@ -8252,7 +8381,7 @@ async def get_repository_tag(
     name: str = Field(..., description="The name of the tag to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that uniquely identifies the repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that uniquely identifies the workspace containing the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific tag in a repository, including the tag's target commit, tagger information, date, and associated links."""
 
     # Construct request model with validation
@@ -8292,7 +8421,7 @@ async def delete_tag(
     name: str = Field(..., description="The name of the tag to delete, without any ref prefixes."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a tag from the specified repository. Provide only the tag name without any ref prefixes such as refs/tags."""
 
     # Construct request model with validation
@@ -8331,7 +8460,7 @@ async def delete_tag(
 async def get_repository_root_src(
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the root directory listing of a repository's main branch, automatically resolving the branch name and latest commit. This is a convenience redirect equivalent to browsing the root path of the main branch directly."""
 
     # Construct request model with validation
@@ -8374,7 +8503,7 @@ async def create_commit_with_files(
     author: str | None = Field(None, description="The author identity for the new commit in 'Full Name <email>' format. When omitted, the authenticated user's display name and primary email are used; anonymous commits are not permitted."),
     files: str | None = Field(None, description="One or more repository-relative file paths that this request is manipulating. Listing a path here without a corresponding file field body causes that file to be deleted; paths not referenced in this field or as file fields are carried over unchanged from the parent commit."),
     branch: str | None = Field(None, description="The name of the branch on which to create the new commit. If omitted, the commit is placed on the repository's main branch. Providing a new branch name creates that branch; providing an existing branch name advances it, with optional parent SHA1 validation to guard against concurrent changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new commit in a repository by uploading, modifying, or deleting files via multipart/form-data or URL-encoded form data. Supports setting commit message, author, target branch, and file attributes such as executable or symlink."""
 
     # Construct request model with validation
@@ -8422,7 +8551,7 @@ async def get_repository_src(
     q: str | None = Field(None, description="A filter expression to narrow directory listing results using Bitbucket's filtering syntax, such as filtering by file size or attributes."),
     sort: str | None = Field(None, description="A sort expression to order directory listing results using Bitbucket's sorting syntax, such as sorting by size ascending or descending."),
     max_depth: int | None = Field(None, description="Maximum directory depth to recurse into when listing directory contents. Performs a breadth-first traversal; very large values may cause the request to time out with a 555 error. Defaults to 1 (non-recursive, direct children only)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the raw contents of a file or a paginated directory listing at a specific commit in a Bitbucket repository. Supports metadata retrieval, rendered markup output, recursive directory traversal, and filtering/sorting for directory listings."""
 
     # Construct request model with validation
@@ -8464,7 +8593,7 @@ async def get_repository_src(
 async def list_repository_watchers(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all users watching the specified repository. Useful for understanding a repository's audience and engagement."""
 
     # Construct request model with validation
@@ -8500,7 +8629,7 @@ async def list_repository_watchers(
 
 # Tags: Snippets
 @mcp.tool()
-async def create_snippet() -> dict[str, Any]:
+async def create_snippet() -> dict[str, Any] | ToolResult:
     """Creates a new snippet under the authenticated user's account, supporting multiple text and binary files via multipart/form-data or multipart/related requests. Snippets can be public or private and optionally organized under a specific workspace."""
 
     # Extract parameters for API call
@@ -8530,7 +8659,7 @@ async def create_snippet() -> dict[str, Any]:
 async def list_workspace_snippets(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     role: Literal["owner", "contributor", "member"] | None = Field(None, description="Filters results to snippets where the authenticated user holds the specified role: owner (created the snippet), contributor (has edit access), or member (has view access)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all snippets owned by a specific workspace, optionally filtered by the authenticated user's role within that workspace."""
 
     # Construct request model with validation
@@ -8569,7 +8698,7 @@ async def list_workspace_snippets(
 
 # Tags: Snippets
 @mcp.tool()
-async def create_workspace_snippet(workspace: str = Field(..., description="The workspace in which to create the snippet, identified by either its slug (human-readable ID) or its UUID surrounded by curly-braces.")) -> dict[str, Any]:
+async def create_workspace_snippet(workspace: str = Field(..., description="The workspace in which to create the snippet, identified by either its slug (human-readable ID) or its UUID surrounded by curly-braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new snippet scoped to the specified workspace. Behaves identically to the global snippet creation endpoint, but associates the snippet with the given workspace."""
 
     # Construct request model with validation
@@ -8608,7 +8737,7 @@ async def create_workspace_snippet(workspace: str = Field(..., description="The 
 async def get_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. a short name) or as a UUID surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single snippet by its ID within a workspace. Supports multiple response content types: application/json (default, metadata and file links only), multipart/related (full snippet including file contents in one response), and multipart/form-data (flat structure with file contents)."""
 
     # Construct request model with validation
@@ -8647,7 +8776,7 @@ async def get_snippet(
 async def update_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to update."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. a short name) or as a UUID surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing snippet in the specified workspace, allowing changes to its title and files via differential payloads. Supports adding, updating, or deleting files atomically using JSON, multipart/related, or multipart/form-data content types."""
 
     # Construct request model with validation
@@ -8686,7 +8815,7 @@ async def update_snippet(
 async def delete_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. my-team) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific snippet from the given workspace. Returns an empty response upon successful deletion."""
 
     # Construct request model with validation
@@ -8725,7 +8854,7 @@ async def delete_snippet(
 async def list_snippet_comments(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose comments are being retrieved."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all comments on a specific snippet within a workspace. Results are sorted oldest to newest by default and can be overridden with the sort query parameter."""
 
     # Construct request model with validation
@@ -8765,7 +8894,7 @@ async def create_snippet_comment(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to comment on."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. my-team) or as a UUID surrounded by curly-braces."),
     body: _models.SnippetComment | None = Field(None, description="The comment payload. Must include the required field `content.raw` containing the comment text. Optionally include `parent.id` to post a threaded reply to an existing comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new comment on a specific snippet in a workspace. Supports threaded replies by including a parent comment ID in the request body."""
 
     # Construct request model with validation
@@ -8809,7 +8938,7 @@ async def get_snippet_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to retrieve."),
     encoded_id: str = Field(..., description="The unique identifier of the snippet, as assigned by Bitbucket."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific comment on a snippet within a workspace. Returns the full comment details for the given comment ID."""
 
     _comment_id = _parse_int(comment_id)
@@ -8852,7 +8981,7 @@ async def update_snippet_comment(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to which the comment belongs."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. a short name) or as a UUID surrounded by curly-braces."),
     body: _models.SnippetComment | None = Field(None, description="The request body containing the updated comment data. Must include `content.raw` with the new comment text in raw markup format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing comment on a snippet. Only the comment's author can make updates, and the request body must include the `content.raw` field."""
 
     _comment_id = _parse_int(comment_id)
@@ -8898,7 +9027,7 @@ async def delete_snippet_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to delete."),
     encoded_id: str = Field(..., description="The unique identifier of the snippet, as assigned by Bitbucket."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific comment from a snippet. This action is restricted to the comment author, snippet creator, or a workspace admin."""
 
     _comment_id = _parse_int(comment_id)
@@ -8939,7 +9068,7 @@ async def delete_snippet_comment(
 async def list_snippet_commits(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose commit history is being retrieved."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the commit history for a specific snippet, returning all changes made over time. Useful for auditing edits or tracking the evolution of a snippet's content."""
 
     # Construct request model with validation
@@ -8979,7 +9108,7 @@ async def get_snippet_commit_changes(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose commit changes you want to retrieve."),
     revision: str = Field(..., description="The SHA1 hash of the commit whose changes you want to inspect."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the changes made to a specific snippet in a given commit. Use this to inspect what was modified in a snippet at a particular point in its history."""
 
     # Construct request model with validation
@@ -9019,7 +9148,7 @@ async def get_snippet_file_content(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve the file from."),
     path: str = Field(..., description="The relative path to the target file within the snippet."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the raw content of a specific file within a snippet at its HEAD revision, bypassing the need to first fetch the snippet and extract versioned file links."""
 
     # Construct request model with validation
@@ -9058,7 +9187,7 @@ async def get_snippet_file_content(
 async def check_snippet_watch_status(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to check watch status for."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether the currently authenticated user is watching a specific snippet. Returns 204 if watching, 404 if not watching or if the request is made anonymously."""
 
     # Construct request model with validation
@@ -9097,7 +9226,7 @@ async def check_snippet_watch_status(
 async def watch_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to watch."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribes the authenticated user to watch a specific snippet, enabling notifications for changes. Returns 204 No Content on success."""
 
     # Construct request model with validation
@@ -9136,7 +9265,7 @@ async def watch_snippet(
 async def unwatch_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to stop watching."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stops watching a specific snippet so the authenticated user no longer receives updates for it. Returns 204 No Content on success."""
 
     # Construct request model with validation
@@ -9176,7 +9305,7 @@ async def get_snippet_revision(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve."),
     node_id: str = Field(..., description="The commit revision SHA1 hash identifying the specific historical version of the snippet to retrieve."),
     workspace: str = Field(..., description="The workspace containing the snippet, specified as either the workspace slug or the workspace UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the file contents of a snippet at a specific historical revision identified by a commit SHA1. Unlike the standard snippet endpoint, this returns the snapshot of file contents at the given revision rather than the current version."""
 
     # Construct request model with validation
@@ -9216,7 +9345,7 @@ async def update_snippet_at_revision(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to update."),
     node_id: str = Field(..., description="The SHA1 commit revision that must match the snippet's current HEAD; the update is rejected if this is not the most recent revision."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a snippet only if the specified commit revision matches the current HEAD, acting as a Compare-And-Swap (CAS) operation to prevent overwriting concurrent modifications. Fails with a 405 if the provided revision is not the latest."""
 
     # Construct request model with validation
@@ -9256,7 +9385,7 @@ async def delete_snippet_revision(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to delete."),
     node_id: str = Field(..., description="The SHA1 commit hash identifying the specific revision of the snippet; must point to the latest commit or the request will fail."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a snippet at a specific versioned commit, but only if that commit is the latest revision. To delete a snippet unconditionally, use the base snippet delete endpoint instead."""
 
     # Construct request model with validation
@@ -9297,7 +9426,7 @@ async def get_snippet_file_contents(
     node_id: str = Field(..., description="The commit revision SHA1 hash identifying the specific version of the snippet to retrieve the file from."),
     path: str = Field(..., description="The path to the target file within the snippet, relative to the snippet's root."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the raw contents of a specific file within a snippet at a given commit revision. The response includes appropriate Content-Type and Content-Disposition headers based on the file's name and type."""
 
     # Construct request model with validation
@@ -9338,7 +9467,7 @@ async def get_snippet_diff(
     revision: str = Field(..., description="A revspec expression identifying the commit or range to diff, such as a commit SHA1, a branch/tag ref name, or a two-dot compare expression to diff between two refs."),
     workspace: str = Field(..., description="The workspace containing the snippet, specified as either the workspace slug or the workspace UUID surrounded by curly braces."),
     path: str | None = Field(None, description="When provided, restricts the diff output to only the specified file path within the snippet, rather than showing all changed files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the diff of a specific snippet commit against its first parent, showing what changed in that revision. Optionally filter the diff to a single file using the path parameter."""
 
     # Construct request model with validation
@@ -9381,7 +9510,7 @@ async def get_snippet_patch(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve the patch for."),
     revision: str = Field(..., description="A revspec expression identifying the commit or range to patch against its first parent, such as a commit SHA1, a ref name, or a range expression using double-dot notation."),
     workspace: str = Field(..., description="The workspace containing the snippet, specified as either the workspace slug or the workspace UUID surrounded by curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the patch of a specific snippet commit against its first parent, including commit headers such as username and message. Unlike a diff, this returns separate patches for each commit on the second parent's ancestry up to the oldest common ancestor for merge commits."""
 
     # Construct request model with validation
@@ -9422,7 +9551,7 @@ async def search_team_code(
     search_query: str = Field(..., description="The search query string used to find matching code; supports advanced syntax such as scoping to a specific repository using the `repo:` qualifier, and combining multiple terms."),
     page: str | None = Field(None, description="The page number of search results to retrieve, starting at 1 for the first page."),
     pagelen: str | None = Field(None, description="The number of search results to return per page; controls pagination granularity."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search across all repositories belonging to a team for code matching a given query, with results that can match file content, file paths, or both. Supports advanced query syntax for scoping searches to specific repositories and customizing returned fields."""
 
     _page = _parse_int(page)
@@ -9464,7 +9593,7 @@ async def search_team_code(
 
 # Tags: Users
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and details of the currently authenticated user. Useful for confirming identity or accessing user-specific information tied to the active session."""
 
     # Extract parameters for API call
@@ -9491,7 +9620,7 @@ async def get_current_user() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def list_user_emails() -> dict[str, Any]:
+async def list_user_emails() -> dict[str, Any] | ToolResult:
     """Retrieves all email addresses associated with the currently authenticated user. Includes both confirmed and unconfirmed addresses."""
 
     # Extract parameters for API call
@@ -9518,7 +9647,7 @@ async def list_user_emails() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def get_email(email: str = Field(..., description="The full email address to look up among the authenticated user's registered email addresses.")) -> dict[str, Any]:
+async def get_email(email: str = Field(..., description="The full email address to look up among the authenticated user's registered email addresses.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific email address belonging to the authenticated user. The response includes whether the address has been confirmed and whether it is the user's primary email."""
 
     # Construct request model with validation
@@ -9557,7 +9686,7 @@ async def get_email(email: str = Field(..., description="The full email address 
 async def list_workspaces(
     sort: str | None = Field(None, description="Property name to sort the returned workspaces by; only sorting by slug is supported."),
     administrator: bool | None = Field(None, description="When set to true, returns only workspaces where the caller has admin permissions; when set to false, returns only workspaces where the caller does not have admin permissions. Omit to return all accessible workspaces regardless of admin status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all workspaces accessible to the authenticated user, including each workspace's details and the caller's admin permissions status. Supports filtering by admin role, sorting, and pagination."""
 
     # Construct request model with validation
@@ -9595,7 +9724,7 @@ async def list_workspaces(
 
 # Tags: Workspaces
 @mcp.tool()
-async def get_workspace_permission(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces.")) -> dict[str, Any]:
+async def get_workspace_permission(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves the calling user's effective (highest) permission role for a specified workspace. If the user belongs to multiple groups with different roles, only the highest privilege level is returned."""
 
     # Construct request model with validation
@@ -9635,7 +9764,7 @@ async def list_workspace_repository_permissions_for_user(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     q: str | None = Field(None, description="A filter expression to narrow results by repository or permission level, using Bitbucket's filtering and sorting syntax. Values must be URL-encoded (e.g., encode `=` as `%3D`)."),
     sort: str | None = Field(None, description="The response property name to sort results by, using Bitbucket's filtering and sorting syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves each repository within the specified workspace where the authenticated user has been explicitly granted access, along with their highest effective permission level (admin, write, or read). Public repositories without explicit grants are excluded from results."""
 
     # Construct request model with validation
@@ -9674,7 +9803,7 @@ async def list_workspace_repository_permissions_for_user(
 
 # Tags: Users
 @mcp.tool()
-async def get_user(selected_user: str = Field(..., description="The identifier of the user to retrieve, accepted as either an Atlassian Account ID or a UUID wrapped in curly braces.")) -> dict[str, Any]:
+async def get_user(selected_user: str = Field(..., description="The identifier of the user to retrieve, accepted as either an Atlassian Account ID or a UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves public profile information for a specified Bitbucket user account. Private profiles omit location, website, and account creation date fields."""
 
     # Construct request model with validation
@@ -9710,7 +9839,7 @@ async def get_user(selected_user: str = Field(..., description="The identifier o
 
 # Tags: GPG
 @mcp.tool()
-async def list_user_gpg_keys(selected_user: str = Field(..., description="The identifier of the user whose GPG keys will be listed, accepted as either an Atlassian Account ID or an account UUID wrapped in curly braces.")) -> dict[str, Any]:
+async def list_user_gpg_keys(selected_user: str = Field(..., description="The identifier of the user whose GPG keys will be listed, accepted as either an Atlassian Account ID or an account UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of GPG public keys associated with a specified Bitbucket user. The key and subkeys fields can be included in the response using partial response syntax."""
 
     # Construct request model with validation
@@ -9749,7 +9878,7 @@ async def list_user_gpg_keys(selected_user: str = Field(..., description="The id
 async def add_gpg_key(
     selected_user: str = Field(..., description="The account identifier for the target user, accepted as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
     body: _models.GpgAccountKey | None = Field(None, description="The request body containing the GPG public key to be added to the user account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new GPG public key to the specified user account, enabling cryptographic verification of commits and other signed content. Returns the newly created GPG key object upon success."""
 
     # Construct request model with validation
@@ -9792,7 +9921,7 @@ async def add_gpg_key(
 async def get_user_gpg_key(
     fingerprint: str = Field(..., description="The fingerprint uniquely identifying the GPG key to retrieve."),
     selected_user: str = Field(..., description="The user whose GPG key is being retrieved, specified as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific GPG public key belonging to a user, identified by its fingerprint. Supports partial responses to include the full key and subkey fields."""
 
     # Construct request model with validation
@@ -9831,7 +9960,7 @@ async def get_user_gpg_key(
 async def delete_user_gpg_key(
     fingerprint: str = Field(..., description="The unique fingerprint identifying the GPG key to delete, used to locate the specific key within the user's account."),
     selected_user: str = Field(..., description="The account identifier for the target user, accepted as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific GPG public key from a user's account, identified by its fingerprint. This action cannot be undone."""
 
     # Construct request model with validation
@@ -9871,7 +10000,7 @@ async def get_user_app_property(
     selected_user: str = Field(..., description="The identifier of the target user account, either as an Atlassian Account ID or a UUID wrapped in curly braces."),
     app_key: str = Field(..., description="The unique key identifying the Connect app whose property is being retrieved."),
     property_name: str = Field(..., description="The name of the application property to retrieve from the specified user and Connect app."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific application property value stored against a Bitbucket user account. Use this to read Connect app metadata associated with a particular user."""
 
     # Construct request model with validation
@@ -9911,7 +10040,7 @@ async def update_user_app_property(
     selected_user: str = Field(..., description="The unique identifier of the target user account, either as an Atlassian Account ID or a UUID wrapped in curly braces."),
     app_key: str = Field(..., description="The key identifying the Connect app whose property is being updated. This must correspond to a registered Connect app key."),
     property_name: str = Field(..., description="The name of the application property to update. This identifies which property value will be overwritten for the specified user and app."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the value of a named application property stored against a specific user for a given Connect app. Use this to persist or overwrite app-specific metadata associated with a Bitbucket user account."""
 
     # Construct request model with validation
@@ -9951,7 +10080,7 @@ async def delete_user_app_property(
     selected_user: str = Field(..., description="The identifier of the target user account, either as an Atlassian Account ID or a UUID wrapped in curly braces."),
     app_key: str = Field(..., description="The unique key identifying the Bitbucket Connect app whose property is being deleted."),
     property_name: str = Field(..., description="The name of the application property to delete from the user's account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific application property value stored against a Bitbucket user account. Targets a property by its Connect app key and property name."""
 
     # Construct request model with validation
@@ -9992,7 +10121,7 @@ async def search_user_code(
     search_query: str = Field(..., description="The search query string used to find matching code; supports advanced syntax such as scoping results to a specific repository using the `repo:` qualifier and combining multiple terms."),
     page: str | None = Field(None, description="The page number of search results to retrieve, starting at 1 for the first page."),
     pagelen: str | None = Field(None, description="The number of search results to return per page; controls pagination granularity."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search across all repositories belonging to a specified user, matching against file content and/or file paths. Supports advanced query syntax including repository-scoped searches and field expansion for richer results."""
 
     _page = _parse_int(page)
@@ -10034,7 +10163,7 @@ async def search_user_code(
 
 # Tags: SSH
 @mcp.tool()
-async def list_user_ssh_keys(selected_user: str = Field(..., description="The identifier of the user whose SSH keys will be listed — either an Atlassian Account ID or an account UUID wrapped in curly braces.")) -> dict[str, Any]:
+async def list_user_ssh_keys(selected_user: str = Field(..., description="The identifier of the user whose SSH keys will be listed — either an Atlassian Account ID or an account UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of SSH public keys associated with the specified user account. Useful for auditing or managing a user's SSH authentication credentials."""
 
     # Construct request model with validation
@@ -10073,7 +10202,7 @@ async def list_user_ssh_keys(selected_user: str = Field(..., description="The id
 async def add_ssh_key(
     selected_user: str = Field(..., description="The account identifier for the target user, either as an Atlassian Account ID or as an account UUID surrounded by curly braces."),
     body: _models.SshAccountKey | None = Field(None, description="The SSH public key payload to add to the user account, including the key type, public key string, and optional label."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new SSH public key to the specified user account. Returns the resulting SSH key object upon success."""
 
     # Construct request model with validation
@@ -10116,7 +10245,7 @@ async def add_ssh_key(
 async def get_user_ssh_key(
     key_id: str = Field(..., description="The unique identifier (UUID) of the SSH key to retrieve."),
     selected_user: str = Field(..., description="The user account to retrieve the SSH key from, specified as either an Atlassian Account ID or an account UUID wrapped in curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific SSH public key belonging to a user account. Useful for inspecting key details such as label, value, and creation date for a given user."""
 
     # Construct request model with validation
@@ -10156,7 +10285,7 @@ async def update_ssh_key(
     key_id: str = Field(..., description="The unique UUID identifier of the SSH key to update."),
     selected_user: str = Field(..., description="The account identifier for the target user, either as an Atlassian Account ID or as an account UUID surrounded by curly braces."),
     body: _models.SshAccountKey | None = Field(None, description="Request body containing the SSH key fields to update. Only the comment/label field is supported for updates."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the comment/label of a specific SSH public key on a user's account. Note that only the comment field can be modified; to change the key itself, delete and re-add it."""
 
     # Construct request model with validation
@@ -10199,7 +10328,7 @@ async def update_ssh_key(
 async def delete_user_ssh_key(
     key_id: str = Field(..., description="The unique UUID identifier of the SSH key to delete."),
     selected_user: str = Field(..., description="The account identifier for the target user, accepted as either an Atlassian Account ID or an account UUID wrapped in curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific SSH public key from a user's account, revoking any access associated with that key."""
 
     # Construct request model with validation
@@ -10235,7 +10364,7 @@ async def delete_user_ssh_key(
 
 # Tags: Workspaces
 @mcp.tool()
-async def get_workspace(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID wrapped in curly braces.")) -> dict[str, Any]:
+async def get_workspace(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific Bitbucket workspace. Returns workspace metadata including settings, links, and membership information."""
 
     # Construct request model with validation
@@ -10271,7 +10400,7 @@ async def get_workspace(workspace: str = Field(..., description="The unique iden
 
 # Tags: Workspaces, Webhooks
 @mcp.tool()
-async def list_workspace_webhooks(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID surrounded by curly-braces.")) -> dict[str, Any]:
+async def list_workspace_webhooks(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID surrounded by curly-braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all webhooks installed on the specified workspace. Useful for auditing or managing webhook integrations configured at the workspace level."""
 
     # Construct request model with validation
@@ -10310,7 +10439,7 @@ async def list_workspace_webhooks(workspace: str = Field(..., description="The u
 async def get_workspace_webhook(
     uid: str = Field(..., description="The unique identifier of the installed webhook to retrieve."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific webhook installed on a workspace, identified by its unique ID. Useful for inspecting webhook configuration, events, and status for a given workspace."""
 
     # Construct request model with validation
@@ -10349,7 +10478,7 @@ async def get_workspace_webhook(
 async def update_workspace_webhook(
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to update."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing webhook subscription for a workspace, allowing modification of its description, URL, secret, active status, and subscribed events. The webhook secret is used to generate an HMAC hex digest signature sent in the X-Hub-Signature header on delivery."""
 
     # Construct request model with validation
@@ -10388,7 +10517,7 @@ async def update_workspace_webhook(
 async def delete_workspace_webhook(
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific webhook subscription from a workspace, stopping all future event deliveries for that hook."""
 
     # Construct request model with validation
@@ -10424,7 +10553,7 @@ async def delete_workspace_webhook(
 
 # Tags: Workspaces
 @mcp.tool()
-async def list_workspace_members(workspace: str = Field(..., description="The unique identifier of the workspace, either as a slug (e.g., a short name/alias) or as a UUID surrounded by curly braces.")) -> dict[str, Any]:
+async def list_workspace_members(workspace: str = Field(..., description="The unique identifier of the workspace, either as a slug (e.g., a short name/alias) or as a UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves all members belonging to the specified workspace. Supports filtering by email address (up to 90 at a time) when called by a workspace administrator, integration, or workspace access token."""
 
     # Construct request model with validation
@@ -10463,7 +10592,7 @@ async def list_workspace_members(workspace: str = Field(..., description="The un
 async def get_workspace_member(
     member: str = Field(..., description="The unique identifier of the member to look up, either their UUID or Atlassian account ID."),
     workspace: str = Field(..., description="The unique identifier of the workspace, either its slug (human-readable ID) or its UUID wrapped in curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the membership details for a specific user in a given workspace, including the full User and Workspace objects associated with that membership."""
 
     # Construct request model with validation
@@ -10502,7 +10631,7 @@ async def get_workspace_member(
 async def list_workspace_permissions(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug (short name) or the workspace UUID enclosed in curly braces."),
     q: str | None = Field(None, description="A filter expression to narrow results by permission level, using Bitbucket's filtering and sorting syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all members of a workspace along with their assigned permission levels (owner, collaborator, or member). Results can be filtered by permission level using the query parameter."""
 
     # Construct request model with validation
@@ -10545,7 +10674,7 @@ async def list_workspace_repository_permissions(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID enclosed in curly braces."),
     q: str | None = Field(None, description="A query string to filter results by repository, user, or permission level using Bitbucket's filtering syntax; values must be URL-encoded."),
     sort: str | None = Field(None, description="The response property name to sort results by, using Bitbucket's sorting syntax to control the order of returned permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the effective repository permissions for all repositories in a workspace, returning the highest permission level each user holds. Accessible only to workspace admins; results can be filtered and sorted by repository, user, or permission level."""
 
     # Construct request model with validation
@@ -10589,7 +10718,7 @@ async def list_repository_user_permissions_workspace(
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
     q: str | None = Field(None, description="A filter expression to narrow results by user or permission level, following Bitbucket's filtering and sorting syntax. Values must be URL-encoded."),
     sort: str | None = Field(None, description="A response property name to sort results by, following Bitbucket's sorting syntax, such as a user display name field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Returns the effective permission level for each user in a specified repository within a workspace. Only users with admin permission on the repository can access this resource."""
 
     # Construct request model with validation
@@ -10628,7 +10757,7 @@ async def list_repository_user_permissions_workspace(
 
 # Tags: Pipelines
 @mcp.tool()
-async def list_workspace_runners(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID enclosed in curly braces.")) -> dict[str, Any]:
+async def list_workspace_runners(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID enclosed in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieve all pipeline runners configured for a specific workspace. Runners are used to execute Bitbucket Pipelines builds within the workspace."""
 
     # Construct request model with validation
@@ -10664,7 +10793,7 @@ async def list_workspace_runners(workspace: str = Field(..., description="The un
 
 # Tags: Pipelines
 @mcp.tool()
-async def create_workspace_runner(workspace: str = Field(..., description="The workspace identifier, either the workspace slug (human-readable short name) or the workspace UUID enclosed in curly braces.")) -> dict[str, Any]:
+async def create_workspace_runner(workspace: str = Field(..., description="The workspace identifier, either the workspace slug (human-readable short name) or the workspace UUID enclosed in curly braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new runner for the specified workspace, enabling custom build infrastructure to execute Bitbucket Pipelines jobs."""
 
     # Construct request model with validation
@@ -10703,7 +10832,7 @@ async def create_workspace_runner(workspace: str = Field(..., description="The w
 async def get_workspace_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
     runner_uuid: str = Field(..., description="The unique UUID identifying the runner to retrieve within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific Pipelines runner configured in a workspace. Useful for inspecting runner status, configuration, and metadata by its unique identifier."""
 
     # Construct request model with validation
@@ -10742,7 +10871,7 @@ async def get_workspace_runner(
 async def update_workspace_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
     runner_uuid: str = Field(..., description="The unique identifier (UUID) of the runner to update within the specified workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the configuration or metadata of a specific runner within a workspace. Use this to modify runner settings such as labels, status, or other properties."""
 
     # Construct request model with validation
@@ -10781,7 +10910,7 @@ async def update_workspace_runner(
 async def delete_workspace_runner(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug (short name) or the workspace UUID enclosed in curly braces."),
     runner_uuid: str = Field(..., description="The unique identifier (UUID) of the runner to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific Pipelines runner from a workspace using its UUID. This removes the runner's registration and it will no longer be available to execute pipeline steps."""
 
     # Construct request model with validation
@@ -10817,7 +10946,7 @@ async def delete_workspace_runner(
 
 # Tags: Pipelines
 @mcp.tool()
-async def list_workspace_pipeline_variables(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID wrapped in curly braces.")) -> dict[str, Any]:
+async def list_workspace_pipeline_variables(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves all pipeline configuration variables defined at the workspace level. These variables are available across all pipelines within the specified workspace."""
 
     # Construct request model with validation
@@ -10853,7 +10982,7 @@ async def list_workspace_pipeline_variables(workspace: str = Field(..., descript
 
 # Tags: Pipelines
 @mcp.tool()
-async def create_pipeline_variable(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID enclosed in curly braces.")) -> dict[str, Any]:
+async def create_pipeline_variable(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID enclosed in curly braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new variable at the workspace level for use across Bitbucket Pipelines. Workspace-level variables are available to all pipelines within the specified workspace."""
 
     # Construct request model with validation
@@ -10892,7 +11021,7 @@ async def create_pipeline_variable(workspace: str = Field(..., description="The 
 async def get_workspace_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
     variable_uuid: str = Field(..., description="The unique identifier (UUID) of the workspace pipeline configuration variable to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific pipeline configuration variable at the workspace level by its UUID. Use this to inspect the details of a single workspace-scoped pipeline variable."""
 
     # Construct request model with validation
@@ -10931,7 +11060,7 @@ async def get_workspace_pipeline_variable(
 async def update_workspace_pipeline_variable(
     workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID surrounded by curly-braces."),
     variable_uuid: str = Field(..., description="The UUID of the pipeline configuration variable to update, uniquely identifying the variable within the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing pipeline configuration variable at the workspace level. Changes apply to all pipelines within the specified workspace that reference this variable."""
 
     # Construct request model with validation
@@ -10970,7 +11099,7 @@ async def update_workspace_pipeline_variable(
 async def delete_workspace_pipeline_variable(
     workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID surrounded by curly-braces."),
     variable_uuid: str = Field(..., description="The UUID of the workspace pipeline variable to delete. This uniquely identifies the specific variable to be permanently removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific pipeline configuration variable at the workspace level. This action cannot be undone and will remove the variable from all pipelines that reference it within the workspace."""
 
     # Construct request model with validation
@@ -11006,7 +11135,7 @@ async def delete_workspace_pipeline_variable(
 
 # Tags: Workspaces
 @mcp.tool()
-async def list_workspace_projects(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces.")) -> dict[str, Any]:
+async def list_workspace_projects(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves all projects belonging to a specified workspace. Returns a list of project resources associated with the given workspace identifier."""
 
     # Construct request model with validation
@@ -11042,7 +11171,7 @@ async def list_workspace_projects(workspace: str = Field(..., description="The w
 
 # Tags: Projects
 @mcp.tool()
-async def create_project(workspace: str = Field(..., description="The workspace in which to create the project, specified as either the workspace slug (human-readable ID) or the workspace UUID surrounded by curly braces.")) -> dict[str, Any]:
+async def create_project(workspace: str = Field(..., description="The workspace in which to create the project, specified as either the workspace slug (human-readable ID) or the workspace UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new project within the specified workspace, supporting optional avatar images via data-URL or external URL, privacy settings, and a unique project key."""
 
     # Construct request model with validation
@@ -11081,7 +11210,7 @@ async def create_project(workspace: str = Field(..., description="The workspace 
 async def get_project(
     project_key: str = Field(..., description="The unique key assigned to the project, used to identify it within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific project within a workspace. Returns project metadata including its key, name, and associated settings."""
 
     # Construct request model with validation
@@ -11120,7 +11249,7 @@ async def get_project(
 async def update_project(
     project_key: str = Field(..., description="The unique key identifying the project within the workspace. This is the short alphanumeric identifier assigned to the project, not its name or UUID."),
     workspace: str = Field(..., description="The workspace in which the project resides, specified as either the workspace slug or the workspace UUID enclosed in curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates a project within a workspace using the specified project key. If the key is changed in the request body, the project is relocated and the new URL is returned in the Location response header."""
 
     # Construct request model with validation
@@ -11159,7 +11288,7 @@ async def update_project(
 async def delete_project(
     project_key: str = Field(..., description="The unique key assigned to the project, identifying which project to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a project from the specified workspace. The project must have no repositories; delete or transfer all repositories before attempting deletion."""
 
     # Construct request model with validation
@@ -11198,7 +11327,7 @@ async def delete_project(
 async def get_project_branching_model(
     project_key: str = Field(..., description="The unique key assigned to the project within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the read-only branching model configured at the project level, including development and production branch settings and all enabled branch types. To modify these settings, use the branching model settings endpoint."""
 
     # Construct request model with validation
@@ -11237,7 +11366,7 @@ async def get_project_branching_model(
 async def get_project_branching_model_settings(
     project_key: str = Field(..., description="The unique key assigned to the project within the workspace, used to identify which project's branching model settings to retrieve."),
     workspace: str = Field(..., description="The workspace identifier, accepted as either the workspace slug or the workspace UUID enclosed in curly braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the raw branching model configuration for a project, including development and production branch settings, branch types, and default branch deletion behavior. Use the active branching model endpoint instead if you need to see the configuration resolved against actual current branches."""
 
     # Construct request model with validation
@@ -11276,7 +11405,7 @@ async def get_project_branching_model_settings(
 async def list_project_default_reviewers(
     project_key: str = Field(..., description="The unique key assigned to the project, used to identify the project within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all default reviewers configured for a project within a workspace. These users are automatically added as reviewers to pull requests in any repository belonging to the project."""
 
     # Construct request model with validation
@@ -11316,7 +11445,7 @@ async def get_project_default_reviewer(
     project_key: str = Field(..., description="The unique identifier of the project, either its short key or its UUID surrounded by curly-braces."),
     selected_user: str = Field(..., description="The unique identifier of the default reviewer to retrieve, either their username or their account UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The unique identifier of the workspace containing the project, either its slug or its UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific default reviewer for a project within a workspace. Returns reviewer details for the specified user if they are configured as a default reviewer on the project."""
 
     # Construct request model with validation
@@ -11356,7 +11485,7 @@ async def add_project_default_reviewer(
     project_key: str = Field(..., description="The unique identifier for the project, either its short key or its UUID surrounded by curly-braces."),
     selected_user: str = Field(..., description="The unique identifier for the user to add as a default reviewer, either their username or their account UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The unique identifier for the workspace, either its slug (ID) or its UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a specified user to the default reviewers list for a project in a workspace. This operation is idempotent, so adding an already-listed reviewer will not cause errors."""
 
     # Construct request model with validation
@@ -11396,7 +11525,7 @@ async def remove_project_default_reviewer(
     project_key: str = Field(..., description="The unique identifier of the project, either its short key or its UUID surrounded by curly-braces."),
     selected_user: str = Field(..., description="The unique identifier of the user to remove as a default reviewer, either their username or their account UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The unique identifier of the workspace containing the project, either its slug or its UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific user from a project's default reviewers list. Once removed, the user will no longer be automatically added as a reviewer on new pull requests in that project."""
 
     # Construct request model with validation
@@ -11435,7 +11564,7 @@ async def remove_project_default_reviewer(
 async def list_project_deploy_keys(
     project_key: str = Field(..., description="The unique key identifier assigned to the project, used to target the specific project whose deploy keys will be listed."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all deploy keys associated with a specific project in a workspace. Deploy keys grant read or read/write access to a repository for CI/CD and automation purposes."""
 
     # Construct request model with validation
@@ -11474,7 +11603,7 @@ async def list_project_deploy_keys(
 async def create_project_deploy_key(
     project_key: str = Field(..., description="The unique key identifier assigned to the project (e.g., 'TEST_PROJECT'). This is the short key label, not the project name or UUID."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new deploy key for a specified project within a workspace, enabling secure read or read/write access to the project's repositories."""
 
     # Construct request model with validation
@@ -11514,7 +11643,7 @@ async def get_project_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to retrieve."),
     project_key: str = Field(..., description="The unique key assigned to the project, used to identify it within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific deploy key associated with a project, identified by its key ID. Returns the full deploy key details for the given workspace and project."""
 
     # Construct request model with validation
@@ -11554,7 +11683,7 @@ async def delete_project_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to be deleted from the project."),
     project_key: str = Field(..., description="The unique key identifier assigned to the project, used to reference the project within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific deploy key from a project in the given workspace. This revokes any access granted to systems using that key."""
 
     # Construct request model with validation
@@ -11593,7 +11722,7 @@ async def delete_project_deploy_key(
 async def list_project_group_permissions(
     project_key: str = Field(..., description="The unique key identifying the project within the workspace, as assigned when the project was created."),
     workspace: str = Field(..., description="The workspace identifier, accepted as either the workspace slug or the workspace UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of explicit group-level permissions configured for a specific project within a workspace. Only explicitly assigned group permissions are returned; inherited or implicit permissions are not included."""
 
     # Construct request model with validation
@@ -11632,7 +11761,7 @@ async def list_project_group_permissions(
 async def list_project_user_permissions(
     project_key: str = Field(..., description="The unique key identifying the project within the workspace, as assigned when the project was created."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of explicit user-level permissions configured for a specific project within a workspace. Only directly assigned user permissions are returned; inherited or group-based permissions are not included."""
 
     # Construct request model with validation
@@ -11672,7 +11801,7 @@ async def list_user_pull_requests_in_workspace(
     selected_user: str = Field(..., description="The identifier of the pull request author — accepts a username, an Atlassian ID, or a UUID wrapped in curly braces."),
     workspace: str = Field(..., description="The identifier of the workspace — accepts a workspace slug or a UUID wrapped in curly braces."),
     state: Literal["OPEN", "MERGED", "DECLINED", "SUPERSEDED"] | None = Field(None, description="Filters results to pull requests in the specified state. Repeat this parameter to include multiple states simultaneously; omitting it returns only open pull requests."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pull requests authored by a specified user within a given workspace. Supports filtering by one or more states and allows sorting and filtering of results."""
 
     # Construct request model with validation
@@ -11716,7 +11845,7 @@ async def search_workspace_code(
     search_query: str = Field(..., description="The search query string used to match code content or file paths, supporting the same syntax as the Bitbucket UI including repository-scoped filters."),
     page: str | None = Field(None, description="The page number of search results to retrieve, starting at 1 for the first page."),
     pagelen: str | None = Field(None, description="The number of search results to return per page; controls pagination granularity."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search across all repositories in a workspace by code content, file path, or both. Supports scoped queries (e.g., limiting to a specific repository) and field expansion for richer response data."""
 
     _page = _parse_int(page)

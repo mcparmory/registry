@@ -1,7 +1,7 @@
 """
 Authentication module for Bitbucket MCP server.
 
-Generated: 2026-04-14 18:16:06 UTC
+Generated: 2026-04-23 21:02:39 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -74,32 +74,39 @@ class OAuth2Auth:
         Token URL: https://bitbucket.org/site/oauth2/access_token
 
     Available Scopes (configure via OAUTH2_SCOPES):
+        - account:email
+        - account:read
+        - account:write
+        - workspace:read
+        - workspace:write
+        - project:read
+        - project:write
+        - project:admin
         - repository
         - repository:write
         - repository:admin
         - repository:delete
-        - project
-        - project:admin
-        - email
-        - account
-        - account:write
-        - team
-        - team:write
-        - pipeline
-        - pipeline:write
-        - pipeline:variable
-        - runner
-        - runner:write
-        - test
-        - test:write
         - pullrequest
         - pullrequest:write
-        - webhook
         - issue
         - issue:write
-        - snippet
-        - snippet:write
         - wiki
+        - snippet:read
+        - snippet:write
+        - webhook
+        - pipeline
+        - pipeline:write
+        - pipeline:edit_variables
+        - runner:read
+        - runner:write
+        - project
+        - email
+        - account
+        - team
+        - team:write
+        - pipeline:variable
+        - runner
+        - snippet
     """
 
     def __init__(self):

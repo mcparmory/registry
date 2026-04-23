@@ -1,7 +1,7 @@
 """
 Bitbucket MCP Server - Pydantic Models
 
-Generated: 2026-04-14 18:16:06 UTC
+Generated: 2026-04-23 21:02:39 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
