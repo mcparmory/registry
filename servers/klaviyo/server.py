@@ -7,7 +7,7 @@ API Info:
 - Contact: Klaviyo Developer Experience Team <developers@klaviyo.com> (https://developers.klaviyo.com)
 - Terms of Service: https://www.klaviyo.com/legal/api-terms
 
-Generated: 2026-04-14 18:24:50 UTC
+Generated: 2026-04-23 21:24:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -41,6 +42,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://a.klaviyo.com")
@@ -472,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -499,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -541,18 +572,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -624,7 +724,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -672,6 +780,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -734,7 +846,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -760,10 +880,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -857,16 +975,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -880,6 +999,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -922,6 +1042,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -933,20 +1068,28 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
+    'OAuth2',
     'Klaviyo-API-Key',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["Klaviyo-API-Key"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Authorization", prefix="Klaviyo-API-Key")
+    _auth_handlers["OAuth2"] = _auth.OAuth2Auth()
+    logging.info("Authentication configured: OAuth2")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for OAuth2 not configured: {error_msg}")
+    _auth_handlers["OAuth2"] = None
+try:
+    _auth_handlers["Klaviyo-API-Key"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Authorization")
     logging.info("Authentication configured: Klaviyo-API-Key")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
@@ -1077,7 +1220,7 @@ mcp = FastMCP("Klaviyo", middleware=[_JsonCoercionMiddleware()])
 async def get_accounts(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_account: list[Literal["contact_information", "contact_information.default_sender_email", "contact_information.default_sender_name", "contact_information.organization_name", "contact_information.street_address", "contact_information.street_address.address1", "contact_information.street_address.address2", "contact_information.street_address.city", "contact_information.street_address.country", "contact_information.street_address.region", "contact_information.street_address.zip", "contact_information.website_url", "industry", "locale", "preferred_currency", "public_api_key", "test_account", "timezone"]] | None = Field(None, alias="fieldsaccount", description="Specify which account fields to include in the response using sparse fieldsets for optimized data retrieval. See API documentation for available field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve account information associated with your private API key, including contact details, timezone, currency, and public API key. Use this to access account-specific data or verify API key ownership before performing other operations."""
 
     # Construct request model with validation
@@ -1123,7 +1266,7 @@ async def get_account(
     id_: str = Field(..., alias="id", description="The unique identifier of the account to retrieve (e.g., AbC123)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_account: list[Literal["contact_information", "contact_information.default_sender_email", "contact_information.default_sender_name", "contact_information.organization_name", "contact_information.street_address", "contact_information.street_address.address1", "contact_information.street_address.address2", "contact_information.street_address.city", "contact_information.street_address.country", "contact_information.street_address.region", "contact_information.street_address.zip", "contact_information.website_url", "industry", "locale", "preferred_currency", "public_api_key", "test_account", "timezone"]] | None = Field(None, alias="fieldsaccount", description="Optional list of specific account fields to include in the response. Use sparse fieldsets to reduce payload size and improve performance. Refer to the API documentation for available field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single account object by its ID. You can only access the account associated with the private API key used for authentication."""
 
     # Construct request model with validation
@@ -1169,7 +1312,7 @@ async def get_account(
 async def list_campaigns(
     filter_: str = Field(..., alias="filter", description="Filter expression to narrow campaign results. A channel filter is required—use equals(messages.channel,'email'), equals(messages.channel,'sms'), or equals(messages.channel,'mobile_push'). You can combine with additional filters on id, name (contains), status, archived state, or timestamps (created_at, scheduled_at, updated_at). See API documentation for full filtering syntax."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve campaigns filtered by channel (email, SMS, or mobile push) and optional criteria like name, status, or date range. A channel filter is required to list campaigns."""
 
     # Construct request model with validation
@@ -1211,7 +1354,7 @@ async def list_campaigns(
 async def get_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific campaign by its ID. Returns detailed campaign information for the requested resource."""
 
     # Construct request model with validation
@@ -1259,7 +1402,7 @@ async def update_campaign(
     send_options: _models.EmailSendOptions | _models.SmsSendOptions | _models.PushSendOptions | None = Field(None, description="Configuration options that control how the campaign will be sent, including delivery timing and method preferences."),
     tracking_options: _models.CampaignsEmailTrackingOptions | _models.CampaignsSmsTrackingOptions | None = Field(None, description="Tracking configuration for the campaign, including metrics collection and event monitoring settings."),
     send_strategy: _models.StaticSendStrategy | _models.ThrottledSendStrategy | _models.ImmediateSendStrategy | _models.SmartSendTimeStrategy | None = Field(None, description="The delivery strategy that determines how the campaign will be distributed to recipients (e.g., immediate, scheduled, or progressive send)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing campaign's configuration including name, audience targeting, send options, tracking, and delivery strategy. Requires the campaign ID and current revision for optimistic concurrency control."""
 
     # Construct request model with validation
@@ -1308,7 +1451,7 @@ async def update_campaign(
 async def delete_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a campaign by its ID. This action cannot be undone and will remove all associated campaign data."""
 
     # Construct request model with validation
@@ -1348,7 +1491,7 @@ async def delete_campaign(
 async def get_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific campaign message by its ID. Returns the message details for the specified revision of the API."""
 
     # Construct request model with validation
@@ -1393,7 +1536,7 @@ async def update_campaign_message(
     type_: Literal["campaign-message"] = Field(..., alias="type", description="The resource type identifier for the campaign message. Must be set to 'campaign-message'."),
     image_data_type: Literal["image"] = Field(..., alias="imageDataType", description="The resource type identifier for the associated image. Must be set to 'image'."),
     definition: _models.EmailMessageDefinition | _models.SmsMessageDefinitionCreate | _models.MobilePushMessageStandardDefinitionUpdate | _models.MobilePushMessageSilentDefinitionUpdate | None = Field(None, description="The campaign message contents and configuration settings, including template variables, targeting rules, and delivery preferences."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing campaign message with new content and settings. Supports modifying message definition, associated images for mobile push notifications, and other campaign message properties."""
 
     # Construct request model with validation
@@ -1446,7 +1589,7 @@ async def update_campaign_message(
 async def get_campaign_send_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign send job to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific campaign send job by its ID. Use this to check the status and metadata of a campaign send operation."""
 
     # Construct request model with validation
@@ -1489,7 +1632,7 @@ async def update_campaign_send_job(
     data_id: str = Field(..., alias="dataId", description="The unique identifier of the campaign send job being modified; must match the path ID."),
     type_: Literal["campaign-send-job"] = Field(..., alias="type", description="The resource type identifier; must be 'campaign-send-job'."),
     action: Literal["cancel", "revert"] = Field(..., description="The action to perform: 'cancel' to permanently stop the send, or 'revert' to return the campaign to draft status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel an in-progress campaign send or revert it back to draft status. Use 'cancel' to permanently stop the send, or 'revert' to return the campaign to draft for further editing."""
 
     # Construct request model with validation
@@ -1537,7 +1680,7 @@ async def update_campaign_send_job(
 async def get_campaign_recipient_estimation_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign recipient estimation job whose status you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of a recipient estimation job for a campaign. Use this to poll the asynchronous job triggered by the Create Campaign Recipient Estimation Job endpoint."""
 
     # Construct request model with validation
@@ -1577,7 +1720,7 @@ async def get_campaign_recipient_estimation_job(
 async def get_campaign_recipient_estimation(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve the estimated recipient count."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the estimated recipient count for a campaign. Use the Create Campaign Recipient Estimation Job endpoint to refresh this estimate."""
 
     # Construct request model with validation
@@ -1619,7 +1762,7 @@ async def clone_campaign(
     type_: Literal["campaign"] = Field(..., alias="type", description="The resource type being cloned. Must be set to 'campaign' for this operation."),
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to clone."),
     new_name: str | None = Field(None, description="Optional custom name for the newly cloned campaign. If not provided, a default name will be generated based on the original campaign."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a duplicate of an existing campaign with a new ID and optional custom name. The cloned campaign inherits all settings and configuration from the original."""
 
     # Construct request model with validation
@@ -1669,7 +1812,7 @@ async def assign_template_to_campaign_message(
     template_data_type: Literal["template"] = Field(..., alias="templateDataType", description="Resource type identifier for the template relationship. Must be set to 'template'."),
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message that will receive the template assignment."),
     template_data_id: str = Field(..., alias="templateDataId", description="The unique identifier of the template to assign to the campaign message."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns a template to a campaign message by creating a non-reusable copy of the template linked to that specific message. This operation requires campaigns:write scope and is subject to rate limits of 10 requests per second (burst) and 150 requests per minute (steady state)."""
 
     # Construct request model with validation
@@ -1721,7 +1864,7 @@ async def send_campaign(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["campaign-send-job"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be 'campaign-send-job'."),
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to send. This campaign must exist and be in a valid state for sending."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger an asynchronous campaign send job to deliver messages to recipients. The operation queues the campaign for processing and returns immediately."""
 
     # Construct request model with validation
@@ -1766,7 +1909,7 @@ async def trigger_campaign_recipient_estimation(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     type_: Literal["campaign-recipient-estimation-job"] = Field(..., alias="type", description="Resource type identifier; must be set to 'campaign-recipient-estimation-job' to specify the job type being created."),
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to estimate recipient count."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate an asynchronous job to recalculate the estimated recipient count for a campaign. Poll the job status endpoint or retrieve the final estimation once processing completes."""
 
     # Construct request model with validation
@@ -1810,7 +1953,7 @@ async def trigger_campaign_recipient_estimation(
 async def get_campaign_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the associated campaign."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the campaign associated with a specific campaign message. This operation returns the parent campaign details for the given message."""
 
     # Construct request model with validation
@@ -1850,7 +1993,7 @@ async def get_campaign_for_campaign_message(
 async def get_campaign_id_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the associated campaign ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the ID of the campaign associated with a specific campaign message. This operation returns the relationship data linking a message to its parent campaign."""
 
     # Construct request model with validation
@@ -1890,7 +2033,7 @@ async def get_campaign_id_for_campaign_message(
 async def get_template_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message whose template you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the template associated with a specific campaign message. Returns the template configuration used by the campaign message."""
 
     # Construct request model with validation
@@ -1930,7 +2073,7 @@ async def get_template_for_campaign_message(
 async def get_template_id_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the related template ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the ID of the template associated with a specific campaign message. This operation returns only the template relationship identifier, useful for determining which template is used by a campaign message."""
 
     # Construct request model with validation
@@ -1970,7 +2113,7 @@ async def get_template_id_for_campaign_message(
 async def get_image_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the associated image."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the image associated with a specific campaign message. Returns the image resource linked to the campaign message identified by the provided ID."""
 
     # Construct request model with validation
@@ -2010,7 +2153,7 @@ async def get_image_for_campaign_message(
 async def get_image_id_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message whose related image ID you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the ID of the image associated with a specific campaign message. This operation returns only the image relationship identifier, not the full image resource."""
 
     # Construct request model with validation
@@ -2052,7 +2195,7 @@ async def update_image_for_campaign_message(
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     data_id: str = Field(..., alias="dataId", description="The unique identifier of the image to associate with the campaign message."),
     type_: Literal["image"] = Field(..., alias="type", description="The resource type identifier, which must be 'image' to specify the relationship type being updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace the image associated with a campaign message. Requires both the campaign message ID and the image ID to establish the relationship."""
 
     # Construct request model with validation
@@ -2097,7 +2240,7 @@ async def update_image_for_campaign_message(
 async def list_tags_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve tags."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific campaign. Returns a collection of tags that have been assigned to the campaign."""
 
     # Construct request model with validation
@@ -2137,7 +2280,7 @@ async def list_tags_for_campaign(
 async def list_tag_ids_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve associated tag IDs."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tag IDs associated with a specific campaign. Returns a collection of tag identifiers linked to the campaign."""
 
     # Construct request model with validation
@@ -2177,7 +2320,7 @@ async def list_tag_ids_for_campaign(
 async def list_messages_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve messages."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all messages associated with a specific campaign. Returns a collection of messages that have been created or assigned to the campaign."""
 
     # Construct request model with validation
@@ -2217,7 +2360,7 @@ async def list_messages_for_campaign(
 async def list_message_ids_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign whose associated message IDs you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all message IDs associated with a specific campaign. Use this to discover which messages are linked to a campaign for further operations."""
 
     # Construct request model with validation
@@ -2257,7 +2400,7 @@ async def list_message_ids_for_campaign(
 async def list_catalog_items(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter catalog items by specific criteria. Supports filtering by item IDs (using `any` operator), category ID (exact match), item title (partial match), or published status (exact match). Provide filters in the format specified by the API filtering documentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog items in your account with optional filtering and sorting. Returns up to 100 items per request."""
 
     # Construct request model with validation
@@ -2309,7 +2452,7 @@ async def create_catalog_item(
     custom_metadata: dict[str, Any] | None = Field(None, description="A flat JSON object containing custom metadata about the item (e.g., {'Top Pick': true, 'Season': 'Summer'}). Total size must not exceed 100KB."),
     published: bool | None = Field(None, description="Boolean flag indicating whether the catalog item is published and visible. Defaults to true if not specified."),
     data: list[_models.CreateCatalogItemBodyDataRelationshipsCategoriesDataItem] | None = Field(None, description="Additional data payload for the catalog item. Structure and usage depend on your integration requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new catalog item in your product catalog. The item will be assigned a unique identifier and can include pricing, images, and custom metadata for use in email campaigns and integrations."""
 
     # Construct request model with validation
@@ -2357,7 +2500,7 @@ async def create_catalog_item(
 async def get_catalog_item(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog item, formatted as `{integration}:::{catalog}:::{external_id}`. Use `$custom` for the integration type and `$default` for the catalog name, followed by your item's external identifier."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific catalog item by its compound ID. The item ID combines integration type, catalog name, and external identifier in a structured format."""
 
     # Construct request model with validation
@@ -2407,7 +2550,7 @@ async def update_catalog_item(
     custom_metadata: dict[str, Any] | None = Field(None, description="A flat JSON object containing custom metadata about the item. Total size must not exceed 100 kilobytes."),
     published: bool | None = Field(None, description="Boolean flag indicating whether the catalog item is currently published and visible."),
     data: list[_models.UpdateCatalogItemBodyDataRelationshipsCategoriesDataItem] | None = Field(None, description="Reserved parameter for internal use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing catalog item with new metadata, pricing, images, or publication status. Use the compound ID format to identify the item, and include the required revision date for API versioning."""
 
     # Construct request model with validation
@@ -2456,7 +2599,7 @@ async def update_catalog_item(
 async def delete_catalog_item(
     id_: str = Field(..., alias="id", description="The unique identifier for the catalog item in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for the integration and `$default` for the catalog, followed by your item's external ID (e.g., `$custom:::$default:::SAMPLE-DATA-ITEM-1`)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a catalog item from the default catalog. Requires the item's compound ID and the API revision date to ensure consistency."""
 
     # Construct request model with validation
@@ -2496,7 +2639,7 @@ async def delete_catalog_item(
 async def list_catalog_variants(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter variants by specific criteria using supported fields and operators. You can filter by variant IDs (using `any` operator), item ID, SKU, title (partial match), or publication status. Provide filters in the format specified by the API filtering documentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog variants in your account with optional filtering and sorting. Returns up to 100 variants per request."""
 
     # Construct request model with validation
@@ -2552,7 +2695,7 @@ async def create_catalog_variant(
     images: list[str] | None = Field(None, description="Array of image URLs for the variant. Order matters—the first image is typically used as the primary product image."),
     custom_metadata: dict[str, Any] | None = Field(None, description="Custom metadata as a flat JSON object (max 100KB). Use for storing additional variant attributes not covered by standard fields."),
     published: bool | None = Field(None, description="Whether the variant is published and visible in your catalog. Defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new variant for a catalog item, such as a specific size, color, or SKU. Variants inherit from their parent catalog item and can have distinct pricing, inventory, and product URLs."""
 
     # Construct request model with validation
@@ -2604,7 +2747,7 @@ async def create_catalog_variant(
 async def get_catalog_variant(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog variant, formatted as {integration}:::{catalog}:::{external_id}. Use $custom for the integration type and $default for the catalog name, followed by your external variant identifier."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific catalog item variant by its compound ID. The variant ID combines integration type, catalog name, and external identifier in a structured format."""
 
     # Construct request model with validation
@@ -2656,7 +2799,7 @@ async def update_catalog_variant(
     images: list[str] | None = Field(None, description="An array of image URLs for this variant. Order matters—the first image is typically used as the primary product image."),
     custom_metadata: dict[str, Any] | None = Field(None, description="A flat JSON object for storing custom metadata about the variant (e.g., `{'Top Pick': true}`). Must not exceed 100KB."),
     published: bool | None = Field(None, description="Set to `true` to make this variant visible in your catalog, or `false` to hide it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a catalog item variant by its compound ID. Modify variant details such as title, description, pricing, inventory, images, and custom metadata to keep your product catalog current."""
 
     # Construct request model with validation
@@ -2704,7 +2847,7 @@ async def update_catalog_variant(
 async def delete_catalog_variant(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog variant in the format {integration}:::{catalog}:::{external_id}. Use $custom as the integration type and $default as the catalog name, followed by your external variant identifier."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a catalog item variant by its compound ID. The variant ID must follow the format {integration}:::{catalog}:::{external_id}, where integration is $custom and catalog is $default."""
 
     # Construct request model with validation
@@ -2744,7 +2887,7 @@ async def delete_catalog_variant(
 async def list_catalog_categories(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using supported fields and operators. You can filter by category IDs using the `any` operator, item IDs using `equals`, or category names using `contains` for partial matching."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog categories in your account. Returns up to 100 categories per request, supporting filtering by IDs, item IDs, or category names."""
 
     # Construct request model with validation
@@ -2790,7 +2933,7 @@ async def create_catalog_category(
     name: str = Field(..., description="The display name for the catalog category. This is the human-readable label shown in your catalog."),
     integration_type: Literal["$custom"] | None = Field(None, description="The integration type for this category. Currently only '$custom' is supported for custom integrations."),
     data: list[_models.CreateCatalogCategoryBodyDataRelationshipsItemsDataItem] | None = Field(None, description="Optional array of custom data fields to attach to this category. Item format and order significance depend on your integration requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new catalog category in your product catalog. The category will be identified by an external system ID and can include custom metadata."""
 
     # Construct request model with validation
@@ -2838,7 +2981,7 @@ async def create_catalog_category(
 async def get_catalog_category(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog category, formatted as `{integration}:::{catalog}:::{external_id}`. Currently supports only the `$custom` integration type and `$default` catalog. The external ID is a custom string that uniquely identifies the category within the catalog."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific catalog category by its compound ID. The category ID combines integration type, catalog name, and external identifier to uniquely identify the category."""
 
     # Construct request model with validation
@@ -2882,7 +3025,7 @@ async def update_catalog_category(
     type_: Literal["catalog-category"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'catalog-category' for this operation."),
     name: str | None = Field(None, description="The display name for the catalog category (e.g., 'Sample Data Category Apparel'). Optional field for updating category metadata."),
     data: list[_models.UpdateCatalogCategoryBodyDataRelationshipsItemsDataItem] | None = Field(None, description="Additional structured data for the catalog category. Format and contents depend on the specific catalog structure requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing catalog category by ID. Modifies category metadata such as name while maintaining the compound ID structure."""
 
     # Construct request model with validation
@@ -2931,7 +3074,7 @@ async def update_catalog_category(
 async def delete_catalog_category(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog category, formatted as {integration}:::{catalog}:::{external_id}. Use $custom as the integration and $default as the catalog name."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a catalog category by its compound ID. The category ID must follow the format {integration}:::{catalog}:::{external_id}, where integration is $custom and catalog is $default."""
 
     # Construct request model with validation
@@ -2971,7 +3114,7 @@ async def delete_catalog_category(
 async def list_bulk_create_catalog_items_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to show only processing jobs). Supports the status field only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog item bulk create jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3014,7 +3157,7 @@ async def create_catalog_items_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-item-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-item-bulk-create-job' to specify this operation creates catalog items in bulk."),
     data: list[_models.CatalogItemCreateQueryResourceObject] = Field(..., description="Array of catalog item objects to create. Accepts up to 100 items per request. Each item must conform to the catalog item schema. Order is preserved in processing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a bulk job to create up to 100 catalog items in a single request. The operation queues the job for asynchronous processing with a maximum payload size of 5MB and a limit of 500 concurrent jobs."""
 
     # Construct request model with validation
@@ -3063,7 +3206,7 @@ async def create_catalog_items_bulk_job(
 async def get_bulk_create_catalog_items_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog item bulk create job by its ID. Optionally include related catalog items in the response."""
 
     # Construct request model with validation
@@ -3103,7 +3246,7 @@ async def get_bulk_create_catalog_items_job(
 async def list_catalog_item_bulk_update_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports the status field only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog item bulk update jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3146,7 +3289,7 @@ async def create_catalog_item_bulk_update_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-item-bulk-update-job"] = Field(..., alias="type", description="The type of bulk operation job being created. Must be set to 'catalog-item-bulk-update-job' to indicate this is a catalog item update operation."),
     data: list[_models.CatalogItemUpdateQueryResourceObject] = Field(..., description="Array of catalog items to update. Each item should contain the fields to be modified. Maximum 100 items per request; total payload cannot exceed 5MB."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk update job to modify up to 100 catalog items in a single request. The job processes asynchronously and you can have up to 500 jobs in progress simultaneously."""
 
     # Construct request model with validation
@@ -3195,7 +3338,7 @@ async def create_catalog_item_bulk_update_job(
 async def get_bulk_update_catalog_items_job(
     job_id: str = Field(..., description="The unique identifier of the bulk update job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog item bulk update job by its ID. Optionally include related catalog items in the response."""
 
     # Construct request model with validation
@@ -3235,7 +3378,7 @@ async def get_bulk_update_catalog_items_job(
 async def list_bulk_delete_catalog_items_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to show only processing jobs). Omit to retrieve jobs in all statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog item bulk delete jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3278,7 +3421,7 @@ async def create_catalog_item_bulk_delete_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this operation."),
     type_: Literal["catalog-item-bulk-delete-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-item-bulk-delete-job' to indicate this is a bulk delete operation."),
     data: list[_models.CatalogItemDeleteQueryResourceObject] = Field(..., description="Array of catalog items to delete. Submit up to 100 items per request. Each item should contain the necessary identifiers for deletion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk delete job to remove a batch of catalog items. Submit up to 100 items per request with a maximum payload of 5MB, and maintain no more than 500 concurrent jobs."""
 
     # Construct request model with validation
@@ -3327,7 +3470,7 @@ async def create_catalog_item_bulk_delete_job(
 async def get_bulk_delete_catalog_items_job(
     job_id: str = Field(..., description="The unique identifier of the bulk delete job to retrieve. This ID is returned when the bulk delete operation is initiated."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog item bulk delete job by its ID. Use this to monitor the progress of an in-progress or completed bulk deletion operation."""
 
     # Construct request model with validation
@@ -3367,7 +3510,7 @@ async def get_bulk_delete_catalog_items_job(
 async def list_bulk_create_variants_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Omit to return jobs of all statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog variant bulk create jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3410,7 +3553,7 @@ async def create_catalog_variants_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-variant-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-variant-bulk-create-job' to specify this operation."),
     data: list[_models.CatalogVariantCreateQueryResourceObject] = Field(..., description="Array of catalog variant objects to create. Accepts up to 100 variants per request with a maximum payload size of 5MB. Each item represents a single catalog variant to be created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a bulk job to create up to 100 catalog variants in a single request. The job processes asynchronously and allows up to 500 concurrent jobs per account."""
 
     # Construct request model with validation
@@ -3459,7 +3602,7 @@ async def create_catalog_variants_bulk(
 async def get_bulk_create_variants_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (format: alphanumeric string)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog variant bulk create job by its ID. Optionally include related variant data in the response."""
 
     # Construct request model with validation
@@ -3499,7 +3642,7 @@ async def get_bulk_create_variants_job(
 async def list_bulk_update_variants_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports filtering on the status field only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog variant bulk update jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3542,7 +3685,7 @@ async def create_catalog_variant_bulk_update_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-variant-bulk-update-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-variant-bulk-update-job' to indicate this is a bulk variant update operation."),
     data: list[_models.CatalogVariantUpdateQueryResourceObject] = Field(..., description="Array of catalog variant objects to update. Accepts up to 100 variants per request with a maximum payload size of 5MB. Order is preserved for processing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk update job to modify up to 100 catalog variants in a single request. The job processes asynchronously with a maximum of 500 concurrent jobs allowed per account."""
 
     # Construct request model with validation
@@ -3591,7 +3734,7 @@ async def create_catalog_variant_bulk_update_job(
 async def get_bulk_update_variants_job(
     job_id: str = Field(..., description="The unique identifier of the bulk update job to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog variant bulk update job by its ID. Optionally include related variant data in the response."""
 
     # Construct request model with validation
@@ -3631,7 +3774,7 @@ async def get_bulk_update_variants_job(
 async def list_bulk_delete_variants_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to show only processing jobs). Omit to retrieve jobs in all statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog variant bulk delete jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3674,7 +3817,7 @@ async def create_catalog_variant_bulk_delete_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this operation."),
     type_: Literal["catalog-variant-bulk-delete-job"] = Field(..., alias="type", description="The type of bulk job being created. Must be set to 'catalog-variant-bulk-delete-job' to indicate this is a variant deletion operation."),
     data: list[_models.CatalogVariantDeleteQueryResourceObject] = Field(..., description="Array of catalog variant identifiers to delete. Accepts up to 100 variants per request with a maximum payload size of 5MB. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk delete job to remove up to 100 catalog variants in a single request. The job is processed asynchronously, with a maximum of 500 jobs allowed in progress simultaneously."""
 
     # Construct request model with validation
@@ -3723,7 +3866,7 @@ async def create_catalog_variant_bulk_delete_job(
 async def get_bulk_delete_variants_job(
     job_id: str = Field(..., description="The unique identifier of the bulk delete job to retrieve. This ID is returned when the job is initially created."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog variant bulk delete job by its ID. Use this to monitor the progress and outcome of asynchronous variant deletion operations."""
 
     # Construct request model with validation
@@ -3763,7 +3906,7 @@ async def get_bulk_delete_variants_job(
 async def list_bulk_create_categories_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports the status field only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog category bulk create jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3806,7 +3949,7 @@ async def create_catalog_categories_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-category-bulk-create-job' to specify this operation creates catalog categories."),
     data: list[_models.CatalogCategoryCreateQueryResourceObject] = Field(..., description="Array of catalog category objects to create. Accepts up to 100 items per request with a maximum payload size of 5MB. Order is preserved for processing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a bulk job to create up to 100 catalog categories in a single request. The job processes asynchronously and allows up to 500 concurrent jobs per account."""
 
     # Construct request model with validation
@@ -3855,7 +3998,7 @@ async def create_catalog_categories_bulk_job(
 async def get_bulk_create_categories_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (format: alphanumeric string)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog category bulk create job by its ID. Optionally include related category resources in the response."""
 
     # Construct request model with validation
@@ -3895,7 +4038,7 @@ async def get_bulk_create_categories_job(
 async def list_bulk_update_categories_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports filtering on the status field only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog category bulk update jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -3938,7 +4081,7 @@ async def create_catalog_category_bulk_update_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category-bulk-update-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-category-bulk-update-job' to indicate this is a bulk category update operation."),
     data: list[_models.CatalogCategoryUpdateQueryResourceObject] = Field(..., description="Array of catalog category objects to update. Supports up to 100 categories per request with a maximum payload size of 5MB. Order is preserved for processing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk update job to modify up to 100 catalog categories in a single request. The job processes asynchronously with a maximum of 500 concurrent jobs allowed per account."""
 
     # Construct request model with validation
@@ -3987,7 +4130,7 @@ async def create_catalog_category_bulk_update_job(
 async def get_bulk_update_categories_job(
     job_id: str = Field(..., description="The unique identifier of the bulk update job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog category bulk update job by its ID. Optionally include related category data in the response."""
 
     # Construct request model with validation
@@ -4027,7 +4170,7 @@ async def get_bulk_update_categories_job(
 async def list_bulk_delete_categories_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Omit to return jobs in all statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog category bulk delete jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -4070,7 +4213,7 @@ async def create_catalog_category_bulk_delete_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category-bulk-delete-job"] = Field(..., alias="type", description="The type of bulk job being created. Must be set to 'catalog-category-bulk-delete-job' to indicate this is a catalog category deletion operation."),
     data: list[_models.CatalogCategoryDeleteQueryResourceObject] = Field(..., description="Array of catalog category identifiers to delete. Accepts up to 100 categories per request. The total payload size must not exceed 5MB."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk delete job to remove up to 100 catalog categories in a single request. The job is processed asynchronously and you can have up to 500 jobs in progress simultaneously."""
 
     # Construct request model with validation
@@ -4119,7 +4262,7 @@ async def create_catalog_category_bulk_delete_job(
 async def get_bulk_delete_categories_job(
     job_id: str = Field(..., description="The unique identifier of the bulk delete job to retrieve. This ID is returned when the bulk delete operation is initiated."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a catalog category bulk delete job by its ID. Use this to monitor the progress of an asynchronous bulk deletion operation."""
 
     # Construct request model with validation
@@ -4167,7 +4310,7 @@ async def create_back_in_stock_subscription(
     email: str | None = Field(None, description="The email address of the profile. Used to identify or create the profile if no profile ID is provided."),
     phone_number: str | None = Field(None, description="The phone number of the profile in E.164 format (e.g., +15005550006). Used to identify or create the profile if no profile ID is provided."),
     external_id: str | None = Field(None, description="An external identifier that links this Klaviyo profile to a profile in another system (such as a point-of-sale system). Format varies based on the external system."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe a profile to receive notifications when a catalog variant is back in stock. The profile can be identified by ID, email, phone number, or external ID, and will receive notifications through their preferred channels (email, SMS, or both)."""
 
     # Construct request model with validation
@@ -4228,7 +4371,7 @@ async def list_items_for_catalog_category(
     id_: str | None = Field(..., alias="id", description="The catalog category identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your category's external ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (e.g., 2026-01-15). Defaults to the latest stable revision if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results. Supports filtering by item IDs (any match), category ID (exact match), item title (contains), or publication status (exact match). Use the format specified in Klaviyo's filtering documentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all items in a specific catalog category. Results can be sorted by creation date and filtered by item IDs, category, title, or publication status, with a maximum of 100 items returned per request."""
 
     # Construct request model with validation
@@ -4272,7 +4415,7 @@ async def list_item_ids_for_catalog_category(
     id_: str | None = Field(..., alias="id", description="The catalog category identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your external category ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results. Supports filtering by item IDs (any match), category ID (exact match), item title (contains), or published status (exact match). Use the format specified in Klaviyo's filtering documentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all item IDs belonging to a specific catalog category. Returns up to 100 items per request and supports filtering by item IDs, category, title, or publication status."""
 
     # Construct request model with validation
@@ -4316,7 +4459,7 @@ async def add_items_to_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for the integration and `$default` for the catalog, followed by your category's external ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.AddItemsToCatalogCategoryBodyDataItem] = Field(..., description="An array of item objects to associate with the category. Each item in the array will be linked to the specified catalog category."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate one or more items with a catalog category by creating item relationships. This operation links items to the specified category within your catalog."""
 
     # Construct request model with validation
@@ -4362,7 +4505,7 @@ async def update_items_for_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: {integration}:::{catalog}:::{external_id}. Use integration type `$custom` and catalog `$default` with your external category ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.UpdateItemsForCatalogCategoryBodyDataItem] = Field(..., description="An array of item relationship objects to associate with the category. Order and structure follow the JSON:API relationships specification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the item relationships associated with a catalog category. This operation modifies which items are linked to the specified category."""
 
     # Construct request model with validation
@@ -4408,7 +4551,7 @@ async def remove_items_from_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: {integration}:::{catalog}:::{external_id}. Use $custom as the integration and $default as the catalog, followed by your external category ID (e.g., $custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL)."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.RemoveItemsFromCatalogCategoryBodyDataItem] = Field(..., description="Array of item identifiers to remove from the category. Each item in the array will be unlinked from the specified category."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove item relationships from a catalog category. Deletes the specified items from the given category, identified by its compound ID."""
 
     # Construct request model with validation
@@ -4454,7 +4597,7 @@ async def list_variants_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Currently only `$custom` integration and `$default` catalog are supported (e.g., `$custom:::$default:::SAMPLE-DATA-ITEM-1`)."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results. Supports filtering by variant IDs (any match), item ID (exact match), SKU (exact match), title (partial match), and published status (exact match). Use the Klaviyo filtering syntax for complex queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all variants associated with a catalog item. Results can be sorted by creation date and are limited to 100 variants per request."""
 
     # Construct request model with validation
@@ -4498,7 +4641,7 @@ async def list_variant_ids_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your external item ID (e.g., `$custom:::$default:::SAMPLE-DATA-ITEM-1`)."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results. Supports filtering by variant IDs (any match), item ID (exact match), SKU (exact match), title (partial match), and published status (exact match). Use the format specified in Klaviyo's filtering documentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all variant IDs associated with a specific catalog item. Results can be filtered and sorted by creation date, with a maximum of 100 variants returned per request."""
 
     # Construct request model with validation
@@ -4542,7 +4685,7 @@ async def list_categories_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your item's external ID."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (or with optional suffix). Defaults to the latest stable revision if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results by category IDs, item ID, or category name. Supports `ids` (any match), `item.id` (exact match), and `name` (partial match) operators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog categories that contain a specific catalog item. Results can be sorted by creation date and are limited to 100 categories per request."""
 
     # Construct request model with validation
@@ -4586,7 +4729,7 @@ async def list_category_ids_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your item's external ID."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to the latest stable version."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter to narrow results by category IDs, item ID, or category name. Supports `ids` (any match), `item.id` (exact match), and `name` (partial match) operators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all catalog categories assigned to a specific catalog item. Returns up to 100 categories per request."""
 
     # Construct request model with validation
@@ -4630,7 +4773,7 @@ async def add_categories_to_catalog_item(
     id_: str = Field(..., alias="id", description="The unique identifier for the catalog item, formatted as a compound ID with three colon-separated segments: integration type, catalog name, and external ID (e.g., $custom:::$default:::SAMPLE-DATA-ITEM-1). Currently only the $custom integration and $default catalog are supported."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.AddCategoriesToCatalogItemBodyDataItem] = Field(..., description="An array of category objects to associate with the catalog item. Each entry represents a category relationship to create."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate one or more categories with a catalog item by creating category relationships. This operation links existing categories to the specified item in your catalog."""
 
     # Construct request model with validation
@@ -4676,7 +4819,7 @@ async def update_categories_for_catalog_item(
     id_: str = Field(..., alias="id", description="The unique identifier for the catalog item, formatted as a compound ID with three colon-separated segments: integration type, catalog name, and external ID. Use the format `$custom:::$default:::` followed by your item's external identifier."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     data: list[_models.UpdateCategoriesForCatalogItemBodyDataItem] = Field(..., description="An array of category objects to associate with the catalog item. Each element defines a category relationship to be added or updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the category relationships for a specific catalog item. This operation allows you to modify which categories are associated with an item in your catalog."""
 
     # Construct request model with validation
@@ -4722,7 +4865,7 @@ async def remove_categories_from_catalog_item(
     id_: str = Field(..., alias="id", description="The catalog item identifier in compound format: {integration}:::{catalog}:::{external_id}. Use $custom for integration and $default for catalog, followed by your item's external ID (e.g., $custom:::$default:::SAMPLE-DATA-ITEM-1)."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.RemoveCategoriesFromCatalogItemBodyDataItem] = Field(..., description="Array of category relationship objects to remove from the catalog item. Each entry specifies a category to unlink."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove category relationships from a catalog item. Specify which categories to unlink from the item using a compound ID that identifies the integration, catalog, and external item reference."""
 
     # Construct request model with validation
@@ -4764,7 +4907,7 @@ async def remove_categories_from_catalog_item(
 
 # Tags: Coupons
 @mcp.tool()
-async def list_coupons(revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified.")) -> dict[str, Any]:
+async def list_coupons(revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all coupons in your Klaviyo account. Use this to view your complete coupon inventory and their details."""
 
     # Construct request model with validation
@@ -4806,7 +4949,7 @@ async def create_coupon(
     external_id: str = Field(..., description="A unique identifier for this coupon in your external systems (such as Shopify or Magento). This ID is used to sync and reference the coupon across integrations."),
     description: str | None = Field(None, description="A human-readable description of the coupon's purpose and terms (e.g., discount percentage, minimum purchase requirements, or promotional details)."),
     monitor_configuration: dict[str, Any] | None = Field(None, description="Configuration settings for monitoring coupon health and usage. Specify thresholds such as low_balance_threshold to trigger alerts when coupon balance falls below a specified amount."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new coupon for use in promotions and discounts. Requires a unique external identifier that maps to your integrated systems like Shopify or Magento."""
 
     # Construct request model with validation
@@ -4853,7 +4996,7 @@ async def create_coupon(
 async def get_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to retrieve (e.g., '10OFF'). This ID is consistent across internal and external integration systems."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific coupon by its ID. The coupon ID matches both the internal identifier and the external ID stored in integrated systems."""
 
     # Construct request model with validation
@@ -4897,7 +5040,7 @@ async def update_coupon(
     type_: Literal["coupon"] = Field(..., alias="type", description="The resource type, which must be 'coupon' to identify this as a coupon update operation."),
     description: str | None = Field(None, description="A human-readable description of the coupon's purpose or offer (e.g., '10% off for purchases over $50'). Optional field for documentation purposes."),
     monitor_configuration: dict[str, Any] | None = Field(None, description="Configuration settings for monitoring the coupon's usage and health, such as balance thresholds. Accepts an object with monitoring parameters like low_balance_threshold."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing coupon's properties such as description and monitoring configuration. Requires the coupon ID and current revision for optimistic concurrency control."""
 
     # Construct request model with validation
@@ -4945,7 +5088,7 @@ async def update_coupon(
 async def delete_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to delete. This ID matches both the internal system ID and the external ID used in integrations (e.g., '10OFF')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a coupon by its ID. This operation requires the coupons:write scope and is subject to rate limits of 3 requests per second (burst) and 60 requests per minute (steady state)."""
 
     # Construct request model with validation
@@ -4985,7 +5128,7 @@ async def delete_coupon(
 async def list_coupon_codes(
     filter_: str = Field(..., alias="filter", description="Filter expression to narrow results by coupon ID(s), profile ID(s), expiration date range, or status. At least one coupon or profile filter is required. Use 'any' operator to match multiple IDs, 'equals' for single matches, and comparison operators (greater-than, less-than, etc.) for date ranges. Format: operator(field,'value') or operator(field,'value1','value2',...)"),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve coupon codes filtered by coupon ID(s) and/or profile ID(s). Use filter parameters to specify which coupons or customer profiles to retrieve codes for, and optionally filter by expiration date or status."""
 
     # Construct request model with validation
@@ -5031,7 +5174,7 @@ async def create_coupon_code(
     unique_code: str = Field(..., description="A unique alphanumeric string assigned to each customer or profile to identify and track this specific coupon code instance."),
     id_: str = Field(..., alias="id", description="Unique identifier for the coupon code (e.g., '10OFF'). Used as a reference key for this coupon code resource."),
     expires_at: str | None = Field(None, description="Optional expiration date and time in ISO 8601 format (e.g., 2022-11-08T00:00:00+00:00). If omitted or null, the code automatically expires 1 year from creation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a unique coupon code linked to a specific coupon, enabling per-customer or per-profile discount distribution. The code will automatically expire after 1 year unless a custom expiration date is provided."""
 
     # Construct request model with validation
@@ -5083,7 +5226,7 @@ async def create_coupon_code(
 async def get_coupon_code(
     id_: str = Field(..., alias="id", description="The combined identifier for the coupon code, consisting of the unique code and its associated coupon ID (e.g., '10OFF-ASD325FHK324UJDOI2M3JNES99')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific coupon code by its combined identifier (code + coupon ID). Returns the full coupon code details including associated metadata."""
 
     # Construct request model with validation
@@ -5127,7 +5270,7 @@ async def update_coupon_code(
     type_: Literal["coupon-code"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'coupon-code'."),
     status: Literal["ASSIGNED_TO_PROFILE", "DELETING", "PROCESSING", "UNASSIGNED", "USED", "VERSION_NOT_ACTIVE"] | None = Field(None, description="The current status of the coupon code in the system. Valid statuses include: ASSIGNED_TO_PROFILE (linked to a customer), UNASSIGNED (available for use), USED (already redeemed), PROCESSING (being created), DELETING (being removed), or VERSION_NOT_ACTIVE (associated coupon is inactive)."),
     expires_at: str | None = Field(None, description="The date and time when this coupon code expires, specified in ISO 8601 format with timezone (e.g., '2022-11-08T00:00:00+00:00'). If omitted or set to null, the expiration will automatically default to one year from the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status or expiration date of a coupon code. This operation allows you to modify coupon code lifecycle properties such as assignment status and expiration timing."""
 
     # Construct request model with validation
@@ -5175,7 +5318,7 @@ async def update_coupon_code(
 async def delete_coupon_code(
     id_: str = Field(..., alias="id", description="The unique identifier combining the coupon code and its associated coupon ID (e.g., '10OFF-ASD325FHK324UJDOI2M3JNES99')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a coupon code by its identifier. The operation will fail if the coupon code has an assigned profile."""
 
     # Construct request model with validation
@@ -5215,7 +5358,7 @@ async def delete_coupon_code(
 async def list_coupon_code_bulk_create_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports filtering on the status field only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all coupon code bulk create jobs with optional filtering by status. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -5258,7 +5401,7 @@ async def create_coupon_code_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
     type_: Literal["coupon-code-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'coupon-code-bulk-create-job' to specify this operation."),
     data: list[_models.CouponCodeCreateQueryResourceObject] = Field(..., description="Array of coupon code definitions to create in this bulk job. Maximum 1,000 items per job. Each item should contain the coupon code configuration details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a bulk job to create up to 1,000 coupon codes at once. You can queue up to 100 jobs simultaneously, with rate limits of 75 requests per second (burst) or 700 per minute (steady state)."""
 
     # Construct request model with validation
@@ -5307,7 +5450,7 @@ async def create_coupon_code_bulk_job(
 async def get_coupon_code_bulk_create_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a coupon code bulk create job by its ID. Use this to monitor the progress and results of asynchronous bulk coupon code creation operations."""
 
     # Construct request model with validation
@@ -5347,7 +5490,7 @@ async def get_coupon_code_bulk_create_job(
 async def get_coupon_for_coupon_code(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon code to retrieve the associated coupon for (e.g., '10OFF')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the coupon associated with a specific coupon code ID. This operation allows you to look up the relationship between a coupon code and its corresponding coupon details."""
 
     # Construct request model with validation
@@ -5387,7 +5530,7 @@ async def get_coupon_for_coupon_code(
 async def get_coupon_relationship_for_coupon_code(
     id_: str = Field(..., alias="id", description="The coupon code ID to look up (e.g., '10OFF'). This is the identifier of the coupon code whose associated coupon you want to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the coupon relationship associated with a specific coupon code. Use this to find which coupon is linked to a given coupon code ID."""
 
     # Construct request model with validation
@@ -5428,7 +5571,7 @@ async def list_coupon_codes_for_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to retrieve associated codes for (e.g., '10OFF')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results by expiration date (using comparison operators), status, or related coupon/profile identifiers. Supports multiple filter conditions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all coupon codes associated with a specific coupon. Supports filtering by expiration date, status, and related coupon or profile IDs."""
 
     # Construct request model with validation
@@ -5472,7 +5615,7 @@ async def list_coupon_code_ids_for_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to retrieve associated coupon codes for (e.g., '10OFF')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (defaults to 2026-01-15). Specify a different revision date if needed for API version compatibility."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results. Supports filtering by expiration date (using comparison operators like less-than or greater-than), status (exact match), coupon ID, or profile ID. See API documentation for filter syntax details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of coupon code IDs associated with a specific coupon. Use optional filters to narrow results by expiration date, status, or related coupon/profile IDs."""
 
     # Construct request model with validation
@@ -5516,7 +5659,7 @@ async def list_data_sources(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
     fields_data_source: list[Literal["description", "namespace", "title", "visibility"]] | None = Field(None, alias="fieldsdata-source", description="Specify which data source fields to include in the response for sparse fieldset optimization. Omit to return all available fields."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of data sources to return per page. Defaults to 20 results; valid range is 1 to 100 items per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all data sources configured in your account. Supports pagination and sparse fieldset selection to optimize response payload."""
 
     # Construct request model with validation
@@ -5565,7 +5708,7 @@ async def create_data_source(
     visibility: Literal["private", "shared"] | None = Field(None, description="Controls who can access this data source. Choose 'private' for account-only access or 'shared' for broader visibility. Defaults to 'private'."),
     description: str | None = Field(None, description="Optional descriptive text providing additional context about the data source's purpose or contents."),
     namespace: str | None = Field(None, description="The organizational container for this data source. Defaults to 'custom-objects' if not specified, which is the standard namespace for custom object definitions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new data source within an account namespace. Data sources serve as containers for custom object definitions and can be configured with different visibility levels."""
 
     # Construct request model with validation
@@ -5613,7 +5756,7 @@ async def get_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier of the data source to retrieve."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_data_source: list[Literal["description", "namespace", "title", "visibility"]] | None = Field(None, alias="fieldsdata-source", description="Optional list of specific data source fields to include in the response. Omit to retrieve all available fields. See API documentation for valid field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific data source by ID from your account. Use this to fetch detailed information about a configured data source."""
 
     # Construct request model with validation
@@ -5659,7 +5802,7 @@ async def get_data_source(
 async def delete_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier of the data source to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a data source from your account. This operation requires the data source ID and the current API revision to ensure consistency."""
 
     # Construct request model with validation
@@ -5702,7 +5845,7 @@ async def create_data_source_records_bulk(
     data_source_data_type: Literal["data-source"] = Field(..., alias="data_sourceDataType", description="The resource type identifier for the data source relationship, which must be 'data-source'."),
     data: list[_models.DataSourceRecordResourceObject] = Field(..., description="Array of record objects to import. Supports up to 500 records per request, with each record not exceeding 512KB in size."),
     id_: str = Field(..., alias="id", description="The unique identifier of the data source to which these records belong (e.g., '01J7C23V8XWMRG13FMD7VZN6GW')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a bulk import job to create up to 500 data source records in a single request. The operation accepts a batch of records with a maximum payload size of 4MB total and 512KB per individual record."""
 
     # Construct request model with validation
@@ -5760,7 +5903,7 @@ async def create_data_source_record(
     data_source_data_type: Literal["data-source"] = Field(..., alias="data_sourceDataType", description="The type identifier for the data source relationship. Must be 'data-source'."),
     record: dict[str, Any] = Field(..., description="The record object containing the data to be imported. Must not exceed 512KB in size."),
     id_: str = Field(..., alias="id", description="The unique identifier of the data source to which this record belongs (e.g., 01J7C23V8XWMRG13FMD7VZN6GW)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a single data source record import job. The record payload must not exceed 512KB. Requires custom-objects:write scope."""
 
     # Construct request model with validation
@@ -5822,7 +5965,7 @@ async def create_profile_deletion_job(
     profile_data_type: Literal["profile"] = Field(..., alias="profileDataType", description="Resource type identifier for the profile being deleted. Must be set to 'profile'."),
     email: str | None = Field(None, description="Email address of the individual whose profile(s) should be deleted. Provide this, phone_number, or neither—but not multiple identifier types together."),
     phone_number: str | None = Field(None, description="Phone number in E.164 format (e.g., +1 country code and number) of the individual whose profile(s) should be deleted. Provide this, email, or neither—but not multiple identifier types together."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Request asynchronous deletion of all profiles matching a specified identifier (email, phone number, or profile ID). Only one identifier type may be provided per request. Deleted profiles will appear on the Deleted Profiles page once processing completes."""
 
     # Construct request model with validation
@@ -5877,7 +6020,7 @@ async def list_events(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter events by specific criteria using comparison operators. Supports filtering by metric_id, profile_id, profile relationship, or datetime/timestamp ranges (e.g., events after a specific date). Custom metrics are not supported in metric_id filters. See API documentation for detailed filter syntax."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of events to return per page. Defaults to 200 if not specified; must be between 1 and 1000.", ge=1, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all events from an account with optional filtering by metric, profile, or datetime range. Returns up to 200 events per page."""
 
     # Construct request model with validation
@@ -5927,7 +6070,7 @@ async def create_event(
     value_currency: str | None = Field(None, description="ISO 4217 currency code for the event value (e.g., USD, EUR). Should be provided if a value is specified."),
     unique_id: str | None = Field(None, description="Unique identifier for deduplication. If the same unique_id is submitted for the same profile and metric, only the first processed event is recorded. Defaults to timestamp precision of one second, limiting one event per profile per second."),
     profile: _models.CreateEventBodyDataAttributesProfile | None = Field(None, description="Profile associated with the event: email, phone, name, location, and custom properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Track a profile's activity by creating a new event. This operation also allows you to create a new profile or update an existing profile's properties in a single request. The event is validated and queued for processing immediately, though processing may not complete instantly."""
 
     # Construct request model with validation
@@ -5982,7 +6125,7 @@ async def create_event(
 async def get_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific event by its ID. Returns the complete event details for the requested event."""
 
     # Construct request model with validation
@@ -6023,7 +6166,7 @@ async def create_events_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["event-bulk-create-job"] = Field(..., alias="type", description="The type of bulk job being created. Must be set to 'event-bulk-create-job' to indicate this is an event creation operation."),
     data: list[_models.EventsBulkCreateQueryResourceObject] = Field(..., description="Array of event objects to create, with a maximum of 1,000 events per request and 5MB total payload size. Each event must include at least one profile identifier (id, email, or phone_number) and a metric name. Individual string values cannot exceed 100KB."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a batch of up to 1,000 events for one or more profiles in a single request. This operation supports creating new profiles or updating existing profile properties alongside event creation."""
 
     # Construct request model with validation
@@ -6072,7 +6215,7 @@ async def create_events_bulk(
 async def get_metric_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event for which to retrieve the associated metric."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metric associated with a specific event. This operation returns metric data linked to the event identified by the provided event ID."""
 
     # Construct request model with validation
@@ -6112,7 +6255,7 @@ async def get_metric_for_event(
 async def list_metrics_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event for which to retrieve associated metrics."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all metrics associated with a specific event. Returns a list of related metric identifiers linked to the event."""
 
     # Construct request model with validation
@@ -6152,7 +6295,7 @@ async def list_metrics_for_event(
 async def get_profile_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event whose associated profile you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the profile associated with a specific event. Returns the profile data linked to the event identified by the provided event ID."""
 
     # Construct request model with validation
@@ -6192,7 +6335,7 @@ async def get_profile_for_event(
 async def get_profile_id_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event for which you want to retrieve the associated profile relationship."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the profile relationship for a specific event, returning the associated profile ID. This operation allows you to identify which profile is linked to a given event."""
 
     # Construct request model with validation
@@ -6233,7 +6376,7 @@ async def list_flows(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter flows using comparison operators on specific fields. Supports filtering by id (any match), name (contains, starts-with, ends-with, equals), status (equals), archived status (equals), creation/update timestamps (equals, greater-than, greater-or-equal, less-than, less-or-equal), and trigger_type (equals). See API documentation for filter syntax."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of flows to return per page. Must be between 1 and 50, defaults to 50.", ge=1, le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all flows in an account with cursor-based pagination. Returns up to 50 flows per request, filterable by multiple criteria including name, status, and timestamps."""
 
     # Construct request model with validation
@@ -6275,7 +6418,7 @@ async def list_flows(
 async def get_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific flow by its ID. Returns the complete flow definition and configuration for the given flow identifier."""
 
     # Construct request model with validation
@@ -6318,7 +6461,7 @@ async def update_flow_status(
     data_id: str = Field(..., alias="dataId", description="The unique identifier of the flow being updated; must match the flow ID in the path parameter."),
     type_: Literal["flow"] = Field(..., alias="type", description="The resource type identifier; must be set to 'flow'."),
     status: str = Field(..., description="The target status for the flow: 'draft' for unpublished changes, 'manual' for manual execution mode, or 'live' for active production status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status of a flow and all its associated actions. The flow can be transitioned to draft, manual, or live status."""
 
     # Construct request model with validation
@@ -6366,7 +6509,7 @@ async def update_flow_status(
 async def delete_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow to delete (e.g., XVTP5Q)."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specify the revision to ensure compatibility with the intended API version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a flow by its ID. This operation requires the flow's current revision to ensure safe deletion and prevent accidental overwrites in concurrent scenarios."""
 
     # Construct request model with validation
@@ -6406,7 +6549,7 @@ async def delete_flow(
 async def get_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific flow action by its ID. Returns the complete flow action details including configuration and metadata."""
 
     # Construct request model with validation
@@ -6446,7 +6589,7 @@ async def get_flow_action(
 async def get_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific flow message by its ID. Returns the complete message details from the associated flow."""
 
     # Construct request model with validation
@@ -6488,7 +6631,7 @@ async def list_actions_for_flow(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by action properties. Supports filtering on: id (any operator), action_type (any/equals), status (equals), and created/updated timestamps (equals, greater-or-equal, greater-than, less-or-equal, less-than operators). See API documentation for filter syntax details."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of actions to return per page. Must be between 1 and 50, defaults to 50.", ge=1, le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all flow actions associated with a specific flow. Results are paginated with a maximum of 50 actions per request using cursor-based pagination."""
 
     # Construct request model with validation
@@ -6533,7 +6676,7 @@ async def list_action_ids_for_flow(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by action properties. Supports filtering on: id (any match), action_type (any or exact match), status (exact match), and created/updated timestamps (exact match or comparison operators). See API documentation for filter syntax."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results to return per page. Must be between 1 and 50, defaults to 50.", ge=1, le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all action IDs associated with a specific flow. Returns up to 100 results per request with cursor-based pagination support."""
 
     # Construct request model with validation
@@ -6576,7 +6719,7 @@ async def list_action_ids_for_flow(
 async def get_tags_for_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow for which to retrieve associated tags."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific flow. Returns a collection of tags linked to the flow identified by the provided ID."""
 
     # Construct request model with validation
@@ -6616,7 +6759,7 @@ async def get_tags_for_flow(
 async def list_tag_ids_for_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow whose associated tags you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tag IDs associated with a specific flow. Returns a collection of tag identifiers linked to the given flow resource."""
 
     # Construct request model with validation
@@ -6656,7 +6799,7 @@ async def list_tag_ids_for_flow(
 async def get_flow_for_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action for which to retrieve the associated flow."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). This parameter controls which version of the API contract is used for the request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the flow associated with a specific flow action by its ID. This operation requires the flows:read scope and is subject to rate limits of 3 requests per second (burst) and 60 requests per minute (steady state)."""
 
     # Construct request model with validation
@@ -6696,7 +6839,7 @@ async def get_flow_for_flow_action(
 async def get_flow_relationship_for_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action for which to retrieve the associated flow."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the flow associated with a specific flow action by its ID. Returns the flow relationship data for the given action."""
 
     # Construct request model with validation
@@ -6738,7 +6881,7 @@ async def list_flow_action_messages(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by message properties. Supports filtering on id (any operator), name (contains, ends-with, equals, starts-with), created timestamp, and updated timestamp (all timestamp filters support equals, greater-than, greater-or-equal, less-than, less-or-equal operators)."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of messages to return per page. Must be between 1 and 50, defaults to 50.", ge=1, le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all flow messages associated with a specific flow action. Returns up to 50 messages per request with cursor-based pagination support."""
 
     # Construct request model with validation
@@ -6783,7 +6926,7 @@ async def list_message_ids_for_flow_action(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by message properties. Supports filtering on `name` (contains, ends-with, equals, starts-with), `created` (equals, greater-or-equal, greater-than, less-or-equal, less-than), and `updated` (equals, greater-or-equal, greater-than, less-or-equal, less-than) fields."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of message relationships to return per page. Must be between 1 and 50, defaults to 50.", ge=1, le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all flow message IDs associated with a specific flow action. Results are paginated with a maximum of 50 relationships per request using cursor-based pagination."""
 
     # Construct request model with validation
@@ -6826,7 +6969,7 @@ async def list_message_ids_for_flow_action(
 async def get_flow_action_for_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated flow action."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the flow action associated with a specific flow message. This operation returns the action configuration that should be executed for the given message within a flow."""
 
     # Construct request model with validation
@@ -6866,7 +7009,7 @@ async def get_flow_action_for_message(
 async def get_flow_action_for_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated flow action relationship."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the flow action relationship associated with a specific flow message. This returns the relationship link to the flow action that governs the behavior of the given flow message."""
 
     # Construct request model with validation
@@ -6906,7 +7049,7 @@ async def get_flow_action_for_flow_message(
 async def get_template_for_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated template."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the template associated with a specific flow message. Returns the template configuration used by the flow message."""
 
     # Construct request model with validation
@@ -6946,7 +7089,7 @@ async def get_template_for_flow_message(
 async def get_template_id_for_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated template ID."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the ID of the template associated with a specific flow message. This operation returns the relationship between a flow message and its related template."""
 
     # Construct request model with validation
@@ -6988,7 +7131,7 @@ async def list_forms(
     fields_form: list[Literal["ab_test", "created_at", "name", "status", "updated_at"]] | None = Field(None, alias="fieldsform", description="Specify which form fields to include in the response using sparse fieldsets for optimized data retrieval."),
     filter_: str | None = Field(None, alias="filter", description="Filter forms by id, name, ab_test status, creation/update timestamps, or status. Supports operators like equals, contains, any, and temporal comparisons (greater-than, less-than, etc.)."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of forms to return per page. Must be between 1 and 100 items; defaults to 20.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all forms in an account with optional filtering, field selection, and pagination. Supports filtering by form properties like name, status, and timestamps."""
 
     # Construct request model with validation
@@ -7037,7 +7180,7 @@ async def create_form(
     status: Literal["draft", "live"] = Field(..., description="The initial status of the form: either 'draft' for unpublished forms or 'live' for published forms."),
     ab_test: bool = Field(..., description="A boolean flag indicating whether this form has an A/B test configured. Set to true to enable A/B testing for this form."),
     name: str = Field(..., description="The display name of the form. Use a descriptive name that identifies the form's purpose (e.g., 'Cyber Monday Deals')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new form with specified configuration, including versioning, status, and optional A/B testing setup. The form will be created in the specified status (draft or live) and can be configured for A/B testing."""
 
     # Construct request model with validation
@@ -7088,7 +7231,7 @@ async def get_form(
     id_: str = Field(..., alias="id", description="The unique identifier of the form to retrieve (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format, with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
     fields_form: list[Literal["ab_test", "created_at", "definition", "definition.versions", "name", "status", "updated_at"]] | None = Field(None, alias="fieldsform", description="Optional sparse fieldset to limit returned form fields. See API documentation for supported field names and filtering syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific form by its ID. Use optional field filtering to customize the response payload."""
 
     # Construct request model with validation
@@ -7134,7 +7277,7 @@ async def get_form(
 async def delete_form(
     id_: str = Field(..., alias="id", description="The unique identifier of the form to delete (e.g., 'Y6nRLr')"),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a form by its ID. This operation requires the form ID and API revision to be specified."""
 
     # Construct request model with validation
@@ -7175,7 +7318,7 @@ async def get_form_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the form version to retrieve (e.g., '1234567')."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_form_version: list[Literal["ab_test", "ab_test.variation_name", "created_at", "form_type", "status", "updated_at", "variation_name"]] | None = Field(None, alias="fieldsform-version", description="Optional sparse fieldset to limit returned fields for the form-version resource. Reduces response payload by selecting only needed fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific form version by its ID. Use optional field filtering to customize the response payload."""
 
     # Construct request model with validation
@@ -7224,7 +7367,7 @@ async def list_versions_for_form(
     fields_form_version: list[Literal["ab_test", "ab_test.variation_name", "created_at", "form_type", "status", "updated_at", "variation_name"]] | None = Field(None, alias="fieldsform-version", description="Specify which form-version fields to include in the response to reduce payload size. Omit to return all fields."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by form type (popup, embedded, etc.), status, or creation/update timestamps. Supports equality checks and date range comparisons (greater than, less than, etc.)."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results per page for pagination. Defaults to 20, with a range of 1 to 100 results.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a specific form, with optional filtering by form type, status, or date range, and support for sparse fieldsets and pagination."""
 
     # Construct request model with validation
@@ -7272,7 +7415,7 @@ async def list_version_ids_for_form(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by form type (any or equals), status (equals), or timestamps (created_at/updated_at with greater-than, greater-or-equal, less-than, less-or-equal operators). See API documentation for filter syntax."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results per page. Must be between 1 and 100, defaults to 20.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the version IDs for a specific form. Supports filtering by form type, status, and creation/update timestamps, with pagination support."""
 
     # Construct request model with validation
@@ -7316,7 +7459,7 @@ async def get_form_for_form_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the form version you want to retrieve the form for (e.g., '1234567')."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_form: list[Literal["ab_test", "created_at", "name", "status", "updated_at"]] | None = Field(None, alias="fieldsform", description="Optional sparse fieldset to limit which form fields are returned in the response. Specify an array of field names to include only those fields in the result."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the form associated with a specific form version. Use this to access the complete form definition linked to a particular version."""
 
     # Construct request model with validation
@@ -7362,7 +7505,7 @@ async def get_form_for_form_version(
 async def get_form_id_for_form_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the form version for which you want to retrieve the associated form ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the ID of the form associated with a specific form version. This operation returns the relationship between a form version and its parent form."""
 
     # Construct request model with validation
@@ -7403,7 +7546,7 @@ async def list_images(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using field-specific operators. Supports filtering by ID (any/equals), updated_at (comparison operators), format (any/equals), name (text matching), size (numeric comparison), and hidden status (any/equals). Provide filter expressions in the format: operator(field,'value')."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of images to return per page. Defaults to 20 results; minimum is 1, maximum is 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all images in your account with optional filtering and pagination. Supports filtering by ID, update date, format, name, size, and visibility status."""
 
     # Construct request model with validation
@@ -7448,7 +7591,7 @@ async def import_image_from_url(
     import_from_url: str = Field(..., description="The source URL or base64-encoded data URI for the image to import. Accepts standard HTTP/HTTPS URLs or data URIs in the format data:image/[format];base64,[encoded_data]. Supported formats are JPEG, PNG, and GIF, with a maximum file size of 5MB."),
     name: str | None = Field(None, description="Optional display name for the imported image. If omitted, the filename from the URL will be used. If the name matches an existing image, a numeric suffix will be automatically appended to ensure uniqueness."),
     hidden: bool | None = Field(None, description="Optional flag to exclude this image from the asset library UI. When true, the image is stored but not displayed in browsable asset lists. Defaults to false (image is visible)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import an image into your asset library from a publicly accessible URL or base64-encoded data URI. Supports JPEG, PNG, and GIF formats up to 5MB in size."""
 
     # Construct request model with validation
@@ -7495,7 +7638,7 @@ async def import_image_from_url(
 async def get_image(
     id_: str = Field(..., alias="id", description="The unique identifier of the image to retrieve (e.g., '7'). This ID must correspond to an existing image in the system."),
     revision: str = Field(..., description="The API endpoint revision to use for this request, specified in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). This ensures compatibility with specific API versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific image by its ID. Returns the image metadata and content for the requested image resource."""
 
     # Construct request model with validation
@@ -7539,7 +7682,7 @@ async def update_image(
     type_: Literal["image"] = Field(..., alias="type", description="The resource type; must be set to 'image'"),
     name: str | None = Field(None, description="A display name for the image; optional and can be any string value"),
     hidden: bool | None = Field(None, description="Controls image visibility in the asset library; when true, the image is hidden from the library view"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an image's metadata, including its name and visibility settings. Requires the image ID and API revision to be specified."""
 
     # Construct request model with validation
@@ -7589,7 +7732,7 @@ async def create_image_from_file(
     file_: str = Field(..., alias="file", description="The image file to upload as binary data. Supported formats: JPEG, PNG, GIF. Maximum file size is 5MB."),
     name: str | None = Field(None, description="Optional name for the image. If not provided, defaults to the original filename. If the name matches an existing image, a numeric suffix will be automatically added."),
     hidden: bool | None = Field(None, description="If true, the image will be hidden from the asset library. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload an image file to create a new image asset. Supports JPEG, PNG, and GIF formats up to 5MB. For importing images from URLs or data URIs, use the Upload Image From URL endpoint instead."""
 
     # Construct request model with validation
@@ -7622,6 +7765,7 @@ async def create_image_from_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -7633,7 +7777,7 @@ async def list_lists(
     revision: str = Field(..., description="API version in YYYY-MM-DD format (e.g., 2026-01-15). Defaults to 2026-01-15 if not specified."),
     fields_list: list[Literal["created", "name", "opt_in_process", "updated"]] | None = Field(None, alias="fieldslist", description="Specify which list fields to include in the response for sparse fieldset optimization. Reduces payload size by returning only requested fields."),
     filter_: str | None = Field(None, alias="filter", description="Filter lists by name, id, creation date, or last update date. Supports exact matching for name and id, or date range queries using greater-than operators. Use the format: operator(field,[values])."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all lists in your account with optional filtering and field selection. Results are paginated with a maximum of 10 lists per page."""
 
     # Construct request model with validation
@@ -7680,7 +7824,7 @@ async def create_list(
     type_: Literal["list"] = Field(..., alias="type", description="The resource type being created. Must be set to 'list' for this operation."),
     name: str = Field(..., description="A descriptive name for the list to help identify it in your account (e.g., 'Newsletter', 'Product Updates'). Used for display and organization purposes."),
     opt_in_process: Literal["double_opt_in", "single_opt_in"] | None = Field(None, description="The subscriber opt-in verification method for this list: 'double_opt_in' requires confirmation via email, while 'single_opt_in' adds subscribers immediately. If not specified, your account's default opt-in process will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new mailing list for managing subscribers. The list will be configured with your specified name and opt-in process preference."""
 
     # Construct request model with validation
@@ -7728,7 +7872,7 @@ async def get_list(
     id_: str = Field(..., alias="id", description="The unique identifier for the list, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
     fields_list: list[Literal["created", "name", "opt_in_process", "profile_count", "updated"]] | None = Field(None, alias="fieldslist", description="Optional array of field names to include in the response for sparse fieldsets. Omit to return all default fields. See API documentation for available fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific list by its ID. Use optional field selection to customize the response payload and control rate limit impact."""
 
     # Construct request model with validation
@@ -7778,7 +7922,7 @@ async def update_list(
     type_: Literal["list"] = Field(..., alias="type", description="The resource type, which must be 'list' for this operation."),
     name: str | None = Field(None, description="A descriptive name for the list to help identify it (e.g., 'Newsletter'). Optional field."),
     opt_in_process: Literal["double_opt_in", "single_opt_in"] | None = Field(None, description="The opt-in process type for this list: 'double_opt_in' requires confirmation, while 'single_opt_in' adds subscribers immediately. Optional field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a list's name and opt-in process settings. Requires the list ID in both the URL path and request body, along with the API revision date."""
 
     # Construct request model with validation
@@ -7826,7 +7970,7 @@ async def update_list(
 async def delete_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list to delete, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a list by its ID. This action cannot be undone and will remove the list and all associated data."""
 
     # Construct request model with validation
@@ -7866,7 +8010,7 @@ async def delete_list(
 async def list_tags_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier for the list, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific list. Returns a collection of tags linked to the given list ID."""
 
     # Construct request model with validation
@@ -7906,7 +8050,7 @@ async def list_tags_for_list(
 async def list_tag_ids_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier for the list, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific list. Returns tag IDs that are linked to the given list."""
 
     # Construct request model with validation
@@ -7948,7 +8092,7 @@ async def list_profiles_for_list(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., 2026-01-15). Defaults to the latest version if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter profiles by email, phone number, push token, or join date. Supports exact matching and range operators (greater-than, less-than, etc.) for dates. Use the format specified in the API filtering guide."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of profiles to return per page. Must be between 1 and 100. Defaults to 20 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all profiles within a specific list. Optionally filter by email, phone number, push token, or group join date, and sort results by join date in ascending or descending order."""
 
     # Construct request model with validation
@@ -7993,7 +8137,7 @@ async def list_profile_ids_for_list(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., '2026-01-15'). Defaults to the latest version if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter to narrow results by profile attributes. Supports filtering by email, phone number, push token, Klaviyo ID (_kx), or group join date. Use operators like 'equals', 'any', 'greater-than', or 'less-than' depending on the field. See API documentation for filter syntax."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results per page. Must be between 1 and 100. Defaults to 20 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the profile IDs that are members of a specific list. Use filtering to narrow results by email, phone number, push token, or other profile attributes, and pagination to manage large result sets."""
 
     # Construct request model with validation
@@ -8037,7 +8181,7 @@ async def add_profiles_to_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list to which profiles will be added."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     data: list[_models.AddProfilesToListBodyDataItem] = Field(..., description="Array of profile objects to add to the list. Maximum 1000 profiles per request. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more profiles to a list. Accepts up to 1000 profiles per request. For granting email or SMS marketing consent, use the Subscribe Profiles endpoint instead."""
 
     # Construct request model with validation
@@ -8083,7 +8227,7 @@ async def remove_profiles_from_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list from which profiles will be removed."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
     data: list[_models.RemoveProfilesFromListBodyDataItem] = Field(..., description="An array of profiles to remove from the list. Supports up to 1000 profiles per request. Each item should contain the profile identifier in the format expected by the API."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more profiles from a marketing list. Removed profiles will no longer receive marketing communications from that list, but their overall consent and subscription status remain unchanged."""
 
     # Construct request model with validation
@@ -8128,7 +8272,7 @@ async def remove_profiles_from_list(
 async def list_flows_triggered_by_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list (generated by Klaviyo) for which you want to find associated flow triggers."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all automation flows that are configured to trigger when the specified list is used as a trigger source. This helps identify which workflows depend on a particular list."""
 
     # Construct request model with validation
@@ -8168,7 +8312,7 @@ async def list_flows_triggered_by_list(
 async def list_flow_trigger_ids_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list, generated by Klaviyo (e.g., 'Y6nRLr'). This ID specifies which list's flow triggers you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the IDs of all flows that are triggered by a specific list. This helps identify which automation workflows depend on a given list as their trigger source."""
 
     # Construct request model with validation
@@ -8208,7 +8352,7 @@ async def list_flow_trigger_ids_for_list(
 async def list_metrics(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter metrics by integration name or category using equality operators. Specify as a filter expression (e.g., equals(integration.name,'value') or equals(integration.category,'value'))."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all metrics in your account with optional filtering by integration name or category. Returns up to 200 results per page."""
 
     # Construct request model with validation
@@ -8250,7 +8394,7 @@ async def list_metrics(
 async def get_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific metric by its ID. Returns the metric details for the specified metric identifier."""
 
     # Construct request model with validation
@@ -8291,7 +8435,7 @@ async def get_metric_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric property to retrieve (UUID format)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_metric_property: list[Literal["inferred_type", "label", "property", "sample_values"]] | None = Field(None, alias="fieldsmetric-property", description="Optional sparse fieldset to limit the response to specific metric property fields. Specify which fields to include in the response to optimize payload size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific metric property by its ID. Use this to fetch detailed information about a metric property for inspection or integration purposes."""
 
     # Construct request model with validation
@@ -8334,7 +8478,7 @@ async def get_metric_property(
 
 # Tags: Metrics
 @mcp.tool()
-async def list_custom_metrics(revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified.")) -> dict[str, Any]:
+async def list_custom_metrics(revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom metrics configured in your account. This operation requires the metrics:read scope and is subject to rate limits of 3 requests per second (burst) and 60 requests per minute (steady state)."""
 
     # Construct request model with validation
@@ -8376,7 +8520,7 @@ async def create_custom_metric(
     name: str = Field(..., description="Unique name for the custom metric within your account. Duplicate names will be rejected with a 400 error."),
     aggregation_method: Literal["count", "value"] = Field(..., description="Aggregation method determining how metric measurements are combined. Use 'value' for revenue-based metrics (like Placed Order) or 'count' for conversion-based metrics (like Active on Site)."),
     metric_groups: list[_models.CustomMetricGroup] = Field(..., description="Array of metric groups to associate with this custom metric. Specifies the grouping categories for organizing metric data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new custom metric for tracking account-specific measurements. Custom metrics require a unique name and aggregation method to define how measurements are combined."""
 
     # Construct request model with validation
@@ -8426,7 +8570,7 @@ async def create_custom_metric(
 async def get_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric to retrieve, formatted as a hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a custom metric by its unique identifier. Returns the metric definition and configuration for the specified custom metric ID."""
 
     # Construct request model with validation
@@ -8471,7 +8615,7 @@ async def update_custom_metric(
     aggregation_method: Literal["count", "value"] = Field(..., description="The aggregation method determines how metric measurements are combined. Use 'value' for revenue-based metrics (e.g., Placed Order) or 'count' for conversion-based metrics (e.g., Active on Site)."),
     metric_groups: list[_models.CustomMetricGroup] = Field(..., description="An array of metric group configurations associated with this custom metric. Specify the order and structure of each group as required by your metric definition."),
     name: str | None = Field(None, description="The display name for the custom metric. Names must be unique within your account; attempting to use a duplicate name will result in a 400 error."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing custom metric by ID. Modify the metric's name, aggregation method, and metric groups while maintaining the metric's identity and revision."""
 
     # Construct request model with validation
@@ -8522,7 +8666,7 @@ async def update_custom_metric(
 async def delete_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric to delete, formatted as a 32-character hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom metric by its ID. This operation requires the metrics:write scope and is subject to rate limits of 3 requests per second (burst) or 60 per minute (steady state)."""
 
     # Construct request model with validation
@@ -8559,7 +8703,7 @@ async def delete_custom_metric(
 
 # Tags: Metrics
 @mcp.tool()
-async def list_mapped_metrics(revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with an optional suffix. Defaults to 2026-01-15 if not specified.")) -> dict[str, Any]:
+async def list_mapped_metrics(revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with an optional suffix. Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all mapped metrics configured in your account. This operation returns the complete set of metrics that have been mapped for use in your system."""
 
     # Construct request model with validation
@@ -8598,7 +8742,7 @@ async def list_mapped_metrics(revision: str = Field(..., description="The API en
 async def get_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The metric type identifier. Must be one of the supported conversion event types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a mapped metric by its identifier. Mapped metrics represent conversion events tracked across your analytics platform, such as revenue, product views, or checkout initiations."""
 
     # Construct request model with validation
@@ -8644,7 +8788,7 @@ async def update_mapped_metric(
     type_: Literal["mapped-metric"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'mapped-metric'."),
     metric_data_type: Literal["metric"] = Field(..., alias="metricDataType", description="The resource type identifier for the metric relationship. Must be set to 'metric'."),
     custom_metric_data_type: Literal["custom-metric"] = Field(..., alias="custom_metricDataType", description="The resource type identifier for the custom metric relationship. Must be set to 'custom-metric'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a mapped metric to change its associations with standard or custom metrics. Use null values to unset metric mappings."""
 
     # Construct request model with validation
@@ -8707,7 +8851,7 @@ async def query_metric_aggregates(
     by: list[Literal["$attributed_channel", "$attributed_flow", "$attributed_message", "$attributed_variation", "$campaign_channel", "$flow", "$flow_channel", "$message", "$message_send_cohort", "$usage_amount", "$value_currency", "$variation", "$variation_send_cohort", "Bot Click", "Bounce Type", "Campaign Name", "Client Canonical", "Client Name", "Client Type", "Email Domain", "Failure Source", "Failure Type", "From Number", "From Phone Region", "Inbox Provider", "List", "Message Name", "Message Type", "Method", "Segment Count", "Subject", "To Number", "To Phone Region", "URL", "form_id"]] | None = Field(None, description="Optional attributes to partition results by, such as '$message' for message type. Enables multi-dimensional analysis of aggregated data."),
     return_fields: list[str] | None = Field(None, description="Optional list of fields to include in the response. If omitted, all available fields are returned."),
     timezone_: str | None = Field(None, alias="timezone", description="IANA timezone for query processing, such as 'America/New_York'. Defaults to UTC. Case-sensitive. Most timezones are supported except Factory, Europe/Kyiv, and Pacific/Kanton."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query and aggregate event data for a metric across native Klaviyo metrics, integrations, and custom events. Results can be filtered by time range and grouped by time intervals, event properties, or profile dimensions."""
 
     # Construct request model with validation
@@ -8754,7 +8898,7 @@ async def query_metric_aggregates(
 async def list_flows_triggered_by_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric to query for associated flow triggers."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all workflows that use the specified metric as a trigger condition. This helps identify which flows depend on a particular metric for activation."""
 
     # Construct request model with validation
@@ -8794,7 +8938,7 @@ async def list_flows_triggered_by_metric(
 async def list_flow_ids_triggered_by_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric for which to retrieve triggered flows."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the IDs of all flows that use the specified metric as their trigger condition. This allows you to identify which flows are dependent on a particular metric."""
 
     # Construct request model with validation
@@ -8835,7 +8979,7 @@ async def get_metric_properties(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric to retrieve properties for (e.g., '925e38')."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_metric_property: list[Literal["inferred_type", "label", "property", "sample_values"]] | None = Field(None, alias="fieldsmetric-property", description="Optional list of specific metric-property fields to include in the response. When omitted, all available fields are returned. See API documentation for available field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all properties associated with a specific metric by its ID. Use optional field filtering to request only specific metric property attributes."""
 
     # Construct request model with validation
@@ -8881,7 +9025,7 @@ async def get_metric_properties(
 async def list_property_ids_for_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric (e.g., '925e38'). This ID specifies which metric's properties you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specify a revision to ensure consistent API behavior across requests."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the IDs of all metric properties associated with a specific metric. Use this to discover which properties are linked to a metric."""
 
     # Construct request model with validation
@@ -8921,7 +9065,7 @@ async def list_property_ids_for_metric(
 async def get_metric_for_metric_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric property. Use the metric property ID to look up its associated metric."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metric associated with a specific metric property. This operation fetches the metric data linked to the given metric property ID."""
 
     # Construct request model with validation
@@ -8961,7 +9105,7 @@ async def get_metric_for_metric_property(
 async def get_metric_id_for_metric_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric property. Use the metric property ID (a 32-character hexadecimal string) to specify which property's metric relationship you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metric ID associated with a specific metric property. This operation resolves the relationship between a metric property and its parent metric."""
 
     # Construct request model with validation
@@ -9001,7 +9145,7 @@ async def get_metric_id_for_metric_property(
 async def get_metrics_for_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric. Use the custom metric ID returned when the metric was created or retrieved from a list operation."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified, allowing you to control which API version behavior is used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all metrics associated with a specific custom metric by its ID. This operation allows you to fetch the complete set of metric data points for a given custom metric configuration."""
 
     # Construct request model with validation
@@ -9041,7 +9185,7 @@ async def get_metrics_for_custom_metric(
 async def list_metrics_for_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric. This is a 32-character hexadecimal string that uniquely identifies the custom metric resource."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified, allowing you to target specific API versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all metric IDs associated with a specific custom metric. Use this to discover which metrics are linked to a custom metric configuration."""
 
     # Construct request model with validation
@@ -9081,7 +9225,7 @@ async def list_metrics_for_custom_metric(
 async def get_metric_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The mapped metric type identifier. Must be one of the predefined metric mapping types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metric associated with a specific mapped metric. This operation returns the underlying metric data for a given mapped metric ID, if one exists."""
 
     # Construct request model with validation
@@ -9121,7 +9265,7 @@ async def get_metric_for_mapped_metric(
 async def get_metric_id_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The type of mapped metric to query. Must be one of the predefined mapping types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the metric ID associated with a specific mapped metric. This operation resolves the relationship between a mapped metric and its underlying metric."""
 
     # Construct request model with validation
@@ -9161,7 +9305,7 @@ async def get_metric_id_for_mapped_metric(
 async def get_custom_metric_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The mapped metric type identifier. Must be one of the predefined event types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the custom metric associated with a specific mapped metric. Returns the custom metric details if one exists for the given mapped metric ID."""
 
     # Construct request model with validation
@@ -9201,7 +9345,7 @@ async def get_custom_metric_for_mapped_metric(
 async def get_custom_metric_id_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The type of metric mapping to query. Must be one of the predefined mapping types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the custom metric ID associated with a specific mapped metric. This operation returns the relationship between a mapped metric and its underlying custom metric."""
 
     # Construct request model with validation
@@ -9243,7 +9387,7 @@ async def list_profiles(
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Specify which push token fields to include in the response using sparse fieldsets for optimized data retrieval."),
     filter_: str | None = Field(None, alias="filter", description="Filter profiles by id, email, phone_number, external_id, _kx identifier, creation/update timestamps, or email subscription and suppression details. Use operators like equals, any, greater-than, and less-than depending on the field."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of profiles to return per page, between 1 and 100 (default: 20).", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all profiles in an account with optional filtering, sorting, and enrichment. Supports subscriptions and predictive analytics data via the additional-fields parameter, with different rate limits depending on which enrichments are requested."""
 
     # Construct request model with validation
@@ -9308,7 +9452,7 @@ async def create_profile(
     timezone_: str | None = Field(None, alias="timezone", description="Time zone name using the IANA Time Zone Database (e.g., America/New_York)."),
     ip: str | None = Field(None, description="IP address of the individual."),
     properties: dict[str, Any] | None = Field(None, description="Custom key-value properties to attach to the profile (e.g., {'pseudonym': 'Dr. Octopus'})."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new customer profile with contact information, location data, and custom properties. Use the `additional-fields` parameter to include subscriptions and predictive analytics in the response."""
 
     # Construct request model with validation
@@ -9359,7 +9503,7 @@ async def get_profile(
     fields_list: list[Literal["created", "name", "opt_in_process", "updated"]] | None = Field(None, alias="fieldslist", description="Optional sparse fieldset for list-related profile fields. Specify which fields to include in the response to optimize data transfer."),
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Optional sparse fieldset for push-token-related profile fields. Specify which fields to include in the response to optimize data transfer."),
     fields_segment: list[Literal["created", "definition", "definition.condition_groups", "is_active", "is_processing", "is_starred", "name", "updated"]] | None = Field(None, alias="fieldssegment", description="Optional sparse fieldset for segment-related profile fields. Specify which fields to include in the response to optimize data transfer. Note: Using this parameter reduces rate limits to 1 request per second (burst) and 15 requests per minute (steady)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a profile by ID with optional support for subscriptions and predictive analytics data. Be aware of rate limits that vary based on the `fields` parameters used."""
 
     # Construct request model with validation
@@ -9432,7 +9576,7 @@ async def update_profile(
     append: dict[str, Any] | None = Field(None, description="Append one or more simple values to an existing property array (e.g., add SKUs to a list)."),
     unappend: dict[str, Any] | None = Field(None, description="Remove one or more simple values from an existing property array (e.g., remove SKUs from a list)."),
     unset: str | list[str] | None = Field(None, description="Remove one or more keys (and their values) completely from the properties object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing customer profile with new or modified information. Use the `additional-fields` parameter to include subscriptions and predictive analytics data in the response. Setting a field to `null` clears it; omitting a field leaves it unchanged."""
 
     # Construct request model with validation
@@ -9484,7 +9628,7 @@ async def list_bulk_import_profiles_jobs(
     fields_profile_bulk_import_job: list[Literal["completed_at", "completed_count", "created_at", "expires_at", "failed_count", "started_at", "status", "total_count"]] | None = Field(None, alias="fieldsprofile-bulk-import-job", description="Specify which fields to include in the response for each bulk import job. Supports sparse fieldsets to optimize payload size."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using equality or any-match operators. Supported field: `status` with operators `equals` and `any`."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of jobs to return per page. Must be between 1 and 100, with a default of 20.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all bulk profile import jobs with optional filtering and pagination. Returns up to 100 jobs per request."""
 
     # Construct request model with validation
@@ -9531,7 +9675,7 @@ async def create_profile_bulk_import_job(
     type_: Literal["profile-bulk-import-job"] = Field(..., alias="type", description="Resource type identifier for this operation. Must be set to 'profile-bulk-import-job'."),
     profiles_data: list[_models.ProfileUpsertQueryResourceObject] = Field(..., alias="profilesData", description="Array of profile objects to import. Each profile can be up to 100KB. The array can contain up to 10,000 profiles per request. Order is preserved during processing."),
     lists_data: list[_models.BulkImportProfilesBodyDataRelationshipsListsDataItem] | None = Field(None, alias="listsData", description="Optional array of list identifiers to associate the imported profiles with. Profiles will be added to these lists upon successful import."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk import job to efficiently create or update up to 10,000 profiles in a single request. The job processes profiles asynchronously and supports payloads up to 5MB total (100KB per profile)."""
 
     # Construct request model with validation
@@ -9583,7 +9727,7 @@ async def get_bulk_import_profiles_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_list: list[Literal["created", "name", "opt_in_process", "updated"]] | None = Field(None, alias="fieldslist", description="Optional list of top-level resource types to include in the response. Specify resource types to retrieve only those fields across all included resources."),
     fields_profile_bulk_import_job: list[Literal["completed_at", "completed_count", "created_at", "expires_at", "failed_count", "started_at", "status", "total_count"]] | None = Field(None, alias="fieldsprofile-bulk-import-job", description="Optional list of fields specific to the profile bulk import job resource. Specify field names to retrieve only those attributes for the job."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a bulk profile import job by its ID. Use this to monitor the progress and results of profile import operations."""
 
     # Construct request model with validation
@@ -9630,7 +9774,7 @@ async def get_bulk_import_profiles_job(
 async def list_bulk_suppress_profiles_jobs(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status, list ID, or segment ID using equality operators. Specify filters in the format `field_name=value` (e.g., `status=processing`)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status of all bulk profile suppression jobs. Use filtering to narrow results by job status, list ID, or segment ID."""
 
     # Construct request model with validation
@@ -9677,7 +9821,7 @@ async def create_profile_suppression_bulk_job(
     data: list[_models.ProfileSuppressionCreateQueryResourceObject] = Field(..., description="Array of email addresses to suppress. Maximum 100 email addresses per request. Specify this to suppress individual profiles, or use list/segment ID instead to suppress all members of a group."),
     list_data_id: str = Field(..., alias="listDataId", description="ID of the list whose current members should be suppressed. Provide this to suppress all profiles in a specific list, or use the email addresses array for individual suppressions."),
     segment_data_id: str = Field(..., alias="segmentDataId", description="ID of the segment whose current members should be suppressed. Provide this to suppress all profiles in a specific segment, or use the email addresses array for individual suppressions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bulk job to suppress profiles from receiving email marketing. Suppress profiles by providing individual email addresses (up to 100 per request) or by specifying a segment or list ID to suppress all current members."""
 
     # Construct request model with validation
@@ -9734,7 +9878,7 @@ async def create_profile_suppression_bulk_job(
 async def get_bulk_suppress_profiles_job(
     job_id: str = Field(..., description="The unique identifier of the bulk suppress profiles job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a bulk suppress profiles job by its ID. Use this to monitor the progress and results of profile suppression operations."""
 
     # Construct request model with validation
@@ -9774,7 +9918,7 @@ async def get_bulk_suppress_profiles_job(
 async def list_bulk_unsuppress_profiles_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status, list ID, or segment ID using equality operators. Specify filters in the format `field_name=value` (e.g., `status=processing` to show only processing jobs)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all bulk unsuppress profiles jobs with optional filtering by status, list ID, or segment ID. Use this to monitor the progress and status of profile unsuppression operations."""
 
     # Construct request model with validation
@@ -9821,7 +9965,7 @@ async def remove_profile_suppressions_bulk(
     data: list[_models.ProfileSuppressionDeleteQueryResourceObject] = Field(..., description="Array of email addresses to unsuppress. Maximum 100 email addresses per request."),
     list_data_id: str = Field(..., alias="listDataId", description="The ID of the list whose current members should have suppressions removed. Provide either this or segment.data.id, not both."),
     segment_data_id: str = Field(..., alias="segmentDataId", description="The ID of the segment whose current members should have suppressions removed. Provide either this or list.data.id, not both."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk remove USER_SUPPRESSED suppressions from profiles by email address or by unsuppressing all members of a specified segment or list. Other suppression reasons (unsubscribed, invalid email, hard bounce) are not affected."""
 
     # Construct request model with validation
@@ -9878,7 +10022,7 @@ async def remove_profile_suppressions_bulk(
 async def get_bulk_unsuppress_profiles_job(
     job_id: str = Field(..., description="The unique identifier of the bulk unsuppress job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a bulk unsuppress profiles job by its ID. Use this to monitor the progress of profile unsuppression operations."""
 
     # Construct request model with validation
@@ -9920,7 +10064,7 @@ async def list_push_tokens(
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Specify which push token fields to include in the response using sparse fieldsets for optimized payload size."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by push token properties. Supported filters: token ID, associated profile ID, enablement status, or platform. Use equals operator with the format: field_name equals('value')."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results per page. Must be between 1 and 100 items. Defaults to 20 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve push tokens associated with your company account. Supports filtering by token ID, profile ID, enablement status, and platform, with optional sparse fieldset selection."""
 
     # Construct request model with validation
@@ -9972,7 +10116,7 @@ async def create_or_update_push_token(
     background: Literal["AVAILABLE", "DENIED", "RESTRICTED"] | None = Field(None, description="Whether the device can receive background push notifications. Defaults to 'AVAILABLE'. Use 'DENIED' or 'RESTRICTED' if background delivery is not permitted."),
     device_metadata: _models.CreatePushTokenBodyDataAttributesDeviceMetadata | None = Field(None, description="Device metadata: device_id, model, OS, app info, SDK version, and environment."),
     profile: _models.CreatePushTokenBodyDataAttributesProfile | None = Field(None, description="Profile to associate with the push token: email, phone, name, location, and custom properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update a push token for a user's device, enabling push notification delivery. This endpoint supports migrating push tokens from other platforms and accepts device metadata to enhance targeting and analytics."""
 
     # Construct request model with validation
@@ -10020,7 +10164,7 @@ async def get_push_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the push token to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Specify which fields to include in the push token response using sparse fieldsets. Omit to receive all available fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific push token by its ID. Returns detailed information about the push token configuration and status."""
 
     # Construct request model with validation
@@ -10066,7 +10210,7 @@ async def get_push_token(
 async def delete_push_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the push token to delete, typically a 32-character hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a push token by its ID. This operation requires write access to push tokens and is subject to rate limits (3 requests per second burst, 60 per minute steady)."""
 
     # Construct request model with validation
@@ -10130,7 +10274,7 @@ async def create_or_update_profile(
     append: dict[str, Any] | None = Field(None, description="Object specifying simple values to append to property arrays (e.g., add SKUs to an existing list)."),
     unappend: dict[str, Any] | None = Field(None, description="Object specifying simple values to remove from property arrays (e.g., remove SKUs from an existing list)."),
     unset: str | list[str] | None = Field(None, description="Array or string specifying property keys to remove completely from the profile, including all their values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new profile or update an existing one with the provided attributes. Returns 201 for newly created profiles and 200 for updates. Use the `additional-fields` parameter to include subscriptions and predictive analytics in the response."""
 
     # Construct request model with validation
@@ -10181,7 +10325,7 @@ async def merge_profiles(
     type_: Literal["profile-merge"] = Field(..., alias="type", description="The type of operation being performed. Must be set to 'profile-merge'."),
     id_: str = Field(..., alias="id", description="The unique identifier of the destination profile that will receive merged data from the source profile."),
     data: list[_models.MergeProfilesBodyDataRelationshipsProfilesDataItem] | None = Field(None, description="Array containing the source profile relationship to be merged into the destination profile. Only one source profile is accepted per request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a source profile into a destination profile by ID. This operation queues an asynchronous task that consolidates data from the source profile into the destination profile and deletes the source profile. Only one source profile can be merged per request."""
 
     # Construct request model with validation
@@ -10233,7 +10377,7 @@ async def subscribe_profiles_bulk(
     id_: str = Field(..., alias="id", description="The ID of the list to add newly subscribed profiles to (e.g., 'Y6nRLr')."),
     custom_source: str | None = Field(None, description="Optional custom label or source to record on consent records (e.g., 'Marketing Event'). Useful for tracking subscription origin."),
     historical_import: bool | None = Field(None, description="Set to true when importing historical subscription data where consent was already collected. When enabled, bypasses double opt-in emails and 'Added to list' flows, and requires the consented_at field in the past for each profile."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe up to 1,000 profiles to email, SMS, WhatsApp, or push marketing channels. Profiles will be immediately subscribed or sent a double opt-in confirmation based on list settings or account defaults. Removes any existing unsubscribe, spam report, or suppression flags from the profiles."""
 
     # Construct request model with validation
@@ -10291,7 +10435,7 @@ async def unsubscribe_profiles_bulk(
     list_data_type: Literal["list"] = Field(..., alias="listDataType", description="The type of resource being referenced. Must be 'list'."),
     data: list[_models.ProfileSubscriptionDeleteQueryResourceObject] = Field(..., description="Array of profile objects to unsubscribe. Maximum 100 profiles per request. Each profile should include the necessary identifiers for the unsubscribe operation."),
     id_: str = Field(..., alias="id", description="The unique identifier of the list from which to unsubscribe the profiles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk unsubscribe one or more profiles (up to 100 per request) from email marketing, SMS marketing, or both. ⚠️ Profiles not in the specified list will be globally unsubscribed—always verify list membership before calling to avoid unintended global unsubscribes."""
 
     # Construct request model with validation
@@ -10346,7 +10490,7 @@ async def list_push_tokens_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile whose push tokens should be retrieved."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Optional sparse fieldset to limit which push token attributes are included in the response. Specify as a comma-separated list of field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all push tokens associated with a specific profile. Use sparse fieldsets to customize which push token attributes are returned in the response."""
 
     # Construct request model with validation
@@ -10392,7 +10536,7 @@ async def list_push_tokens_for_profile(
 async def list_push_token_ids_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile for which to retrieve associated push token IDs."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all push token IDs associated with a specific profile. Returns a collection of push token identifiers linked to the given profile."""
 
     # Construct request model with validation
@@ -10433,7 +10577,7 @@ async def list_lists_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile whose list memberships you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_list: list[Literal["created", "name", "opt_in_process", "updated"]] | None = Field(None, alias="fieldslist", description="Specify which fields to include in the response using sparse fieldsets. Omit to return default fields. See API documentation for available field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all list memberships for a specific profile. Returns the lists that a profile belongs to, with support for sparse fieldsets to customize the response."""
 
     # Construct request model with validation
@@ -10479,7 +10623,7 @@ async def list_lists_for_profile(
 async def get_lists_for_profile_relationship(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile to retrieve list memberships for."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all list memberships for a specific profile. Returns the IDs of lists that the profile belongs to."""
 
     # Construct request model with validation
@@ -10520,7 +10664,7 @@ async def get_segments_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile to retrieve segments for."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_segment: list[Literal["created", "definition", "definition.condition_groups", "is_active", "is_processing", "is_starred", "name", "updated"]] | None = Field(None, alias="fieldssegment", description="Optional list of specific segment fields to include in the response. Use sparse fieldsets to reduce payload size and improve performance by requesting only needed fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all segment memberships for a specific profile. Returns which segments the profile belongs to, with optional field filtering for sparse responses."""
 
     # Construct request model with validation
@@ -10566,7 +10710,7 @@ async def get_segments_for_profile(
 async def list_segment_ids_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile whose segment memberships you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all segment IDs that a profile is a member of. Returns the segment membership relationships for the specified profile."""
 
     # Construct request model with validation
@@ -10607,7 +10751,7 @@ async def get_lists_for_bulk_import_profiles_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import profiles job."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_list: list[Literal["created", "name", "opt_in_process", "updated"]] | None = Field(None, alias="fieldslist", description="Specify which fields to include in the response using sparse fieldsets. Omit to receive all available fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the lists associated with a bulk profile import job. Use this to see which lists will receive the imported profiles."""
 
     # Construct request model with validation
@@ -10653,7 +10797,7 @@ async def get_lists_for_bulk_import_profiles_job(
 async def get_list_ids_for_bulk_import_profiles_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk profile import job for which to retrieve associated list IDs."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the list IDs associated with a specific bulk profile import job. This operation returns the relationship between a bulk import job and its related lists."""
 
     # Construct request model with validation
@@ -10694,7 +10838,7 @@ async def list_profiles_for_bulk_import_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import job whose profiles you want to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of profiles to return per page. Defaults to 20 profiles; must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve profiles associated with a bulk profile import job. Results are paginated and support customizable page sizes."""
 
     # Construct request model with validation
@@ -10738,7 +10882,7 @@ async def list_profile_ids_for_bulk_import_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import profiles job."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of profile IDs to return per page. Defaults to 20, with a maximum of 100 results per page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the profile IDs associated with a bulk import job. Returns paginated profile relationships for the specified bulk profile import job."""
 
     # Construct request model with validation
@@ -10783,7 +10927,7 @@ async def list_import_errors_for_bulk_import_profiles_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (default: 2026-01-15). Determines the response schema version."),
     fields_import_error: list[Literal["code", "detail", "original_payload", "source", "source.pointer", "title"]] | None = Field(None, alias="fieldsimport-error", description="Specify which fields to include in the import-error response using sparse fieldsets. Omit to return all available fields."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of errors to return per page. Must be between 1 and 100 (default: 20).", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve import errors for a bulk profile import job. Returns detailed error information for profiles that failed during the import process, with pagination support."""
 
     # Construct request model with validation
@@ -10829,7 +10973,7 @@ async def list_import_errors_for_bulk_import_profiles_job(
 async def get_profile_for_push_token(
     id_: str = Field(..., alias="id", description="The push token identifier whose associated profile you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the user profile associated with a specific push token. This operation allows you to look up profile information linked to a push notification token."""
 
     # Construct request model with validation
@@ -10869,7 +11013,7 @@ async def get_profile_for_push_token(
 async def get_profile_id_for_push_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the push token for which you want to retrieve the associated profile ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the profile ID associated with a specific push token. This operation returns the relationship between a push token and its linked user profile."""
 
     # Construct request model with validation
@@ -10914,7 +11058,7 @@ async def query_campaign_values_report(
     conversion_metric_id: str = Field(..., description="Unique identifier of the conversion metric to use for calculating conversion-related statistics in the report."),
     group_by: list[Literal["campaign_id", "campaign_message_id", "campaign_message_name", "group", "group_name", "send_channel", "tag_id", "tag_name", "text_message_format", "variation", "variation_name"]] | None = Field(None, description="Optional list of dimensions to group results by. Supported dimensions include campaign_id, campaign_message_id, campaign_message_name, group, group_name, send_channel, tag_id, tag_name, text_message_format, variation, and variation_name. Campaign_id and campaign_message_id are required if grouping is specified. Defaults to grouping by campaign_id, campaign_message_id, and send_channel if omitted."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results using AND-combined conditions. Scalar attributes (send_channel, campaign_id, campaign_message_id, campaign_message_name, variation, variation_name, text_message_format) support equals and contains-any operators. List attributes (tag_id, tag_name) support contains-any and contains-all operators. Send_channel values are limited to email, sms, push-notification, and whatsapp. Maximum 100 items per list filter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve campaign analytics data for specified statistics across a given timeframe, with optional grouping and filtering capabilities. Results include conversion metrics and can be segmented by campaign, channel, tags, and other dimensions."""
 
     # Construct request model with validation
@@ -10966,7 +11110,7 @@ async def query_flow_values_report(
     conversion_metric_id: str = Field(..., description="Metric ID used to calculate conversion-related statistics in the report. Provide the ID of the conversion metric you want to measure (e.g., 'RESQ6t')."),
     group_by: list[Literal["flow_id", "flow_message_id", "flow_message_name", "flow_name", "send_channel", "tag_id", "tag_name", "text_message_format", "variation", "variation_name"]] | None = Field(None, description="Optional list of attributes to group results by. Allowed values include flow_id, flow_message_id, flow_message_name, flow_name, send_channel, tag_id, tag_name, text_message_format, variation, and variation_name. The attributes flow_message_id and flow_id are always required in the grouping. If omitted, results default to grouping by flow_id, flow_message_id, and send_channel."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results. Use operators like 'equals' and 'contains-any' for scalar attributes (flow_id, flow_name, send_channel, flow_message_id, flow_message_name, text_message_format, variation, variation_name), and 'contains-any' or 'contains-all' for list attributes (tag_id, tag_name). Combine conditions with AND only. Limited to 100 items per list filter. For send_channel, valid values are email, sms, push-notification, and whatsapp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve flow analytics data including performance metrics like opens, clicks, conversions, and engagement rates. Results can be filtered and grouped by flow, message, channel, tags, and other dimensions to analyze campaign performance over a specified time period."""
 
     # Construct request model with validation
@@ -11019,7 +11163,7 @@ async def get_flow_series_analytics(
     conversion_metric_id: str = Field(..., description="The metric ID used to calculate conversion statistics. This determines which conversion event is tracked in the results."),
     group_by: list[Literal["flow_id", "flow_message_id", "flow_message_name", "flow_name", "send_channel", "tag_id", "tag_name", "text_message_format", "variation", "variation_name"]] | None = Field(None, description="Optional list of attributes to group results by (e.g., flow_id, flow_name, send_channel, tag_name). Flow_message_id and flow_id are always required. If omitted, data defaults to grouping by flow_id, flow_message_id, and send_channel."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results by scalar attributes (flow_id, flow_name, send_channel, etc.) or list attributes (tag_id, tag_name). Use equals or contains-any for scalars, contains-any or contains-all for lists. Combine multiple filters with AND only. Maximum 100 items per list filter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time-series analytics data for flows, including performance metrics like opens, clicks, and conversions aggregated at your specified interval over a given timeframe."""
 
     # Construct request model with validation
@@ -11070,7 +11214,7 @@ async def query_form_values_report(
     timeframe: _models.Timeframe | _models.CustomTimeframe = Field(..., description="The time period for which to retrieve data, with a maximum span of 1 year. Use the available time frame formats documented in the reporting API overview."),
     group_by: list[Literal["form_id", "form_version_id"]] | None = Field(None, description="Optional list of attributes to group results by. Supported values are 'form_id' and 'form_version_id'. Defaults to 'form_id' if not provided. When grouping by 'form_version_id', 'form_id' must also be included."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results by form_id or form_version_id using equals or any operators. Combine multiple filters with AND. The 'any' operator supports up to 100 values per filter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve form analytics data including submission rates, views, and other performance metrics. Results can be filtered by form and grouped by form or form version over a specified time period (up to 1 year)."""
 
     # Construct request model with validation
@@ -11122,7 +11266,7 @@ async def get_form_series_analytics(
     interval: Literal["daily", "hourly", "monthly", "weekly"] = Field(..., description="Aggregation interval for the data series. Hourly intervals are limited to 7-day timeframes, daily to 60 days, and monthly to 52 weeks."),
     group_by: list[Literal["form_id", "form_version_id"]] | None = Field(None, description="Optional list of attributes to group results by (form_id or form_version_id). Defaults to form_id if not specified. When grouping by form_version_id, form_id must also be included."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter expression to narrow results by form_id or form_version_id using equals or any operators. Combine multiple filters with AND; any operator supports up to 100 values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time-series analytics data for forms, including metrics like view counts and submission rates aggregated over your specified timeframe and interval."""
 
     # Construct request model with validation
@@ -11172,7 +11316,7 @@ async def get_segment_values_report(
     statistics: list[Literal["members_added", "members_removed", "net_members_changed", "total_members"]] = Field(..., description="Array of metric names to retrieve for each segment. Examples include 'total_members' and 'net_members_changed'. At least one statistic is required."),
     timeframe: _models.Timeframe | _models.CustomTimeframe = Field(..., description="Time period for the report query. Must span no more than 1 year and cannot include dates before June 1st, 2023. Use ISO 8601 format or refer to available timeframe options in the API documentation."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter to narrow results to specific segments. Use 'equals' operator for a single segment ID or 'any' operator to include up to 100 segment IDs. Only one filter per attribute is allowed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for segment values across specified statistics and timeframe. Returns aggregated metrics like member counts and changes for one or more segments."""
 
     # Construct request model with validation
@@ -11223,7 +11367,7 @@ async def get_segment_series_report(
     timeframe: _models.Timeframe | _models.CustomTimeframe = Field(..., description="Time range for the report. Must span no longer than 1 year and cannot include dates before June 1st, 2023. Use ISO 8601 date format or relative time frame identifiers as documented in the reporting API overview."),
     interval: Literal["daily", "hourly", "monthly", "weekly"] = Field(..., description="Aggregation granularity for the time series. Hourly intervals are limited to 7-day windows, daily to 60 days, weekly to 1 year, and monthly to 52 weeks. Choose based on your timeframe and desired detail level."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter to narrow results to specific segments. Use 'equals' for a single segment ID or 'any' to include up to 100 segment IDs. Format: any(segment_id,[\"id1\",\"id2\"]) or equals(segment_id,\"id\")."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time-series analytics data for one or more segments, aggregated at your specified interval. Supports filtering by segment ID and covers data from June 1st, 2023 onward, with a maximum lookback period of 1 year."""
 
     # Construct request model with validation
@@ -11271,7 +11415,7 @@ async def list_reviews(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter reviews using comparison and matching operators. Supports filtering by creation date (date range), rating (any value, equals, or range), IDs, content keywords, status, review type, and verification status. Use the format specified in the Klaviyo filtering documentation."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of reviews to return per page. Defaults to 20 results; must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all reviews with optional filtering and pagination. Supports filtering by creation date, rating, ID, item ID, content, status, review type, and verification status."""
 
     # Construct request model with validation
@@ -11313,7 +11457,7 @@ async def list_reviews(
 async def get_review(
     id_: str = Field(..., alias="id", description="The unique identifier of the review to retrieve (e.g., '2134228')"),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific review by its ID. Returns the full review details including content, metadata, and associated information."""
 
     # Construct request model with validation
@@ -11356,7 +11500,7 @@ async def update_review(
     data_id: str = Field(..., alias="dataId", description="The unique identifier of the review being updated. Must match the path ID parameter."),
     type_: Literal["review"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'review' to indicate this operation targets a review resource."),
     status: _models.ReviewStatusRejected | _models.ReviewStatusFeatured | _models.ReviewStatusPublished | _models.ReviewStatusUnpublished | _models.ReviewStatusPending | None = Field(None, description="The new status to assign to the review. Valid status values depend on the review workflow configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing review by its ID. Requires the review:write scope and respects rate limits of 10 requests per second (burst) and 150 requests per minute (steady state)."""
 
     # Construct request model with validation
@@ -11405,7 +11549,7 @@ async def list_segments(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_segment: list[Literal["created", "definition", "definition.condition_groups", "is_active", "is_processing", "is_starred", "name", "updated"]] | None = Field(None, alias="fieldssegment", description="Specify which segment fields to include in the response using sparse fieldsets for optimized data retrieval."),
     filter_: str | None = Field(None, alias="filter", description="Filter segments by name, ID, creation date, update date, active status, or starred status. Supports exact matching and partial matching operators depending on the field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all segments in an account with optional filtering and field selection. Returns up to 10 results per page."""
 
     # Construct request model with validation
@@ -11453,7 +11597,7 @@ async def create_segment(
     name: str = Field(..., description="A descriptive name for the segment that identifies its purpose or target audience."),
     condition_groups: list[_models.ConditionGroup] = Field(..., description="An array of condition groups that define the segment's matching criteria. Each group contains conditions that users must satisfy to be included in the segment."),
     is_starred: bool | None = Field(None, description="Optional flag to mark the segment as starred for quick access. Defaults to false if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new audience segment defined by condition groups. Segments are used to target specific groups of users based on matching criteria."""
 
     # Construct request model with validation
@@ -11504,7 +11648,7 @@ async def get_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., 2026-01-15), optionally with a suffix. Defaults to 2026-01-15 if not specified."),
     fields_segment: list[Literal["created", "definition", "definition.condition_groups", "is_active", "is_processing", "is_starred", "name", "profile_count", "updated"]] | None = Field(None, alias="fieldssegment", description="Optional list of segment fields to include in the response. Use sparse fieldsets to optimize payload size and performance. Refer to the API overview documentation for available fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a segment by its ID. Optionally include additional fields like profile count, which has stricter rate limits."""
 
     # Construct request model with validation
@@ -11556,7 +11700,7 @@ async def update_segment(
     name: str | None = Field(None, description="Human-readable name for the segment."),
     is_starred: bool | None = Field(None, description="Whether to star/favorite this segment for quick access."),
     is_active: bool | None = Field(None, description="Activation status of the segment. Set to false to deactivate (this must be the only attribute in the request); set to true to reactivate. Deactivating impacts campaigns, flows, ad syncs, forms, helpdesk routing, and other dependent features."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing segment's configuration, including name, activation status, and condition groups. Note: deactivation must be performed as a standalone operation and cannot be combined with other updates."""
 
     # Construct request model with validation
@@ -11607,7 +11751,7 @@ async def update_segment(
 async def delete_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a segment by its ID. Requires the segment's current revision to ensure safe deletion and prevent conflicts from concurrent modifications."""
 
     # Construct request model with validation
@@ -11647,7 +11791,7 @@ async def delete_segment(
 async def list_tags_for_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment for which to retrieve associated tags."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific segment. Returns a collection of tags linked to the given segment ID."""
 
     # Construct request model with validation
@@ -11687,7 +11831,7 @@ async def list_tags_for_segment(
 async def list_tag_ids_for_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment for which to retrieve associated tag IDs."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tag IDs associated with a specific segment. Returns a collection of tag identifiers linked to the given segment."""
 
     # Construct request model with validation
@@ -11729,7 +11873,7 @@ async def list_profiles_for_segment(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (default: 2026-01-15)."),
     filter_: str | None = Field(None, alias="filter", description="Filter profiles by profile_id, email, phone_number, push_token, _kx, or joined_group_at. Use operators like 'equals', 'any', 'greater-than', 'less-than', etc. For details on filter syntax, see the API documentation."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of profiles to return per page. Must be between 1 and 100 (default: 20).", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all profiles within a specific segment. Optionally filter and sort results to find profiles matching specific criteria like email, phone number, or join date."""
 
     # Construct request model with validation
@@ -11774,7 +11918,7 @@ async def list_profile_ids_for_segment(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., '2026-01-15'). Defaults to the latest stable version."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by profile attributes or membership metadata. Supports filtering by profile_id, email, phone_number, push_token, _kx identifier, or joined_group_at timestamp. Use operators like 'equals' for exact matches or 'any' for multiple values, and comparison operators (greater-than, less-than, etc.) for date ranges."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results per page. Must be between 1 and 100, with a default of 20.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all profile IDs that are members of a specific segment. Use filtering and pagination to narrow results and manage large datasets."""
 
     # Construct request model with validation
@@ -11817,7 +11961,7 @@ async def list_profile_ids_for_segment(
 async def list_flows_triggered_by_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment. This is a Klaviyo-generated primary key (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all automation flows that are triggered by a specific segment. This operation identifies which flows use the given segment as their entry point trigger."""
 
     # Construct request model with validation
@@ -11857,7 +12001,7 @@ async def list_flows_triggered_by_segment(
 async def list_flow_ids_triggered_by_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment, generated by Klaviyo (e.g., 'Y6nRLr'). This segment will be checked to find all flows using it as a trigger."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the IDs of all flows that use the specified segment as their trigger condition. This helps identify which automation workflows are activated by a particular audience segment."""
 
     # Construct request model with validation
@@ -11897,7 +12041,7 @@ async def list_flow_ids_triggered_by_segment(
 async def list_tags(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter tags by name using comparison operators (equals, contains, starts-with, ends-with). For example, filter by exact name match or partial name patterns."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags in an account with optional filtering and sorting. Results are paginated with a maximum of 50 tags per request."""
 
     # Construct request model with validation
@@ -11942,7 +12086,7 @@ async def create_tag(
     tag_group_data_type: Literal["tag-group"] = Field(..., alias="tag_groupDataType", description="The resource type identifier for the tag group relationship. Must be set to 'tag-group'."),
     name: str = Field(..., description="The name of the tag being created. This is a user-facing label for organizing and categorizing items."),
     id_: str = Field(..., alias="id", description="The ID of the tag group to associate this tag with. If omitted, the tag will be assigned to your account's default tag group. Provide a UUID-formatted identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new tag within your account. Tags are organized into tag groups; if no tag group is specified, the tag will be added to your account's default tag group. Note: accounts are limited to 500 unique tags."""
 
     # Construct request model with validation
@@ -11994,7 +12138,7 @@ async def create_tag(
 async def get_tag(
     id_: str = Field(..., alias="id", description="The unique identifier for the tag to retrieve, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific tag by its ID. Requires the tags:read scope and is subject to rate limits of 3 requests per second (burst) and 60 requests per minute (steady state)."""
 
     # Construct request model with validation
@@ -12037,7 +12181,7 @@ async def update_tag(
     data_id: str = Field(..., alias="dataId", description="The unique identifier of the tag being updated, formatted as a UUID. Must match the tag ID in the path parameter."),
     type_: Literal["tag"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'tag' for this operation."),
     name: str = Field(..., description="The new name for the tag. Can be any string value (e.g., 'My Tag')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a tag's name by its ID. Only the tag name can be modified; tags cannot be moved between tag groups."""
 
     # Construct request model with validation
@@ -12085,7 +12229,7 @@ async def update_tag(
 async def delete_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to delete, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a tag by its ID. This operation removes the tag and all its associations with other resources."""
 
     # Construct request model with validation
@@ -12125,7 +12269,7 @@ async def delete_tag(
 async def list_tag_groups(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter tag groups by name (using contains, ends-with, equals, or starts-with matching), exclusivity status, or default status. Provide filter expressions in the format: operator(field,'value')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tag groups in an account with optional filtering and sorting. Every account includes one default tag group, and results are paginated with a maximum of 25 tag groups per request."""
 
     # Construct request model with validation
@@ -12169,7 +12313,7 @@ async def create_tag_group(
     type_: Literal["tag-group"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'tag-group' for this operation."),
     name: str = Field(..., description="A descriptive name for the tag group. This is the human-readable identifier used to reference the tag group."),
     exclusive: bool | None = Field(None, description="Controls whether resources can be linked to multiple tags within this group. When true, resources can only be linked to one tag; when false (default), resources can be linked to multiple tags from this group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new tag group to organize and categorize tags within your account. Tag groups can be configured as exclusive (allowing only one tag per resource) or non-exclusive (allowing multiple tags per resource). Accounts are limited to 50 unique tag groups."""
 
     # Construct request model with validation
@@ -12216,7 +12360,7 @@ async def create_tag_group(
 async def get_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group to retrieve, formatted as a UUID (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific tag group by its ID. Requires read access to tags and supports API versioning through the revision parameter."""
 
     # Construct request model with validation
@@ -12260,7 +12404,7 @@ async def update_tag_group(
     type_: Literal["tag-group"] = Field(..., alias="type", description="Resource type identifier; must be set to 'tag-group'."),
     name: str = Field(..., description="The new name for the tag group. This is the only updatable field."),
     return_fields: list[str] | None = Field(None, description="Optional list of fields to include in the response. If not specified, default fields are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a tag group's name by ID. Only the name field can be modified; exclusive and default properties are immutable after creation."""
 
     # Construct request model with validation
@@ -12308,7 +12452,7 @@ async def update_tag_group(
 async def delete_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group to delete, formatted as a UUID (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a tag group and all associated tags and their relationships with other resources. Note that the default tag group cannot be deleted."""
 
     # Construct request model with validation
@@ -12348,7 +12492,7 @@ async def delete_tag_group(
 async def list_flows_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all flow IDs associated with a specific tag. Returns a collection of flow identifiers linked to the given tag."""
 
     # Construct request model with validation
@@ -12389,7 +12533,7 @@ async def add_flows_to_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with flows, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     data: list[_models.TagFlowsBodyDataItem] = Field(..., description="Array of flow IDs to associate with the tag. Each ID should be a valid flow identifier; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate one or more flows with a tag. Each flow can be tagged with up to 100 tags maximum."""
 
     # Construct request model with validation
@@ -12435,7 +12579,7 @@ async def remove_tag_from_flows(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to remove from flows, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.RemoveTagFromFlowsBodyDataItem] = Field(..., description="An array of flow IDs to remove the tag association from. Each item should be a flow ID string. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a tag's association with one or more flows by specifying the flow IDs in the request body. This operation breaks the relationship between the tag and the specified flows."""
 
     # Construct request model with validation
@@ -12480,7 +12624,7 @@ async def remove_tag_from_flows(
 async def list_campaign_ids_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all campaign IDs associated with a specific tag. Use this to discover which campaigns are linked to a given tag."""
 
     # Construct request model with validation
@@ -12521,7 +12665,7 @@ async def add_campaigns_to_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with campaigns. Use UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.TagCampaignsBodyDataItem] = Field(..., description="Array of campaign IDs to associate with the tag. Each ID should be a valid campaign identifier. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate one or more campaigns with a tag. Each campaign can be tagged with up to 100 tags maximum."""
 
     # Construct request model with validation
@@ -12567,7 +12711,7 @@ async def remove_tag_from_campaigns(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to disassociate from campaigns, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.RemoveTagFromCampaignsBodyDataItem] = Field(..., description="An array of campaign IDs to remove from the tag's associations. Each item should be a campaign identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a tag's association with one or more campaigns by specifying the campaign IDs in the request body."""
 
     # Construct request model with validation
@@ -12612,7 +12756,7 @@ async def remove_tag_from_campaigns(
 async def list_lists_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all list IDs associated with a specific tag. Returns a collection of list identifiers linked to the given tag."""
 
     # Construct request model with validation
@@ -12653,7 +12797,7 @@ async def associate_lists_with_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with lists, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.TagListsBodyDataItem] = Field(..., description="An array of list IDs to associate with the tag. Each ID should be a valid list identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate one or more lists with a tag. Each list can be associated with a maximum of 100 tags."""
 
     # Construct request model with validation
@@ -12699,7 +12843,7 @@ async def remove_tag_from_lists(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to remove from lists, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     data: list[_models.RemoveTagFromListsBodyDataItem] = Field(..., description="An array of list IDs to disassociate from the tag. Each item should be a list identifier; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a tag's association with one or more lists by specifying the list IDs in the request body."""
 
     # Construct request model with validation
@@ -12744,7 +12888,7 @@ async def remove_tag_from_lists(
 async def list_segment_ids_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all segment IDs associated with a specific tag. Returns a collection of segment identifiers linked to the given tag."""
 
     # Construct request model with validation
@@ -12785,7 +12929,7 @@ async def add_segments_to_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with segments. Use UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.TagSegmentsBodyDataItem] = Field(..., description="Array of segment IDs to associate with the tag. Each ID should be a valid segment identifier. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate one or more segments with a tag. Each segment can be tagged with a maximum of 100 tags total."""
 
     # Construct request model with validation
@@ -12831,7 +12975,7 @@ async def remove_tag_from_segments(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to disassociate from segments, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     data: list[_models.RemoveTagFromSegmentsBodyDataItem] = Field(..., description="An array of segment IDs to remove from the tag's associations. Each item should be a segment identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a tag's association with one or more segments by specifying the segment IDs in the request body."""
 
     # Construct request model with validation
@@ -12876,7 +13020,7 @@ async def remove_tag_from_segments(
 async def get_tag_group_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag in UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the tag group resource associated with a specific tag. Use this to find the parent group classification for a given tag ID."""
 
     # Construct request model with validation
@@ -12916,7 +13060,7 @@ async def get_tag_group_for_tag(
 async def get_tag_group_id_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag in UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the ID of the tag group associated with a specific tag. Use this to determine which tag group a tag belongs to."""
 
     # Construct request model with validation
@@ -12956,7 +13100,7 @@ async def get_tag_group_id_for_tag(
 async def list_tags_for_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group. Use the tag group ID in UUID format (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific tag group. Returns a collection of tags organized under the given tag group ID."""
 
     # Construct request model with validation
@@ -12996,7 +13140,7 @@ async def list_tags_for_tag_group(
 async def list_tag_ids_for_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group. Use the tag group ID in UUID format (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tag IDs contained within a specific tag group. This operation returns a collection of tag identifiers that belong to the given tag group."""
 
     # Construct request model with validation
@@ -13036,7 +13180,7 @@ async def list_tag_ids_for_tag_group(
 async def list_templates(
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter templates by id, name, created date, or updated date. Supports exact matching, partial text search, and date range comparisons. See API documentation for filter syntax details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all templates in your account with optional filtering and sorting. Results are paginated with a maximum of 10 templates per page."""
 
     # Construct request model with validation
@@ -13083,7 +13227,7 @@ async def create_template(
     html: str | None = Field(None, description="The HTML markup content of the template. Provide a complete, valid HTML document structure."),
     text: str | None = Field(None, description="Plain text version of the template content, used as a fallback for email clients that don't support HTML."),
     amp: str | None = Field(None, description="AMP (Accelerated Mobile Pages) version of the template for dynamic email content. Requires AMP Email to be enabled in your account; refer to the AMP Email setup guide for configuration details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new custom HTML email template. Note that accounts are limited to 1,000 templates via the API; creation will fail if this limit is reached."""
 
     # Construct request model with validation
@@ -13130,7 +13274,7 @@ async def create_template(
 async def get_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific template by its ID. Returns the template configuration and metadata for the requested template."""
 
     # Construct request model with validation
@@ -13176,7 +13320,7 @@ async def update_template(
     html: str | None = Field(None, description="The HTML markup content of the template. Provide complete, valid HTML structure. Optional field for updating template rendering."),
     text: str | None = Field(None, description="The plaintext version of the template content. Used as fallback for email clients that don't support HTML. Optional field for updating template text representation."),
     amp: str | None = Field(None, description="The AMP for Email version of the template. Requires AMP Email to be enabled in your Klaviyo account to use. Refer to the AMP Email setup guide for implementation details. Optional field for updating dynamic email content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing email template by ID. Allows modification of template name, HTML content, plaintext version, and AMP email format. Note: drag & drop templates are not currently supported for updates."""
 
     # Construct request model with validation
@@ -13224,7 +13368,7 @@ async def update_template(
 async def delete_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a template by its ID. This operation requires the template ID and API revision to ensure the correct version is targeted."""
 
     # Construct request model with validation
@@ -13265,7 +13409,7 @@ async def list_universal_content(
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not provided."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using Klaviyo's filter syntax. Supports filtering by ID, name, creation/update timestamps (with comparison operators), content type, and definition type. See Klaviyo's filtering documentation for syntax details."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results to return per page. Must be between 1 and 100 items; defaults to 20 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all universal content items in your account. Supports filtering by ID, name, creation/update dates, and content type, with pagination for managing large result sets."""
 
     # Construct request model with validation
@@ -13309,7 +13453,7 @@ async def create_universal_content(
     type_: Literal["template-universal-content"] = Field(..., alias="type", description="The resource type identifier, must be set to 'template-universal-content'"),
     name: str = Field(..., description="A descriptive name for this universal content block"),
     definition: _models.ButtonBlock | _models.DropShadowBlock | _models.HorizontalRuleBlock | _models.HtmlBlock | _models.ImageBlock | _models.SpacerBlock | _models.TextBlock = Field(..., description="The block configuration object defining the content structure and properties. Supported block types are: button, drop_shadow, horizontal_rule, html, image, spacer, and text"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a universal content block for use in templates. Supports multiple block types including buttons, images, text, HTML, spacing elements, and decorative components."""
 
     # Construct request model with validation
@@ -13356,7 +13500,7 @@ async def create_universal_content(
 async def get_universal_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the universal content template to retrieve (e.g., 01HWWWKAW4RHXQJCMW4R2KRYR4)."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific universal content template by its ID. Returns the template configuration and content for the specified revision."""
 
     # Construct request model with validation
@@ -13400,7 +13544,7 @@ async def update_template_universal_content(
     type_: Literal["template-universal-content"] = Field(..., alias="type", description="The resource type identifier; must be set to 'template-universal-content'."),
     name: str | None = Field(None, description="A human-readable name for this template universal content."),
     definition: _models.ButtonBlock | _models.DropShadowBlock | _models.HorizontalRuleBlock | _models.HtmlBlock | _models.ImageBlock | _models.SpacerBlock | _models.TextBlock | None = Field(None, description="The block definition configuration. Only supported for button, drop_shadow, horizontal_rule, html, image, spacer, and text block types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update universal content within a template. Only specific block types (button, drop_shadow, horizontal_rule, html, image, spacer, and text) support definition field updates."""
 
     # Construct request model with validation
@@ -13448,7 +13592,7 @@ async def update_template_universal_content(
 async def delete_universal_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the template universal content to delete. Use the full ID string (e.g., 01HWWWKAW4RHXQJCMW4R2KRYR4)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a universal content template by its ID. This operation requires the templates:write scope and is subject to rate limits of 75 requests per second (burst) or 700 per minute (steady state)."""
 
     # Construct request model with validation
@@ -13490,7 +13634,7 @@ async def render_template(
     type_: Literal["template"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'template' to specify this operation targets email templates."),
     id_: str = Field(..., alias="id", description="The unique identifier of the email template to render."),
     context: dict[str, Any] = Field(..., description="A JSON object containing template variable values. Use dot notation to reference nested properties (e.g., user.first_name). Variables without corresponding context values render as empty. See Klaviyo template documentation for supported tag syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Render an email template with provided context variables, returning AMP, HTML, and plain text versions. Template variables use dot notation for nested access and are treated as false when missing from context."""
 
     # Construct request model with validation
@@ -13539,7 +13683,7 @@ async def create_template_clone(
     type_: Literal["template"] = Field(..., alias="type", description="Resource type identifier; must be set to 'template' for this operation."),
     id_: str = Field(..., alias="id", description="The unique identifier of the template to clone."),
     name: str | None = Field(None, description="Optional custom name for the cloned template. If not provided, the system will assign a default name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a duplicate of an existing template by its ID. Note that accounts are limited to 1,000 templates created via API; cloning will fail if this limit is reached."""
 
     # Construct request model with validation
@@ -13587,7 +13731,7 @@ async def get_tracking_settings(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to the latest stable revision."),
     fields_tracking_setting: list[Literal["auto_add_parameters", "custom_parameters", "utm_campaign", "utm_campaign.campaign", "utm_campaign.campaign.type", "utm_campaign.campaign.value", "utm_campaign.flow", "utm_campaign.flow.type", "utm_campaign.flow.value", "utm_id", "utm_id.campaign", "utm_id.campaign.type", "utm_id.campaign.value", "utm_id.flow", "utm_id.flow.type", "utm_id.flow.value", "utm_medium", "utm_medium.campaign", "utm_medium.campaign.type", "utm_medium.campaign.value", "utm_medium.flow", "utm_medium.flow.type", "utm_medium.flow.value", "utm_source", "utm_source.campaign", "utm_source.campaign.type", "utm_source.campaign.value", "utm_source.flow", "utm_source.flow.type", "utm_source.flow.value", "utm_term", "utm_term.campaign", "utm_term.campaign.type", "utm_term.campaign.value", "utm_term.flow", "utm_term.flow.type", "utm_term.flow.value"]] | None = Field(None, alias="fieldstracking-setting", description="Specify which fields to include in the response for each tracking setting. Use sparse fieldsets to optimize payload size by requesting only the fields you need."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results to return per page. This endpoint supports only a single result, so the maximum value is 1.", ge=1, le=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all UTM tracking settings configured for your Klaviyo account. Returns an array containing the account's tracking setting configuration."""
 
     # Construct request model with validation
@@ -13633,7 +13777,7 @@ async def get_tracking_setting(
     id_: str = Field(..., alias="id", description="The account ID of the tracking setting to retrieve (e.g., 'abCdEf')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_tracking_setting: list[Literal["auto_add_parameters", "custom_parameters", "utm_campaign", "utm_campaign.campaign", "utm_campaign.campaign.type", "utm_campaign.campaign.value", "utm_campaign.flow", "utm_campaign.flow.type", "utm_campaign.flow.value", "utm_id", "utm_id.campaign", "utm_id.campaign.type", "utm_id.campaign.value", "utm_id.flow", "utm_id.flow.type", "utm_id.flow.value", "utm_medium", "utm_medium.campaign", "utm_medium.campaign.type", "utm_medium.campaign.value", "utm_medium.flow", "utm_medium.flow.type", "utm_medium.flow.value", "utm_source", "utm_source.campaign", "utm_source.campaign.type", "utm_source.campaign.value", "utm_source.flow", "utm_source.flow.type", "utm_source.flow.value", "utm_term", "utm_term.campaign", "utm_term.campaign.type", "utm_term.campaign.value", "utm_term.flow", "utm_term.flow.type", "utm_term.flow.value"]] | None = Field(None, alias="fieldstracking-setting", description="Specify which fields to include in the response for the tracking-setting resource. Use sparse fieldsets to optimize payload size by requesting only needed fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a UTM tracking setting by account ID. Returns the tracking configuration for the specified account, which controls how UTM parameters are captured and processed."""
 
     # Construct request model with validation
@@ -13680,7 +13824,7 @@ async def list_web_feeds(
     revision: str = Field(..., description="API version in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not provided."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using comparison operators on feed name, creation date, or last update date. Supports exact matching, partial text matching, and date range queries. See API documentation for detailed filter syntax."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of results to return per page. Must be between 1 and 20 items; defaults to 5 if not specified.", ge=1, le=20),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all web feeds configured for your account. Supports filtering by name, creation date, or last update, with pagination to manage large result sets."""
 
     # Construct request model with validation
@@ -13726,7 +13870,7 @@ async def create_web_feed(
     url: str = Field(..., description="The URL endpoint from which to fetch the web feed content (e.g., 'https://help.klaviyo.com/api/v2/help_center/en-us/articles.json')."),
     request_method: Literal["get", "post"] = Field(..., description="The HTTP method to use when requesting the feed; either 'get' for standard retrieval or 'post' for feeds requiring POST requests."),
     content_type: Literal["json", "xml"] = Field(..., description="The expected content format of the feed; either 'json' for JSON-formatted feeds or 'xml' for XML-formatted feeds."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new web feed to aggregate content from a specified URL. The feed will be polled using the specified HTTP method and parsed according to the declared content type."""
 
     # Construct request model with validation
@@ -13773,7 +13917,7 @@ async def create_web_feed(
 async def get_web_feed(
     id_: str = Field(..., alias="id", description="The unique identifier of the web feed to retrieve (e.g., '925e385b52fb')"),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific web feed by its ID. Returns the complete feed configuration and metadata for the given feed identifier."""
 
     # Construct request model with validation
@@ -13819,7 +13963,7 @@ async def update_web_feed(
     url: str | None = Field(None, description="The URL endpoint from which to fetch the web feed content (e.g., 'https://help.klaviyo.com/api/v2/help_center/en-us/articles.json')"),
     request_method: Literal["get", "post"] | None = Field(None, description="The HTTP method to use when requesting the web feed; either 'get' or 'post'"),
     content_type: Literal["json", "xml"] | None = Field(None, description="The expected content format of the web feed; either 'json' or 'xml'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing web feed configuration, including its name, URL, request method, and content type. Requires the feed ID and current API revision for the request."""
 
     # Construct request model with validation
@@ -13867,7 +14011,7 @@ async def update_web_feed(
 async def delete_web_feed(
     id_: str = Field(..., alias="id", description="The unique identifier of the web feed to delete (e.g., '925e385b52fb')"),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a web feed by its ID. This operation requires the feed ID and API revision to ensure safe deletion."""
 
     # Construct request model with validation
@@ -13907,7 +14051,7 @@ async def delete_web_feed(
 async def list_webhooks(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_webhook: list[Literal["created_at", "description", "enabled", "endpoint_url", "name", "updated_at"]] | None = Field(None, alias="fieldswebhook", description="Specify which webhook fields to include in the response using sparse fieldsets for optimized payload size. Provide as an array of field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all webhooks configured in the account. Use optional field filtering to customize the response payload."""
 
     # Construct request model with validation
@@ -13953,7 +14097,7 @@ async def get_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
     fields_webhook: list[Literal["created_at", "description", "enabled", "endpoint_url", "name", "updated_at"]] | None = Field(None, alias="fieldswebhook", description="Optional array of specific webhook fields to include in the response. Use sparse fieldsets to reduce payload size and improve performance by requesting only needed fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook by its ID. Returns the webhook configuration and settings for the given identifier."""
 
     # Construct request model with validation
@@ -14007,7 +14151,7 @@ async def update_webhook(
     secret_key: str | None = Field(None, description="A secret key used to cryptographically sign webhook requests, allowing the receiver to verify authenticity."),
     enabled: bool | None = Field(None, description="Whether the webhook is active and should send events. Set to true to enable or false to disable."),
     data: list[_models.UpdateWebhookBodyDataRelationshipsWebhookTopicsDataItem] | None = Field(None, description="Additional structured data associated with the webhook. Order and format depend on the webhook configuration schema."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing webhook configuration by ID. Modify webhook properties such as name, description, endpoint URL, secret key, and enabled status."""
 
     # Construct request model with validation
@@ -14056,7 +14200,7 @@ async def update_webhook(
 async def delete_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to delete."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a webhook by its ID. This action cannot be undone and will stop all event deliveries to the webhook's configured endpoint."""
 
     # Construct request model with validation
@@ -14093,7 +14237,7 @@ async def delete_webhook(
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhook_topics(revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified.")) -> dict[str, Any]:
+async def list_webhook_topics(revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all available webhook topics in a Klaviyo account. Webhook topics define the events that can trigger webhooks for your integration."""
 
     # Construct request model with validation
@@ -14132,7 +14276,7 @@ async def list_webhook_topics(revision: str = Field(..., description="API endpoi
 async def get_webhook_topic(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook topic to retrieve (e.g., 'event:klaviyo.sent_sms'). Use this ID to fetch the specific topic's configuration."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified, ensuring compatibility with the desired API version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook topic by its ID to view its configuration and details. Useful for inspecting webhook topic settings before subscribing to events."""
 
     # Construct request model with validation
@@ -14178,7 +14322,7 @@ async def list_client_review_values_reports(
     fields_review_values_report: list[Literal["results"]] | None = Field(None, alias="fieldsreview-values-report", description="Optional sparse fieldset to limit which fields are returned in the review-values-report objects. Specify as a comma-separated list of field names."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter to narrow results by product external IDs. Supports 'equals' for exact match or 'any' to match multiple IDs. Use comma-separated format for multiple values with the 'any' operator."),
     page_size: int | None = Field(None, alias="pagesize", description="Optional page size for results, ranging from 1 to 100 items per page. Defaults to 20 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated review metrics reports for your account, grouped by company or product with customizable statistics and timeframe filtering."""
 
     # Construct request model with validation
@@ -14225,7 +14369,7 @@ async def list_client_reviews(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter reviews by specific criteria such as status, rating, review type, verification status, or content properties. Supports operators like equals, contains, has, and range comparisons (greater-or-equal, less-or-equal). For detailed filtering syntax, see the API overview documentation."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of reviews to return per page. Must be between 1 and 100; defaults to 20 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all product reviews for a client-side environment. Use this endpoint for client-side applications; for server-side implementations, refer to the server-side reviews endpoint."""
 
     # Construct request model with validation
@@ -14281,7 +14425,7 @@ async def create_client_review(
     title: str | None = Field(None, description="Optional headline or summary for the review. Provides a brief overview of the reviewer's main point."),
     custom_questions: list[_models.CustomQuestionDto] | None = Field(None, description="Optional array of custom question responses. Each item contains a question ID and an array of selected answers (e.g., size or color selections)."),
     images: list[str] | None = Field(None, description="Optional list of image URLs or base-64 encoded data URIs attached to the review. Supports multiple images; empty array if no images provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a product review from a client-side environment. This endpoint creates a review or question for a product associated with an order, supporting ratings, custom questions, and image attachments."""
 
     # Construct request model with validation
@@ -14344,7 +14488,7 @@ async def create_client_subscription(
     id_: str = Field(..., alias="id", description="The ID of the list to add the newly subscribed profile to. Required to associate the subscription with a specific audience list."),
     custom_source: str | None = Field(None, description="Optional custom source or method detail to record on the consent records, such as 'Homepage footer signup form' or other signup origin."),
     profile: _models.CreateClientSubscriptionBodyDataAttributesProfile | None = Field(None, description="Profile to subscribe: email, phone, name, location, subscription consents, and custom properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe a contact to email and/or SMS marketing channels by creating a subscription and consent record. Must be called from client-side environments only using a public API key. Provide either an email address or phone number (or both) to identify the contact."""
 
     # Construct request model with validation
@@ -14425,7 +14569,7 @@ async def create_or_update_client_profile(
     append: dict[str, Any] | None = Field(None, description="Append values to existing array properties. Specify property names with values to add. Useful for accumulating list-based attributes without replacing existing data."),
     unappend: dict[str, Any] | None = Field(None, description="Remove specific values from existing array properties. Specify property names with values to remove. Useful for cleaning up list-based attributes."),
     unset: str | list[str] | None = Field(None, description="Remove one or more properties entirely from the profile. Specify property names as a string or array to delete them and their values completely."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update a customer profile with identity and property information from client-side environments. This endpoint requires a public API key and is designed for browser-based implementations; use server-side endpoints for identifier updates or server applications."""
 
     # Construct request model with validation
@@ -14486,7 +14630,7 @@ async def subscribe_profile_to_back_in_stock_notifications(
     email: str | None = Field(None, description="The profile's email address. Use this to identify or create a profile if profile ID is not provided."),
     phone_number: str | None = Field(None, description="The profile's phone number in E.164 format (e.g., +1 country code and number). Use this to identify or create a profile if profile ID is not provided."),
     external_id: str | None = Field(None, description="An external identifier from your system (such as a customer ID from your point-of-sale or CRM) to link this Klaviyo profile with your internal records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe a customer profile to receive back-in-stock notifications for a specific product variant through their preferred channels (email, SMS, or both). This client-side endpoint requires a public API key and is designed for browser-based implementations."""
 
     # Construct request model with validation
