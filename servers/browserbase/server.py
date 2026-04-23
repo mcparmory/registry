@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Browserbase MCP Server
-Generated: 2026-04-14 18:16:44 UTC
+Generated: 2026-04-23 21:05:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,9 +36,10 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "https://www.browserbase.com")
+BASE_URL = os.getenv("BASE_URL", "https://api.browserbase.com")
 SERVER_NAME = "Browserbase"
 SERVER_VERSION = "1.0.0"
 
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +713,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +769,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +835,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +869,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -865,16 +978,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -888,6 +1002,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -930,6 +1045,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -941,7 +1071,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -954,7 +1083,7 @@ AUTH_SCHEME_PRIORITY = [
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["BrowserbaseAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="X-BB-API-Key")
+    _auth_handlers["BrowserbaseAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="x-bb-api-key")
     logging.info("Authentication configured: BrowserbaseAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
@@ -1082,7 +1211,7 @@ mcp = FastMCP("Browserbase", middleware=[_JsonCoercionMiddleware()])
 
 
 @mcp.tool()
-async def create_context(project_id: str = Field(..., alias="projectId", description="The unique identifier of the project under which the context will be created. Locatable in the Browserbase account Settings page.")) -> dict[str, Any]:
+async def create_context(project_id: str = Field(..., alias="projectId", description="The unique identifier of the project under which the context will be created. Locatable in the Browserbase account Settings page.")) -> dict[str, Any] | ToolResult:
     """Creates a new browser context within a specified project, enabling isolated session management and configuration for automated browsing tasks."""
 
     # Construct request model with validation
@@ -1120,7 +1249,7 @@ async def create_context(project_id: str = Field(..., alias="projectId", descrip
 
 
 @mcp.tool()
-async def get_context(id_: str = Field(..., alias="id", description="The unique identifier of the context to retrieve.")) -> dict[str, Any]:
+async def get_context(id_: str = Field(..., alias="id", description="The unique identifier of the context to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific context by its unique identifier. Returns the full details of the requested context object."""
 
     # Construct request model with validation
@@ -1156,7 +1285,7 @@ async def get_context(id_: str = Field(..., alias="id", description="The unique 
 
 
 @mcp.tool()
-async def update_context(id_: str = Field(..., alias="id", description="The unique identifier of the context to update.")) -> dict[str, Any]:
+async def update_context(id_: str = Field(..., alias="id", description="The unique identifier of the context to update.")) -> dict[str, Any] | ToolResult:
     """Updates an existing context by its unique identifier. Use this to modify the properties or configuration of a previously created context."""
 
     # Construct request model with validation
@@ -1192,7 +1321,7 @@ async def update_context(id_: str = Field(..., alias="id", description="The uniq
 
 
 @mcp.tool()
-async def upload_extension(file_: str = Field(..., alias="file", description="The binary file containing the extension package to be uploaded.")) -> dict[str, Any]:
+async def upload_extension(file_: str = Field(..., alias="file", description="The binary file containing the extension package to be uploaded.")) -> dict[str, Any] | ToolResult:
     """Upload an extension package to the system, making it available for installation and use. Accepts a binary file representing the extension bundle."""
 
     # Construct request model with validation
@@ -1224,6 +1353,7 @@ async def upload_extension(file_: str = Field(..., alias="file", description="Th
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -1231,7 +1361,7 @@ async def upload_extension(file_: str = Field(..., alias="file", description="Th
 
 
 @mcp.tool()
-async def get_extension(id_: str = Field(..., alias="id", description="The unique identifier of the extension to retrieve.")) -> dict[str, Any]:
+async def get_extension(id_: str = Field(..., alias="id", description="The unique identifier of the extension to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific extension by its unique identifier. Use this to inspect extension configuration, status, or metadata."""
 
     # Construct request model with validation
@@ -1267,7 +1397,7 @@ async def get_extension(id_: str = Field(..., alias="id", description="The uniqu
 
 
 @mcp.tool()
-async def delete_extension(id_: str = Field(..., alias="id", description="The unique identifier of the extension to delete.")) -> dict[str, Any]:
+async def delete_extension(id_: str = Field(..., alias="id", description="The unique identifier of the extension to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific extension by its unique identifier. This action is irreversible and removes the extension and its associated data."""
 
     # Construct request model with validation
@@ -1303,7 +1433,7 @@ async def delete_extension(id_: str = Field(..., alias="id", description="The un
 
 
 @mcp.tool()
-async def list_projects() -> dict[str, Any]:
+async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all projects accessible to the authenticated user. Use this to discover available projects and their associated metadata."""
 
     # Extract parameters for API call
@@ -1330,7 +1460,7 @@ async def list_projects() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve.")) -> dict[str, Any]:
+async def get_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific project by its unique identifier. Use this to fetch project metadata, status, and configuration."""
 
     # Construct request model with validation
@@ -1366,7 +1496,7 @@ async def get_project(id_: str = Field(..., alias="id", description="The unique 
 
 
 @mcp.tool()
-async def get_project_usage(id_: str = Field(..., alias="id", description="The unique identifier of the project whose usage data you want to retrieve.")) -> dict[str, Any]:
+async def get_project_usage(id_: str = Field(..., alias="id", description="The unique identifier of the project whose usage data you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves usage statistics and consumption metrics for a specific project. Useful for monitoring resource utilization and tracking project activity over time."""
 
     # Construct request model with validation
@@ -1402,7 +1532,7 @@ async def get_project_usage(id_: str = Field(..., alias="id", description="The u
 
 
 @mcp.tool()
-async def list_sessions(status: Literal["RUNNING", "ERROR", "TIMED_OUT", "COMPLETED"] | None = Field(None, description="Filters the returned sessions by their current lifecycle status. Accepted values are RUNNING (active), ERROR (failed), TIMED_OUT (expired), or COMPLETED (finished successfully).")) -> dict[str, Any]:
+async def list_sessions(status: Literal["RUNNING", "ERROR", "TIMED_OUT", "COMPLETED"] | None = Field(None, description="Filters the returned sessions by their current lifecycle status. Accepted values are RUNNING (active), ERROR (failed), TIMED_OUT (expired), or COMPLETED (finished successfully).")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of sessions, optionally filtered by their current status. Useful for monitoring active, completed, or failed sessions."""
 
     # Construct request model with validation
@@ -1458,7 +1588,7 @@ async def create_session(
     proxies: Any | None = Field(None, description="Proxy configuration for the session. Pass true to use the default proxy, or provide an array of proxy configuration objects for custom routing."),
     region: Literal["us-west-2", "us-east-1", "eu-central-1", "ap-southeast-1"] | None = Field(None, description="The geographic region in which to run the browser session, affecting latency and geo-targeted content."),
     viewport: str | None = Field(None, description="Viewport dimensions in 'WIDTHxHEIGHT' format (e.g., '1920x1080')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new browser session within a specified project, with configurable settings for fingerprinting, proxies, recording, and session lifecycle management."""
 
     # Call helper functions
@@ -1504,7 +1634,7 @@ async def create_session(
 
 
 @mcp.tool()
-async def get_session(id_: str = Field(..., alias="id", description="The unique identifier of the session to retrieve.")) -> dict[str, Any]:
+async def get_session(id_: str = Field(..., alias="id", description="The unique identifier of the session to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific session by its unique identifier. Useful for checking session status, metadata, or associated activity."""
 
     # Construct request model with validation
@@ -1544,7 +1674,7 @@ async def release_session(
     id_: str = Field(..., alias="id", description="The unique identifier of the session to update."),
     project_id: str = Field(..., alias="projectId", description="The Project ID associated with the session. Can be found in the Browserbase Settings page."),
     status: Literal["REQUEST_RELEASE"] = Field(..., description="The desired status update for the session. Set to REQUEST_RELEASE to signal that the session is complete and should be released before its scheduled timeout."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a session's status to request an early release, signaling that the session has completed. Use this before the session's timeout to avoid incurring additional charges."""
 
     # Construct request model with validation
@@ -1583,7 +1713,7 @@ async def release_session(
 
 
 @mcp.tool()
-async def get_session_debug_urls(id_: str = Field(..., alias="id", description="The unique identifier of the session for which to retrieve debug URLs.")) -> dict[str, Any]:
+async def get_session_debug_urls(id_: str = Field(..., alias="id", description="The unique identifier of the session for which to retrieve debug URLs.")) -> dict[str, Any] | ToolResult:
     """Retrieves live debug URLs for an active browser session, enabling real-time inspection and monitoring of the session's state."""
 
     # Construct request model with validation
@@ -1619,7 +1749,7 @@ async def get_session_debug_urls(id_: str = Field(..., alias="id", description="
 
 
 @mcp.tool()
-async def list_session_downloads(id_: str = Field(..., alias="id", description="The unique identifier of the session whose downloads you want to retrieve.")) -> dict[str, Any]:
+async def list_session_downloads(id_: str = Field(..., alias="id", description="The unique identifier of the session whose downloads you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all downloads associated with a specific session. Useful for reviewing files or resources that were downloaded during a given session."""
 
     # Construct request model with validation
@@ -1655,7 +1785,7 @@ async def list_session_downloads(id_: str = Field(..., alias="id", description="
 
 
 @mcp.tool()
-async def get_session_logs(id_: str = Field(..., alias="id", description="The unique identifier of the session whose logs you want to retrieve.")) -> dict[str, Any]:
+async def get_session_logs(id_: str = Field(..., alias="id", description="The unique identifier of the session whose logs you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the log output for a specific session, useful for debugging, auditing, or monitoring session activity."""
 
     # Construct request model with validation
@@ -1691,7 +1821,7 @@ async def get_session_logs(id_: str = Field(..., alias="id", description="The un
 
 
 @mcp.tool()
-async def get_session_recording(id_: str = Field(..., alias="id", description="The unique identifier of the session whose recording you want to retrieve.")) -> dict[str, Any]:
+async def get_session_recording(id_: str = Field(..., alias="id", description="The unique identifier of the session whose recording you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the recording associated with a specific session. Returns the recording data or media for playback or download."""
 
     # Construct request model with validation
@@ -1730,7 +1860,7 @@ async def get_session_recording(id_: str = Field(..., alias="id", description="T
 async def upload_session_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the session to which the file will be uploaded."),
     file_: str = Field(..., alias="file", description="The binary file content to upload to the session."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a file to an existing session, attaching it as a resource for use within that session's context."""
 
     # Construct request model with validation
@@ -1763,6 +1893,7 @@ async def upload_session_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 

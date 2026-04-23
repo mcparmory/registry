@@ -1,6 +1,7 @@
 # Browserbase MCP Server
+<!-- mcp-name: com.mcparmory/browserbase -->
 
-Base URL: https://www.browserbase.com
+Base URL: https://api.browserbase.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
@@ -50,7 +51,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY` — API Key Authentication (X-BB-API-Key)
+- `API_KEY` — API Key Authentication (x-bb-api-key)
 Do not commit credentials to version control.
 
 ---
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/browserbase`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/browserbase:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t browserbase .
 docker run -p 8000:8000 --env-file .env browserbase
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
