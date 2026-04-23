@@ -1,7 +1,7 @@
 """
 Authentication module for Globalping MCP server.
 
-Generated: 2026-04-14 18:23:05 UTC
+Generated: 2026-04-23 21:20:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -498,6 +498,6 @@ using OR/AND relationships (outer list = OR, inner list = AND).
 """
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_measurement": [["OAuth2"], ["BearerAuth"]],
-    "poll_measurement": [],
-    "list_probes": []
+    "poll_measurement": [["OAuth2"], ["BearerAuth"]],
+    "list_probes": [["OAuth2"], ["BearerAuth"]]
 }

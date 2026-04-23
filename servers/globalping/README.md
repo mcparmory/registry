@@ -1,11 +1,12 @@
 # Globalping MCP Server
+<!-- mcp-name: com.mcparmory/globalping -->
 
 Base URL: https://api.globalping.io
 | | |
 |---|---|
 | **Category** | Infrastructure |
 | **Tools** | 3 |
-| **Auth** | OAuth2, Bearer Token |
+| **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
 - **API License:** Open Software License 3.0 (OSL-3.0)
@@ -116,6 +117,19 @@ Example (if server is at `/home/user/mcp-servers/globalping`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/globalping:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -127,6 +141,8 @@ docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env glo
 **Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {
