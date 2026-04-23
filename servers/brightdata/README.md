@@ -1,4 +1,5 @@
 # Bright Data MCP Server
+<!-- mcp-name: com.mcparmory/brightdata -->
 
 Base URL: https://api.brightdata.com
 | | |
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/brightdata`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/brightdata:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t brightdata .
 docker run -p 8000:8000 --env-file .env brightdata
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

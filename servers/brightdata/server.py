@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Bright Data MCP Server
-Generated: 2026-04-14 18:16:37 UTC
+Generated: 2026-04-23 21:04:39 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.brightdata.com")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +713,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +769,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +835,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +869,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -822,16 +935,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -845,6 +959,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -887,6 +1002,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -898,7 +1028,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1039,7 +1168,7 @@ mcp = FastMCP("Bright Data", middleware=[_JsonCoercionMiddleware()])
 
 
 @mcp.tool()
-async def list_cities(country: str = Field(..., description="The ISO 3166-1 alpha-2 two-letter country code identifying the country whose cities should be retrieved.")) -> dict[str, Any]:
+async def list_cities(country: str = Field(..., description="The ISO 3166-1 alpha-2 two-letter country code identifying the country whose cities should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of cities belonging to a specified country. Useful for populating location options or validating city data within a given country."""
 
     # Construct request model with validation
@@ -1077,7 +1206,7 @@ async def list_cities(country: str = Field(..., description="The ISO 3166-1 alph
 
 
 @mcp.tool()
-async def list_countries_by_zone() -> dict[str, Any]:
+async def list_countries_by_zone() -> dict[str, Any] | ToolResult:
     """Retrieves a complete list of all available countries organized by zone type. Use this to discover supported countries and their associated geographic or regulatory zones."""
 
     # Extract parameters for API call
@@ -1104,7 +1233,7 @@ async def list_countries_by_zone() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_customer_balance() -> dict[str, Any]:
+async def get_customer_balance() -> dict[str, Any] | ToolResult:
     """Retrieves the total account balance for the authenticated customer. Returns the current balance across all associated accounts or funds."""
 
     # Extract parameters for API call
@@ -1134,7 +1263,7 @@ async def get_customer_balance() -> dict[str, Any]:
 async def get_bandwidth_stats(
     from_: str | None = Field(None, alias="from", description="The start of the time range for which to retrieve bandwidth stats, specified as an ISO 8601 datetime string."),
     to: str | None = Field(None, description="The end of the time range for which to retrieve bandwidth stats, specified as an ISO 8601 datetime string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves bandwidth usage statistics aggregated across all your Zones. Optionally filter results to a specific time window using start and end timestamps."""
 
     # Construct request model with validation
@@ -1172,7 +1301,7 @@ async def get_bandwidth_stats(
 
 
 @mcp.tool()
-async def get_zone_info(zone: str = Field(..., description="The identifier or name of the zone whose status you want to retrieve.")) -> dict[str, Any]:
+async def get_zone_info(zone: str = Field(..., description="The identifier or name of the zone whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status and details of a specified zone. Use this to monitor zone health, availability, or configuration state."""
 
     # Construct request model with validation
@@ -1235,7 +1364,7 @@ async def create_zone(
     ub_premium: bool | None = Field(None, description="Set to `true` to enable access to premium domains for Unblocker zones."),
     solve_captcha_disable: bool | None = Field(None, description="Set to `true` to disable automatic captcha solving for this zone."),
     custom_headers: bool | None = Field(None, description="Set to `true` to allow custom HTTP headers to be included in requests routed through this zone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new proxy zone with the specified configuration, including zone type, IP allocation, targeting options, and bandwidth settings. Supports Datacenter, Residential, Mobile, ISP, SERP, Unblocker, and Browser API zone types."""
 
     # Construct request model with validation
@@ -1274,7 +1403,7 @@ async def create_zone(
 
 
 @mcp.tool()
-async def delete_zone(zone: str | None = Field(None, description="The name of the zone to delete. If omitted, all zones associated with your account will be deleted.")) -> dict[str, Any]:
+async def delete_zone(zone: str | None = Field(None, description="The name of the zone to delete. If omitted, all zones associated with your account will be deleted.")) -> dict[str, Any] | ToolResult:
     """Deletes a specified DNS zone or, if no zone is provided, deletes all zones associated with your account. Use with caution as this action is irreversible."""
 
     # Construct request model with validation
@@ -1312,7 +1441,7 @@ async def delete_zone(zone: str | None = Field(None, description="The name of th
 
 
 @mcp.tool()
-async def list_zone_blacklisted_ips(zones: str | None = Field(None, description="A comma-separated list of zone identifiers to filter results by. Omitting this parameter defaults to all zones.")) -> dict[str, Any]:
+async def list_zone_blacklisted_ips(zones: str | None = Field(None, description="A comma-separated list of zone identifiers to filter results by. Omitting this parameter defaults to all zones.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of denylisted (blacklisted) IP addresses for one or more specified zones. If no zones are specified, results are returned across all zones."""
 
     # Construct request model with validation
@@ -1353,7 +1482,7 @@ async def list_zone_blacklisted_ips(zones: str | None = Field(None, description=
 async def add_ips_to_zone_denylist(
     ip: str | list[str] = Field(..., description="One or more IP addresses to block, accepted as a single IP string, an array of IP strings, a hyphenated IP range, a CIDR subnet, or a netmask notation subnet. Each IP string in an array must be individually quoted."),
     zone: str | None = Field(None, description="The name of the zone to apply the denylist entry to. If omitted, the IP block will be applied across all your zones."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more IP addresses to the denylist (blacklist) for a specific zone or all zones, blocking traffic from those IPs. Supports single IPs, arrays, ranges, subnets, and netmask notation."""
 
     # Construct request model with validation
@@ -1394,7 +1523,7 @@ async def add_ips_to_zone_denylist(
 async def delete_blacklist_entry(
     zone: str | None = Field(None, description="The name of the zone whose blacklist should be modified. If omitted, the deletion applies across all your zones."),
     ip: str | None = Field(None, description="The IP address or address group to remove from the blacklist. Accepts a single IP address, a hyphen-delimited IP range, a CIDR subnet, or a subnet mask notation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more IP addresses from the blacklist for a specific zone or all zones. Supports deletion of single IPs, IP ranges, subnets, and masked addresses."""
 
     # Construct request model with validation
@@ -1436,7 +1565,7 @@ async def get_zone_bandwidth_stats(
     zone: str = Field(..., description="The name of the zone for which to retrieve bandwidth statistics."),
     from_: str | None = Field(None, alias="from", description="The start of the time range for filtering bandwidth stats, specified in ISO 8601 datetime format. If omitted, results may default to the earliest available data."),
     to: str | None = Field(None, description="The end of the time range for filtering bandwidth stats, specified in ISO 8601 datetime format. If omitted, results may default to the most recent available data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves bandwidth usage statistics for a specified zone, optionally filtered by a time range. Useful for monitoring data transfer consumption over a given period."""
 
     # Construct request model with validation
@@ -1477,7 +1606,7 @@ async def get_zone_bandwidth_stats(
 async def set_zone_status(
     zone: str = Field(..., description="The name of the DNS zone whose active status will be changed."),
     disable: Literal[0, 1] = Field(..., description="Controls the zone's active state: use 0 to activate the zone or 1 to disable it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Activates or disables a specified DNS zone, controlling whether the zone is actively served or suspended."""
 
     # Construct request model with validation
@@ -1518,7 +1647,7 @@ async def set_zone_status(
 async def count_available_ips(
     zone: str | None = Field(None, description="The name of the zone for which to count available IP addresses. If omitted, results may reflect a default or global scope."),
     plan: _models.GetZoneCountAvailableIpsQueryPlan | None = Field(None, description="A plan object used to filter the available IP count based on specific plan criteria or resource tier constraints."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the number of available IP addresses in a specified zone, optionally filtered by plan. Useful for capacity planning and determining IP availability before provisioning resources."""
 
     # Construct request model with validation
@@ -1560,7 +1689,7 @@ async def get_zone_cost(
     zone: str = Field(..., description="The name of the zone for which to retrieve cost and bandwidth statistics."),
     from_: str | None = Field(None, alias="from", description="The start of the date range for filtering results, specified in ISO 8601 format."),
     to: str | None = Field(None, description="The end of the date range for filtering results, specified in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the total cost and bandwidth statistics for a specified zone. Optionally filter results by a date range using start and end timestamps."""
 
     # Construct request model with validation
@@ -1602,7 +1731,7 @@ async def add_zone_domain_permission(
     zone: str = Field(..., description="The name of the zone to which the domain permission rule will be applied."),
     type_: Literal["whitelist", "blacklist"] = Field(..., alias="type", description="Determines whether the specified domains are added to the allowlist (permitted) or denylist (blocked) for the zone. Use 'whitelist' to allow domains or 'blacklist' to deny them."),
     domain: str | None = Field(None, description="One or more domains to add to the specified list, provided as a space-separated string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more domains to a zone's allowlist or denylist to control which domains are permitted or blocked within that zone."""
 
     # Construct request model with validation
@@ -1640,7 +1769,7 @@ async def add_zone_domain_permission(
 
 
 @mcp.tool()
-async def list_active_zones() -> dict[str, Any]:
+async def list_active_zones() -> dict[str, Any] | ToolResult:
     """Retrieves all currently active zones in the system. Use this to get a complete list of zones that are operational and available for further actions."""
 
     # Extract parameters for API call
@@ -1667,7 +1796,7 @@ async def list_active_zones() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def list_zones() -> dict[str, Any]:
+async def list_zones() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all available zones. Use this to discover zone identifiers and configurations for subsequent zone-specific operations."""
 
     # Extract parameters for API call
@@ -1697,7 +1826,7 @@ async def list_zones() -> dict[str, Any]:
 async def list_zone_ips(
     zone: str = Field(..., description="The name of the zone whose static IPs should be retrieved."),
     ip_per_country: str | None = Field(None, description="When provided, the response includes the total number of IPs available per country for the specified zone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the static (Datacenter/ISP) IP addresses assigned to a specified zone. Optionally returns a breakdown of the total IP count grouped by country."""
 
     # Construct request model with validation
@@ -1741,7 +1870,7 @@ async def add_zone_static_ips(
     count: float = Field(..., description="The number of static IPs to allocate to the zone."),
     country: str | None = Field(None, description="Two-letter country code used to restrict the newly allocated IPs to a specific country."),
     country_city: str | None = Field(None, description="Country and city code used to restrict the newly allocated IPs to a specific city, formatted as a country-city pair."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Allocates a specified number of static IPs to a zone for Datacenter or ISP proxy types. Optionally scopes the new IPs to a specific country or city."""
 
     # Construct request model with validation
@@ -1782,7 +1911,7 @@ async def add_zone_static_ips(
 async def remove_zone_ips(
     zone: str | None = Field(None, description="The name of the zone from which the specified IP addresses will be removed."),
     ips: list[str] | None = Field(None, description="A list of IP addresses to delete from the zone. Each item should be a valid IPv4 or IPv6 address string; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more IP addresses from a specified zone. Use this to revoke or clean up IP entries associated with a named zone."""
 
     # Construct request model with validation
@@ -1824,7 +1953,7 @@ async def migrate_zone_ips(
     from_: str = Field(..., alias="from", description="The name of the source zone from which the specified Static IPs will be migrated."),
     to: str = Field(..., description="The name of the destination zone to which the specified Static IPs will be migrated."),
     ips: str = Field(..., description="The list of Static IP addresses to migrate from the source zone to the destination zone. Each item should be a valid IPv4 address string; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Migrate one or more Static IPs from a source zone to a destination zone across Datacenter or ISP zone types. Both zones must be specified along with the list of IPs to transfer."""
 
     # Construct request model with validation
@@ -1868,7 +1997,7 @@ async def refresh_zone_ips(
     ips: list[str] | None = Field(None, description="List of specific IPs to refresh. Omit this parameter to refresh all allocated IPs in the zone."),
     country: str | None = Field(None, description="The target country for the newly assigned IPs, specified as a two-letter country code."),
     country_city: str | None = Field(None, description="The target city for the newly assigned IPs, specified as a country-city slug."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Refreshes (rotates) allocated IPs within a specified zone, optionally targeting specific IPs and assigning a new country or city location. Omit the IP parameters to refresh all allocated IPs in the zone."""
 
     # Construct request model with validation
@@ -1906,7 +2035,7 @@ async def refresh_zone_ips(
 
 
 @mcp.tool()
-async def list_unavailable_zone_ips() -> dict[str, Any]:
+async def list_unavailable_zone_ips() -> dict[str, Any] | ToolResult:
     """Retrieves the live connectivity status of Static (Datacenter/ISP) zones and any IPs currently experiencing problems. Use this to monitor and diagnose unavailable or degraded proxy IPs in real time."""
 
     # Extract parameters for API call
@@ -1933,7 +2062,7 @@ async def list_unavailable_zone_ips() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def list_zone_passwords(zone: str = Field(..., description="The identifier of the zone whose passwords should be retrieved.")) -> dict[str, Any]:
+async def list_zone_passwords(zone: str = Field(..., description="The identifier of the zone whose passwords should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all passwords associated with a specified zone. Useful for managing zone-level credentials and access configurations."""
 
     # Construct request model with validation
@@ -1971,7 +2100,7 @@ async def list_zone_passwords(zone: str = Field(..., description="The identifier
 
 # Tags: Proxy
 @mcp.tool()
-async def list_proxies_pending_replacement(zone: str | None = Field(None, description="The zone identifier used to filter proxies pending replacement. If omitted, results may span all accessible zones.")) -> dict[str, Any]:
+async def list_proxies_pending_replacement(zone: str | None = Field(None, description="The zone identifier used to filter proxies pending replacement. If omitted, results may span all accessible zones.")) -> dict[str, Any] | ToolResult:
     """Retrieves all proxies within a specified zone that are currently pending replacement. Useful for monitoring and managing proxy lifecycle transitions within a zone."""
 
     # Construct request model with validation
@@ -2009,7 +2138,7 @@ async def list_proxies_pending_replacement(zone: str | None = Field(None, descri
 
 
 @mcp.tool()
-async def list_zone_recent_ips(zones: str | None = Field(None, description="Specifies which zones to retrieve recent attempting IPs for. Use a wildcard to include all zones, or provide a specific zone identifier to filter results.")) -> dict[str, Any]:
+async def list_zone_recent_ips(zones: str | None = Field(None, description="Specifies which zones to retrieve recent attempting IPs for. Use a wildcard to include all zones, or provide a specific zone identifier to filter results.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of IP addresses that have recently attempted to access your zones. Useful for monitoring access patterns and identifying suspicious activity."""
 
     # Construct request model with validation
@@ -2051,7 +2180,7 @@ async def list_zone_route_ips(
     zone: str = Field(..., description="The name of the zone for which to retrieve available IPs."),
     country: str | None = Field(None, description="Filters the returned IPs to only those belonging to the specified country, provided as a 2-letter ISO 3166-1 alpha-2 country code."),
     list_countries: bool | None = Field(None, description="When set to true, returns a JSON array of objects pairing each IP with its country code instead of a plain list of IP addresses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the available Data Center and ISP IP addresses for a specified zone. Optionally filter by country or request enriched output pairing each IP with its country code."""
 
     # Construct request model with validation
@@ -2089,7 +2218,7 @@ async def list_zone_route_ips(
 
 
 @mcp.tool()
-async def list_zone_dedicated_ips(zone: str = Field(..., description="The name of the zone for which to retrieve available residential dedicated IPs.")) -> dict[str, Any]:
+async def list_zone_dedicated_ips(zone: str = Field(..., description="The name of the zone for which to retrieve available residential dedicated IPs.")) -> dict[str, Any] | ToolResult:
     """Retrieves all available residential dedicated IPs (VIPs) assigned to a specified zone. Use this to discover static IP resources available within a given zone for dedicated routing."""
 
     # Construct request model with validation
@@ -2130,7 +2259,7 @@ async def list_zone_dedicated_ips(zone: str = Field(..., description="The name o
 async def list_static_cities(
     country: str = Field(..., description="The country for which to retrieve available static network cities, specified as a country code."),
     pool_ip_type: Literal["dc", "static_res"] | None = Field(None, description="The static network type to filter cities by: datacenter ('dc') or ISP/residential ('static_res')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of cities available in the static residential network for a specified country. Results can be filtered by network type (Datacenter or ISP)."""
 
     # Construct request model with validation
@@ -2168,7 +2297,7 @@ async def list_static_cities(
 
 
 @mcp.tool()
-async def get_zone_status(zone: str = Field(..., description="The identifier or name of the zone whose status you want to retrieve.")) -> dict[str, Any]:
+async def get_zone_status(zone: str = Field(..., description="The identifier or name of the zone whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a specified zone. Use this to monitor zone health, availability, or operational state."""
 
     # Construct request model with validation
@@ -2209,7 +2338,7 @@ async def get_zone_status(zone: str = Field(..., description="The identifier or 
 async def toggle_zone_failover(
     zone: str | None = Field(None, description="The name of the Static zone for which automatic failover should be toggled."),
     active: Literal[0, 1] | None = Field(None, description="Controls whether automatic failover is enabled or disabled for the zone. Use 1 to enable automatic failover and 0 to disable it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable or disable automatic failover (100% uptime mode) for a specified Static zone. When enabled, traffic is automatically rerouted to a backup in the event of a zone failure."""
 
     # Construct request model with validation
@@ -2250,7 +2379,7 @@ async def toggle_zone_failover(
 async def remove_zone_vips(
     zone: str = Field(..., description="The name of the zone from which the specified VIPs will be removed."),
     gips: list[str] = Field(..., description="A list of Virtual IP addresses to remove from the zone. Order is not significant; each item should be a valid IP address string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more Virtual IPs (VIPs) from a specified zone. Use this to decommission or reassign VIP addresses that are no longer needed within the zone."""
 
     # Construct request model with validation
@@ -2288,7 +2417,7 @@ async def remove_zone_vips(
 
 
 @mcp.tool()
-async def list_zone_whitelisted_ips(zones: str | None = Field(None, description="A comma-separated list of zone identifiers to filter results by. When omitted, results are returned for all zones.")) -> dict[str, Any]:
+async def list_zone_whitelisted_ips(zones: str | None = Field(None, description="A comma-separated list of zone identifiers to filter results by. When omitted, results are returned for all zones.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of allowlisted IP addresses for one or more specified zones. Useful for auditing or reviewing which IPs have been granted access within a zone."""
 
     # Construct request model with validation
@@ -2329,7 +2458,7 @@ async def list_zone_whitelisted_ips(zones: str | None = Field(None, description=
 async def add_zone_whitelist_ip(
     ip: str | list[str] = Field(..., description="One or more IP addresses to add to the allowlist, accepted as a single IP string, an array of IP strings, a hyphenated IP range, a CIDR subnet, or a netmask notation subnet."),
     zone: str | None = Field(None, description="The name of the zone whose allowlist will be updated. If omitted, the IP(s) will be added to the allowlist for all zones associated with your account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more IP addresses to the allowlist for a specific zone or all zones, restricting access to only the specified IPs. Supports single IPs, IP arrays, ranges, subnets, and netmask notation."""
 
     # Construct request model with validation
@@ -2370,7 +2499,7 @@ async def add_zone_whitelist_ip(
 async def delete_whitelist_ip(
     zone: str | None = Field(None, description="The name of the zone whose whitelist will be modified. If omitted, the deletion applies to all zones associated with your account."),
     ip: str | None = Field(None, description="The IP address or address group to remove from the whitelist. Accepts a single IP address, a hyphen-delimited IP range, a CIDR subnet notation, or an IP with a subnet mask."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more IP addresses from the whitelist of a specific zone or all zones. Supports deletion of single IPs, IP ranges, subnets, and IP mask formats."""
 
     # Construct request model with validation
