@@ -41,7 +41,7 @@ from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.rootly.com")
 SERVER_NAME = "Rootly"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
