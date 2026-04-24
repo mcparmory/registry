@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Rootly MCP Server
-Generated: 2026-04-23 21:09:28 UTC
+Generated: 2026-04-24 08:34:45 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -41,7 +41,7 @@ from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.rootly.com")
 SERVER_NAME = "Rootly"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.0.1"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -588,18 +588,23 @@ async def _make_request(
                         if _value is None:
                             continue
                         if _key in _file_fields:
-                            if isinstance(_value, str):
-                                _file_content = _value.encode("utf-8")
-                            elif isinstance(_value, (bytes, bytearray)):
-                                _file_content = bytes(_value)
-                            else:
-                                raise ValueError(
-                                    f"Unsupported multipart file field '{_key}': "
-                                    f"expected str or bytes, got {type(_value).__name__}"
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
                                 )
-                            _multipart_parts.append(
-                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
-                            )
                         else:
                             if isinstance(_value, (dict, list)):
                                 _part_value = json.dumps(_value)

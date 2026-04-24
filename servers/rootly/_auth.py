@@ -1,7 +1,7 @@
 """
 Authentication module for Rootly MCP server.
 
-Generated: 2026-04-23 21:09:28 UTC
+Generated: 2026-04-24 08:34:45 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
