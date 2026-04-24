@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ElevenLabs MCP Server
-Generated: 2026-04-14 18:20:45 UTC
+Generated: 2026-04-24 08:33:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,9 +36,10 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import AfterValidator, Field
 
-BASE_URL = os.getenv("BASE_URL", "")
+BASE_URL = os.getenv("BASE_URL", "https://api.elevenlabs.io/v1")
 SERVER_NAME = "ElevenLabs"
 SERVER_VERSION = "1.0.0"
 
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -958,16 +1076,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -981,6 +1100,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1023,6 +1143,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1034,26 +1169,25 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'xi_api_key',
+    'ApiKeyAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["xi_api_key"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="xi-api-key")
-    logging.info("Authentication configured: xi_api_key")
+    _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="xi-api-key")
+    logging.info("Authentication configured: ApiKeyAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for xi_api_key not configured: {error_msg}")
-    _auth_handlers["xi_api_key"] = None
+    logging.warning(f"Credentials for ApiKeyAuth not configured: {error_msg}")
+    _auth_handlers["ApiKeyAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1184,7 +1318,7 @@ async def list_speech_history(
     date_after_unix: int | None = Field(None, description="Filter to history items created on or after this date (inclusive). Provide as a Unix timestamp."),
     sort_direction: Literal["asc", "desc"] | None = Field(None, description="Order results by creation date in ascending or descending order."),
     source: Literal["TTS", "STS"] | None = Field(None, description="Filter results by the source that generated the audio item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of your generated audio items with optional filtering by voice, model, date range, and source. Results are ordered by creation date."""
 
     # Construct request model with validation
@@ -1222,7 +1356,7 @@ async def list_speech_history(
 
 # Tags: speech-history
 @mcp.tool()
-async def get_speech_history_item(history_item_id: str = Field(..., description="The unique identifier of the history item to retrieve. You can obtain available history item IDs by calling the list speech history operation.")) -> dict[str, Any]:
+async def get_speech_history_item(history_item_id: str = Field(..., description="The unique identifier of the history item to retrieve. You can obtain available history item IDs by calling the list speech history operation.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific speech synthesis history item by its ID. Use this to access details about a previously generated speech synthesis request."""
 
     # Construct request model with validation
@@ -1258,7 +1392,7 @@ async def get_speech_history_item(history_item_id: str = Field(..., description=
 
 # Tags: speech-history
 @mcp.tool()
-async def delete_history_item(history_item_id: str = Field(..., description="The unique identifier of the history item to delete. You can retrieve available history item IDs using the list history items endpoint.")) -> dict[str, Any]:
+async def delete_history_item(history_item_id: str = Field(..., description="The unique identifier of the history item to delete. You can retrieve available history item IDs using the list history items endpoint.")) -> dict[str, Any] | ToolResult:
     """Delete a speech history item by its ID. This removes the item from your speech synthesis history."""
 
     # Construct request model with validation
@@ -1294,7 +1428,7 @@ async def delete_history_item(history_item_id: str = Field(..., description="The
 
 # Tags: speech-history
 @mcp.tool()
-async def get_speech_history_audio(history_item_id: str = Field(..., description="The unique identifier of the speech history item from which to retrieve the audio file.")) -> dict[str, Any]:
+async def get_speech_history_audio(history_item_id: str = Field(..., description="The unique identifier of the speech history item from which to retrieve the audio file.")) -> dict[str, Any] | ToolResult:
     """Retrieve the audio file associated with a specific speech synthesis history item. Use the history item ID obtained from the speech history list to download the generated audio."""
 
     # Construct request model with validation
@@ -1333,7 +1467,7 @@ async def get_speech_history_audio(history_item_id: str = Field(..., description
 async def download_speech_items(
     history_item_ids: list[str] = Field(..., description="List of history item IDs to download. Retrieve available IDs and metadata from the list speech history endpoint. Order is preserved in the output archive."),
     output_format: str | None = Field(None, description="Audio file format for transcoding. Specify the desired output format for the downloaded audio files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download one or more speech history items as audio files. Single items are returned as individual audio files, while multiple items are packaged into a .zip archive."""
 
     # Construct request model with validation
@@ -1378,7 +1512,7 @@ async def generate_sound(
     duration_seconds: float | None = Field(None, description="Target duration of the generated sound in seconds. If not specified, the optimal duration will be automatically determined from the text description."),
     prompt_influence: float | None = Field(None, description="Controls how strictly the generation adheres to the text description. Higher values produce more consistent results but less variation; lower values allow more creative freedom."),
     model_id: str | None = Field(None, description="The AI model to use for sound generation. Determines the quality and capabilities of the generated audio."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate realistic sound effects from text descriptions using advanced AI models. Perfect for video production, voice-overs, and game audio."""
 
     # Construct request model with validation
@@ -1419,7 +1553,7 @@ async def generate_sound(
 
 # Tags: audio-isolation
 @mcp.tool()
-async def isolate_audio(audio: str = Field(..., description="The audio file to process for noise removal and vocal/speech isolation. Accepts binary audio data in common formats.")) -> dict[str, Any]:
+async def isolate_audio(audio: str = Field(..., description="The audio file to process for noise removal and vocal/speech isolation. Accepts binary audio data in common formats.")) -> dict[str, Any] | ToolResult:
     """Removes background noise and isolates vocals or speech from an audio file. Returns the cleaned audio with background noise suppressed."""
 
     # Construct request model with validation
@@ -1451,6 +1585,7 @@ async def isolate_audio(audio: str = Field(..., description="The audio file to p
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["audio"],
         headers=_http_headers,
     )
 
@@ -1458,7 +1593,7 @@ async def isolate_audio(audio: str = Field(..., description="The audio file to p
 
 # Tags: audio-isolation
 @mcp.tool()
-async def isolate_audio_stream(audio: str = Field(..., description="The audio file to process for isolation. The audio data should be provided in binary format.")) -> dict[str, Any]:
+async def isolate_audio_stream(audio: str = Field(..., description="The audio file to process for isolation. The audio data should be provided in binary format.")) -> dict[str, Any] | ToolResult:
     """Removes background noise from audio and streams the isolated vocals or speech. Processes the provided audio file and returns the cleaned result as a stream."""
 
     # Construct request model with validation
@@ -1490,6 +1625,7 @@ async def isolate_audio_stream(audio: str = Field(..., description="The audio fi
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["audio"],
         headers=_http_headers,
     )
 
@@ -1500,7 +1636,7 @@ async def isolate_audio_stream(audio: str = Field(..., description="The audio fi
 async def delete_voice_sample(
     voice_id: str = Field(..., description="The unique identifier of the voice containing the sample to delete."),
     sample_id: str = Field(..., description="The unique identifier of the sample to delete from the specified voice."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a sample from a voice by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1539,7 +1675,7 @@ async def delete_voice_sample(
 async def retrieve_voice_sample_audio(
     voice_id: str = Field(..., description="The unique identifier of the voice containing the sample. You can retrieve available voice IDs from the voices list endpoint."),
     sample_id: str = Field(..., description="The unique identifier of the sample within the specified voice. You can retrieve available sample IDs by fetching the voice details endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the audio file associated with a specific sample attached to a voice. Use this to download or access audio data for voice samples."""
 
     # Construct request model with validation
@@ -1590,7 +1726,7 @@ async def generate_speech(
     next_request_ids: list[str] | None = Field(None, description="Request IDs of audio samples that follow this generation. Useful for maintaining natural flow when regenerating a sample within a sequence. Maximum of 3 request IDs. Works best with the same model across generations."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Controls text normalization behavior. 'auto' lets the system decide, 'on' always applies normalization (e.g., spelling out numbers), and 'off' skips normalization entirely."),
     apply_language_text_normalization: bool | None = Field(None, description="Enables language-specific text normalization for improved pronunciation in supported languages. Currently only supported for Japanese. Warning: may significantly increase request latency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts text into natural-sounding speech using a selected voice and returns audio in your preferred format. Supports voice customization through stability, similarity, style, and speed controls, with optional pronunciation dictionaries and continuity features for multi-part audio generation."""
 
     # Construct request model with validation
@@ -1648,7 +1784,7 @@ async def generate_speech_with_timestamps(
     next_request_ids: list[str] | None = Field(None, description="Request IDs of subsequent speech samples to maintain continuity. Useful for regenerating a sample while preserving natural flow with following audio. Maximum of 3 request IDs. Results are best when using the same model across generations."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Text normalization mode: 'auto' applies normalization automatically, 'on' always applies it, 'off' disables it. Normalization handles conversions like spelling out numbers."),
     apply_language_text_normalization: bool | None = Field(None, description="Enable language-specific text normalization for proper pronunciation. Currently supported for Japanese only. Warning: may significantly increase request latency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert text to speech audio with precise character-level timing information for synchronizing audio playback with text. Returns audio file and timestamp data for each character."""
 
     # Construct request model with validation
@@ -1706,7 +1842,7 @@ async def generate_speech_stream(
     next_request_ids: list[str] | None = Field(None, description="Request IDs from samples that follow this generation. Maintains natural flow when regenerating a sample within a sequence. Maximum 3 IDs, best results with consistent model."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Text normalization mode: 'auto' applies normalization automatically, 'on' always applies it, 'off' disables it. Normalization handles number spelling and similar conversions."),
     apply_language_text_normalization: bool | None = Field(None, description="Enable language-specific text normalization for proper pronunciation. Currently supported for Japanese only. Warning: significantly increases request latency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts text into streaming audio using a specified voice. Returns audio as a continuous stream in your chosen format, ideal for real-time playback or large content."""
 
     # Construct request model with validation
@@ -1764,7 +1900,7 @@ async def generate_speech_stream_with_timestamps(
     next_request_ids: list[str] | None = Field(None, description="Request IDs from subsequent speech samples to maintain continuity. Accepts up to 3 IDs applied in order. Useful when regenerating a sample while preserving natural flow with following content."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Text normalization mode: 'auto' applies normalization when appropriate, 'on' always applies it, 'off' disables it. Normalization handles conversions like spelling out numbers."),
     apply_language_text_normalization: bool | None = Field(None, description="Enable language-specific text normalization for improved pronunciation in supported languages. Currently only supports Japanese. Warning: may significantly increase request latency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts text to speech audio and returns a stream of JSON objects containing base64-encoded audio chunks with character-level timing information, enabling precise synchronization of audio with text."""
 
     # Construct request model with validation
@@ -1815,7 +1951,7 @@ async def generate_dialogue(
     stability: float | None = Field(None, description="Voice stability control between 0.0 and 1.0. Lower values increase emotional range and variation; higher values produce more monotonous, consistent speech.", ge=0.0, le=1.0),
     pronunciation_dictionary_locators: list[_models.PronunciationDictionaryVersionLocatorRequestModel] | None = Field(None, description="List of pronunciation dictionary locators to apply in order. Each locator contains a pronunciation_dictionary_id and version_id. Maximum of 3 locators per request."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Text normalization mode: 'auto' applies normalization based on system decision, 'on' always applies it, 'off' disables it. Normalization handles cases like spelling out numbers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a list of text and voice ID pairs into multi-voice dialogue audio. Supports up to 10 unique voices per request with configurable audio format, model, stability, and text normalization settings."""
 
     # Construct request model with validation
@@ -1865,7 +2001,7 @@ async def generate_dialogue_stream(
     stability: float | None = Field(None, description="Voice stability control between 0.0 and 1.0. Lower values increase emotional range and variability; higher values produce more consistent, monotonous speech.", ge=0.0, le=1.0),
     pronunciation_dictionary_locators: list[_models.PronunciationDictionaryVersionLocatorRequestModel] | None = Field(None, description="List of pronunciation dictionary locators to apply in order. Each locator contains a pronunciation_dictionary_id and version_id. Maximum of 3 locators per request."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Text normalization mode: 'auto' applies normalization automatically based on content (e.g., spelling out numbers), 'on' always applies normalization, 'off' disables it entirely."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a list of text and voice ID pairs into multi-voice dialogue speech and streams the audio. Useful for creating conversations, interviews, or multi-speaker content with different voices."""
 
     # Construct request model with validation
@@ -1915,7 +2051,7 @@ async def generate_dialogue_stream_with_timestamps(
     stability: float | None = Field(None, description="Controls voice consistency and emotional variation. Lower values (closer to 0) produce greater emotional range and variability. Higher values (closer to 1) produce more consistent, monotonous delivery.", ge=0.0, le=1.0),
     pronunciation_dictionary_locators: list[_models.PronunciationDictionaryVersionLocatorRequestModel] | None = Field(None, description="Ordered list of pronunciation dictionary references to apply custom pronunciations. Applied sequentially in the order provided. Maximum of 3 locators per request."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Controls text normalization behavior. 'auto' lets the system decide, 'on' always normalizes (e.g., converts numbers to words), 'off' disables normalization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts text and voice ID pairs into streamed dialogue audio with precise timestamps. Returns a continuous stream of JSON objects containing base64-encoded audio chunks and their corresponding timing information."""
 
     # Construct request model with validation
@@ -1965,7 +2101,7 @@ async def generate_dialogue_with_timestamps(
     stability: float | None = Field(None, description="Voice stability control affecting emotional range and consistency. Lower values produce broader emotional variation; higher values result in more monotonous, emotionally limited speech.", ge=0.0, le=1.0),
     pronunciation_dictionary_locators: list[_models.PronunciationDictionaryVersionLocatorRequestModel] | None = Field(None, description="Custom pronunciation dictionary rules to apply to the text in order. Each locator references a specific dictionary version. Maximum of 3 locators per request."),
     apply_text_normalization: Literal["auto", "on", "off"] | None = Field(None, description="Text normalization mode: 'auto' applies normalization based on system decision, 'on' always applies it, 'off' disables it. Normalization handles cases like spelling out numbers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate dialogue from text with precise character-level timing information for audio-text synchronization. Each dialogue turn is converted to speech using specified voice IDs and returned with exact timestamp markers."""
 
     # Construct request model with validation
@@ -2017,7 +2153,7 @@ async def convert_voice(
     similarity_boost: float | None = Field(None, description="Controls how closely the voice matches the original. Higher values increase similarity. Range: 0.0 to 1.0"),
     style: float | None = Field(None, description="Controls the style exaggeration of the voice. Range: 0.0 to 1.0"),
     use_speaker_boost: bool | None = Field(None, description="Whether to apply speaker boost for enhanced clarity and presence"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transform audio from one voice to another while preserving the original emotion, timing, and delivery characteristics. The input audio's content and emotional qualities control the output speech generation."""
 
     # Call helper functions
@@ -2056,6 +2192,7 @@ async def convert_voice(
         params=_http_query,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["audio"],
         headers=_http_headers,
     )
 
@@ -2073,7 +2210,7 @@ async def convert_speech_to_speech_stream(
     similarity_boost: float | None = Field(None, description="Controls how closely the voice matches the original. Higher values increase similarity. Range: 0.0 to 1.0"),
     style: float | None = Field(None, description="Controls the style exaggeration of the voice. Range: 0.0 to 1.0"),
     use_speaker_boost: bool | None = Field(None, description="Whether to apply speaker boost for enhanced clarity and presence"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert audio from one voice to another with streaming output, maintaining full control over emotion, timing, and delivery. The input audio's content and emotional characteristics drive the generated speech in the target voice."""
 
     # Call helper functions
@@ -2112,6 +2249,7 @@ async def convert_speech_to_speech_stream(
         params=_http_query,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["audio"],
         headers=_http_headers,
     )
 
@@ -2125,7 +2263,7 @@ async def generate_voice_previews(
     loudness: float | None = Field(None, description="Volume level of the generated voice samples, ranging from quietest to loudest. A value of 0 corresponds to approximately -24 LUFS.", ge=-1.0, le=1.0),
     quality: float | None = Field(None, description="Voice quality level that balances output fidelity with variety. Higher values produce more consistent, polished voices with less variation across previews.", ge=-1.0, le=1.0),
     should_enhance: bool | None = Field(None, description="Automatically expand and refine the voice description using AI to add detail and improve generation quality. Useful for simple or brief descriptions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate multiple voice preview samples based on a text description to help you select a custom voice. Each preview includes a unique voice ID and audio sample that can be used to create the final voice."""
 
     # Construct request model with validation
@@ -2171,7 +2309,7 @@ async def create_voice(
     voice_description: str = Field(..., description="A detailed description of the voice characteristics and use case. Must be between 20 and 1000 characters.", min_length=20, max_length=1000),
     generated_voice_id: str = Field(..., description="The ID of the generated voice preview to finalize. Obtain this from the response of POST /v1/text-to-voice/design or POST /v1/text-to-voice/:voice_id/remix operations."),
     labels: dict[str, str] | None = Field(None, description="Optional metadata tags to associate with the created voice for organization and filtering purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a persistent voice from a previously generated voice preview. This endpoint finalizes a voice design by converting a generated_voice_id (obtained from design or remix operations) into a named voice asset."""
 
     # Construct request model with validation
@@ -2217,7 +2355,7 @@ async def design_voice(
     stream_previews: bool | None = Field(None, description="When enabled, voice previews are streamed separately via the stream endpoint instead of being included in the response. Useful for reducing response payload size."),
     should_enhance: bool | None = Field(None, description="Automatically enhance the voice description with AI-generated details to improve voice generation quality and variety. Expands simple prompts into more comprehensive descriptions."),
     quality: float | None = Field(None, description="Quality level for voice generation, where higher values produce better output but with less variation across previews.", ge=-1.0, le=1.0),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate voice design previews based on a detailed description. Returns multiple voice options with audio samples that can be used to create a custom voice."""
 
     # Construct request model with validation
@@ -2264,7 +2402,7 @@ async def remix_voice(
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio output format specified as codec_sample_rate_bitrate. MP3 at 192kbps requires Creator tier or higher. PCM at 44.1kHz requires Pro tier or higher. μ-law format is compatible with Twilio."),
     loudness: float | None = Field(None, description="Volume level of the generated voice, ranging from -1 (quietest) to 1 (loudest), with 0 corresponding to approximately -24 LUFS.", ge=-1.0, le=1.0),
     stream_previews: bool | None = Field(None, description="When true, returns only generated voice IDs without audio previews in the response. Audio can then be streamed separately via the stream endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate voice previews by remixing an existing voice based on a descriptive prompt. Returns multiple voice preview options with generated voice IDs that can be used to create new voices."""
 
     # Construct request model with validation
@@ -2306,7 +2444,7 @@ async def remix_voice(
 
 # Tags: text-to-voice
 @mcp.tool()
-async def stream_voice_preview(generated_voice_id: str = Field(..., description="The unique identifier of the generated voice preview to stream.")) -> dict[str, Any]:
+async def stream_voice_preview(generated_voice_id: str = Field(..., description="The unique identifier of the generated voice preview to stream.")) -> dict[str, Any] | ToolResult:
     """Stream audio data for a voice preview that was previously generated using the voice design endpoint. This operation returns the audio content as a continuous stream."""
 
     # Construct request model with validation
@@ -2342,7 +2480,7 @@ async def stream_voice_preview(generated_voice_id: str = Field(..., description=
 
 
 @mcp.tool()
-async def get_subscription_info() -> dict[str, Any]:
+async def get_subscription_info() -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about the user's current subscription, including plan details, billing status, and entitlements."""
 
     # Extract parameters for API call
@@ -2369,7 +2507,7 @@ async def get_subscription_info() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_user() -> dict[str, Any]:
+async def get_user() -> dict[str, Any] | ToolResult:
     """Retrieves the authenticated user's profile information and account details."""
 
     # Extract parameters for API call
@@ -2407,7 +2545,7 @@ async def list_voices(
     collection_id: str | None = Field(None, description="Filter voices to only those belonging to a specific collection by its ID."),
     include_total_count: bool | None = Field(None, description="Include the total count of matching voices in the response. Note that this count is a live snapshot and may change between requests. Use the has_more flag for pagination instead. Only enable when you need the total count for display purposes, as it incurs a performance cost."),
     voice_ids: list[str] | None = Field(None, description="Retrieve specific voices by their IDs. Accepts up to 100 voice IDs in a single request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available voices with advanced filtering, sorting, and search capabilities. Supports filtering by voice type, category, fine-tuning state, and collection membership."""
 
     # Construct request model with validation
@@ -2445,7 +2583,7 @@ async def list_voices(
 
 # Tags: voices
 @mcp.tool()
-async def get_default_voice_settings() -> dict[str, Any]:
+async def get_default_voice_settings() -> dict[str, Any] | ToolResult:
     """Retrieve the default voice settings for all voices, including similarity boost (Clarity + Similarity Enhancement) and stability parameters that control voice characteristics."""
 
     # Extract parameters for API call
@@ -2472,7 +2610,7 @@ async def get_default_voice_settings() -> dict[str, Any]:
 
 # Tags: voices
 @mcp.tool()
-async def get_voice_settings(voice_id: str = Field(..., description="The unique identifier of the voice whose settings you want to retrieve. Use the list voices endpoint to discover available voice IDs.")) -> dict[str, Any]:
+async def get_voice_settings(voice_id: str = Field(..., description="The unique identifier of the voice whose settings you want to retrieve. Use the list voices endpoint to discover available voice IDs.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration settings for a specific voice, including similarity boost (Clarity + Similarity Enhancement) and stability parameters that control voice quality characteristics."""
 
     # Construct request model with validation
@@ -2508,7 +2646,7 @@ async def get_voice_settings(voice_id: str = Field(..., description="The unique 
 
 # Tags: voices
 @mcp.tool()
-async def get_voice(voice_id: str = Field(..., description="The unique identifier of the voice to retrieve. You can list all available voices to discover valid IDs.")) -> dict[str, Any]:
+async def get_voice(voice_id: str = Field(..., description="The unique identifier of the voice to retrieve. You can list all available voices to discover valid IDs.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific voice, including its properties and configuration. Use this to get information about a voice before using it for text-to-speech synthesis."""
 
     # Construct request model with validation
@@ -2544,7 +2682,7 @@ async def get_voice(voice_id: str = Field(..., description="The unique identifie
 
 # Tags: voices
 @mcp.tool()
-async def delete_voice(voice_id: str = Field(..., description="The unique identifier of the voice to delete. You can retrieve available voice IDs from the list voices endpoint.")) -> dict[str, Any]:
+async def delete_voice(voice_id: str = Field(..., description="The unique identifier of the voice to delete. You can retrieve available voice IDs from the list voices endpoint.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a voice by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2586,7 +2724,7 @@ async def configure_voice_settings(
     similarity_boost: float | None = Field(None, description="Controls how closely the generated voice matches the original voice characteristics. Higher values enforce stricter adherence to the original voice, while lower values allow more deviation.", ge=0.0, le=1.0),
     style: float | None = Field(None, description="Amplifies the stylistic characteristics of the original speaker. Non-zero values increase computational resource usage and may increase latency."),
     speed: float | None = Field(None, description="Adjusts speech playback speed relative to normal rate. Use 1.0 for default speed, values below 1.0 to slow down, and values above 1.0 to speed up."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure voice parameters for a specific voice, including stability, similarity, style, and speed adjustments. These settings control how the voice is generated and how closely it adheres to the original voice characteristics."""
 
     # Construct request model with validation
@@ -2631,7 +2769,7 @@ async def create_voice_sample(
     remove_background_noise: bool | None = Field(None, description="Enable background noise removal using audio isolation processing. Only use if your samples contain background noise, as it may degrade quality for clean recordings."),
     description: str | None = Field(None, description="Optional metadata describing the voice characteristics, tone, and intended use cases."),
     labels: dict[str, str] | str | None = Field(None, description="Categorical metadata for voice classification. Supports language code, accent variant, gender, and age range to help organize and filter voices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new voice in VoiceLab by uploading audio samples for voice cloning. The voice will be added to your collection and available for use in voice synthesis."""
 
     # Construct request model with validation
@@ -2663,6 +2801,7 @@ async def create_voice_sample(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["files"],
         headers=_http_headers,
     )
 
@@ -2677,7 +2816,7 @@ async def update_voice(
     remove_background_noise: bool | None = Field(None, description="Enable automatic background noise removal from audio samples using audio isolation. Only use if samples contain background noise, as it may degrade quality otherwise."),
     description: str | None = Field(None, description="A brief description of the voice characteristics, tone, and intended use cases."),
     labels: dict[str, str] | str | None = Field(None, description="Metadata labels describing the voice. Supported keys include language (ISO 639-1 code), accent (BCP 47 tag), gender, and age."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the name, description, labels, and audio samples of a voice you created. Optionally apply background noise removal to improve audio quality."""
 
     # Construct request model with validation
@@ -2710,6 +2849,7 @@ async def update_voice(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["files"],
         headers=_http_headers,
     )
 
@@ -2722,7 +2862,7 @@ async def add_shared_voice(
     voice_id: str = Field(..., description="The unique identifier of the voice to add to your collection."),
     new_name: str = Field(..., description="The display name for this voice in your voice collection. This name will appear in your voice selection dropdown."),
     bookmarked: bool | None = Field(None, description="Whether to bookmark this voice for quick access in your collection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a shared voice from another user to your personal voice collection. The voice will be displayed in your voice dropdown with a custom name you assign."""
 
     # Construct request model with validation
@@ -2774,7 +2914,7 @@ async def generate_podcast(
     highlights: list[str] | None = Field(None, description="Key themes or highlights summarizing the podcast content. Each highlight should be a brief phrase between 10-70 characters."),
     callback_url: str | None = Field(None, description="Webhook URL for conversion status notifications. The service will POST status updates when the project and chapters complete processing, including success/error details."),
     apply_text_normalization: Literal["auto", "on", "off", "apply_english"] | None = Field(None, description="Controls text normalization behavior. 'auto' lets the system decide, 'on' always normalizes, 'apply_english' normalizes assuming English text, and 'off' disables normalization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a podcast by converting source content into audio using AI-powered text-to-speech. Supports both conversational (two-voice dialogue) and bulletin (monologue) formats with customizable quality, duration, language, and styling options."""
 
     # Construct request model with validation
@@ -2816,7 +2956,7 @@ async def apply_pronunciation_dictionaries(
     project_id: str = Field(..., description="The unique identifier of the Studio project to which pronunciation dictionaries will be applied."),
     pronunciation_dictionary_locators: list[_models.PronunciationDictionaryVersionLocatorDbModel] = Field(..., description="An ordered list of pronunciation dictionary references to apply to the project. Each reference must include the dictionary ID and its version ID. Multiple dictionaries can be specified as separate form entries."),
     invalidate_affected_text: bool | None = Field(None, description="Whether to automatically mark text in the project for reconversion when dictionaries are applied or removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Apply pronunciation dictionaries to a Studio project. The operation automatically marks affected text for reconversion when dictionaries are added or removed."""
 
     # Construct request model with validation
@@ -2855,7 +2995,7 @@ async def apply_pronunciation_dictionaries(
 
 # Tags: studio
 @mcp.tool()
-async def list_projects() -> dict[str, Any]:
+async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all Studio projects with their metadata. Use this to discover available projects and their details."""
 
     # Extract parameters for API call
@@ -2914,7 +3054,7 @@ async def create_studio_project(
     similarity_boost: float | None = Field(None, description="Controls how closely the voice matches the original. Higher values increase similarity. Range: 0.0 to 1.0"),
     style: float | None = Field(None, description="Controls the style exaggeration of the voice. Range: 0.0 to 1.0"),
     use_speaker_boost: bool | None = Field(None, description="Whether to apply speaker boost for enhanced clarity and presence"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Studio project for audio content generation. Projects can be initialized as blank, from a document, or from a URL, with customizable voices, audio quality, and metadata."""
 
     # Call helper functions
@@ -2961,7 +3101,7 @@ async def create_studio_project(
 async def get_project(
     project_id: str = Field(..., description="The unique identifier of the Studio project to retrieve."),
     share_id: str | None = Field(None, description="Optional share identifier to access a shared version of the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific Studio project. Returns comprehensive project metadata including configuration, settings, and other project-specific details."""
 
     # Construct request model with validation
@@ -3008,7 +3148,7 @@ async def update_studio_project(
     author: str | None = Field(None, description="Optional author name that will be embedded as metadata in exported MP3 files when the project or chapters are downloaded."),
     isbn_number: str | None = Field(None, description="Optional ISBN number that will be embedded as metadata in exported MP3 files when the project or chapters are downloaded."),
     volume_normalization: bool | None = Field(None, description="When enabled, applies audio postprocessing to downloaded files to ensure compliance with audiobook volume normalization standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a Studio project with new metadata, voice settings, and audio processing preferences. Changes apply to the project configuration and affect how new content is generated and exported."""
 
     # Construct request model with validation
@@ -3047,7 +3187,7 @@ async def update_studio_project(
 
 # Tags: studio
 @mcp.tool()
-async def delete_project(project_id: str = Field(..., description="The unique identifier of the Studio project to delete.")) -> dict[str, Any]:
+async def delete_project(project_id: str = Field(..., description="The unique identifier of the Studio project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a Studio project and all associated data. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3089,7 +3229,7 @@ async def update_project_content(
     content_chapters: list[dict[str, Any]] | None = Field(None, description="List of chapter objects, each with 'name' (string) and 'blocks' (list of block objects)"),
     content_blocks: list[dict[str, Any]] | None = Field(None, description="List of block objects, each with 'sub_type' (e.g., 'p', 'h1', 'h2') and 'nodes' (list of node objects)"),
     content_nodes: list[dict[str, Any]] | None = Field(None, description="List of TTS node objects, each with 'type' ('tts_node'), 'text' (string), and 'voice_id' (string)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the content of a Studio project. Optionally converts the project to audio format during the update."""
 
     # Call helper functions
@@ -3132,7 +3272,7 @@ async def update_project_content(
 
 # Tags: studio
 @mcp.tool()
-async def convert_studio_project(project_id: str = Field(..., description="The unique identifier of the Studio project to convert.")) -> dict[str, Any]:
+async def convert_studio_project(project_id: str = Field(..., description="The unique identifier of the Studio project to convert.")) -> dict[str, Any] | ToolResult:
     """Initiates conversion of a Studio project and all of its associated chapters. This operation processes the entire project structure for conversion."""
 
     # Construct request model with validation
@@ -3168,7 +3308,7 @@ async def convert_studio_project(project_id: str = Field(..., description="The u
 
 # Tags: studio
 @mcp.tool()
-async def list_snapshots(project_id: str = Field(..., description="The unique identifier of the Studio project for which to retrieve snapshots.")) -> dict[str, Any]:
+async def list_snapshots(project_id: str = Field(..., description="The unique identifier of the Studio project for which to retrieve snapshots.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of all snapshots for a specified Studio project. Snapshots capture the state of a project at a point in time."""
 
     # Construct request model with validation
@@ -3207,7 +3347,7 @@ async def list_snapshots(project_id: str = Field(..., description="The unique id
 async def get_snapshot(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the snapshot."),
     project_snapshot_id: str = Field(..., description="The unique identifier of the project snapshot to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific project snapshot by its ID. Use this to access saved project state and configuration data."""
 
     # Construct request model with validation
@@ -3247,7 +3387,7 @@ async def stream_project_snapshot_audio(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the snapshot."),
     project_snapshot_id: str = Field(..., description="The unique identifier of the project snapshot whose audio should be streamed."),
     convert_to_mpeg: bool | None = Field(None, description="Whether to convert the streamed audio to MPEG format. Defaults to false, streaming in the original format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stream audio from a Studio project snapshot. Optionally convert the audio to MPEG format during streaming."""
 
     # Construct request model with validation
@@ -3289,7 +3429,7 @@ async def stream_project_snapshot_audio(
 async def download_snapshot_archive(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the snapshot to archive."),
     project_snapshot_id: str = Field(..., description="The unique identifier of the project snapshot to archive and download."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Downloads a compressed archive containing all audio files from a specific Studio project snapshot. Returns the archive as a binary stream ready for download."""
 
     # Construct request model with validation
@@ -3325,7 +3465,7 @@ async def download_snapshot_archive(
 
 # Tags: studio
 @mcp.tool()
-async def list_chapters(project_id: str = Field(..., description="The unique identifier of the Studio project whose chapters you want to retrieve.")) -> dict[str, Any]:
+async def list_chapters(project_id: str = Field(..., description="The unique identifier of the Studio project whose chapters you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all chapters for a specified Studio project. Returns a list of chapters with their metadata and properties."""
 
     # Construct request model with validation
@@ -3364,7 +3504,7 @@ async def list_chapters(project_id: str = Field(..., description="The unique ide
 async def create_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project where the chapter will be created."),
     name: str = Field(..., description="The display name for the chapter used for identification and organization within the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new chapter in a Studio project, either as a blank chapter or populated from a URL source."""
 
     # Construct request model with validation
@@ -3406,7 +3546,7 @@ async def create_chapter(
 async def get_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific chapter within a Studio project."""
 
     # Construct request model with validation
@@ -3447,7 +3587,7 @@ async def update_chapter(
     chapter_id: str = Field(..., description="The unique identifier of the chapter to update."),
     blocks: list[_models.ChapterContentBlockInputModel] = Field(..., description="An ordered array of content blocks that comprise the chapter. Each block defines a section of content within the chapter."),
     name: str | None = Field(None, description="The display name of the chapter for identification purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing chapter in a Studio project, including its name and content blocks."""
 
     # Construct request model with validation
@@ -3490,7 +3630,7 @@ async def update_chapter(
 async def delete_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter to delete."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a chapter from a Studio project. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3529,7 +3669,7 @@ async def delete_chapter(
 async def convert_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter to convert."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to be converted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates the conversion process for a specific chapter within a Studio project. This asynchronous operation transforms the chapter content into the desired output format."""
 
     # Construct request model with validation
@@ -3568,7 +3708,7 @@ async def convert_chapter(
 async def list_chapter_snapshots(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter for which to retrieve snapshots."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all snapshots for a chapter, which are audio versions automatically created whenever the chapter is converted. Each snapshot can be downloaded as audio."""
 
     # Construct request model with validation
@@ -3608,7 +3748,7 @@ async def get_chapter_snapshot(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter within the project."),
     chapter_snapshot_id: str = Field(..., description="The unique identifier of the specific chapter snapshot to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific chapter snapshot from a Studio project. Use this to access saved states or versions of a chapter."""
 
     # Construct request model with validation
@@ -3649,7 +3789,7 @@ async def get_chapter_snapshot_audio(
     chapter_id: str = Field(..., description="The unique identifier of the chapter within the project."),
     chapter_snapshot_id: str = Field(..., description="The unique identifier of the chapter snapshot to stream."),
     convert_to_mpeg: bool | None = Field(None, description="Whether to convert the streamed audio to MPEG format. Defaults to false, returning the original audio format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve and stream audio from a chapter snapshot. Use the list snapshots endpoint to discover available snapshots for a chapter."""
 
     # Construct request model with validation
@@ -3688,7 +3828,7 @@ async def get_chapter_snapshot_audio(
 
 # Tags: studio
 @mcp.tool()
-async def list_muted_tracks(project_id: str = Field(..., description="The unique identifier of the Studio project to query for muted tracks.")) -> dict[str, Any]:
+async def list_muted_tracks(project_id: str = Field(..., description="The unique identifier of the Studio project to query for muted tracks.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of chapter IDs that have muted tracks in a Studio project. Use this to identify which chapters contain audio that has been muted."""
 
     # Construct request model with validation
@@ -3724,7 +3864,7 @@ async def list_muted_tracks(project_id: str = Field(..., description="The unique
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
 @mcp.tool()
-async def get_dubbing_resource(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project created from the dubbing endpoint with studio mode enabled.")) -> dict[str, Any]:
+async def get_dubbing_resource(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project created from the dubbing endpoint with studio mode enabled.")) -> dict[str, Any] | ToolResult:
     """Retrieves the dubbing resource for a given dubbing project ID that was created with studio enabled. Use this to access the generated dubbing output and associated metadata."""
 
     # Construct request model with validation
@@ -3763,7 +3903,7 @@ async def get_dubbing_resource(dubbing_id: str = Field(..., description="The uni
 async def add_dubbing_language(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to which the language will be added."),
     language: str | None = Field(..., description="The target language code in ElevenLabs Turbo V2/V2.5 format to add to the dubbing resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a supported language to a dubbing project resource. The language is registered but does not automatically generate transcripts, translations, or audio content."""
 
     # Construct request model with validation
@@ -3808,7 +3948,7 @@ async def create_segment(
     start_time: float = Field(..., description="The start time of the segment in seconds (relative to the media timeline)."),
     end_time: float = Field(..., description="The end time of the segment in seconds (relative to the media timeline). Must be greater than the start time."),
     translations: dict[str, str] | None = Field(None, description="Optional translations for the segment content, organized by language code. Specify translations for any languages beyond the default project language."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new segment for a speaker in a dubbing project with specified start and end times across all available languages. The segment is created without automatically generating transcripts, translations, or audio content."""
 
     # Construct request model with validation
@@ -3853,7 +3993,7 @@ async def update_segment_language(
     language: str = Field(..., description="The language identifier for which the segment content should be modified."),
     start_time: float | None = Field(None, description="The start time of the segment in seconds. Defines when the segment begins in the audio timeline."),
     end_time: float | None = Field(None, description="The end time of the segment in seconds. Defines when the segment ends in the audio timeline."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify the text and/or timing of a specific segment in a particular language within a dubbing project. Changes are applied only to the specified language and do not automatically trigger dub regeneration."""
 
     # Construct request model with validation
@@ -3896,7 +4036,7 @@ async def reassign_segments(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segments to reassign."),
     segment_ids: list[str] = Field(..., description="Array of segment identifiers to reassign to the target speaker. Order is preserved as provided."),
     speaker_id: str = Field(..., description="The unique identifier of the speaker to assign the segments to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reassign one or more segments in a dubbing project to a different speaker. This operation changes the speaker attribution for the specified segments."""
 
     # Construct request model with validation
@@ -3938,7 +4078,7 @@ async def reassign_segments(
 async def delete_dubbing_segment(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segment to be deleted."),
     segment_id: str = Field(..., description="The unique identifier of the segment to be deleted from the dubbing project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a single segment from a dubbing project. This operation permanently deletes the specified segment and cannot be undone."""
 
     # Construct request model with validation
@@ -3977,7 +4117,7 @@ async def delete_dubbing_segment(
 async def regenerate_segment_transcriptions(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segments to transcribe."),
     segments: list[str] = Field(..., description="An array of segment identifiers to regenerate transcriptions for. Order is preserved as provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Regenerate transcriptions for specified segments within a dubbing project. This operation updates only the transcription text and does not affect existing translations or dubs."""
 
     # Construct request model with validation
@@ -4020,7 +4160,7 @@ async def translate_dubbing_segments(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to translate."),
     segments: list[str] = Field(..., description="List of segment identifiers to translate. Only these segments will be processed; order is preserved as provided."),
     languages: list[str] = Field(..., description="List of target language codes to translate for each specified segment. Only these languages will be generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Regenerate translations for specified segments and languages in a dubbing project. Automatically transcribes any missing transcriptions but does not regenerate dubs."""
 
     # Construct request model with validation
@@ -4063,7 +4203,7 @@ async def regenerate_dubs(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to regenerate dubs for."),
     segments: list[str] = Field(..., description="List of segment identifiers to dub. Only the specified segments will be processed; order is preserved as provided."),
     languages: list[str] = Field(..., description="List of language codes to dub for each segment. Only the specified languages will be processed; order is preserved as provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Regenerate dubs for specified segments and languages in a dubbing project. Automatically transcribes and translates any missing transcriptions and translations."""
 
     # Construct request model with validation
@@ -4109,7 +4249,7 @@ async def update_speaker(
     voice_id: str | None = Field(None, description="The voice identifier, either from the ElevenLabs voice library or a cloning option ('track-clone' or 'clip-clone')."),
     voice_style: float | None = Field(None, description="The voice style intensity for supported models. Valid range is 0.0 to 1.0, defaults to 1.0."),
     languages: list[str] | None = Field(None, description="List of language codes to apply these speaker changes to. If empty or omitted, changes apply to all languages in the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update speaker metadata in a dubbing project, including voice selection and styling. Supports both ElevenLabs library voices and voice cloning options."""
 
     # Construct request model with validation
@@ -4153,7 +4293,7 @@ async def add_speaker(
     speaker_name: str | None = Field(None, description="A human-readable label for this speaker to identify it within the dubbing project."),
     voice_id: str | None = Field(None, description="The voice identifier to use for this speaker. Can be a voice from the ElevenLabs voice library or a special clone type for custom voice cloning."),
     voice_style: float | None = Field(None, description="The voice style intensity for models that support style control. Valid range is 0.0 to 1.0, with 1.0 as the default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new speaker to a dubbing project with a specified voice and optional styling. Each speaker represents a distinct voice track within the dubbing resource."""
 
     # Construct request model with validation
@@ -4195,7 +4335,7 @@ async def add_speaker(
 async def list_similar_voices(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the speaker."),
     speaker_id: str = Field(..., description="The unique identifier of the speaker within the dubbing project to find similar voices for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the top 10 voices from the ElevenLabs library that are most similar to a specified speaker in a dubbing project. Results include voice IDs, names, descriptions, and sample audio recordings where available."""
 
     # Construct request model with validation
@@ -4236,7 +4376,7 @@ async def render_dubbing(
     language: str = Field(..., description="The target language code for rendering (e.g., 'es' for Spanish). Use 'original' to render the source track."),
     render_type: Literal["mp4", "aac", "mp3", "wav", "aaf", "tracks_zip", "clips_zip"] = Field(..., description="The output format for the rendered media."),
     normalize_volume: bool | None = Field(None, description="Whether to apply volume normalization to the rendered audio."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate output media for a specific language in a dubbing project using the current Studio state. All segments must be dubbed before rendering to be included in the output; renders are processed asynchronously."""
 
     # Construct request model with validation
@@ -4281,7 +4421,7 @@ async def list_dubs(
     filter_by_creator: Literal["personal", "others", "all"] | None = Field(None, description="Filter results by creator: show only your dubs, dubs shared by others, or all dubs you have access to."),
     order_by: Literal["created_at"] | None = Field(None, description="Specify which field to use for ordering the results."),
     order_direction: Literal["DESCENDING", "ASCENDING"] | None = Field(None, description="Specify the sort direction for the ordered results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of dubs you have access to, with filtering and sorting options. Results can be filtered by status, creator, and ordered by specified fields."""
 
     # Construct request model with validation
@@ -4337,7 +4477,7 @@ async def dub_media(
     disable_voice_cloning: bool | None = Field(None, description="Whether to use similar voices from the ElevenLabs Voice Library instead of cloning the original speaker's voice. Requires 'add_voice_from_voice_library' workspace permission and consumes available custom voice slots."),
     mode: Literal["automatic", "manual"] | None = Field(None, description="Processing mode for the dubbing job. Use 'automatic' for standard processing or 'manual' when providing a custom CSV transcript. Manual mode is experimental and not recommended for production use."),
     csv_fps: float | None = Field(None, description="Frames per second value to use when parsing timecodes in the CSV file. If omitted, FPS will be automatically inferred from the timecode data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Dubs an audio or video file into a target language with automatic speaker detection and voice synthesis. Supports advanced options for quality control, voice customization, and manual transcript editing."""
 
     # Construct request model with validation
@@ -4369,6 +4509,7 @@ async def dub_media(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["csv_file"],
         headers=_http_headers,
     )
 
@@ -4376,7 +4517,7 @@ async def dub_media(
 
 # Tags: dubbing, dubbing, dubbing
 @mcp.tool()
-async def get_dubbing(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to retrieve metadata for.")) -> dict[str, Any]:
+async def get_dubbing(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to retrieve metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata about a dubbing project, including its current processing status and completion state."""
 
     # Construct request model with validation
@@ -4412,7 +4553,7 @@ async def get_dubbing(dubbing_id: str = Field(..., description="The unique ident
 
 # Tags: dubbing, dubbing, dubbing
 @mcp.tool()
-async def delete_dubbing(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to delete.")) -> dict[str, Any]:
+async def delete_dubbing(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a dubbing project and all associated data. This action cannot be undone."""
 
     # Construct request model with validation
@@ -4451,7 +4592,7 @@ async def delete_dubbing(dubbing_id: str = Field(..., description="The unique id
 async def download_dubbed_audio(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the dubbed content."),
     language_code: str = Field(..., description="The language code specifying which dubbed audio track to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download the dubbed audio file in MP3 or MP4 format for a specific language. Returns the original automatic dub result; for edited dubs created in Dubbing Studio, use the render endpoint instead."""
 
     # Construct request model with validation
@@ -4491,7 +4632,7 @@ async def get_transcript_dubbing(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the transcript to retrieve."),
     language_code: str = Field(..., description="The language for which to retrieve the transcript. Use 'source' to fetch the original media transcript, or provide an ISO 639 language code."),
     format_type: Literal["srt", "webvtt", "json"] = Field(..., description="The output format for the transcript. Use 'srt' or 'webvtt' for subtitle formats, or 'json' for a full transcript (JSON format is not yet supported for Dubbing Studio)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the transcript for a specific language in a dubbing project. Supports multiple output formats including subtitle formats (SRT, WebVTT) and JSON transcripts."""
 
     # Construct request model with validation
@@ -4527,7 +4668,7 @@ async def get_transcript_dubbing(
 
 # Tags: models
 @mcp.tool()
-async def list_models() -> dict[str, Any]:
+async def list_models() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all available models that can be used for API operations."""
 
     # Extract parameters for API call
@@ -4563,7 +4704,7 @@ async def create_audio_project(
     apply_text_normalization: Literal["auto", "on", "off", "apply_english"] | None = Field(None, description="Controls text normalization behavior. 'auto' lets the system decide, 'on' always applies normalization, 'apply_english' applies normalization assuming English text, and 'off' disables normalization."),
     pronunciation_dictionary_locators: list[str] | None = Field(None, description="A list of pronunciation dictionary locators, each containing a pronunciation_dictionary_id and version_id pair. Multiple dictionaries can be applied to customize pronunciation of specific terms."),
     player_colors: str | None = Field(None, description="Player colors as a comma-separated pair of hex color codes in format 'text_color,background_color' (e.g., '#FFFFFF,#000000'). If not provided, default colors set in Player settings are used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates an Audio Native enabled project with optional automatic conversion to audio. Returns a project ID and embeddable HTML snippet for audio playback."""
 
     # Call helper functions
@@ -4605,7 +4746,7 @@ async def create_audio_project(
 
 # Tags: audio-native
 @mcp.tool()
-async def get_audio_native_settings(project_id: str = Field(..., description="The unique identifier of the Studio project for which to retrieve Audio Native settings.")) -> dict[str, Any]:
+async def get_audio_native_settings(project_id: str = Field(..., description="The unique identifier of the Studio project for which to retrieve Audio Native settings.")) -> dict[str, Any] | ToolResult:
     """Retrieve player settings and configuration for an Audio Native project. Use this to access the current settings applied to a specific project."""
 
     # Construct request model with validation
@@ -4645,7 +4786,7 @@ async def update_audio_native_content(
     project_id: str = Field(..., description="The unique identifier of the Studio project to update."),
     auto_convert: bool | None = Field(None, description="Automatically convert the project to audio format after content update."),
     auto_publish: bool | None = Field(None, description="Automatically publish a new project snapshot after conversion completes. Only applies when auto_convert is enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates content for an Audio-Native project with optional automatic conversion and publishing. Use this to modify project content and trigger downstream processing workflows."""
 
     # Construct request model with validation
@@ -4688,7 +4829,7 @@ async def update_audio_native_content(
 async def update_audio_native_content_from_url(
     url: str = Field(..., description="The web page URL from which to extract content for the AudioNative project."),
     author: str | None = Field(None, description="Optional author name to display in the player and insert at the start of the article. Uses the default author from Player settings if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extracts content from a provided URL, updates the matching AudioNative project, and queues it for conversion and auto-publishing."""
 
     # Construct request model with validation
@@ -4743,7 +4884,7 @@ async def list_voices_shared(
     owner_id: str | None = Field(None, description="Filter voices by the public owner ID of the voice creator."),
     sort: str | None = Field(None, description="Sort results by the specified criteria."),
     page: int | None = Field(None, description="Page number for pagination, starting from 0."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of shared voices with optional filtering by category, demographics, language, use cases, and other attributes. Useful for discovering available voices for text-to-speech applications."""
 
     # Construct request model with validation
@@ -4785,7 +4926,7 @@ async def find_similar_voices(
     audio_file: str | None = Field(None, description="Audio sample file to match against library voices. Used as the reference for similarity comparison."),
     similarity_threshold: float | None = Field(None, description="Similarity threshold for filtering results. Lower values return more similar voices. Valid range is 0 to 2."),
     top_k: int | None = Field(None, description="Maximum number of similar voices to return. If similarity_threshold is also specified, fewer voices may be returned. Valid range is 1 to 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Find voices from the library that are similar to a provided audio sample. Returns a ranked list of matching voices based on similarity scoring."""
 
     # Construct request model with validation
@@ -4817,6 +4958,7 @@ async def find_similar_voices(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["audio_file"],
         headers=_http_headers,
     )
 
@@ -4831,7 +4973,7 @@ async def get_character_usage_metrics(
     breakdown_type: Literal["none", "voice", "voice_multiplier", "user", "groups", "api_keys", "all_api_keys", "product_type", "model", "resource", "request_queue", "region", "subresource_id", "reporting_workspace_id", "has_api_key", "request_source"] | None = Field(None, description="Dimension to break down usage metrics by. The 'user' breakdown requires include_workspace_metrics to be true."),
     aggregation_bucket_size: int | None = Field(None, description="Custom aggregation interval in seconds. When specified, overrides the default daily aggregation."),
     metric: Literal["credits", "tts_characters", "minutes_used", "request_count", "ttfb_avg", "ttfb_p95", "fiat_units_spent", "concurrency", "concurrency_average"] | None = Field(None, description="The usage metric to aggregate and return in the results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve character usage metrics for the current user or entire workspace over a specified time period. Results can be aggregated by time interval and broken down by various dimensions such as voice, user, or API key."""
 
     # Construct request model with validation
@@ -4873,7 +5015,7 @@ async def create_pronunciation_dictionary(
     name: str = Field(..., description="The name of the pronunciation dictionary used for identification and reference within the system."),
     description: str | None = Field(None, description="An optional description of the pronunciation dictionary to provide additional context about its contents or purpose."),
     workspace_access: Literal["admin", "editor", "commenter", "viewer"] | None = Field(None, description="The workspace access level that determines permissions for other users to interact with this dictionary. If not provided, defaults to no access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new pronunciation dictionary from a lexicon .PLS file. The dictionary can be configured with access permissions for workspace collaboration."""
 
     # Construct request model with validation
@@ -4918,7 +5060,7 @@ async def create_pronunciation_dictionary_from_rules(
     workspace_access: Literal["admin", "editor", "commenter", "viewer"] | None = Field(None, description="The access level for workspace users. Determines whether users can administer, edit, comment on, or only view the dictionary. Defaults to no access if not specified."),
     alias_rules: list[dict[str, Any]] | None = Field(None, description="List of alias rules. Each rule is a dict with 'string_to_replace' (str) and 'alias' (str) keys."),
     phoneme_rules: list[dict[str, Any]] | None = Field(None, description="List of phoneme rules. Each rule is a dict with 'string_to_replace' (str), 'phoneme' (str), and 'alphabet' (str) keys."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new pronunciation dictionary from provided rules. The dictionary can be configured with access permissions for workspace collaboration."""
 
     # Call helper functions
@@ -4959,7 +5101,7 @@ async def create_pronunciation_dictionary_from_rules(
 
 # Tags: Pronunciation Dictionary
 @mcp.tool()
-async def get_pronunciation_dictionary(pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to retrieve metadata for.")) -> dict[str, Any]:
+async def get_pronunciation_dictionary(pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to retrieve metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a specific pronunciation dictionary by its ID. Returns configuration details and properties of the pronunciation dictionary."""
 
     # Construct request model with validation
@@ -4999,7 +5141,7 @@ async def update_pronunciation_dictionary(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to update."),
     archived: bool | None = Field(None, description="Set whether the pronunciation dictionary should be archived. Archived dictionaries are retained but no longer active."),
     name: str | None = Field(None, description="A human-readable name for the pronunciation dictionary used for identification and organization purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a pronunciation dictionary by modifying its name or archive status without affecting the version. Only specified fields will be updated."""
 
     # Construct request model with validation
@@ -5041,7 +5183,7 @@ async def update_pronunciation_dictionary(
 async def replace_pronunciation_rules(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to update."),
     rules: list[_models.PronunciationDictionaryAliasRuleRequestModel | _models.PronunciationDictionaryPhonemeRuleRequestModel] = Field(..., description="An ordered list of pronunciation rules to apply. Each rule maps a string to either an alias (another string) or a phoneme (with a specified alphabet such as IPA). All existing rules will be replaced with this list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all pronunciation rules in a dictionary with a new set of rules. Rules can define phonetic aliases or phoneme mappings using specified alphabets."""
 
     # Construct request model with validation
@@ -5083,7 +5225,7 @@ async def replace_pronunciation_rules(
 async def add_pronunciation_rules(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to modify."),
     rules: list[_models.PronunciationDictionaryAliasRuleRequestModel | _models.PronunciationDictionaryPhonemeRuleRequestModel] = Field(..., description="An ordered list of pronunciation rules to add or update. Each rule must be either an alias rule (mapping one string to another alias) or a phoneme rule (mapping a string to a phoneme in a specified alphabet such as IPA)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add or update pronunciation rules in a dictionary. Rules with duplicate string_to_replace values will replace existing rules."""
 
     # Construct request model with validation
@@ -5125,7 +5267,7 @@ async def add_pronunciation_rules(
 async def delete_pronunciation_rules(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary from which rules will be removed."),
     rule_strings: list[str] = Field(..., description="An array of rule strings to remove from the pronunciation dictionary. Each string represents a rule to be deleted. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more pronunciation rules from a pronunciation dictionary. Specify the dictionary ID and provide the list of rule strings to be deleted."""
 
     # Construct request model with validation
@@ -5167,7 +5309,7 @@ async def delete_pronunciation_rules(
 async def download_pronunciation_dictionary_version(
     dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to retrieve."),
     version_id: str = Field(..., description="The unique identifier of the specific version of the pronunciation dictionary to download."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download a PLS (Pronunciation Lexicon Specification) file containing the rules for a specific version of a pronunciation dictionary."""
 
     # Construct request model with validation
@@ -5207,7 +5349,7 @@ async def list_pronunciation_dictionaries(
     page_size: int | None = Field(None, description="Maximum number of pronunciation dictionaries to return per request. Must be between 1 and 100.", ge=1, le=100),
     sort: Literal["creation_time_unix", "name"] | None = Field(None, description="Field to sort the results by. Choose between creation time or alphabetical name ordering."),
     sort_direction: str | None = Field(None, description="Direction to sort the results in. Use ascending for oldest-first or newest-first, descending for newest-first or Z-to-A ordering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of pronunciation dictionaries you have access to, with sorting and filtering options. Returns metadata for each dictionary including creation date and name."""
 
     # Construct request model with validation
@@ -5245,7 +5387,7 @@ async def list_pronunciation_dictionaries(
 
 # Tags: workspace
 @mcp.tool()
-async def list_service_account_api_keys(service_account_user_id: str = Field(..., description="The unique identifier of the service account for which to retrieve API keys.")) -> dict[str, Any]:
+async def list_service_account_api_keys(service_account_user_id: str = Field(..., description="The unique identifier of the service account for which to retrieve API keys.")) -> dict[str, Any] | ToolResult:
     """Retrieve all API keys associated with a specific service account. Use this to view and manage authentication credentials for programmatic access."""
 
     # Construct request model with validation
@@ -5286,7 +5428,7 @@ async def create_service_account_api_key(
     name: str = Field(..., description="A human-readable name for the API key to help identify its purpose or usage context."),
     permissions: list[Literal["text_to_speech", "speech_to_speech", "speech_to_text", "models_read", "models_write", "voices_read", "voices_write", "speech_history_read", "speech_history_write", "sound_generation", "audio_isolation", "voice_generation", "dubbing_read", "dubbing_write", "pronunciation_dictionaries_read", "pronunciation_dictionaries_write", "user_read", "user_write", "projects_read", "projects_write", "audio_native_read", "audio_native_write", "workspace_read", "workspace_write", "forced_alignment", "convai_read", "convai_write", "music_generation", "image_video_generation", "add_voice_from_voice_library", "create_instant_voice_clone", "create_professional_voice_clone", "publish_voice_to_voice_library", "share_voice_externally", "create_user_api_key", "workspace_analytics_full_read", "webhooks_write", "service_account_write", "group_members_manage", "workspace_members_read", "workspace_members_invite", "workspace_members_remove", "terms_of_service_accept"]] | Literal["all"] = Field(..., description="The set of permissions to grant this API key, controlling which XI API operations it can perform."),
     character_limit: int | None = Field(None, description="Optional monthly character limit for this API key. When set, requests that would exceed this limit will be rejected, preventing unexpected usage charges."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a new API key for a service account with specified permissions and optional usage limits. The created key can be used to authenticate requests to the XI API on behalf of the service account."""
 
     # Construct request model with validation
@@ -5328,7 +5470,7 @@ async def create_service_account_api_key(
 async def revoke_service_account_api_key(
     service_account_user_id: str = Field(..., description="The unique identifier of the service account that owns the API key to be deleted."),
     api_key_id: str = Field(..., description="The unique identifier of the API key to be revoked and deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke and permanently delete an API key associated with a service account. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5364,7 +5506,7 @@ async def revoke_service_account_api_key(
 
 # Tags: workspace
 @mcp.tool()
-async def list_auth_connections() -> dict[str, Any]:
+async def list_auth_connections() -> dict[str, Any] | ToolResult:
     """Retrieve all authentication connections configured for the workspace. Returns a list of all connected auth providers and their configurations."""
 
     # Extract parameters for API call
@@ -5391,7 +5533,7 @@ async def list_auth_connections() -> dict[str, Any]:
 
 # Tags: workspace
 @mcp.tool()
-async def delete_auth_connection(auth_connection_id: str = Field(..., description="The unique identifier of the authentication connection to delete.")) -> dict[str, Any]:
+async def delete_auth_connection(auth_connection_id: str = Field(..., description="The unique identifier of the authentication connection to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an authentication connection from the workspace. This removes the stored credentials and configuration for the specified auth connection."""
 
     # Construct request model with validation
@@ -5427,7 +5569,7 @@ async def delete_auth_connection(auth_connection_id: str = Field(..., descriptio
 
 # Tags: workspace
 @mcp.tool()
-async def list_service_accounts() -> dict[str, Any]:
+async def list_service_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all service accounts configured in the workspace. Service accounts are used for programmatic access and automation within the workspace."""
 
     # Extract parameters for API call
@@ -5454,7 +5596,7 @@ async def list_service_accounts() -> dict[str, Any]:
 
 # Tags: workspace
 @mcp.tool()
-async def list_groups() -> dict[str, Any]:
+async def list_groups() -> dict[str, Any] | ToolResult:
     """Retrieve all groups in the workspace. Returns a complete list of groups available to the authenticated user."""
 
     # Extract parameters for API call
@@ -5481,7 +5623,7 @@ async def list_groups() -> dict[str, Any]:
 
 # Tags: workspace
 @mcp.tool()
-async def find_group(name: str = Field(..., description="The name of the user group to search for. The search will match against group names in the workspace.")) -> dict[str, Any]:
+async def find_group(name: str = Field(..., description="The name of the user group to search for. The search will match against group names in the workspace.")) -> dict[str, Any] | ToolResult:
     """Searches for user groups in the workspace by name. Returns matching group(s) or an empty result if no groups are found."""
 
     # Construct request model with validation
@@ -5522,7 +5664,7 @@ async def find_group(name: str = Field(..., description="The name of the user gr
 async def remove_group_member(
     group_id: str = Field(..., description="The unique identifier of the group from which the member will be removed."),
     email: str = Field(..., description="The email address of the workspace member to remove from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a member from a user group. Requires `group_members_manage` permission to perform this action."""
 
     # Construct request model with validation
@@ -5564,7 +5706,7 @@ async def remove_group_member(
 async def add_group_member(
     group_id: str = Field(..., description="The unique identifier of the group to which the member will be added."),
     email: str = Field(..., description="The email address of the workspace member to add to the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a workspace member to a user group. Requires group_members_manage permission."""
 
     # Construct request model with validation
@@ -5607,7 +5749,7 @@ async def send_workspace_invite(
     email: str = Field(..., description="The email address of the user to invite to the workspace."),
     seat_type: Literal["workspace_admin", "workspace_member", "workspace_lite_member"] | None = Field(None, description="The permission level to assign the invited user within the workspace."),
     group_ids: list[str] | None = Field(None, description="List of group IDs to assign the invited user to. Groups determine access permissions and organizational structure within the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends an email invitation to join the workspace. The recipient will be prompted to create an account if needed, and upon acceptance will be added as a workspace user consuming one available seat. Requires WORKSPACE_MEMBERS_INVITE permission."""
 
     # Construct request model with validation
@@ -5649,7 +5791,7 @@ async def send_workspace_invitations(
     emails: list[str] = Field(..., description="List of email addresses to invite. All emails must belong to verified domains associated with your workspace."),
     seat_type: Literal["workspace_admin", "workspace_member", "workspace_lite_member"] | None = Field(None, description="The permission level to assign to invited users within the workspace."),
     group_ids: list[str] | None = Field(None, description="List of group IDs to assign the invited users to upon acceptance. Groups organize users and manage permissions within the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send email invitations to multiple users to join your workspace. Invitees must have email addresses from verified domains, and accepted invitations will add them as workspace users consuming available seats."""
 
     # Construct request model with validation
@@ -5687,7 +5829,7 @@ async def send_workspace_invitations(
 
 # Tags: workspace
 @mcp.tool()
-async def revoke_workspace_invitation(email: str = Field(..., description="The email address of the invitation recipient whose invitation should be revoked.")) -> dict[str, Any]:
+async def revoke_workspace_invitation(email: str = Field(..., description="The email address of the invitation recipient whose invitation should be revoked.")) -> dict[str, Any] | ToolResult:
     """Revoke an existing workspace invitation by email address. The invitation will remain visible in the recipient's inbox but will no longer be activatable to join the workspace. Only workspace members with WORKSPACE_MEMBERS_INVITE permission can perform this action."""
 
     # Construct request model with validation
@@ -5728,7 +5870,7 @@ async def revoke_workspace_invitation(email: str = Field(..., description="The e
 async def get_resource(
     resource_id: str = Field(..., description="The unique identifier of the resource to retrieve."),
     resource_type: Literal["voice", "voice_collection", "pronunciation_dictionary", "dubbing", "project", "convai_agents", "convai_knowledge_base_documents", "convai_tools", "convai_settings", "convai_secrets", "workspace_auth_connections", "convai_phone_numbers", "convai_mcp_servers", "convai_api_integration_connections", "convai_api_integration_trigger_connections", "convai_batch_calls", "convai_agent_response_tests", "convai_test_suite_invocations", "convai_crawl_jobs", "convai_crawl_tasks", "convai_whatsapp_accounts", "convai_agent_versions", "convai_agent_branches", "convai_agent_versions_deployments", "convai_memory_entries", "convai_coaching_proposals", "dashboard", "dashboard_configuration", "convai_agent_drafts", "resource_locators", "assets", "content_generations", "content_templates", "songs"] = Field(..., description="The category of the resource. Determines which resource type's metadata will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a specific resource by its ID and type. Use this to fetch detailed information about any resource in your workspace."""
 
     # Construct request model with validation
@@ -5774,7 +5916,7 @@ async def grant_resource_access(
     user_email: str | None = Field(None, description="The email address of the user or service account to grant access to. The principal must already exist in your workspace."),
     group_id: str | None = Field(None, description="The unique identifier of the group to grant access to. Use the special value 'default' to target the default permissions principals have on this resource."),
     workspace_api_key_id: str | None = Field(None, description="The unique identifier of the workspace API key to grant access to. This is the key ID found in workspace settings, not the API key credential itself. Access will be granted to the service account associated with this key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant or update a role on a workspace resource for a user, service account, group, or API key. This operation overrides any existing role the principal has on the resource. You must have admin access to the resource to perform this action."""
 
     # Construct request model with validation
@@ -5819,7 +5961,7 @@ async def revoke_resource_access(
     user_email: str | None = Field(None, description="The email address of the user or service account to revoke access from. The user or service account must exist in your workspace."),
     group_id: str | None = Field(None, description="The identifier of the group to revoke access from. Use 'default' to target default permissions principals have on this resource."),
     workspace_api_key_id: str | None = Field(None, description="The identifier of the workspace API key to revoke access from. This is the key ID found in workspace settings, not the authentication key itself. Access will be revoked from the service account associated with this API key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes all access permissions for a user, service account, group, or workspace API key to a workspace resource. The requester must have admin access to the resource."""
 
     # Construct request model with validation
@@ -5858,7 +6000,7 @@ async def revoke_resource_access(
 
 # Tags: workspace
 @mcp.tool()
-async def list_workspace_webhooks(include_usages: bool | None = Field(None, description="Include active usage statistics for each webhook. Only accessible to workspace administrators.")) -> dict[str, Any]:
+async def list_workspace_webhooks(include_usages: bool | None = Field(None, description="Include active usage statistics for each webhook. Only accessible to workspace administrators.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhooks configured for a workspace. Optionally include active usage statistics for each webhook (admin-only feature)."""
 
     # Construct request model with validation
@@ -5914,7 +6056,7 @@ async def transcribe_audio(
     no_verbatim: bool | None = Field(None, description="Whether to remove filler words, false starts, and non-speech sounds from the transcript for a cleaner output. Only supported with the scribe_v2 model."),
     entity_redaction: str | list[str] | None = Field(None, description="Entity types or categories to redact from the transcript text. Accepts the same format as entity_detection ('all', specific categories like 'pii' or 'phi', or a list of entity types). Must be a subset of entity_detection if both are specified. When redaction is enabled, the entities field is not returned."),
     keyterms: list[str] | None = Field(None, description="List of domain-specific words or phrases to bias the model toward recognizing with higher accuracy. Each keyterm must be under 50 characters and contain at most 5 words. Maximum 1000 keyterms per request. Requests with over 100 keyterms incur a minimum 20-second billable duration. Incurs additional costs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transcribe audio or video files to text with support for speaker diarization, multi-channel processing, and entity detection. Supports synchronous responses or asynchronous webhook delivery with optional custom metadata for request tracking."""
 
     # Construct request model with validation
@@ -5953,7 +6095,7 @@ async def transcribe_audio(
 
 # Tags: speech-to-text
 @mcp.tool()
-async def get_transcript(transcription_id: str = Field(..., description="The unique identifier of the transcript to retrieve.")) -> dict[str, Any]:
+async def get_transcript(transcription_id: str = Field(..., description="The unique identifier of the transcript to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a previously generated transcript by its unique identifier. Use this operation to access transcription results after they have been processed."""
 
     # Construct request model with validation
@@ -5989,7 +6131,7 @@ async def get_transcript(transcription_id: str = Field(..., description="The uni
 
 # Tags: speech-to-text
 @mcp.tool()
-async def delete_transcript(transcription_id: str = Field(..., description="The unique identifier of the transcript to delete.")) -> dict[str, Any]:
+async def delete_transcript(transcription_id: str = Field(..., description="The unique identifier of the transcript to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a transcript by its unique ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -6025,7 +6167,7 @@ async def delete_transcript(transcription_id: str = Field(..., description="The 
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def list_evaluation_criteria() -> dict[str, Any]:
+async def list_evaluation_criteria() -> dict[str, Any] | ToolResult:
     """Retrieve all available evaluation criteria for speech-to-text assessment. Use this to understand the metrics and standards available for evaluating transcription quality."""
 
     # Extract parameters for API call
@@ -6052,7 +6194,7 @@ async def list_evaluation_criteria() -> dict[str, Any]:
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def get_evaluation_criterion(criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to retrieve.")) -> dict[str, Any]:
+async def get_evaluation_criterion(criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific evaluation criterion by its ID for speech-to-text evaluation tasks. Use this to fetch detailed information about a criterion used in assessment workflows."""
 
     # Construct request model with validation
@@ -6093,7 +6235,7 @@ async def update_eval_criterion(
     fields: list[_models.DataExtractionFieldRequest] = Field(..., description="An array of field identifiers or definitions associated with this evaluation criterion. Specifies which fields are evaluated."),
     name: str | None = Field(None, description="The name of the evaluation criterion. Must be between 1 and 200 characters.", min_length=1, max_length=200),
     criteria: list[_models.CriterionItemRequest] | None = Field(None, description="An array of evaluation criteria details. Order and structure should match the evaluation framework requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing evaluation criterion for speech-to-text assessment. Modify the criterion name, evaluation criteria details, and associated fields."""
 
     # Construct request model with validation
@@ -6133,7 +6275,7 @@ async def update_eval_criterion(
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def delete_evaluation_criterion(criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to delete.")) -> dict[str, Any]:
+async def delete_evaluation_criterion(criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific evaluation criterion from the speech-to-text evaluation system. This operation permanently removes the criterion and cannot be undone."""
 
     # Construct request model with validation
@@ -6178,7 +6320,7 @@ async def list_evaluations(
     sort_by: str | None = Field(None, description="Sort results by a specific field (e.g., created_at, status, agent_id)."),
     sort_dir: str | None = Field(None, description="Sort direction for results: ascending or descending order."),
     page_size: int | None = Field(None, description="Number of evaluations to return per page for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of speech-to-text evaluations with filtering, sorting, and pagination options. Filter by agent, evaluation criterion, status, and creation date range."""
 
     # Construct request model with validation
@@ -6222,7 +6364,7 @@ async def create_evaluation(
     eval_criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to apply during the evaluation."),
     labels: dict[str, str] | None = Field(None, description="Custom labels or metadata to attach to the evaluation as key-value pairs."),
     agent_name: str | None = Field(None, description="The display name of the agent performing the evaluation for reference purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger a new evaluation for a speech-to-text transcript by specifying the transcript, evaluating agent, and evaluation criteria. Optionally provide custom labels and agent name for context."""
 
     # Construct request model with validation
@@ -6260,7 +6402,7 @@ async def create_evaluation(
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def get_evaluation(evaluation_id: str = Field(..., description="The unique identifier of the evaluation to retrieve.")) -> dict[str, Any]:
+async def get_evaluation(evaluation_id: str = Field(..., description="The unique identifier of the evaluation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific speech-to-text evaluation by its unique identifier."""
 
     # Construct request model with validation
@@ -6296,7 +6438,7 @@ async def get_evaluation(evaluation_id: str = Field(..., description="The unique
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def list_human_agents(page_size: int | None = Field(None, description="Number of human agents to return per page. Controls pagination size for the results.")) -> dict[str, Any]:
+async def list_human_agents(page_size: int | None = Field(None, description="Number of human agents to return per page. Controls pagination size for the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of human agents available for speech-to-text evaluation tasks. Use pagination to control the number of results returned per request."""
 
     # Construct request model with validation
@@ -6334,7 +6476,7 @@ async def list_human_agents(page_size: int | None = Field(None, description="Num
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def get_human_agent(agent_id: str = Field(..., description="The unique identifier of the human agent to retrieve.")) -> dict[str, Any]:
+async def get_human_agent(agent_id: str = Field(..., description="The unique identifier of the human agent to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific human agent in the speech-to-text evaluation system. Use this to access agent profiles and evaluation data."""
 
     # Construct request model with validation
@@ -6370,7 +6512,7 @@ async def get_human_agent(agent_id: str = Field(..., description="The unique ide
 
 # Tags: Speech To Text - Evaluation
 @mcp.tool()
-async def delete_human_agent(agent_id: str = Field(..., description="The unique identifier of the human agent to delete.")) -> dict[str, Any]:
+async def delete_human_agent(agent_id: str = Field(..., description="The unique identifier of the human agent to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a human agent from the speech-to-text evaluation system. This operation permanently deletes the agent and their associated routing configuration."""
 
     # Construct request model with validation
@@ -6409,7 +6551,7 @@ async def delete_human_agent(agent_id: str = Field(..., description="The unique 
 async def list_evaluation_analytics(
     created_after: str | None = Field(None, description="Filter results to include only evaluations created on or after this date. Specify in ISO 8601 format."),
     created_before: str | None = Field(None, description="Filter results to include only evaluations created on or before this date. Specify in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for speech-to-text evaluations, optionally filtered by creation date range. Use this to analyze evaluation metrics and performance trends over time."""
 
     # Construct request model with validation
@@ -6451,7 +6593,7 @@ async def get_criterion_analytics(
     criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to retrieve analytics for."),
     created_after: str | None = Field(None, description="Filter analytics to include only records created on or after this date. Specify in ISO 8601 format."),
     created_before: str | None = Field(None, description="Filter analytics to include only records created on or before this date. Specify in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for a specific evaluation criterion, with optional filtering by creation date range. Use this to analyze performance metrics and insights for a particular criterion."""
 
     # Construct request model with validation
@@ -6494,7 +6636,7 @@ async def get_agent_analytics(
     agent_id: str = Field(..., description="The unique identifier of the human agent for which to retrieve analytics."),
     created_after: str | None = Field(None, description="Filter to include only analytics created on or after this date. Specify in ISO 8601 format."),
     created_before: str | None = Field(None, description="Filter to include only analytics created on or before this date. Specify in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for a specific human agent in the speech-to-text evaluation system. Optionally filter results by creation date range."""
 
     # Construct request model with validation
@@ -6537,7 +6679,7 @@ async def align_audio_to_text(
     file_: str = Field(..., alias="file", description="The audio file to align with the transcript. Supports all major audio formats with a maximum file size of 1GB."),
     text: str = Field(..., description="The text transcript to align with the audio. Can be in any text format; diarization (speaker identification) is not currently supported."),
     enabled_spooled_file: bool | None = Field(None, description="Enable streaming processing for large files that cannot fit in memory. When true, the file is streamed to the server and processed in chunks."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronize an audio file with a text transcript to extract precise timing information for each character and word. Supports all major audio formats up to 1GB in size."""
 
     # Construct request model with validation
@@ -6569,6 +6711,7 @@ async def align_audio_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -6580,7 +6723,7 @@ async def get_agent_conversation_signed_link(
     agent_id: str = Field(..., description="The unique identifier of the agent with which to start the conversation."),
     include_conversation_id: bool | None = Field(None, description="Whether to include a unique conversation ID in the response. When enabled, the signed URL can only be used once."),
     branch_id: str | None = Field(None, description="The specific branch variant of the agent to use for the conversation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a signed URL to initiate a conversation with an authorized agent. The signed URL provides secure access to start a new conversation session."""
 
     # Construct request model with validation
@@ -6634,7 +6777,7 @@ async def initiate_outbound_call(
     source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="The platform or integration through which the call was initiated."),
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Key-value pairs of custom variables that can be referenced in the agent's prompt or system instructions to personalize the conversation."),
     call_recording_enabled: bool | None = Field(None, description="Whether Twilio should record the audio of this call for compliance, quality assurance, or archival purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate an outbound phone call through Twilio with AI agent capabilities, including voice synthesis, language support, and optional call recording."""
 
     # Construct request model with validation
@@ -6693,7 +6836,7 @@ async def initiate_twilio_call(
     user_id: str | None = Field(None, description="Identifier for the end user or customer participating in this call, used by the agent owner for tracking and analytics."),
     source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="Channel or platform through which this call was initiated, used for analytics and routing decisions."),
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Custom key-value variables that can be passed to the agent prompt for dynamic personalization or context injection during the conversation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a Twilio voice call with an AI agent and return TwiML configuration for call routing. Supports both inbound and outbound call directions with customizable agent behavior, voice settings, and conversation parameters."""
 
     # Construct request model with validation
@@ -6753,7 +6896,7 @@ async def initiate_whatsapp_call(
     user_id: str | None = Field(None, description="The ID of the end user initiating this call, used by the agent owner for tracking and identifying conversation participants."),
     source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="The source or channel through which the call was initiated."),
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Dynamic variables that can be passed to customize the agent's behavior and responses during the call."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate an outbound voice call to a WhatsApp user through a configured WhatsApp Business Account. The call uses a pre-approved permission request template and connects to an AI agent for conversation."""
 
     # Construct request model with validation
@@ -6814,7 +6957,7 @@ async def send_whatsapp_message(
     user_id: str | None = Field(None, description="Identifier for the end user participating in this conversation, used by the agent owner for tracking and analytics."),
     source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="The channel or platform through which this conversation was initiated."),
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Additional dynamic variables to be substituted into the template or used by the agent during the conversation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send an outbound message to a WhatsApp user using a predefined template with optional AI agent configuration for interactive conversations."""
 
     # Construct request model with validation
@@ -6863,7 +7006,7 @@ async def create_agent_route(
     platform_settings: _models.CreateAgentRouteBodyPlatformSettings | None = Field(None, description="Platform settings including widget config, auth, privacy, guardrails, and evaluation"),
     conversation_config: _models.CreateAgentRouteBodyConversationConfig | None = Field(None, description="Conversation configuration including ASR, TTS, turn handling, and agent prompt settings"),
     workflow: _models.CreateAgentRouteBodyWorkflow | None = Field(None, description="Workflow definition with nodes and edges"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create Agent"""
 
     # Construct request model with validation
@@ -6901,7 +7044,7 @@ async def create_agent_route(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_agent_summaries(agent_ids: list[str] = Field(..., description="List of agent IDs to retrieve summaries for. Order is not significant. Each ID should be a valid agent identifier.")) -> dict[str, Any]:
+async def list_agent_summaries(agent_ids: list[str] = Field(..., description="List of agent IDs to retrieve summaries for. Order is not significant. Each ID should be a valid agent identifier.")) -> dict[str, Any] | ToolResult:
     """Retrieve summaries for the specified agents. Provide a list of agent IDs to get their summary information."""
 
     # Construct request model with validation
@@ -6943,7 +7086,7 @@ async def get_agent(
     agent_id: str = Field(..., description="The unique identifier of the agent to retrieve."),
     version_id: str | None = Field(None, description="The specific version of the agent to retrieve. If not provided, the latest version is used."),
     branch_id: str | None = Field(None, description="The specific branch of the agent to retrieve. If not provided, the default branch is used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration and settings for a specific agent. Optionally specify a particular version or branch to retrieve."""
 
     # Construct request model with validation
@@ -6993,7 +7136,7 @@ async def update_agent_settings(
     name: str | None = Field(None, description="A human-readable name for the agent to improve discoverability and organization."),
     tags: list[str] | None = Field(None, description="Classification tags for organizing and filtering agents by category or function."),
     version_description: str | None = Field(None, description="A description of the changes in this version, used when publishing updates to versioned agents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates agent settings including conversation configuration, platform settings, workflow structure, metadata, and versioning. Changes are applied to the specified agent or branch."""
 
     # Construct request model with validation
@@ -7036,7 +7179,7 @@ async def update_agent_settings(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_agent(agent_id: str = Field(..., description="The unique identifier of the agent to delete.")) -> dict[str, Any]:
+async def delete_agent(agent_id: str = Field(..., description="The unique identifier of the agent to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an agent and remove it from the system. This action cannot be undone."""
 
     # Construct request model with validation
@@ -7075,7 +7218,7 @@ async def delete_agent(agent_id: str = Field(..., description="The unique identi
 async def get_agent_widget_config(
     agent_id: str = Field(..., description="The unique identifier of the agent whose widget configuration you want to retrieve."),
     conversation_signature: str | None = Field(None, description="An optional expiring token that enables WebSocket conversation initiation. Generate tokens using the conversation signed URL endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the widget configuration for a specific agent, including settings needed to embed or display the agent's conversational interface."""
 
     # Construct request model with validation
@@ -7114,7 +7257,7 @@ async def get_agent_widget_config(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_agent_share_link(agent_id: str = Field(..., description="The unique identifier of the agent for which to retrieve the share link.")) -> dict[str, Any]:
+async def get_agent_share_link(agent_id: str = Field(..., description="The unique identifier of the agent for which to retrieve the share link.")) -> dict[str, Any] | ToolResult:
     """Retrieve the shareable link for an agent that can be used to share the agent with others."""
 
     # Construct request model with validation
@@ -7153,7 +7296,7 @@ async def get_agent_share_link(agent_id: str = Field(..., description="The uniqu
 async def upload_agent_avatar(
     agent_id: str = Field(..., description="The unique identifier of the agent to update with the new avatar image."),
     avatar_file: str = Field(..., description="An image file to use as the agent's avatar. The file will be processed and stored for display in the widget."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload and set a profile image for an agent that will be displayed in the chat widget."""
 
     # Construct request model with validation
@@ -7186,6 +7329,7 @@ async def upload_agent_avatar(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["avatar_file"],
         headers=_http_headers,
     )
 
@@ -7199,7 +7343,7 @@ async def list_agents(
     created_by_user_id: str | None = Field(None, description="Filter agents by the user ID of their creator. Use '@me' to refer to the authenticated user. Takes precedence over other ownership filters."),
     sort_direction: Literal["asc", "desc"] | None = Field(None, description="Order direction for sorting results in ascending or descending sequence."),
     sort_by: Literal["name", "created_at"] | None = Field(None, description="Field to sort results by. Choose between agent name or creation timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of your agents with their metadata. Results can be filtered by archived status and creator, and sorted by name or creation date."""
 
     # Construct request model with validation
@@ -7237,7 +7381,7 @@ async def list_agents(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_knowledge_base_size(agent_id: str = Field(..., description="The unique identifier of the agent whose knowledge base size you want to retrieve.")) -> dict[str, Any]:
+async def get_knowledge_base_size(agent_id: str = Field(..., description="The unique identifier of the agent whose knowledge base size you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total number of pages stored in an agent's knowledge base. Use this to understand the size and scope of the knowledge base associated with a specific agent."""
 
     # Construct request model with validation
@@ -7278,7 +7422,7 @@ async def estimate_agent_llm_cost(
     prompt_length: int | None = Field(None, description="The length of the input prompt in characters. Used to estimate token consumption for the prompt component."),
     number_of_pages: int | None = Field(None, description="The total number of pages in PDF documents or URLs indexed in the agent's Knowledge Base. Used to estimate token consumption for RAG retrieval and context injection."),
     rag_enabled: bool | None = Field(None, description="Whether Retrieval-Augmented Generation (RAG) is enabled for the agent. When enabled, additional tokens are consumed for knowledge base retrieval and context augmentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Estimates the expected number of LLM tokens required for an agent based on prompt length, knowledge base content, and RAG configuration. Use this to forecast token consumption and associated costs before deployment."""
 
     # Construct request model with validation
@@ -7320,7 +7464,7 @@ async def estimate_agent_llm_cost(
 async def duplicate_agent(
     agent_id: str = Field(..., description="The unique identifier of the agent to duplicate."),
     name: str | None = Field(None, description="An optional custom name for the duplicated agent to help identify it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new agent by duplicating an existing agent. The new agent will have the same configuration as the source agent, with an optional custom name."""
 
     # Construct request model with validation
@@ -7384,7 +7528,7 @@ async def simulate_agent_conversation(
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Dynamic variables to inject into the prompt and conversation context, enabling parameterized testing scenarios."),
     extra_evaluation_criteria: list[_models.PromptEvaluationCriteria] | None = Field(None, description="Custom evaluation criteria to assess agent performance during the simulation, such as response quality, accuracy, or adherence to guidelines."),
     new_turns_limit: int | None = Field(None, description="Maximum number of conversation turns to generate in the simulation. Prevents excessively long simulations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Simulate a conversation between an AI agent and a simulated user to test agent behavior, responses, and conversation flow. Useful for validating agent configurations, prompts, and tool integrations before deployment."""
 
     # Construct request model with validation
@@ -7451,7 +7595,7 @@ async def simulate_conversation_stream(
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Dynamic variables to inject into the agent's context and prompts during the conversation simulation."),
     extra_evaluation_criteria: list[_models.PromptEvaluationCriteria] | None = Field(None, description="List of custom evaluation criteria to assess the agent's performance during the conversation simulation."),
     new_turns_limit: int | None = Field(None, description="Maximum number of new conversation turns to generate before ending the simulation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Simulate a conversation between an agent and a simulated user with streamed responses. The response streams partial message lists that should be concatenated, concluding with a final message containing conversation analysis."""
 
     # Construct request model with validation
@@ -7507,7 +7651,7 @@ async def create_agent_test(
     simulation_scenario: str | None = Field(None, description="Description of the simulated user scenario and persona for simulation-based tests. Provides context for multi-turn conversation evaluation."),
     simulation_max_turns: int | None = Field(None, description="Maximum number of conversation turns to execute in simulation tests. Controls test duration and complexity.", ge=1, le=50),
     simulation_environment: str | None = Field(None, description="Execution environment for the simulation test. Defaults to production if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new test case for evaluating agent responses. Tests can validate response quality, tool usage, or simulate multi-turn conversations with configurable success criteria."""
 
     # Construct request model with validation
@@ -7545,7 +7689,7 @@ async def create_agent_test(
 
 
 @mcp.tool()
-async def get_agent_test(test_id: str = Field(..., description="The unique identifier of the agent response test to retrieve.")) -> dict[str, Any]:
+async def get_agent_test(test_id: str = Field(..., description="The unique identifier of the agent response test to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific agent response test by its ID. Use this to fetch details about a previously created test."""
 
     # Construct request model with validation
@@ -7596,7 +7740,7 @@ async def update_agent_test(
     simulation_scenario: str | None = Field(None, description="Description of the simulation scenario and user persona for simulation-based tests."),
     simulation_max_turns: int | None = Field(None, description="Maximum number of conversation turns allowed in simulation tests. Controls test duration and complexity.", ge=1, le=50),
     simulation_environment: str | None = Field(None, description="The environment context for running the simulation test. Defaults to production if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an agent response test configuration by ID. Allows modification of test criteria, success/failure examples, dynamic variables, and simulation settings."""
 
     # Construct request model with validation
@@ -7635,7 +7779,7 @@ async def update_agent_test(
 
 
 @mcp.tool()
-async def delete_agent_test(test_id: str = Field(..., description="The unique identifier of the agent response test to delete.")) -> dict[str, Any]:
+async def delete_agent_test(test_id: str = Field(..., description="The unique identifier of the agent response test to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes an agent response test by its ID. This removes the test configuration and associated test data from the system."""
 
     # Construct request model with validation
@@ -7671,7 +7815,7 @@ async def delete_agent_test(test_id: str = Field(..., description="The unique id
 
 
 @mcp.tool()
-async def fetch_agent_response_test_summaries(test_ids: list[str] = Field(..., description="List of unique test IDs to retrieve summaries for. Each ID identifies a specific agent response test.")) -> dict[str, Any]:
+async def fetch_agent_response_test_summaries(test_ids: list[str] = Field(..., description="List of unique test IDs to retrieve summaries for. Each ID identifies a specific agent response test.")) -> dict[str, Any] | ToolResult:
     """Retrieve summaries for multiple agent response tests by their IDs. Returns a mapping of test IDs to their corresponding test summary data."""
 
     # Construct request model with validation
@@ -7713,7 +7857,7 @@ async def list_agent_tests(
     page_size: int | None = Field(None, description="Maximum number of tests to return per request. Must be between 1 and 100.", ge=1, le=100),
     types: list[Literal["llm", "tool", "simulation", "folder"]] | None = Field(None, description="Filter results to include only tests and folders matching the specified types. When provided, only items of these types are returned."),
     sort_mode: Literal["default", "folders_first"] | None = Field(None, description="Determines the sort order for results. Use 'folders_first' to display folders before tests, or 'default' for standard ordering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of agent response tests with optional filtering by test type and custom sorting. Supports organizing results with folders displayed first if needed."""
 
     # Construct request model with validation
@@ -7754,7 +7898,7 @@ async def list_agent_tests(
 async def list_test_invocations(
     agent_id: str = Field(..., description="The unique identifier of the agent whose test invocations should be retrieved."),
     page_size: int | None = Field(None, description="Maximum number of test invocations to return per request. Defaults to 30 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of test invocations for a specific agent. Supports optional pagination control to manage result set size."""
 
     # Construct request model with validation
@@ -7797,7 +7941,7 @@ async def run_agent_tests(
     tests: list[_models.SingleTestRunRequestModel] = Field(..., description="Array of test configurations to execute. Each test validates specific agent behaviors or criteria.", min_length=1, max_length=1000),
     branch_id: str | None = Field(None, description="Agent branch identifier to test against. If omitted, tests run on the default agent configuration."),
     agent_config_override: _models.RunAgentTestSuiteRouteBodyAgentConfigOverride | None = Field(None, description="Agent configuration overrides for test execution"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a suite of tests against a conversational AI agent with optional configuration overrides. Tests validate agent behavior, quality, and compliance against specified criteria."""
 
     # Construct request model with validation
@@ -7836,7 +7980,7 @@ async def run_agent_tests(
 
 
 @mcp.tool()
-async def get_test_invocation(test_invocation_id: str = Field(..., description="The unique identifier of the test invocation to retrieve. This ID is provided when tests are executed.")) -> dict[str, Any]:
+async def get_test_invocation(test_invocation_id: str = Field(..., description="The unique identifier of the test invocation to retrieve. This ID is provided when tests are executed.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific test invocation by its ID. Use this to fetch details about a test invocation that was previously executed."""
 
     # Construct request model with validation
@@ -7878,7 +8022,7 @@ async def resubmit_tests(
     agent_id: str = Field(..., description="The unique identifier of the agent whose tests should be resubmitted."),
     branch_id: str | None = Field(None, description="Branch ID for running tests against a specific agent variant or configuration. If omitted, tests run against the agent's default configuration."),
     agent_config_override: _models.ResubmitTestsRouteBodyAgentConfigOverride | None = Field(None, description="Agent configuration overrides for test resubmission"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Resubmit specific test runs from a completed test invocation to re-evaluate agent performance with potentially updated configurations. Allows selective resubmission of individual test cases within a test batch."""
 
     # Construct request model with validation
@@ -7934,7 +8078,7 @@ async def list_conversations(
     summary_mode: Literal["exclude", "include"] | None = Field(None, description="Include or exclude transcript summaries in the response."),
     conversation_initiation_source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="Filter conversations by their initiation source (SDK, integration, or communication platform)."),
     branch_id: str | None = Field(None, description="Filter conversations by branch ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all conversations for agents owned by the user, with extensive filtering options by agent, call metrics, ratings, evaluation results, and conversation metadata."""
 
     # Construct request model with validation
@@ -7977,7 +8121,7 @@ async def list_conversation_users(
     branch_id: str | None = Field(None, description="Filter conversations to a specific branch by its ID."),
     page_size: int | None = Field(None, description="Maximum number of users to return per page. Valid range is 1 to 100.", ge=1, le=100),
     sort_by: Literal["last_contact_unix_secs", "conversation_count"] | None = Field(None, description="Field to sort results by. Choose between most recent contact time or total conversation count."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of distinct users from conversations, with options to filter by agent and branch, and sort by contact recency or conversation frequency."""
 
     # Construct request model with validation
@@ -8015,7 +8159,7 @@ async def list_conversation_users(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_conversation(conversation_id: str = Field(..., description="The unique identifier of the conversation to retrieve.")) -> dict[str, Any]:
+async def get_conversation(conversation_id: str = Field(..., description="The unique identifier of the conversation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full details and history of a specific conversation by its ID. Use this to access conversation metadata, messages, and related information."""
 
     # Construct request model with validation
@@ -8051,7 +8195,7 @@ async def get_conversation(conversation_id: str = Field(..., description="The un
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_conversation(conversation_id: str = Field(..., description="The unique identifier of the conversation to delete.")) -> dict[str, Any]:
+async def delete_conversation(conversation_id: str = Field(..., description="The unique identifier of the conversation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a conversation and all associated data. This action cannot be undone."""
 
     # Construct request model with validation
@@ -8087,7 +8231,7 @@ async def delete_conversation(conversation_id: str = Field(..., description="The
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_conversation_audio(conversation_id: str = Field(..., description="The unique identifier of the conversation whose audio recording you want to retrieve.")) -> dict[str, Any]:
+async def get_conversation_audio(conversation_id: str = Field(..., description="The unique identifier of the conversation whose audio recording you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the audio recording of a specific conversation. Returns the audio file associated with the conversation ID."""
 
     # Construct request model with validation
@@ -8126,7 +8270,7 @@ async def get_conversation_audio(conversation_id: str = Field(..., description="
 async def submit_conversation_feedback(
     conversation_id: str = Field(..., description="The unique identifier of the conversation to provide feedback for."),
     feedback: Literal["like", "dislike"] | None = Field(None, description="The feedback sentiment for the conversation, either positive or negative."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit feedback for a conversation to indicate user satisfaction. Feedback can be positive ('like') or negative ('dislike')."""
 
     # Construct request model with validation
@@ -8183,7 +8327,7 @@ async def search_conversation_messages(
     summary_mode: Literal["exclude", "include"] | None = Field(None, description="Include or exclude transcript summaries in the response."),
     conversation_initiation_source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="Filter conversations by their initiation source (SDK, integration, or communication platform)."),
     branch_id: str | None = Field(None, description="Filter conversations by branch ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search conversation transcripts using full-text and fuzzy matching with optional filtering by agent, user, call metrics, ratings, language, and other conversation attributes."""
 
     # Construct request model with validation
@@ -8225,7 +8369,7 @@ async def search_conversation_messages_semantic(
     text_query: str = Field(..., description="The search query text to match against conversation messages using semantic similarity. Accepts natural language queries describing intent, topics, or specific requests."),
     agent_id: str | None = Field(None, description="Filter results to messages from a specific agent. If omitted, searches across all agents in the conversation."),
     page_size: int | None = Field(None, description="Number of results to return per page. Controls pagination size for large result sets.", ge=1, le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search conversation transcripts using semantic similarity to find relevant messages based on meaning and intent rather than exact keyword matches. Returns the most contextually relevant messages from conversation history."""
 
     # Construct request model with validation
@@ -8263,7 +8407,7 @@ async def search_conversation_messages_semantic(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_phone_numbers() -> dict[str, Any]:
+async def list_phone_numbers() -> dict[str, Any] | ToolResult:
     """Retrieve all phone numbers associated with your account. Returns a complete list of configured phone numbers available for use in voice conversations."""
 
     # Extract parameters for API call
@@ -8299,7 +8443,7 @@ async def import_phone_number(
     region_config: _models.RegionConfigRequest | None = Field(None, description="Additional Twilio region configuration settings to optimize call routing and compliance for specific geographic regions."),
     inbound_trunk_config: _models.InboundSipTrunkConfigRequestModel | None = Field(None, description="SIP trunk configuration for inbound call routing, including server address, port, and authentication credentials."),
     outbound_trunk_config: _models.OutboundSipTrunkConfigRequestModel | None = Field(None, description="SIP trunk configuration for outbound call routing, including server address, port, and authentication credentials."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import a phone number from your provider configuration (Twilio or SIP trunk) to enable inbound and outbound calling capabilities."""
 
     # Construct request model with validation
@@ -8337,7 +8481,7 @@ async def import_phone_number(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_phone_number(phone_number_id: str = Field(..., description="The unique identifier of the phone number to retrieve.")) -> dict[str, Any]:
+async def get_phone_number(phone_number_id: str = Field(..., description="The unique identifier of the phone number to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific phone number by its ID. Returns the phone number configuration and associated metadata."""
 
     # Construct request model with validation
@@ -8388,7 +8532,7 @@ async def update_phone_number(
     transport: Literal["auto", "udp", "tcp", "tls"] | None = Field(None, description="SIP transport protocol for signaling. Auto-detection attempts to select the optimal protocol."),
     headers: dict[str, str] | None = Field(None, description="Custom SIP X-* headers to include in INVITE requests. Useful for identifying calls or passing metadata to the SIP provider."),
     livekit_stack: Literal["standard", "static"] | None = Field(None, description="LiveKit media server stack configuration for call handling."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the routing configuration and credentials for a phone number, including assigned agent, SIP trunk settings, and security policies."""
 
     # Construct request model with validation
@@ -8435,7 +8579,7 @@ async def update_phone_number(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_phone_number(phone_number_id: str = Field(..., description="The unique identifier of the phone number to delete.")) -> dict[str, Any]:
+async def delete_phone_number(phone_number_id: str = Field(..., description="The unique identifier of the phone number to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a phone number from your ConvAI account by its ID. This action is permanent and cannot be undone."""
 
     # Construct request model with validation
@@ -8475,7 +8619,7 @@ async def calculate_llm_expected_cost(
     prompt_length: int = Field(..., description="The length of the input prompt in characters. This determines the token consumption for the initial request."),
     number_of_pages: int = Field(..., description="The total number of pages in PDF documents or URLs indexed in the agent's knowledge base. Used to estimate retrieval and processing costs when RAG is enabled."),
     rag_enabled: bool = Field(..., description="Whether Retrieval-Augmented Generation (RAG) is enabled. When enabled, the cost calculation includes knowledge base retrieval and context augmentation overhead."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the expected cost of using various LLM models based on prompt length, knowledge base size, and RAG configuration. Returns a list of available models with their associated usage costs."""
 
     # Construct request model with validation
@@ -8513,7 +8657,7 @@ async def calculate_llm_expected_cost(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_llms() -> dict[str, Any]:
+async def list_llms() -> dict[str, Any] | ToolResult:
     """Retrieve a list of available LLM models that can be used with agents, including their capabilities and deprecation status. The response is filtered based on your deployment's data residency and workspace compliance requirements (e.g., HIPAA)."""
 
     # Extract parameters for API call
@@ -8543,7 +8687,7 @@ async def list_llms() -> dict[str, Any]:
 async def upload_file(
     conversation_id: str = Field(..., description="The unique identifier of the conversation to which the file will be uploaded."),
     file_: str = Field(..., alias="file", description="The image or PDF file to upload. Supported formats include common image types (JPEG, PNG, etc.) and PDF documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload an image or PDF file to a conversation. Returns a unique file ID for referencing the file in subsequent conversation messages."""
 
     # Construct request model with validation
@@ -8576,6 +8720,7 @@ async def upload_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -8586,7 +8731,7 @@ async def upload_file(
 async def delete_conversation_file(
     conversation_id: str = Field(..., description="The unique identifier of the conversation containing the file to be deleted."),
     file_id: str = Field(..., description="The unique identifier of the file upload to be removed from the conversation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a file upload from a conversation. This operation is only available if the file has not yet been used within the conversation."""
 
     # Construct request model with validation
@@ -8622,7 +8767,7 @@ async def delete_conversation_file(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_conversation_live_count(agent_id: str | None = Field(None, description="Filter the live count to conversations handled by a specific agent. Omit to get the total count across all agents.")) -> dict[str, Any]:
+async def get_conversation_live_count(agent_id: str | None = Field(None, description="Filter the live count to conversations handled by a specific agent. Omit to get the total count across all agents.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current count of active ongoing conversations. Optionally filter results to a specific agent."""
 
     # Construct request model with validation
@@ -8660,7 +8805,7 @@ async def get_conversation_live_count(agent_id: str | None = Field(None, descrip
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_knowledge_base_summaries(document_ids: list[str] = Field(..., description="List of knowledge base document IDs to retrieve summaries for. IDs must be valid document identifiers from your knowledge base.", min_length=1, max_length=100)) -> dict[str, Any]:
+async def get_knowledge_base_summaries(document_ids: list[str] = Field(..., description="List of knowledge base document IDs to retrieve summaries for. IDs must be valid document identifiers from your knowledge base.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Retrieve summaries for multiple knowledge base documents by their IDs. Useful for quickly accessing document metadata and content previews without loading full documents."""
 
     # Construct request model with validation
@@ -8705,7 +8850,7 @@ async def list_knowledge_bases(
     folders_first: bool | None = Field(None, description="Whether to display folder documents before other document types in the results."),
     sort_direction: Literal["asc", "desc"] | None = Field(None, description="Order direction for sorting results in ascending or descending sequence."),
     sort_by: Literal["name", "created_at", "updated_at", "size"] | None = Field(None, description="Field to sort results by. Choose from document name, creation date, last update date, or file size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available knowledge base documents with filtering and sorting options. Results can be filtered by creator, document type, and sorted by various fields."""
 
     # Construct request model with validation
@@ -8746,7 +8891,7 @@ async def list_knowledge_bases(
 async def create_knowledge_base_document_from_url(
     url: str = Field(..., description="The complete URL of the webpage to scrape and add to the knowledge base. Must be a valid, publicly accessible web address."),
     name: str | None = Field(None, description="A human-readable label for this document within the knowledge base. Helps identify and organize the document for agent reference.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a knowledge base document by scraping and indexing content from a specified webpage. The agent will use this document to access and reference the webpage content when interacting with users."""
 
     # Construct request model with validation
@@ -8787,7 +8932,7 @@ async def create_knowledge_base_document_from_url(
 async def upload_knowledge_base_document(
     file_: str = Field(..., alias="file", description="The file content to upload as a knowledge base document. Accepts binary file formats for documentation."),
     name: str | None = Field(None, description="A human-readable name for the document. If not provided, a default name will be generated.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to create a new knowledge base document that the agent can access and reference when interacting with users."""
 
     # Construct request model with validation
@@ -8819,6 +8964,7 @@ async def upload_knowledge_base_document(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -8829,7 +8975,7 @@ async def upload_knowledge_base_document(
 async def add_text_document(
     text: str = Field(..., description="The text content to be added to the knowledge base. This will be indexed for search and retrieval."),
     name: str | None = Field(None, description="A human-readable name for the document. If not provided, a default name will be generated.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a text document to the knowledge base. The document will be indexed and made available for retrieval and analysis."""
 
     # Construct request model with validation
@@ -8867,7 +9013,7 @@ async def add_text_document(
 
 # Tags: Conversational AI
 @mcp.tool()
-async def create_folder(name: str = Field(..., description="A human-readable name for the folder. Used to identify and organize document groups within the knowledge base.", min_length=1)) -> dict[str, Any]:
+async def create_folder(name: str = Field(..., description="A human-readable name for the folder. Used to identify and organize document groups within the knowledge base.", min_length=1)) -> dict[str, Any] | ToolResult:
     """Create a new folder in the knowledge base for organizing and grouping related documents together."""
 
     # Construct request model with validation
@@ -8908,7 +9054,7 @@ async def create_folder(name: str = Field(..., description="A human-readable nam
 async def retrieve_knowledge_base_document(
     documentation_id: str = Field(..., description="The unique identifier of the document to retrieve from the knowledge base."),
     agent_id: str | None = Field(None, description="Optional agent identifier to scope the knowledge base query to a specific agent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific document from the agent's knowledge base. Use the documentation ID returned when the document was added to access its content and metadata."""
 
     # Construct request model with validation
@@ -8950,7 +9096,7 @@ async def retrieve_knowledge_base_document(
 async def rename_document(
     documentation_id: str = Field(..., description="The unique identifier of the document to rename. This ID is provided when the document is initially added to the knowledge base."),
     name: str = Field(..., description="A human-readable name for the document. Must be at least one character long.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rename a document in the knowledge base by updating its display name."""
 
     # Construct request model with validation
@@ -8992,7 +9138,7 @@ async def rename_document(
 async def delete_knowledge_base_document(
     documentation_id: str = Field(..., description="The unique identifier of the document or folder to delete from the knowledge base."),
     force: bool | None = Field(None, description="Force deletion of the document or folder even if it is currently used by agents. When enabled, the document will be removed from all dependent agents, and all child documents and folders within non-empty folders will also be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a document or folder from the knowledge base. Optionally force deletion even if the document is in use by agents, which will also remove it from dependent agents and delete all child documents in non-empty folders."""
 
     # Construct request model with validation
@@ -9031,7 +9177,7 @@ async def delete_knowledge_base_document(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_rag_index_overview() -> dict[str, Any]:
+async def get_rag_index_overview() -> dict[str, Any] | ToolResult:
     """Retrieves metadata about RAG (Retrieval-Augmented Generation) indexes used by the knowledge base, including total size and other index statistics."""
 
     # Extract parameters for API call
@@ -9058,7 +9204,7 @@ async def get_rag_index_overview() -> dict[str, Any]:
 
 # Tags: Agents Platform
 @mcp.tool()
-async def batch_compute_rag_indexes(items: list[_models.GetOrCreateRagIndexRequestModel] = Field(..., description="Array of RAG index requests for knowledge base documents. Each item specifies a document to index. Order is preserved in the response.", min_length=1, max_length=100)) -> dict[str, Any]:
+async def batch_compute_rag_indexes(items: list[_models.GetOrCreateRagIndexRequestModel] = Field(..., description="Array of RAG index requests for knowledge base documents. Each item specifies a document to index. Order is preserved in the response.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Computes and retrieves RAG (Retrieval-Augmented Generation) indexes for multiple knowledge base documents in a single batch operation. Supports up to 100 documents per request for efficient index creation and retrieval."""
 
     # Construct request model with validation
@@ -9096,7 +9242,7 @@ async def batch_compute_rag_indexes(items: list[_models.GetOrCreateRagIndexReque
 
 # Tags: Agents Platform
 @mcp.tool()
-async def refresh_knowledge_base_document(documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base to refresh. This ID is provided when the document is initially added.")) -> dict[str, Any]:
+async def refresh_knowledge_base_document(documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base to refresh. This ID is provided when the document is initially added.")) -> dict[str, Any] | ToolResult:
     """Manually refresh a URL-based document in the knowledge base by re-fetching its content from the source URL. Use this to update stale or outdated document content."""
 
     # Construct request model with validation
@@ -9132,7 +9278,7 @@ async def refresh_knowledge_base_document(documentation_id: str = Field(..., des
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_rag_indexes(documentation_id: str = Field(..., description="The unique identifier of the knowledge base document for which to retrieve RAG indexes.")) -> dict[str, Any]:
+async def list_rag_indexes(documentation_id: str = Field(..., description="The unique identifier of the knowledge base document for which to retrieve RAG indexes.")) -> dict[str, Any] | ToolResult:
     """Retrieve all RAG indexes associated with a specified knowledge base document. Returns metadata about each index configured for the document."""
 
     # Construct request model with validation
@@ -9171,7 +9317,7 @@ async def list_rag_indexes(documentation_id: str = Field(..., description="The u
 async def index_knowledge_base_document(
     documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base that you want to index or check the indexing status for."),
     model: Literal["e5_mistral_7b_instruct", "multilingual_e5_large_instruct"] = Field(..., description="The embedding model to use for RAG indexing. This determines how the document content will be vectorized for semantic search."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger or retrieve the RAG indexing status for a knowledge base document. If the document hasn't been indexed yet, this operation initiates the indexing task; otherwise, it returns the current indexing status."""
 
     # Construct request model with validation
@@ -9213,7 +9359,7 @@ async def index_knowledge_base_document(
 async def delete_rag_index(
     documentation_id: str = Field(..., description="The unique identifier of the knowledge base document whose RAG index will be deleted."),
     rag_index_id: str = Field(..., description="The unique identifier of the RAG index to delete for the specified document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a RAG index associated with a knowledge base document. This removes the indexed data used for retrieval-augmented generation on that document."""
 
     # Construct request model with validation
@@ -9253,7 +9399,7 @@ async def list_dependent_agents(
     documentation_id: str = Field(..., description="The unique identifier of the knowledge base document for which to retrieve dependent agents."),
     dependent_type: Literal["direct", "transitive", "all"] | None = Field(None, description="Filter results by dependency relationship type. Use 'direct' for agents directly referencing this document, 'transitive' for agents indirectly depending on it, or 'all' to include both."),
     page_size: int | None = Field(None, description="Maximum number of agents to return per request. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of agents that depend on a specific knowledge base document. Supports filtering by dependency type (direct, transitive, or all) with pagination."""
 
     # Construct request model with validation
@@ -9292,7 +9438,7 @@ async def list_dependent_agents(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def retrieve_knowledge_base_document_content(documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base, provided when the document was initially added.")) -> dict[str, Any]:
+async def retrieve_knowledge_base_document_content(documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base, provided when the document was initially added.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete content of a document stored in the knowledge base. Use the documentation ID returned when the document was added to access its full text."""
 
     # Construct request model with validation
@@ -9328,7 +9474,7 @@ async def retrieve_knowledge_base_document_content(documentation_id: str = Field
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_knowledge_base_source_file_url(documentation_id: str = Field(..., description="The unique identifier of the knowledge base document. This ID is provided when the document is initially added to the knowledge base.")) -> dict[str, Any]:
+async def get_knowledge_base_source_file_url(documentation_id: str = Field(..., description="The unique identifier of the knowledge base document. This ID is provided when the document is initially added to the knowledge base.")) -> dict[str, Any] | ToolResult:
     """Retrieve a signed URL to download the original source file of a document stored in the knowledge base. The URL is temporary and can be used to access the file directly."""
 
     # Construct request model with validation
@@ -9368,7 +9514,7 @@ async def retrieve_knowledge_base_chunk(
     documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base. This ID is provided when the document is initially added to the knowledge base."),
     chunk_id: str = Field(..., description="The unique identifier of the specific chunk within the document. Chunks are sequential segments of a document created during RAG processing."),
     embedding_model: Literal["e5_mistral_7b_instruct", "multilingual_e5_large_instruct"] | None = Field(None, description="The embedding model used to generate and retrieve the chunk. Determines the vector representation used for semantic search and retrieval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific chunk from a knowledge base document used by the RAG system. Returns the chunk content and metadata for the specified documentation and chunk identifiers."""
 
     # Construct request model with validation
@@ -9410,7 +9556,7 @@ async def retrieve_knowledge_base_chunk(
 async def move_knowledge_base_document(
     document_id: str = Field(..., description="The unique identifier of the document to move within the knowledge base."),
     move_to: str | None = Field(None, description="The destination folder identifier where the document should be moved. Omit this parameter to move the document to the root folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves a knowledge base document from its current location to a specified folder. If no destination folder is provided, the document is moved to the root folder."""
 
     # Construct request model with validation
@@ -9452,7 +9598,7 @@ async def move_knowledge_base_document(
 async def move_knowledge_base_entities(
     document_ids: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="The IDs of the documents or folders to move. Accepts between 1 and 20 entity IDs in a single operation.", min_length=1, max_length=20),
     move_to: str | None = Field(None, description="The destination folder ID where entities will be moved. Omit this parameter to move entities to the root folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves multiple documents or folders within a knowledge base to a specified destination folder. If no destination is provided, entities are moved to the root folder."""
 
     # Construct request model with validation
@@ -9496,7 +9642,7 @@ async def list_tools(
     types: list[Literal["webhook", "client", "api_integration_webhook"]] | None = Field(None, description="Filter results to include only tools of specified types. Provide as an array of tool type values."),
     sort_direction: Literal["asc", "desc"] | None = Field(None, description="Order direction for sorting results in ascending or descending sequence."),
     sort_by: Literal["name", "created_at"] | None = Field(None, description="Field to sort results by. Choose between tool name or creation timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all available tools in the workspace with optional filtering by creator, type, and sorting capabilities."""
 
     # Construct request model with validation
@@ -9534,7 +9680,7 @@ async def list_tools(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def create_tool(tool_config: _models.WebhookToolConfigInput | _models.ClientToolConfigInput | _models.SystemToolConfigInput | _models.McpToolConfigInput = Field(..., description="The tool configuration object that defines the tool's metadata, input parameters, and behavior. This should include the tool name, description, parameter schema, and any other required configuration properties.")) -> dict[str, Any]:
+async def create_tool(tool_config: _models.WebhookToolConfigInput | _models.ClientToolConfigInput | _models.SystemToolConfigInput | _models.McpToolConfigInput = Field(..., description="The tool configuration object that defines the tool's metadata, input parameters, and behavior. This should include the tool name, description, parameter schema, and any other required configuration properties.")) -> dict[str, Any] | ToolResult:
     """Register a new tool in the workspace to make it available for use in conversations. The tool configuration defines its name, description, parameters, and execution behavior."""
 
     # Construct request model with validation
@@ -9572,7 +9718,7 @@ async def create_tool(tool_config: _models.WebhookToolConfigInput | _models.Clie
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_tool(tool_id: str = Field(..., description="The unique identifier of the tool to retrieve.")) -> dict[str, Any]:
+async def get_tool(tool_id: str = Field(..., description="The unique identifier of the tool to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific tool available in the workspace by its ID. Use this to fetch tool details and configuration."""
 
     # Construct request model with validation
@@ -9611,7 +9757,7 @@ async def get_tool(tool_id: str = Field(..., description="The unique identifier 
 async def update_tool(
     tool_id: str = Field(..., description="The unique identifier of the tool to be updated."),
     tool_config: _models.WebhookToolConfigInput | _models.ClientToolConfigInput | _models.SystemToolConfigInput | _models.McpToolConfigInput = Field(..., description="The configuration object containing the tool's settings and parameters to be updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration of an existing tool in the workspace. Modify tool settings and behavior by providing updated configuration parameters."""
 
     # Construct request model with validation
@@ -9653,7 +9799,7 @@ async def update_tool(
 async def delete_tool(
     tool_id: str = Field(..., description="The unique identifier of the tool to delete."),
     force: bool | None = Field(None, description="Force deletion of the tool even if it is currently used by agents or branches. When enabled, the tool will be automatically removed from all dependent agents and branches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a tool from the workspace. Optionally force deletion to remove the tool from all dependent agents and branches regardless of current usage."""
 
     # Construct request model with validation
@@ -9695,7 +9841,7 @@ async def delete_tool(
 async def list_dependent_agents_tool(
     tool_id: str = Field(..., description="The unique identifier of the tool for which to retrieve dependent agents."),
     page_size: int | None = Field(None, description="Maximum number of agents to return per request. Useful for pagination control.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of agents that depend on a specific tool. Use this to understand tool usage and impact across your agent ecosystem."""
 
     # Construct request model with validation
@@ -9738,7 +9884,7 @@ async def create_workspace_secret(
     type_: Literal["new"] = Field(..., alias="type", description="The category or classification of the secret (e.g., API key, password, token, connection string). Determines how the secret is handled and validated."),
     name: str = Field(..., description="A unique identifier for the secret within the workspace. Used to reference the secret in configurations and workflows."),
     value: str = Field(..., description="The sensitive value to be securely stored. This value is encrypted and not returned in subsequent API responses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new secret for the Convai workspace. Secrets are securely stored credentials or sensitive values that can be referenced in workspace configurations."""
 
     # Construct request model with validation
@@ -9781,7 +9927,7 @@ async def update_secret(
     type_: Literal["update"] = Field(..., alias="type", description="The type or category of the secret (e.g., API key, password, token)."),
     name: str = Field(..., description="The display name or label for the secret."),
     value: str = Field(..., description="The secret value or credential data to store."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing secret in the Convai workspace. Modify the secret's type, name, or value by providing the secret ID and updated details."""
 
     # Construct request model with validation
@@ -9820,7 +9966,7 @@ async def update_secret(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_secret(secret_id: str = Field(..., description="The unique identifier of the secret to delete.")) -> dict[str, Any]:
+async def delete_secret(secret_id: str = Field(..., description="The unique identifier of the secret to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a workspace secret. The secret must not be in use by any active configurations before deletion."""
 
     # Construct request model with validation
@@ -9866,7 +10012,7 @@ async def submit_batch_calls(
     agent_phone_number_id: str | None = Field(None, description="Phone number identifier associated with the agent making the calls. Required for certain call routing configurations."),
     timezone_: str | None = Field(None, alias="timezone", description="Timezone identifier (e.g., America/New_York, Europe/London) for interpreting scheduled_time_unix in local context."),
     target_concurrency_limit: int | None = Field(None, description="Maximum number of simultaneous calls allowed in this batch. When set, this limit takes precedence over workspace or agent-level capacity settings.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a batch call request to schedule multiple outbound calls to recipients. Supports scheduling, concurrency limits, and WhatsApp permission request templates."""
 
     # Construct request model with validation
@@ -9908,7 +10054,7 @@ async def submit_batch_calls(
 async def list_batch_calls(
     limit: int | None = Field(None, description="Maximum number of batch calls to return per request. Controls pagination size for the result set."),
     last_doc: str | None = Field(None, description="Cursor token for pagination. Provide the last document identifier from a previous request to retrieve the next page of results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all batch calls for the current workspace with pagination support. Use limit and last_doc parameters to control result set size and navigate through pages."""
 
     # Construct request model with validation
@@ -9946,7 +10092,7 @@ async def list_batch_calls(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to retrieve.")) -> dict[str, Any]:
+async def get_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific batch call, including all recipients and their call status."""
 
     # Construct request model with validation
@@ -9982,7 +10128,7 @@ async def get_batch_call(batch_id: str = Field(..., description="The unique iden
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to delete.")) -> dict[str, Any]:
+async def delete_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a batch call and all associated recipient records. Note that conversation history will be retained even after deletion."""
 
     # Construct request model with validation
@@ -10018,7 +10164,7 @@ async def delete_batch_call(batch_id: str = Field(..., description="The unique i
 
 # Tags: Agents Platform
 @mcp.tool()
-async def cancel_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to cancel.")) -> dict[str, Any]:
+async def cancel_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel a running batch call and set all recipients to cancelled status. This operation terminates the batch calling process immediately."""
 
     # Construct request model with validation
@@ -10054,7 +10200,7 @@ async def cancel_batch_call(batch_id: str = Field(..., description="The unique i
 
 # Tags: Agents Platform
 @mcp.tool()
-async def retry_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to retry. This specifies which batch's failed and no-response recipients should be called again.")) -> dict[str, Any]:
+async def retry_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to retry. This specifies which batch's failed and no-response recipients should be called again.")) -> dict[str, Any] | ToolResult:
     """Retry a failed batch call by re-attempting to reach recipients who did not respond or experienced call failures. This operation allows you to reprocess a specific batch without creating a new batch call."""
 
     # Construct request model with validation
@@ -10105,7 +10251,7 @@ async def initiate_outbound_sip_call(
     user_id: str | None = Field(None, description="Identifier for the end user or customer participating in this call, used by the agent owner for tracking and user identification."),
     source: Literal["unknown", "android_sdk", "node_js_sdk", "react_native_sdk", "react_sdk", "js_sdk", "python_sdk", "widget", "sip_trunk", "twilio", "genesys", "swift_sdk", "whatsapp", "flutter_sdk", "zendesk_integration", "slack_integration", "template_preview"] | None = Field(None, description="The source or channel through which the call was initiated, used for analytics and tracking purposes."),
     dynamic_variables: dict[str, str | float | int | bool] | None = Field(None, description="Custom variables that can be passed to the agent and used within the prompt or conversation context for dynamic behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an outbound call through a SIP trunk with an AI agent. The agent can be configured with custom voice settings, initial messaging, and LLM behavior to handle the conversation."""
 
     # Construct request model with validation
@@ -10148,7 +10294,7 @@ async def initiate_outbound_sip_call(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_mcp_servers() -> dict[str, Any]:
+async def list_mcp_servers() -> dict[str, Any] | ToolResult:
     """Retrieve all MCP server configurations available in the workspace. Returns a list of configured MCP servers with their settings and connection details."""
 
     # Extract parameters for API call
@@ -10192,7 +10338,7 @@ async def register_mcp_server(
     execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field(None, description="Execution timing for tools from this server: 'immediate' runs the tool right away, 'post_tool_speech' waits for the agent to finish speaking first, 'async' runs in the background without blocking the agent."),
     tool_config_overrides: list[_models.McpToolConfigOverride] | None = Field(None, description="List of per-tool configuration overrides that customize behavior for specific tools, superseding the server-level defaults. Each override targets a tool by identifier and applies custom settings."),
     disable_compression: bool | None = Field(None, description="If enabled, HTTP compression is disabled for requests to this MCP server. Enable this only if the server does not properly support compressed responses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register a new MCP (Model Context Protocol) server in your workspace to enable tool execution through that server. Configure authentication, approval policies, and execution behavior for all tools provided by this server."""
 
     # Construct request model with validation
@@ -10230,7 +10376,7 @@ async def register_mcp_server(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_mcp_server(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to retrieve.")) -> dict[str, Any]:
+async def get_mcp_server(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific MCP server configuration from your workspace. Use this to access detailed settings and metadata for a configured MCP server."""
 
     # Construct request model with validation
@@ -10278,7 +10424,7 @@ async def configure_mcp_server(
     request_headers: dict[str, str | _models.ConvAiSecretLocator | _models.ConvAiDynamicVariable | _models.ConvAiEnvVarLocator] | None = Field(None, description="HTTP headers to include in all requests sent to this MCP server, such as custom authentication or tracking headers."),
     disable_compression: bool | None = Field(None, description="When enabled, disables HTTP compression for requests to this MCP server to reduce processing overhead."),
     auth_connection: _models.AuthConnectionLocator | _models.EnvironmentAuthConnectionLocator | None = Field(None, description="Optional authentication connection configuration for establishing secure communication with this MCP server."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration settings for an MCP server, including approval policies, audio behavior, execution modes, and authentication. Changes apply to all tools provided by this server."""
 
     # Construct request model with validation
@@ -10318,7 +10464,7 @@ async def configure_mcp_server(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_mcp_server(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to delete.")) -> dict[str, Any]:
+async def delete_mcp_server(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a specific MCP server configuration from the workspace. This action permanently deletes the server and its associated settings."""
 
     # Construct request model with validation
@@ -10354,7 +10500,7 @@ async def delete_mcp_server(mcp_server_id: str = Field(..., description="The uni
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_mcp_server_tools(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server for which to retrieve available tools.")) -> dict[str, Any]:
+async def list_mcp_server_tools(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server for which to retrieve available tools.")) -> dict[str, Any] | ToolResult:
     """Retrieve all tools available for a specific MCP server configuration. Returns a complete list of tools that can be invoked through the specified MCP server."""
 
     # Construct request model with validation
@@ -10396,7 +10542,7 @@ async def approve_mcp_server_tool(
     tool_description: str = Field(..., description="A human-readable description of what the MCP tool does and its purpose."),
     input_schema: dict[str, Any] | None = Field(None, description="The input schema that defines the parameters and structure expected by the MCP tool, as defined on the MCP server before any ElevenLabs processing."),
     approval_policy: Literal["auto_approved", "requires_approval"] | None = Field(None, description="The approval policy that determines whether this tool requires explicit approval before each use or is automatically approved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant approval for a specific MCP tool when the server is configured to use per-tool approval mode. This enables fine-grained control over which tools are available for use."""
 
     # Construct request model with validation
@@ -10438,7 +10584,7 @@ async def approve_mcp_server_tool(
 async def revoke_mcp_server_tool_approval(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP Server from which to revoke tool approval."),
     tool_name: str = Field(..., description="The name of the MCP tool to revoke approval for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke approval for a specific MCP tool on a server when using per-tool approval mode. This removes the tool from the approved list, preventing its use until re-approved."""
 
     # Construct request model with validation
@@ -10484,7 +10630,7 @@ async def create_tool_config_override(
     execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field(None, description="Determines when this tool executes relative to speech output: immediately, after tool speech completes, or asynchronously."),
     assignments: list[_models.DynamicVariableAssignment] | None = Field(None, description="Dynamic variable assignments that will be available to this MCP tool during execution. Order is preserved as specified."),
     input_overrides: dict[str, _models.ConstantSchemaOverride | _models.DynamicVariableSchemaOverride | _models.LlmSchemaOverride] | None = Field(None, description="JSON path mappings to override specific input parameters for this tool, allowing selective input transformation or substitution."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create configuration overrides for a specific MCP tool, allowing fine-grained control over tool execution behavior, audio feedback, and input handling independent of server-level settings."""
 
     # Construct request model with validation
@@ -10526,7 +10672,7 @@ async def create_tool_config_override(
 async def get_tool_config_override(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP server containing the tool."),
     tool_name: str = Field(..., description="The name of the MCP tool for which to retrieve configuration overrides."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve configuration overrides for a specific MCP tool within an MCP server. Use this to fetch customized tool settings that differ from default configurations."""
 
     # Construct request model with validation
@@ -10572,7 +10718,7 @@ async def override_mcp_tool_config(
     execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field(None, description="Specify when this tool executes: immediately, after speech completes, or asynchronously."),
     assignments: list[_models.DynamicVariableAssignment] | None = Field(None, description="Dynamic variable assignments to pass to this MCP tool during execution. Order is preserved if significant for the tool's logic."),
     input_overrides: dict[str, _models.ConstantSchemaOverride | _models.DynamicVariableSchemaOverride | _models.LlmSchemaOverride] | None = Field(None, description="JSON path mappings that override specific input fields for this tool, allowing selective parameter customization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Override configuration settings for a specific MCP tool, allowing fine-grained control over behavior like speech timing, interruptions, and execution mode independent of server-level defaults."""
 
     # Construct request model with validation
@@ -10611,7 +10757,7 @@ async def override_mcp_tool_config(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_whatsapp_account(phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number associated with the account.")) -> dict[str, Any]:
+async def get_whatsapp_account(phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number associated with the account.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific WhatsApp account using its phone number ID. Returns account configuration and status information."""
 
     # Construct request model with validation
@@ -10652,7 +10798,7 @@ async def update_whatsapp_account(
     assigned_agent_id: str | None = Field(None, description="The ID of the agent to assign to this WhatsApp account for handling conversations."),
     enable_messaging: bool | None = Field(None, description="Enable or disable messaging functionality for this WhatsApp account."),
     enable_audio_message_response: bool | None = Field(None, description="Enable or disable automatic audio message response capability for this WhatsApp account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration settings for a WhatsApp account, including agent assignment and messaging capabilities. Changes take effect immediately."""
 
     # Construct request model with validation
@@ -10691,7 +10837,7 @@ async def update_whatsapp_account(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def delete_whatsapp_account(phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number account to delete.")) -> dict[str, Any]:
+async def delete_whatsapp_account(phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number account to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a WhatsApp account and remove it from the ConvAI platform. This action cannot be undone."""
 
     # Construct request model with validation
@@ -10727,7 +10873,7 @@ async def delete_whatsapp_account(phone_number_id: str = Field(..., description=
 
 # Tags: Agents Platform
 @mcp.tool()
-async def list_whatsapp_accounts() -> dict[str, Any]:
+async def list_whatsapp_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all WhatsApp accounts associated with your ConvAI workspace. This operation returns a complete list of configured WhatsApp business accounts available for messaging and automation."""
 
     # Extract parameters for API call
@@ -10758,7 +10904,7 @@ async def list_agent_branches(
     agent_id: str = Field(..., description="The unique identifier of the agent whose branches should be retrieved."),
     include_archived: bool | None = Field(None, description="Whether to include archived branches in the results. Defaults to excluding archived branches."),
     limit: int | None = Field(None, description="Maximum number of branches to return in the response. Must be between 2 and 100 inclusive.", le=100, gt=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of branches for a specified agent. Optionally includes archived branches and supports result limiting."""
 
     # Construct request model with validation
@@ -10806,7 +10952,7 @@ async def create_agent_branch(
     platform_settings: dict[str, Any] | None = Field(None, description="Optional platform-specific settings changes to apply to this branch."),
     edges: dict[str, _models.WorkflowEdgeModelInput] | None = Field(None, description="Optional edge definitions for the agent's conversation flow in this branch."),
     nodes: dict[str, _models.WorkflowStartNodeModelInput | _models.WorkflowEndNodeModelInput | _models.WorkflowPhoneNumberNodeModelInput | _models.WorkflowOverrideAgentNodeModelInput | _models.WorkflowStandaloneAgentNodeModelInput | _models.WorkflowToolNodeModelInput] | None = Field(None, description="Optional node definitions for the agent's conversation flow in this branch.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new branch from a specified version of an agent's main branch. Branches allow you to develop and test agent configurations independently before merging changes back to the main branch."""
 
     # Construct request model with validation
@@ -10849,7 +10995,7 @@ async def create_agent_branch(
 async def get_agent_branch(
     agent_id: str = Field(..., description="The unique identifier of the agent that contains the branch."),
     branch_id: str = Field(..., description="The unique identifier of the branch to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific agent branch, including its configuration and settings."""
 
     # Construct request model with validation
@@ -10891,7 +11037,7 @@ async def update_branch(
     name: str | None = Field(None, description="New name for the branch. Must be unique within the agent.", min_length=1, max_length=140),
     is_archived: bool | None = Field(None, description="Whether to archive the branch. Archived branches are hidden from normal operations but retain their data."),
     protection_status: Literal["writer_perms_required", "admin_perms_required"] | None = Field(None, description="The access control level required to modify the branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update agent branch properties including name, archival status, and access control permissions. Allows modification of branch configuration and protection levels."""
 
     # Construct request model with validation
@@ -10935,7 +11081,7 @@ async def merge_branch(
     source_branch_id: str = Field(..., description="The unique identifier of the source branch to merge from."),
     target_branch_id: str = Field(..., description="The unique identifier of the target branch to merge into. Must be the main branch."),
     archive_source_branch: bool | None = Field(None, description="Whether to archive the source branch after a successful merge."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a source branch into a target branch, optionally archiving the source branch after the merge completes."""
 
     # Construct request model with validation
@@ -10980,7 +11126,7 @@ async def merge_branch(
 async def deploy_agent(
     agent_id: str = Field(..., description="The unique identifier of the agent for which to create or update deployments."),
     requests: list[_models.AgentDeploymentRequestItem] = Field(..., description="An ordered list of deployment configurations, each specifying a branch and its traffic allocation strategy. Order may affect deployment precedence."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update deployments for an agent, specifying which branches to deploy and how to distribute traffic across them."""
 
     # Construct request model with validation
@@ -11028,7 +11174,7 @@ async def create_agent_draft(
     edges: dict[str, _models.WorkflowEdgeModelInput] | None = Field(None, description="Workflow connections defining how nodes interact. Each edge represents a transition or data flow between nodes in the agent's workflow graph."),
     nodes: dict[str, _models.WorkflowStartNodeModelInput | _models.WorkflowEndNodeModelInput | _models.WorkflowPhoneNumberNodeModelInput | _models.WorkflowOverrideAgentNodeModelInput | _models.WorkflowStandaloneAgentNodeModelInput | _models.WorkflowToolNodeModelInput] | None = Field(None, description="Workflow nodes representing individual components or steps in the agent's logic. Nodes define actions, decision points, or processing stages.", min_length=1),
     tags: list[str] | None = Field(None, description="Optional labels for categorizing and filtering the agent draft. Tags enable organization by use case, domain, or other classification criteria."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new draft version of an agent with specified configuration, platform settings, and workflow structure. Drafts allow you to develop and test agent changes before publishing."""
 
     # Construct request model with validation
@@ -11074,7 +11220,7 @@ async def create_agent_draft(
 async def delete_agent_draft(
     agent_id: str = Field(..., description="The unique identifier of the agent whose draft should be deleted."),
     branch_id: str = Field(..., description="The identifier of the agent branch containing the draft to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a draft version of an agent. This removes the unpublished changes associated with the specified agent and branch."""
 
     # Construct request model with validation
@@ -11117,7 +11263,7 @@ async def list_environment_variables(
     page_size: int | None = Field(None, description="Maximum number of environment variables to return per request. Useful for pagination when working with large variable sets.", ge=1, le=100),
     label: str | None = Field(None, description="Filter results to return only environment variables matching this exact label value."),
     type_: Literal["string", "secret", "auth_connection"] | None = Field(None, alias="type", description="Filter results by variable type to narrow down to specific categories of environment variables."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all environment variables configured in your workspace with optional filtering by label or variable type. Results are paginated for efficient data retrieval."""
 
     # Construct request model with validation
@@ -11159,7 +11305,7 @@ async def create_environment_variable(
     type_: Literal["string"] = Field(..., alias="type", description="The type or category of the environment variable, determining how it will be processed and used within the workspace."),
     label: str = Field(..., description="A unique identifier label for this environment variable within the workspace. Used to reference the variable in configurations and deployments."),
     values: dict[str, str] = Field(..., description="A mapping of environment names to their corresponding values. Must include at least a 'production' key with its associated value for production deployments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new environment variable for the workspace with environment-specific values. Environment variables enable dynamic configuration management across different deployment environments."""
 
     # Construct request model with validation
@@ -11197,7 +11343,7 @@ async def create_environment_variable(
 
 # Tags: Agents Platform
 @mcp.tool()
-async def get_environment_variable(env_var_id: str = Field(..., description="The unique identifier of the environment variable to retrieve.")) -> dict[str, Any]:
+async def get_environment_variable(env_var_id: str = Field(..., description="The unique identifier of the environment variable to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific environment variable by its unique identifier. Use this to fetch configuration values stored in your environment."""
 
     # Construct request model with validation
@@ -11236,7 +11382,7 @@ async def get_environment_variable(env_var_id: str = Field(..., description="The
 async def update_environment_variable(
     env_var_id: str = Field(..., description="The unique identifier of the environment variable to update."),
     values: dict[str, str | _models.EnvironmentVariableSecretValueRequest | _models.EnvironmentVariableAuthConnectionValueRequest] = Field(..., description="A mapping of environment names to their values. Set an environment's value to null to remove it from the variable (production environment is required and cannot be removed)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an environment variable's values across different environments. Set values to null to remove a specific environment (production environment cannot be removed)."""
 
     # Construct request model with validation
@@ -11282,7 +11428,7 @@ async def generate_composition_plan(
     sections: list[_models.SongSection] = Field(..., description="Array of song sections defining the structure and progression of the composition. Order matters and determines the sequence of sections in the final output.", max_length=30),
     music_length_ms: int | None = Field(None, description="Target duration for the composition in milliseconds. If omitted, the model will automatically determine an appropriate length based on the prompt.", ge=3000, le=600000),
     model_id: Literal["music_v1"] | None = Field(None, description="The AI model version to use for generating the composition plan."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a detailed composition plan from a text prompt, specifying musical structure, styles, and duration for music generation."""
 
     # Construct request model with validation
@@ -11335,7 +11481,7 @@ async def compose_song(
     force_instrumental: bool | None = Field(None, description="When enabled, ensures the generated song contains no vocals and is purely instrumental. Only applicable with prompt-based generation."),
     use_phonetic_names: bool | None = Field(None, description="When enabled, proper names in the prompt are phonetically spelled for improved lyrical pronunciation while preserving original names in word-level timestamps."),
     respect_sections_durations: bool | None = Field(None, description="Controls section duration enforcement in composition plans. When true, strictly respects each section's specified duration. When false, allows duration adjustments for improved quality and latency while maintaining total song length."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a complete song from either a text prompt or a detailed composition plan, with control over musical style, structure, and audio output format."""
 
     # Construct request model with validation
@@ -11393,7 +11539,7 @@ async def compose_song_detailed(
     use_phonetic_names: bool | None = Field(None, description="When enabled, proper names in the prompt are phonetically spelled for improved lyrical pronunciation while preserving original names in word timestamps."),
     respect_sections_durations: bool | None = Field(None, description="Controls section duration enforcement in composition_plan. When true, strictly respects each section's specified duration. When false, allows duration flexibility for improved quality and latency while maintaining total song length."),
     with_timestamps: bool | None = Field(None, description="When enabled, the response includes precise word-level timestamps indicating when each lyric occurs in the generated audio."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a complete song with detailed metadata from either a text prompt or a structured composition plan. Returns audio file and optional word-level timestamps."""
 
     # Construct request model with validation
@@ -11449,7 +11595,7 @@ async def compose_music(
     model_id: Literal["music_v1"] | None = Field(None, description="The generative model version to use for music composition."),
     force_instrumental: bool | None = Field(None, description="When enabled, ensures the generated composition contains no vocals. Only applicable with prompt-based generation."),
     use_phonetic_names: bool | None = Field(None, description="When enabled, proper names in the prompt are phonetically spelled for improved lyrical pronunciation while preserving original names in word-level timestamps."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate and stream composed music from either a text prompt or a detailed composition plan. Supports various audio formats and customizable musical styles."""
 
     # Construct request model with validation
@@ -11495,7 +11641,7 @@ async def compose_music(
 async def upload_song(
     file_: str = Field(..., alias="file", description="The audio file to upload in binary format."),
     extract_composition_plan: bool | None = Field(None, description="Whether to generate and return the composition plan for the uploaded song. Enabling this increases response latency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a music file for use in inpainting workflows. This operation is restricted to enterprise clients with access to the inpainting feature."""
 
     # Construct request model with validation
@@ -11527,6 +11673,7 @@ async def upload_song(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -11538,7 +11685,7 @@ async def separate_song_stems(
     file_: str = Field(..., alias="file", description="The audio file to separate into individual stems. Provide the binary audio data."),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Output format for the separated stems, specified as codec_sample_rate_bitrate. MP3 192kbps requires Creator tier or above; PCM 44.1kHz requires Pro tier or above. μ-law format is commonly used for Twilio audio inputs."),
     stem_variation_id: Literal["two_stems_v1", "six_stems_v1"] | None = Field(None, description="The stem separation model variation to use. Two-stem splits into vocals and instruments; six-stem provides more granular separation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Separate an audio file into individual musical stems (vocals, drums, bass, etc.). This operation may have high latency depending on audio file length."""
 
     # Construct request model with validation
@@ -11573,6 +11720,7 @@ async def separate_song_stems(
         params=_http_query,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -11585,7 +11733,7 @@ async def create_voice_pvc(
     language: str = Field(..., description="The language code for the voice samples and voice model training."),
     description: str | None = Field(None, description="Optional description providing context about the voice characteristics and intended use cases.", max_length=500),
     labels: dict[str, str] | None = Field(None, description="Optional metadata labels to categorize and describe the voice. Supports language, accent, gender, and age attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new PVC voice with metadata. Voice samples can be added later to train the voice model."""
 
     # Construct request model with validation
@@ -11629,7 +11777,7 @@ async def update_voice_pvc(
     language: str | None = Field(None, description="Language code of the voice samples (e.g., 'en' for English)."),
     description: str | None = Field(None, description="Detailed description of the voice characteristics and intended use cases.", max_length=500),
     labels: dict[str, str] | None = Field(None, description="Classification labels for the voice including language, accent, gender, and age characteristics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update metadata for a PVC (Professional Voice Clone) voice, including name, language, description, and classification labels."""
 
     # Construct request model with validation
@@ -11672,7 +11820,7 @@ async def add_voice_samples(
     voice_id: str = Field(..., description="The unique identifier of the PVC voice to add samples to. Use the voices list endpoint to retrieve available voice IDs."),
     files: list[str] = Field(..., description="Audio files to add to the voice. Provide one or more audio files in supported formats to expand the voice training dataset."),
     remove_background_noise: bool | None = Field(None, description="Enable automatic background noise removal from audio samples using audio isolation. Disable if samples contain minimal background noise, as processing may reduce quality."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add audio samples to a PVC (Personal Voice Clone) to enhance voice quality and training data. Optionally remove background noise from samples to improve voice clarity."""
 
     # Construct request model with validation
@@ -11705,6 +11853,7 @@ async def add_voice_samples(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["files"],
         headers=_http_headers,
     )
 
@@ -11720,7 +11869,7 @@ async def update_voice_sample(
     trim_start_time: int | None = Field(None, description="The start time of the audio segment to use for PVC training, specified in milliseconds from the beginning of the file."),
     trim_end_time: int | None = Field(None, description="The end time of the audio segment to use for PVC training, specified in milliseconds from the beginning of the file."),
     file_name: str | None = Field(None, description="The name to assign to the audio file for PVC training purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a PVC voice sample by applying noise removal, selecting speakers, adjusting trim times, or changing the file name. Changes are applied to the specified sample within a voice model."""
 
     # Construct request model with validation
@@ -11762,7 +11911,7 @@ async def update_voice_sample(
 async def remove_voice_sample(
     voice_id: str = Field(..., description="The unique identifier of the PVC voice from which to remove the sample."),
     sample_id: str = Field(..., description="The unique identifier of the sample to be deleted from the voice."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a sample from a PVC (Professional Voice Clone) voice. This permanently deletes the specified sample, which cannot be undone."""
 
     # Construct request model with validation
@@ -11802,7 +11951,7 @@ async def get_voice_sample_audio(
     voice_id: str = Field(..., description="The unique identifier of the voice whose sample audio you want to retrieve."),
     sample_id: str = Field(..., description="The unique identifier of the specific voice sample to retrieve."),
     remove_background_noise: bool | None = Field(None, description="Enable background noise removal using audio isolation. Note: applying this to samples without background noise may degrade audio quality."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the first 30 seconds of audio from a voice sample, with optional background noise removal using audio isolation technology."""
 
     # Construct request model with validation
@@ -11844,7 +11993,7 @@ async def get_voice_sample_audio(
 async def get_voice_sample_waveform(
     voice_id: str = Field(..., description="The unique identifier of the voice whose sample waveform you want to retrieve."),
     sample_id: str = Field(..., description="The unique identifier of the voice sample whose waveform you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the visual waveform representation of a specific voice sample. This waveform can be used to visualize the audio characteristics of the sample."""
 
     # Construct request model with validation
@@ -11883,7 +12032,7 @@ async def get_voice_sample_waveform(
 async def get_speaker_separation_status(
     voice_id: str = Field(..., description="The unique identifier of the voice whose sample is being analyzed."),
     sample_id: str = Field(..., description="The unique identifier of the voice sample undergoing speaker separation analysis."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of speaker separation processing for a voice sample and list any detected speakers if the process is complete."""
 
     # Construct request model with validation
@@ -11922,7 +12071,7 @@ async def get_speaker_separation_status(
 async def separate_speakers(
     voice_id: str = Field(..., description="The unique identifier of the voice to be used for the separation process."),
     sample_id: str = Field(..., description="The unique identifier of the audio sample to be processed for speaker separation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate speaker separation processing for an audio sample, which identifies and isolates individual speakers within the sample."""
 
     # Construct request model with validation
@@ -11962,7 +12111,7 @@ async def get_speaker_audio(
     voice_id: str = Field(..., description="The unique identifier of the voice. Use the voices list endpoint to discover available voice IDs."),
     sample_id: str = Field(..., description="The unique identifier of the sample within the specified voice."),
     speaker_id: str = Field(..., description="The unique identifier of the speaker whose audio should be extracted. Use the speakers list endpoint for the voice and sample to discover available speaker IDs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the isolated audio track for a specific speaker from a voice sample. This operation extracts and returns only the audio corresponding to the designated speaker."""
 
     # Construct request model with validation
@@ -12001,7 +12150,7 @@ async def get_speaker_audio(
 async def train_voice(
     voice_id: str = Field(..., description="The unique identifier of the voice to train. You can retrieve available voices from the voices list endpoint."),
     model_id: str | None = Field(None, description="The AI model version to use for training. Specifies which voice conversion model architecture to apply during the training process."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Start a PVC (Personal Voice Cloning) training process for a specified voice. This initiates the model training that enables voice customization and optimization."""
 
     # Construct request model with validation
@@ -12044,7 +12193,7 @@ async def submit_voice_verification(
     voice_id: str = Field(..., description="The unique identifier of the voice to be verified. Use the voices list endpoint to retrieve available voice IDs."),
     files: list[str] = Field(..., description="Array of verification document files to submit for manual review. Documents should be in a supported format and clearly demonstrate voice ownership or authorization."),
     extra_text: str | None = Field(None, description="Optional additional context or information to support the verification request, such as clarification about the voice or usage intent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit verification documents for manual review of a PVC (Premium Voice Clone) voice. This process validates the voice identity before it can be used in production."""
 
     # Construct request model with validation
@@ -12077,6 +12226,7 @@ async def submit_voice_verification(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["files"],
         headers=_http_headers,
     )
 

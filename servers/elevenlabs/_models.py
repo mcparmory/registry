@@ -1,7 +1,7 @@
 """
 Elevenlabs MCP Server - Pydantic Models
 
-Generated: 2026-04-14 18:20:45 UTC
+Generated: 2026-04-24 08:33:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

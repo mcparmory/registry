@@ -1,6 +1,7 @@
 # ElevenLabs MCP Server
+<!-- mcp-name: com.mcparmory/elevenlabs -->
 
-
+Base URL: https://api.elevenlabs.io/v1
 | | |
 |---|---|
 | **Category** | AI & Machine Learning |
@@ -14,7 +15,6 @@
 ### Quick Start (recommended)
 
 ```bash
-BASE_URL=https://your-instance.example.com \
 API_KEY=YOUR_API_KEY \
 uvx mcparmory-elevenlabs
 ```
@@ -23,7 +23,6 @@ uvx mcparmory-elevenlabs
 
 ```bash
 pip install mcparmory-elevenlabs
-BASE_URL=https://your-instance.example.com \
 API_KEY=YOUR_API_KEY \
 mcparmory-elevenlabs
 ```
@@ -39,7 +38,6 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-elevenlabs"],
       "env": {
-        "BASE_URL": "https://your-instance.example.com",
         "API_KEY": "YOUR_API_KEY"
       }
     }
@@ -87,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/elevenlabs`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/elevenlabs:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -94,7 +102,9 @@ docker build -t elevenlabs .
 docker run -p 8000:8000 --env-file .env elevenlabs
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
