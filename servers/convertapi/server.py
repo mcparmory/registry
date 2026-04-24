@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: https://www.convertapi.com/terms
 
-Generated: 2026-04-14 18:18:45 UTC
+Generated: 2026-04-24 08:32:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://v2.convertapi.com")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +723,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +779,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +845,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +879,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -952,16 +1070,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -975,6 +1094,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1017,6 +1137,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1028,28 +1163,18 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'jwt',
     'secret',
     'token',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
-try:
-    _auth_handlers["jwt"] = _auth.JWTBearerAuth()
-    logging.info("Authentication configured: jwt")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for jwt not configured: {error_msg}")
-    _auth_handlers["jwt"] = None
 try:
     _auth_handlers["secret"] = _auth.BearerTokenAuth(env_var="SECRET_BEARER_TOKEN", token_format="Bearer")
     logging.info("Authentication configured: secret")
@@ -1191,7 +1316,7 @@ async def upload_file(
     filename: str | None = Field(None, description="The name of the file being uploaded. Required unless the content-disposition header is provided."),
     url: str | None = Field(None, description="A remote URL pointing to the file to upload. If provided, the file will be downloaded and stored directly from this location instead of uploading file contents."),
     file_: str | None = Field(None, alias="file", description="The binary file content to upload. Provide the raw file data directly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to ConvertAPI servers for temporary storage and reuse across multiple conversion operations. The file is securely stored for up to 3 hours and assigned a unique File ID for referencing in subsequent conversion requests."""
 
     # Construct request model with validation
@@ -1226,6 +1351,7 @@ async def upload_file(
         params=_http_query,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -1236,7 +1362,7 @@ async def upload_file(
 async def download_file(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to download. Must be exactly 32 characters long.", min_length=32, max_length=32),
     download: Literal["attachment", "inline"] | None = Field(None, description="Specifies how the file should be delivered: as an attachment for download or inline for viewing in a web browser."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download or view a file by its ID. Specify whether to download as an attachment or view inline in a web browser."""
 
     # Construct request model with validation
@@ -1275,7 +1401,7 @@ async def download_file(
 
 # Tags: File Server
 @mcp.tool()
-async def delete_file(file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to delete. Must be exactly 32 characters.", min_length=32, max_length=32)) -> dict[str, Any]:
+async def delete_file(file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to delete. Must be exactly 32 characters.", min_length=32, max_length=32)) -> dict[str, Any] | ToolResult:
     """Permanently delete a file from storage. Files are automatically deleted after 3 hours if not manually removed."""
 
     # Construct request model with validation
@@ -1311,7 +1437,7 @@ async def delete_file(file_id: str = Field(..., alias="fileId", description="The
 
 # Tags: File Server
 @mcp.tool()
-async def get_file_metadata(file_id: str = Field(..., alias="fileId", description="The unique identifier of the file. This is a 32-character alphanumeric string that uniquely identifies the file in the system.", min_length=32, max_length=32)) -> dict[str, Any]:
+async def get_file_metadata(file_id: str = Field(..., alias="fileId", description="The unique identifier of the file. This is a 32-character alphanumeric string that uniquely identifies the file in the system.", min_length=32, max_length=32)) -> dict[str, Any] | ToolResult:
     """Retrieve metadata and information about a file without downloading its contents. Use this to check file existence, properties, and availability."""
 
     # Construct request model with validation
@@ -1347,7 +1473,7 @@ async def get_file_metadata(file_id: str = Field(..., alias="fileId", descriptio
 
 # Tags: User
 @mcp.tool()
-async def get_account() -> dict[str, Any]:
+async def get_account() -> dict[str, Any] | ToolResult:
     """Retrieve account information including balance status and other account details. Requires authentication with a secret key."""
 
     # Extract parameters for API call
@@ -1377,7 +1503,7 @@ async def get_account() -> dict[str, Any]:
 async def get_usage_statistics(
     start_date: str = Field(..., alias="startDate", description="The start date for the statistics query period in YYYY-MM-DD format (inclusive)."),
     end_date: str = Field(..., alias="endDate", description="The end date for the statistics query period in YYYY-MM-DD format (inclusive)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve usage statistics for a specified date range. Returns aggregated data about your account activity and consumption metrics within the provided time period."""
 
     # Construct request model with validation
@@ -1421,7 +1547,7 @@ async def convert_image_to_jpg(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Specify the color space for the output JPG image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an AI image file to JPG format with optional scaling and color space adjustments. Supports URL or file content input with customizable output naming and image properties."""
 
     # Construct request model with validation
@@ -1453,6 +1579,7 @@ async def convert_image_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1469,7 +1596,7 @@ async def convert_ai_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Adobe Illustrator (AI) files to PNG format with optional scaling and proportional constraints. Supports both file uploads and URL-based file sources."""
 
     # Call helper functions
@@ -1504,6 +1631,7 @@ async def convert_ai_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1520,7 +1648,7 @@ async def convert_image_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an Adobe Illustrator (AI) image file to Portable Anymap (PNM) format. Supports URL or file content input with optional scaling and proportional constraint controls."""
 
     # Call helper functions
@@ -1555,6 +1683,7 @@ async def convert_image_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1568,7 +1697,7 @@ async def convert_ai_to_svg(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert Adobe Illustrator (AI) files to Scalable Vector Graphics (SVG) format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -1600,6 +1729,7 @@ async def convert_ai_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1613,7 +1743,7 @@ async def convert_ai_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a single multi-page TIFF file instead of separate single-page files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert Adobe Illustrator (AI) files to TIFF format with optional scaling and multi-page support. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -1645,6 +1775,7 @@ async def convert_ai_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1658,7 +1789,7 @@ async def convert_image_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an AI image file to WebP format with optional scaling and color space adjustments. Supports URL or file content input with configurable output naming and image properties."""
 
     # Construct request model with validation
@@ -1690,6 +1821,7 @@ async def convert_image_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1703,7 +1835,7 @@ async def convert_image_bmp_to_jpg(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a BMP image file to JPG format with optional scaling and color space adjustments. Supports both URL and direct file content input."""
 
     # Construct request model with validation
@@ -1735,6 +1867,7 @@ async def convert_image_bmp_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1750,7 +1883,7 @@ async def convert_image_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Color profile to apply to the output PDF. Some profiles override the ColorSpace setting."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for long-term archival and preservation of the output document."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert BMP images to PDF format with support for rotation, color space configuration, and PDF/A compliance. Accepts file input as URL or binary content and generates a named output PDF file."""
 
     # Call helper functions
@@ -1785,6 +1918,7 @@ async def convert_image_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1801,7 +1935,7 @@ async def convert_image_bmp_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a BMP image file to PNG format with optional scaling and proportional constraint controls. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -1836,6 +1970,7 @@ async def convert_image_bmp_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1852,7 +1987,7 @@ async def convert_image_bmp_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a BMP image file to PNM (Portable Anymap) format with optional scaling and proportion constraints. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -1887,6 +2022,7 @@ async def convert_image_bmp_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1901,7 +2037,7 @@ async def convert_image_to_svg_bmp(
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Controls whether the image is traced in full color or converted to black-and-white during vectorization."),
     layering: Literal["cutout", "stacked"] | None = Field(None, alias="Layering", description="Determines how color regions are arranged in the output SVG: cutout mode isolates regions as separate layers, while stacked mode overlays regions on top of each other."),
     curve_mode: Literal["pixel", "polygon", "spline"] | None = Field(None, alias="CurveMode", description="Defines how shapes are approximated during tracing. Pixel mode follows exact pixel boundaries with minimal smoothing, Polygon mode creates straight-edged paths with sharp corners, and Spline mode generates smooth continuous curves for more natural shapes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a BMP image to SVG vector format with configurable tracing presets and vectorization options. Supports color or black-and-white output with customizable curve approximation and layer arrangement."""
 
     # Construct request model with validation
@@ -1933,6 +2069,7 @@ async def convert_image_to_svg_bmp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1946,7 +2083,7 @@ async def convert_image_bmp_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a multi-page TIFF file combining all converted pages into a single output file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a BMP image to TIFF format with optional scaling and multi-page output support. Supports both URL and direct file content input."""
 
     # Construct request model with validation
@@ -1978,6 +2115,7 @@ async def convert_image_bmp_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -1991,7 +2129,7 @@ async def convert_image_bmp_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Choose from standard color profiles to optimize the image for different use cases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a BMP image file to WebP format with optional scaling and color space adjustments. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -2023,6 +2161,7 @@ async def convert_image_bmp_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2041,7 +2180,7 @@ async def convert_csv_to_pdf(
     decimal_separator: str | None = Field(None, alias="DecimalSeparator", description="Character used to separate decimal places in numeric values (e.g., period for 1.5 or comma for 1,5)."),
     date_format: Literal["us", "iso", "eu", "german", "japanese"] | None = Field(None, alias="DateFormat", description="Date format standard to apply in the output PDF, overriding regional Excel settings to ensure consistency."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Generate a PDF/A-1b compliant document for long-term archival and preservation purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts CSV spreadsheet files to PDF format with support for formatting options, metadata preservation, and PDF/A compliance. Handles column fitting, header repetition across pages, and customizable number/date formatting."""
 
     # Construct request model with validation
@@ -2073,6 +2212,7 @@ async def convert_csv_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2085,7 +2225,7 @@ async def convert_csv_to_xlsx(
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated Excel output file. The system automatically sanitizes the filename, appends the .xlsx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated."),
     delimiter: str | None = Field(None, alias="Delimiter", description="The character used to separate fields in the CSV file. Specify the delimiter that matches your CSV format."),
     cell_type: Literal["general", "text"] | None = Field(None, alias="CellType", description="Determines how cell values are formatted in the output Excel file. Use 'text' to preserve CSV formatting for dates and numbers, or 'general' for automatic Excel formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a CSV file to Excel (XLSX) format with configurable field delimiters and cell type formatting. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -2117,6 +2257,7 @@ async def convert_csv_to_xlsx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2130,7 +2271,7 @@ async def convert_djvu_to_jpg(
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="JPG encoding type for the output image. Choose between standard JPEG, CMYK color space, or grayscale."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DJVU document to JPG image format with configurable output type and scaling options. Supports URL or file content input and generates uniquely named output files."""
 
     # Construct request model with validation
@@ -2162,6 +2303,7 @@ async def convert_djvu_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2177,7 +2319,7 @@ async def convert_djvu_to_pdf(
     margin_right: float | None = Field(None, alias="MarginRight", description="Right margin in points (pt) for text content on the PDF page.", ge=0, le=200),
     margin_top: float | None = Field(None, alias="MarginTop", description="Top margin in points (pt) for text content on the PDF page.", ge=0, le=200),
     margin_bottom: float | None = Field(None, alias="MarginBottom", description="Bottom margin in points (pt) for text content on the PDF page.", ge=0, le=200),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DJVU document to PDF format with customizable layout and typography settings. Supports file input via URL or direct file content with configurable margins and base font sizing."""
 
     # Construct request model with validation
@@ -2209,6 +2351,7 @@ async def convert_djvu_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2221,7 +2364,7 @@ async def convert_djvu_to_png(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to fit the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a DJVU document or image file to PNG format. Supports URL-based or direct file input with optional scaling and proportional resizing controls."""
 
     # Construct request model with validation
@@ -2253,6 +2396,7 @@ async def convert_djvu_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2268,7 +2412,7 @@ async def convert_djvu_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Bit order within each byte: 0 for most significant bit first (standard), 1 for least significant bit first."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, preserving quality for smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert DJVU documents to TIFF image format with configurable output settings including compression type, multi-page support, and scaling options."""
 
     # Construct request model with validation
@@ -2300,6 +2444,7 @@ async def convert_djvu_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2312,7 +2457,7 @@ async def convert_djvu_to_webp(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a DJVU document or image to WebP format. Supports URL or file content input with optional scaling and proportional constraint controls."""
 
     # Construct request model with validation
@@ -2344,6 +2489,7 @@ async def convert_djvu_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2357,7 +2503,7 @@ async def convert_document_to_docx(
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the converted document to reflect current document structure."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="When enabled, automatically updates all reference fields (cross-references, citations, etc.) in the converted document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a document file to Microsoft Word (.docx) format. Supports password-protected documents and can optionally update tables of content and reference fields in the output."""
 
     # Construct request model with validation
@@ -2389,6 +2535,7 @@ async def convert_document_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2414,7 +2561,7 @@ async def compare_docx_documents(
     compare_moves: bool | None = Field(None, alias="CompareMoves", description="Track and report content that has been moved between locations within the documents."),
     accept_revisions: bool | None = Field(None, alias="AcceptRevisions", description="Automatically accept all tracked revisions in the primary document before performing the comparison."),
     revision_author: str | None = Field(None, alias="RevisionAuthor", description="Author name to attribute to the comparison operation in the revision history."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Compare two Word documents and generate a detailed comparison report highlighting differences in content, formatting, and structure. Supports granular comparison options for specific document elements like tables, headers, comments, and more."""
 
     # Construct request model with validation
@@ -2446,6 +2593,7 @@ async def compare_docx_documents(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File", "CompareFile"],
         headers=_http_headers,
     )
 
@@ -2457,7 +2605,7 @@ async def convert_document_to_html(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a file upload (binary content) or a URL pointing to a DOCX file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated HTML output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.html, document_1.html) if multiple files are generated."),
     inline_images: bool | None = Field(None, alias="InlineImages", description="Whether to embed images from the document directly into the HTML output as inline content, or reference them externally."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DOCX document to HTML format with optional inline image embedding. Supports both file uploads and URL-based document sources."""
 
     # Construct request model with validation
@@ -2489,6 +2637,7 @@ async def convert_document_to_html(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2501,7 +2650,7 @@ async def convert_document_to_image(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., report_0.jpg, report_1.jpg) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password for opening password-protected DOCX documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10 inclusive)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts DOCX documents to JPG image format. Supports password-protected documents and selective page range conversion."""
 
     # Construct request model with validation
@@ -2533,6 +2682,7 @@ async def convert_document_to_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2543,7 +2693,7 @@ async def convert_document_to_image(
 async def convert_document_to_markdown(
     file_: str | None = Field(None, alias="File", description="The DOCX file to convert. Can be provided as a URL reference or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output Markdown file. The API automatically sanitizes the filename, appends the .md extension, and adds numeric suffixes (e.g., document_0.md, document_1.md) when generating multiple output files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DOCX document to Markdown format. Accepts a DOCX file via URL or direct file content and returns the converted Markdown output with a customizable filename."""
 
     # Construct request model with validation
@@ -2575,6 +2725,7 @@ async def convert_document_to_markdown(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2588,7 +2739,7 @@ async def convert_document_docx_to_odt(
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document during conversion."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="When enabled, automatically updates all reference fields in the document during conversion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DOCX document to ODT (OpenDocument Text) format. Supports password-protected documents and can optionally update tables of content and reference fields during conversion."""
 
     # Construct request model with validation
@@ -2620,6 +2771,7 @@ async def convert_document_docx_to_odt(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2638,7 +2790,7 @@ async def convert_document_to_pdf(
     bookmark_mode: Literal["none", "headings", "bookmarks"] | None = Field(None, alias="BookmarkMode", description="Controls how bookmarks are generated in the PDF: 'none' disables bookmarks, 'headings' creates bookmarks from document headings, and 'bookmarks' uses existing bookmarks from the source document."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document before conversion."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-3a compliant document for long-term archival and preservation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts DOCX documents to PDF format with support for advanced formatting options, metadata preservation, and accessibility features. Handles password-protected documents and allows customization of bookmarks, page ranges, and PDF/A compliance."""
 
     # Construct request model with validation
@@ -2670,6 +2822,7 @@ async def convert_document_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2688,7 +2841,7 @@ async def convert_document_to_image_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts DOCX documents to PNG images with support for page range selection, scaling, and rotation. Handles password-protected documents and generates uniquely named output files."""
 
     # Call helper functions
@@ -2723,6 +2876,7 @@ async def convert_document_to_image_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2734,7 +2888,7 @@ async def convert_document_to_protected_word(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct file extension, and adds indexing (e.g., filename_0, filename_1) when multiple files are produced from a single input."),
     encrypt_password: str | None = Field(None, alias="EncryptPassword", description="Password to encrypt the output Word document. When set, the password will be required to open and view the document content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a document file to a password-protected Word format. The output file can be encrypted with a password to restrict access and viewing of the document content."""
 
     # Construct request model with validation
@@ -2766,6 +2920,7 @@ async def convert_document_to_protected_word(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2779,7 +2934,7 @@ async def convert_document_docx_to_rtf(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected DOCX documents."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Automatically update all tables of content in the document during conversion."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="Automatically update all reference fields in the document during conversion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DOCX document to RTF format with optional support for password-protected files and automatic updates to tables of content and reference fields."""
 
     # Construct request model with validation
@@ -2811,6 +2966,7 @@ async def convert_document_docx_to_rtf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2828,7 +2984,7 @@ async def convert_document_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Specifies the logical bit order within each byte of the TIFF data. Value 0 represents MSB-first (most significant bit first), while 1 represents LSB-first (least significant bit first)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when scaling the output image to fit specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, applies scaling only if the input image dimensions exceed the target output dimensions. Prevents upscaling of smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts DOCX documents to TIFF image format with configurable compression, color depth, and page range options. Supports password-protected documents and multi-page TIFF generation."""
 
     # Construct request model with validation
@@ -2860,6 +3016,7 @@ async def convert_document_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2873,7 +3030,7 @@ async def convert_document_to_text(
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c))."),
     end_line_char: Literal["crlf", "cr", "lfcr", "lf"] | None = Field(None, alias="EndLineChar", description="Specifies the line ending character to use in the output text file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DOCX document to plain text format with optional character substitutions and configurable line ending styles. Supports password-protected documents and customizable output file naming."""
 
     # Construct request model with validation
@@ -2905,6 +3062,7 @@ async def convert_document_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2919,7 +3077,7 @@ async def convert_document_to_webp(
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when scaling the output image to prevent distortion."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, scaling is applied only if the input image dimensions exceed the output dimensions, preventing unnecessary upscaling."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts DOCX documents to WebP image format with configurable page range, scaling, and output naming. Supports password-protected documents and flexible scaling options."""
 
     # Construct request model with validation
@@ -2951,6 +3109,7 @@ async def convert_document_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -2965,7 +3124,7 @@ async def convert_docx_to_xml(
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Whether to automatically update all tables of content in the document during conversion."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="Whether to automatically update all reference fields in the document during conversion."),
     xml_type: Literal["word2003", "flatWordXml", "strictOpenXml"] | None = Field(None, alias="XmlType", description="The XML schema type to use when saving the Word document. Word2003 uses legacy XML format, flatWordXml uses a single flat structure, and strictOpenXml uses the modern Office Open XML standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Word document (.docx) to XML format with support for multiple XML schema types. Optionally updates tables of content and reference fields, and supports password-protected documents."""
 
     # Construct request model with validation
@@ -2997,6 +3156,7 @@ async def convert_docx_to_xml(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3009,7 +3169,7 @@ async def convert_document_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format. Only the specified pages will be included in the output."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a DOTX (Word template) document to JPG image format. Supports password-protected documents and selective page range conversion."""
 
     # Construct request model with validation
@@ -3041,6 +3201,7 @@ async def convert_document_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3059,7 +3220,7 @@ async def convert_dotx_to_pdf(
     bookmark_mode: Literal["none", "headings", "bookmarks"] | None = Field(None, alias="BookmarkMode", description="Controls bookmark generation in the PDF: 'none' disables bookmarks, 'headings' creates bookmarks from document headings, and 'bookmarks' uses existing bookmarks from the source document."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document before conversion."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, generates a PDF/A-3a compliant document for long-term archival and preservation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Word document (.dotx) to PDF format with support for advanced options including markup conversion, accessibility tags, metadata preservation, and PDF/A compliance."""
 
     # Construct request model with validation
@@ -3091,6 +3252,7 @@ async def convert_dotx_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3103,7 +3265,7 @@ async def convert_dwf_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output image, affecting color representation and file size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWF files to JPG image format with support for layer export and color space customization. Accepts file input as URL or binary content and generates optimized image output."""
 
     # Construct request model with validation
@@ -3135,6 +3297,7 @@ async def convert_dwf_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3148,7 +3311,7 @@ async def convert_dwf_to_pdf(
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to preserve and export AutoCAD layers in the PDF output, maintaining the layer structure from the original DWF file."),
     auto_fit: bool | None = Field(None, alias="AutoFit", description="Automatically detects the drawing dimensions and adjusts the output to fit the page size, optionally rotating the page orientation to accommodate the drawing without clipping."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Specifies the color space for the PDF output. Choose truecolors for full color reproduction, grayscale for reduced file size with gray tones, or monochrome for black and white only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWF (Design Web Format) files to PDF format with support for layer export and automatic page fitting. The conversion intelligently handles drawing dimensions and color space preferences to produce optimized PDF output."""
 
     # Construct request model with validation
@@ -3180,6 +3343,7 @@ async def convert_dwf_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3196,7 +3360,7 @@ async def convert_dwf_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWF files to PNG image format with support for layer export and color space customization. Accepts file input as URL or binary content and generates uniquely named output files."""
 
     # Call helper functions
@@ -3231,6 +3395,7 @@ async def convert_dwf_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3243,7 +3408,7 @@ async def convert_dwf_to_svg(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique, safe naming."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the SVG output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output SVG. Choose between full color, grayscale, or monochrome rendering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWF files to SVG format with support for layer export and color space customization. Accepts file input as URL or binary content and generates properly named output files."""
 
     # Construct request model with validation
@@ -3275,6 +3440,7 @@ async def convert_dwf_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3288,7 +3454,7 @@ async def convert_dwf_to_tiff(
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output TIFF."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output TIFF image. Choose truecolors for full color output, grayscale for reduced color depth, or monochrome for black and white only."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Whether to combine all pages into a single multi-page TIFF file or generate separate TIFF files for each page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWF files to TIFF format with support for layer export, color space configuration, and multi-page output. Accepts file input as URL or binary content and generates sanitized output files with automatic extension handling."""
 
     # Construct request model with validation
@@ -3320,6 +3486,7 @@ async def convert_dwf_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3336,7 +3503,7 @@ async def convert_dwf_to_webp(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWF files to WebP format with support for layer export and color space customization. Accepts file input as URL or binary content and generates optimized WebP output."""
 
     # Call helper functions
@@ -3371,6 +3538,7 @@ async def convert_dwf_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3383,7 +3551,7 @@ async def convert_dwg_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output JPG image. Choose between full color, grayscale, or monochrome rendering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWG files to JPG image format with support for layer export and color space customization. Accepts file input via URL or direct file content."""
 
     # Construct request model with validation
@@ -3415,6 +3583,7 @@ async def convert_dwg_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3428,7 +3597,7 @@ async def convert_dwg_to_pdf(
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the PDF output."),
     auto_fit: bool | None = Field(None, alias="AutoFit", description="Automatically detects and adjusts the drawing to fit the current page size, including automatic page orientation adjustment if needed."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Specifies the color space for the output PDF. Choose from true color, grayscale, or monochrome rendering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWG files to PDF format with support for layer export, automatic page fitting, and color space configuration. Accepts file input as URL or binary content."""
 
     # Construct request model with validation
@@ -3460,6 +3629,7 @@ async def convert_dwg_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3476,7 +3646,7 @@ async def convert_dwg_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWG files to PNG image format with support for layer export and color space customization. Accepts file input via URL or direct file content."""
 
     # Call helper functions
@@ -3511,6 +3681,7 @@ async def convert_dwg_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3523,7 +3694,7 @@ async def convert_dwg_to_svg(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple generated files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate SVG elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output SVG, affecting how colors are rendered."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWG files to SVG format with support for layer export and color space configuration. Accepts file input via URL or direct file content."""
 
     # Construct request model with validation
@@ -3555,6 +3726,7 @@ async def convert_dwg_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3568,7 +3740,7 @@ async def convert_dwg_to_tiff(
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output TIFF image."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Whether to create a multi-page TIFF file combining all content, or separate single-page files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWG files to TIFF format with support for layer export, color space configuration, and multi-page output. Accepts file input via URL or direct file content."""
 
     # Construct request model with validation
@@ -3600,6 +3772,7 @@ async def convert_dwg_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3616,7 +3789,7 @@ async def convert_dwg_to_webp(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DWG files to WebP format with support for layer export and color space customization. Accepts file input via URL or direct file content."""
 
     # Call helper functions
@@ -3651,6 +3824,7 @@ async def convert_dwg_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3663,7 +3837,7 @@ async def convert_dxf_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPG file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output JPG image. Choose between full color, grayscale, or monochrome rendering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DXF files to JPG image format with support for layer export and color space customization. Accepts file input as URL or binary content and generates optimized image output."""
 
     # Construct request model with validation
@@ -3695,6 +3869,7 @@ async def convert_dxf_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3708,7 +3883,7 @@ async def convert_dxf_to_pdf(
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to preserve and export AutoCAD layers in the output PDF."),
     auto_fit: bool | None = Field(None, alias="AutoFit", description="Automatically detects the drawing dimensions and adjusts the page size and orientation to fit the content without clipping."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Specifies the color space for the output PDF. Choose truecolors for full color output, grayscale for reduced file size, or monochrome for black and white only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DXF drawings to PDF format with support for layer export, automatic page fitting, and color space configuration. The conversion intelligently handles multi-page outputs and ensures proper file naming."""
 
     # Construct request model with validation
@@ -3740,6 +3915,7 @@ async def convert_dxf_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3756,7 +3932,7 @@ async def convert_dxf_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DXF files to PNG image format with support for layer export and color space customization. Accepts file input as URL or binary content and generates optimized raster images."""
 
     # Call helper functions
@@ -3791,6 +3967,7 @@ async def convert_dxf_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3803,7 +3980,7 @@ async def convert_dxf_to_svg(
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to preserve and export AutoCAD layer information in the output SVG file."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output SVG. Choose between full color, grayscale, or monochrome rendering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DXF files to SVG format with support for layer export and color space configuration. Accepts file input as URL or binary content and generates optimized vector graphics output."""
 
     # Construct request model with validation
@@ -3835,6 +4012,7 @@ async def convert_dxf_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3848,7 +4026,7 @@ async def convert_dxf_to_tiff(
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output TIFF."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output image. Choose between full color, grayscale, or black-and-white rendering."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Whether to combine all output into a single multi-page TIFF file or create separate TIFF files for each page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts DXF (AutoCAD drawing) files to TIFF image format with support for layer export and multi-page output. Useful for archiving technical drawings or sharing CAD designs as raster images."""
 
     # Construct request model with validation
@@ -3880,6 +4058,7 @@ async def convert_dxf_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3896,7 +4075,7 @@ async def convert_dxf_to_webp(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts AutoCAD DXF files to WebP image format with support for layer export and color space customization. Accepts file input as URL or binary content and generates optimized WebP output."""
 
     # Call helper functions
@@ -3931,6 +4110,7 @@ async def convert_dxf_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3943,7 +4123,7 @@ async def extract_email_attachments(
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the name, appends the appropriate file extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated from a single input."),
     use_cid_as_file_name: bool | None = Field(None, alias="UseCIDAsFileName", description="When enabled, uses the Content ID (CID) of attachments as the filename instead of the original filename."),
     ignore_inline_attachments: bool | None = Field(None, alias="IgnoreInlineAttachments", description="When enabled, skips inline attachments such as embedded images and logos, processing only standalone attachments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extracts attachments and metadata from email files (EML, MSG, etc.) into structured data. Supports filtering of inline attachments and customizable output file naming."""
 
     # Construct request model with validation
@@ -3975,6 +4155,7 @@ async def extract_email_attachments(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -3986,7 +4167,7 @@ async def extract_email_metadata(
     file_: str | None = Field(None, alias="File", description="The email file to process. Accepts either a file URL or raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output metadata file. The system automatically sanitizes the filename, appends the appropriate extension, and adds numeric indexing (e.g., metadata_0, metadata_1) when multiple output files are generated from a single input."),
     ignore_inline_attachments: bool | None = Field(None, alias="IgnoreInlineAttachments", description="When enabled, skips inline attachments such as embedded images and logos during processing, extracting only non-inline attachments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extracts structured metadata from email files, converting email content into organized metadata format. Supports both file uploads and direct content input, with optional filtering of inline attachments."""
 
     # Construct request model with validation
@@ -4018,6 +4199,7 @@ async def extract_email_metadata(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4030,7 +4212,7 @@ async def convert_email_to_image(
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., output_0.jpg, output_1.jpg) when multiple files are produced."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are suppressed and the email is still converted to the target format. Only applies when attachments are being processed."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body content with converted attachments into a single output. Only applies when attachments are being processed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an email message (EML format) to JPG image format. Optionally process attachments and merge them with the email body in the output."""
 
     # Construct request model with validation
@@ -4062,6 +4244,7 @@ async def convert_email_to_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4076,7 +4259,7 @@ async def convert_eml_to_pdf(
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into a single PDF document. Only applies when attachments are being converted."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-1b compliant document, which is an ISO-standardized archival format suitable for long-term preservation."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in millimeters as space-separated values in CSS order: top right bottom left (e.g., '10 10 10 10')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an EML (email) file to PDF format, with optional support for embedding attachments and creating PDF/A-1b compliant documents."""
 
     # Call helper functions
@@ -4111,6 +4294,7 @@ async def convert_eml_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4123,7 +4307,7 @@ async def convert_email_to_png(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., output_0.png, output_1.png) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email is still converted to PNG. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into the final PNG output. Only applies when attachments are being converted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an email message (EML format) to PNG image format, with optional support for converting and merging attachments into the output."""
 
     # Construct request model with validation
@@ -4155,6 +4339,7 @@ async def convert_email_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4168,7 +4353,7 @@ async def convert_eml_to_tiff(
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to TIFF. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into the output TIFF file(s). Only applies when attachments are being converted."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="When enabled, creates a single multi-page TIFF file containing all content. When disabled, generates separate TIFF files for each page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts email messages (EML format) to TIFF image files, with optional support for merging email body with attachments into a single or multi-page document."""
 
     # Construct request model with validation
@@ -4200,6 +4385,7 @@ async def convert_eml_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4212,7 +4398,7 @@ async def convert_eml_to_webp(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output WebP file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an EML (email) file to WebP image format. Supports URL or file content input with optional scaling and proportional constraint controls."""
 
     # Construct request model with validation
@@ -4244,6 +4430,7 @@ async def convert_eml_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4254,7 +4441,7 @@ async def convert_eml_to_webp(
 async def convert_eps_to_jpg(
     file_: str | None = Field(None, alias="File", description="The EPS file to convert, provided either as a URL or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file. The API automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an EPS (Encapsulated PostScript) file to JPG format. Accepts file input as a URL or binary content and generates a converted JPG output file with automatic naming."""
 
     # Construct request model with validation
@@ -4286,6 +4473,7 @@ async def convert_eps_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4305,7 +4493,7 @@ async def convert_eps_to_pdf(
     open_page: int | None = Field(None, alias="OpenPage", description="Page number where the PDF should open when first displayed in a viewer.", ge=1, le=3000),
     open_zoom: Literal["Default", "ActualSize", "FitPage", "FitWidth", "FitHeight", "FitVisible", "25", "50", "75", "100", "125", "150", "200", "400", "800", "1600", "2400", "3200", "6400"] | None = Field(None, alias="OpenZoom", description="Default zoom level when opening the PDF in a viewer. Choose from preset percentages or fit-to-page options."),
     color_space: Literal["Default", "RGB", "CMYK", "Gray"] | None = Field(None, alias="ColorSpace", description="Color space for the PDF output. RGB is suitable for screen viewing, CMYK for professional printing, and Gray for grayscale documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert EPS (Encapsulated PostScript) files to PDF format with customizable output properties including resolution, metadata, and viewer settings."""
 
     # Construct request model with validation
@@ -4337,6 +4525,7 @@ async def convert_eps_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4347,7 +4536,7 @@ async def convert_eps_to_pdf(
 async def convert_eps_to_png(
     file_: str | None = Field(None, alias="File", description="The EPS file to convert, provided either as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an EPS (Encapsulated PostScript) file to PNG format. Accepts file input as a URL or binary file content and generates a PNG output file with optional custom naming."""
 
     # Construct request model with validation
@@ -4379,6 +4568,7 @@ async def convert_eps_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4389,7 +4579,7 @@ async def convert_eps_to_png(
 async def convert_eps_to_tiff(
     file_: str | None = Field(None, alias="File", description="The EPS file to convert, provided either as a URL reference or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file. The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric indexing (e.g., output_0.tiff, output_1.tiff) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an EPS (Encapsulated PostScript) file to TIFF (Tagged Image File Format) image format. Accepts file input as a URL or binary content and generates a properly named output file."""
 
     # Construct request model with validation
@@ -4421,6 +4611,7 @@ async def convert_eps_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4434,7 +4625,7 @@ async def convert_epub_to_jpg(
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="Color mode for the output JPG image. Choose between standard RGB (jpeg), CMYK for print (jpegcmyk), or grayscale (jpeggray)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, preventing upscaling of smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert EPUB documents to JPG image format with configurable output settings. Supports multiple JPG color modes and optional image scaling to optimize file size and dimensions."""
 
     # Construct request model with validation
@@ -4466,6 +4657,7 @@ async def convert_epub_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4481,7 +4673,7 @@ async def convert_epub_to_pdf(
     margin_right: float | None = Field(None, alias="MarginRight", description="Right margin width in points (pt) for the PDF page content.", ge=0, le=200),
     margin_top: float | None = Field(None, alias="MarginTop", description="Top margin width in points (pt) for the PDF page content.", ge=0, le=200),
     margin_bottom: float | None = Field(None, alias="MarginBottom", description="Bottom margin width in points (pt) for the PDF page content.", ge=0, le=200),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an EPUB file to PDF format with customizable typography and page layout settings. Supports both file uploads and URL-based sources with options to control font sizing and margins."""
 
     # Construct request model with validation
@@ -4513,6 +4705,7 @@ async def convert_epub_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4525,7 +4718,7 @@ async def convert_epub_to_png(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert EPUB documents to PNG image format. Supports URL or file content input with optional scaling and proportional constraint controls."""
 
     # Construct request model with validation
@@ -4557,6 +4750,7 @@ async def convert_epub_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4572,7 +4766,7 @@ async def convert_epub_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Bit order within each byte: 0 for most significant bit first (MSB), 1 for least significant bit first (LSB)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert EPUB documents to TIFF image format with configurable output settings including multi-page support, compression type, and scaling options."""
 
     # Construct request model with validation
@@ -4604,6 +4798,7 @@ async def convert_epub_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4616,7 +4811,7 @@ async def convert_epub_to_webp(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert EPUB documents to WebP image format. Supports URL or file content input with optional scaling and proportional constraint controls."""
 
     # Construct request model with validation
@@ -4648,6 +4843,7 @@ async def convert_epub_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4658,7 +4854,7 @@ async def convert_epub_to_webp(
 async def convert_file_to_pdf(
     file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The API automatically sanitizes the filename, appends the .pdf extension, and adds numeric indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple output files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a file to PDF format from a provided file or URL. Supports various input formats and generates uniquely named output files with automatic extension handling."""
 
     # Construct request model with validation
@@ -4690,6 +4886,7 @@ async def convert_file_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4702,7 +4899,7 @@ async def compress_files_to_archive(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output ZIP archive file. The system automatically sanitizes the filename to remove unsafe characters and appends the .zip extension. For multiple input files, output files are automatically indexed (e.g., archive_0.zip, archive_1.zip)."),
     compression_level: Literal["Optimal", "Medium", "Fastest", "NoCompression"] | None = Field(None, alias="CompressionLevel", description="Compression algorithm intensity for the archive. Controls the trade-off between file size and compression speed."),
     password: str | None = Field(None, alias="Password", description="Optional password to encrypt and protect the ZIP archive. When set, the archive requires this password to extract."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts and compresses multiple files into a single ZIP archive with optional password protection. Supports files provided as URLs or direct content."""
 
     # Construct request model with validation
@@ -4734,6 +4931,7 @@ async def compress_files_to_archive(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -4748,7 +4946,7 @@ async def convert_gif_animation(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     animation_delay: int | None = Field(None, alias="AnimationDelay", description="Time interval between animation frames, specified in hundredths of a second. Controls playback speed of the GIF animation.", ge=0, le=20000),
     animation_iterations: int | None = Field(None, alias="AnimationIterations", description="Number of times the animation loops. Set to zero for infinite looping.", ge=0, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert GIF files with customizable animation settings including frame delay and loop iterations. Supports URL or file content input with optional output filename specification."""
 
     # Construct request model with validation
@@ -4780,6 +4978,7 @@ async def convert_gif_animation(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -4794,7 +4993,7 @@ async def convert_gif_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only resize the image if the input dimensions exceed the target output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Replace transparent areas with a solid color. Accepts RGBA or CMYK hex color codes, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert GIF images to JPG format with optional scaling, color space adjustment, and transparency handling. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -4826,6 +5025,7 @@ async def convert_gif_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4841,7 +5041,7 @@ async def convert_gif_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Color profile for the output PDF. Some profiles override the ColorSpace setting. Use 'isocoatedv2' for ISO Coated v2 profile compliance."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for long-term archival and preservation of the output PDF document."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert GIF images to PDF format with support for rotation, color space configuration, and PDF/A compliance. Handles single or multiple image conversions with automatic file naming."""
 
     # Call helper functions
@@ -4876,6 +5076,7 @@ async def convert_gif_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4892,7 +5093,7 @@ async def convert_gif_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a GIF image to PNG format with optional scaling and proportional constraint controls. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -4927,6 +5128,7 @@ async def convert_gif_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4943,7 +5145,7 @@ async def convert_gif_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a GIF image file to PNM (Portable Anymap) format with optional scaling and proportion constraints. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -4978,6 +5180,7 @@ async def convert_gif_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -4992,7 +5195,7 @@ async def convert_gif_to_svg(
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Output color mode for the traced SVG. Choose between full color or black-and-white vectorization."),
     layering: Literal["cutout", "stacked"] | None = Field(None, alias="Layering", description="Arrangement method for color regions in the output SVG. Cutout mode creates isolated layers, while stacked mode overlays regions on top of each other."),
     curve_mode: Literal["pixel", "polygon", "spline"] | None = Field(None, alias="CurveMode", description="Shape approximation method during vectorization. Pixel mode traces exact pixel boundaries with minimal smoothing, Polygon creates straight-edged paths with sharp corners, and Spline generates smooth continuous curves."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts GIF images to scalable vector graphics (SVG) format using configurable vectorization presets and tracing options. Supports both color and black-and-white output with customizable layering and curve approximation modes."""
 
     # Construct request model with validation
@@ -5024,6 +5227,7 @@ async def convert_gif_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5037,7 +5241,7 @@ async def convert_gif_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a single multi-page TIFF file instead of separate files for each frame."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert GIF images to TIFF format with optional scaling and multi-page support. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -5069,6 +5273,7 @@ async def convert_gif_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5082,7 +5287,7 @@ async def convert_gif_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Use 'default' to preserve the source color space, or specify a target color space for conversion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert GIF images to WebP format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -5114,6 +5319,7 @@ async def convert_gif_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5128,7 +5334,7 @@ async def convert_heic_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Color to apply to transparent areas. Accepts RGBA or CMYK hex strings, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to JPG format with optional scaling and color space adjustments. Supports both URL-based and direct file uploads with customizable output naming and image properties."""
 
     # Construct request model with validation
@@ -5160,6 +5366,7 @@ async def convert_heic_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5173,7 +5380,7 @@ async def convert_image_heic_to_jxl(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Choose from standard color profiles or use the default setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to JXL (JPEG XL) format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -5205,6 +5412,7 @@ async def convert_image_heic_to_jxl(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5220,7 +5428,7 @@ async def convert_heic_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Apply a specific color profile to the output PDF. Some profiles may override the ColorSpace setting."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Generate a PDF/A-1b compliant document for long-term archival and preservation."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,20')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to PDF format with support for rotation, color space configuration, and PDF/A compliance. Accepts file input via URL or direct file content."""
 
     # Call helper functions
@@ -5255,6 +5463,7 @@ async def convert_heic_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5271,7 +5480,7 @@ async def convert_heic_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to PNG format with optional scaling and proportional constraints. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -5306,6 +5515,7 @@ async def convert_heic_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5322,7 +5532,7 @@ async def convert_image_heic_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to PNM (Portable Anymap) format with optional scaling and proportional constraint controls."""
 
     # Call helper functions
@@ -5357,6 +5567,7 @@ async def convert_image_heic_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5370,7 +5581,7 @@ async def convert_heic_to_svg(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output SVG image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to SVG vector format. Supports URL or direct file content input with optional scaling and color space configuration."""
 
     # Construct request model with validation
@@ -5402,6 +5613,7 @@ async def convert_heic_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5415,7 +5627,7 @@ async def convert_heic_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a multi-page TIFF file when converting. If disabled, creates a single-page TIFF."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to TIFF format with optional scaling and multi-page support. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -5447,6 +5659,7 @@ async def convert_heic_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5460,7 +5673,7 @@ async def convert_image_heic_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIC image files to WebP format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -5492,6 +5705,7 @@ async def convert_image_heic_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5506,7 +5720,7 @@ async def convert_heif_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Specify a color to replace transparent areas in the image. Accepts RGBA or CMYK hex color codes, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIF image files to JPG format with optional scaling and color space adjustments. Supports both URL and direct file content input."""
 
     # Construct request model with validation
@@ -5538,6 +5752,7 @@ async def convert_heif_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5553,7 +5768,7 @@ async def convert_heif_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Color profile to apply to the output PDF. Some profiles may override the ColorSpace setting."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for the output document, ensuring long-term archival compatibility."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,20')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HEIF image files to PDF format with support for rotation, color space configuration, and PDF/A compliance. Accepts file input as URL or binary content and generates a properly named output PDF file."""
 
     # Call helper functions
@@ -5588,6 +5803,7 @@ async def convert_heif_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5599,7 +5815,7 @@ async def convert_html_to_docx(
     file_: str | None = Field(None, alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The desired name for the output DOCX file. The API automatically sanitizes the filename, appends the correct .docx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated from a single input."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in inches as 'horizontal,vertical' (e.g., '0.5,0.75')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts HTML content to DOCX format. Accepts HTML as a URL or raw file content and generates a properly formatted Word document with the specified output filename."""
 
     # Call helper functions
@@ -5634,6 +5850,7 @@ async def convert_html_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5653,7 +5870,7 @@ async def convert_html_to_jpg(
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the page request. Separate multiple headers with pipe characters (|) and use colon (:) to separate header names from values."),
     zoom: float | None = Field(None, alias="Zoom", description="Set the default zoom level for webpage rendering. Values between 0.1 and 10 are supported.", ge=0.1, le=10),
     file_: str | None = Field(None, alias="File", description="The HTML content or URL to convert. Accepts either a web URL or raw HTML file content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HTML content or web pages to JPG image format. Supports URL-based or direct HTML content conversion with advanced rendering options including JavaScript execution, CSS customization, and DOM element waiting."""
 
     # Construct request model with validation
@@ -5685,6 +5902,7 @@ async def convert_html_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5700,7 +5918,7 @@ async def convert_html_to_markdown(
     unsupported_tags: Literal["PassThrough", "Drop", "Bypass", "Fail"] | None = Field(None, alias="UnsupportedTags", description="Define how to handle HTML tags that are not supported in Markdown conversion. Choose to pass through as-is, drop entirely, bypass processing, or fail on unsupported tags."),
     pass_through_tags: str | None = Field(None, alias="PassThroughTags", description="Specify HTML tags to pass through unchanged to the Markdown output. Provide tag names as a comma-separated list. Only applies when UnsupportedTags is set to PassThrough."),
     list_bullet_char: str | None = Field(None, alias="ListBulletChar", description="Set the character used for bullet points in unordered lists within the Markdown output."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert HTML content or files to Markdown format with customizable formatting options including GitHub-flavored markdown support and tag handling rules."""
 
     # Construct request model with validation
@@ -5732,6 +5950,7 @@ async def convert_html_to_markdown(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5764,7 +5983,7 @@ async def convert_html_to_pdf(
     break_after_elements: str | None = Field(None, alias="BreakAfterElements", description="CSS selector for elements that should trigger a page break after them."),
     file_: str | None = Field(None, alias="File", description="The HTML content or URL to convert to PDF. Can be a full URL (http/https) or raw HTML file content."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in millimeters as a space-separated string in CSS order: top right bottom left (e.g., '10 5 10 5')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts HTML content from a URL or file to PDF format with advanced rendering options, including JavaScript execution, custom styling, headers/footers, and page layout control."""
 
     # Call helper functions
@@ -5799,6 +6018,7 @@ async def convert_html_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5819,7 +6039,7 @@ async def convert_html_to_png(
     zoom: float | None = Field(None, alias="Zoom", description="Zoom level for rendering the webpage. Values below 1 zoom out, values above 1 zoom in.", ge=0.1, le=10),
     transparent_background: bool | None = Field(None, alias="TransparentBackground", description="Use a transparent background instead of the default white background. The source HTML body background color must also be set to 'none' for transparency to work."),
     file_: str | None = Field(None, alias="File", description="The HTML content or URL to convert. Provide either a web URL or raw HTML content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts HTML content or web pages to PNG image format. Supports JavaScript execution, custom styling, cookie handling, and DOM element waiting for dynamic content rendering."""
 
     # Construct request model with validation
@@ -5851,6 +6071,7 @@ async def convert_html_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5870,7 +6091,7 @@ async def convert_html_to_text(
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the request. Separate multiple headers with pipes and use colons to delimit header names from values."),
     file_: str | None = Field(None, alias="File", description="HTML content to convert. Provide either a URL or raw HTML file content."),
     extract_elements: str | None = Field(None, alias="ExtractElements", description="CSS selector to extract specific DOM elements instead of converting the entire page. Use class selectors (.classname), ID selectors (#id), or tag names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts HTML content from a URL or file to plain text format. Supports advanced options like JavaScript execution, element extraction, custom styling, and cookie/ad handling for flexible web content processing."""
 
     # Construct request model with validation
@@ -5902,6 +6123,7 @@ async def convert_html_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5912,7 +6134,7 @@ async def convert_html_to_text(
 async def convert_html_to_spreadsheet(
     file_: str | None = Field(None, alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output spreadsheet file. The system automatically sanitizes the filename, appends the correct .xls extension, and adds numeric indexing (e.g., report_0.xls, report_1.xls) if multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts HTML content or files to Excel spreadsheet format. Accepts HTML input as a URL or raw file content and generates a formatted XLS output file."""
 
     # Construct request model with validation
@@ -5944,6 +6166,7 @@ async def convert_html_to_spreadsheet(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -5954,7 +6177,7 @@ async def convert_html_to_spreadsheet(
 async def convert_html_to_xlsx(
     file_: str | None = Field(None, alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output Excel file. The system automatically sanitizes the filename, appends the .xlsx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts HTML content or files to Excel spreadsheet format. Accepts HTML input as a URL or raw file content and generates a formatted XLSX output file."""
 
     # Construct request model with validation
@@ -5986,6 +6209,7 @@ async def convert_html_to_xlsx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6000,7 +6224,7 @@ async def convert_image_ico_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only scale the image if the input is larger than the desired output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Replace transparent areas with a specific color. Accepts RGBA or CMYK hex strings, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert ICO (icon) image files to JPG format with optional scaling, color space adjustment, and alpha channel handling."""
 
     # Construct request model with validation
@@ -6032,6 +6256,7 @@ async def convert_image_ico_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6047,7 +6272,7 @@ async def convert_ico_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Color profile to apply to the output PDF. Some profiles override the ColorSpace setting."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for the output document, ensuring long-term archival compatibility."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert ICO (icon) image files to PDF format with support for rotation, color space configuration, and PDF/A compliance. Accepts file input as URL or binary content and generates a properly named output PDF file."""
 
     # Call helper functions
@@ -6082,6 +6307,7 @@ async def convert_ico_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6098,7 +6324,7 @@ async def convert_image_ico_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an ICO (icon) image file to PNG format. Supports URL or file content input with optional scaling and proportional resizing."""
 
     # Call helper functions
@@ -6133,6 +6359,7 @@ async def convert_image_ico_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6147,7 +6374,7 @@ async def convert_icon_to_svg(
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Color processing mode for tracing. Choose 'color' for full-color output or 'bw' for black-and-white conversion."),
     layering: Literal["cutout", "stacked"] | None = Field(None, alias="Layering", description="Arrangement method for color regions in the output SVG. 'cutout' creates isolated layers, while 'stacked' overlays regions on top of each other."),
     curve_mode: Literal["pixel", "polygon", "spline"] | None = Field(None, alias="CurveMode", description="Shape approximation method during tracing. 'pixel' follows exact pixel boundaries with minimal smoothing, 'polygon' creates straight-edged paths with sharp corners, and 'spline' generates smooth continuous curves."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ICO (icon) files to SVG (Scalable Vector Graphics) format with customizable vectorization settings. Supports preset configurations for different image types and offers fine-grained control over color mode, layering, and curve approximation."""
 
     # Construct request model with validation
@@ -6179,6 +6406,7 @@ async def convert_icon_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6192,7 +6420,7 @@ async def convert_image_ico_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output image. Choose from standard color profiles or use default for automatic detection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert ICO image files to WebP format with optional scaling and color space adjustments. Supports both file uploads and URL-based sources."""
 
     # Construct request model with validation
@@ -6224,6 +6452,7 @@ async def convert_image_ico_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6238,7 +6467,7 @@ async def join_images(
     image_spacing: int | None = Field(None, alias="ImageSpacing", description="Space in pixels between individual images in the composite. Specify a value between 0 and 200 pixels.", ge=0, le=200),
     spacing_color: str | None = Field(None, alias="SpacingColor", description="Color of the spacing area between images. Works in conjunction with ImageSpacing to customize the visual appearance of gaps in the composite image."),
     image_output_format: Literal["auto", "jpg", "png", "tiff"] | None = Field(None, alias="ImageOutputFormat", description="Output format for the final composite image. Select a specific format (jpg, png, tiff) or use auto-detection to match the format of the input images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Combines multiple images into a single composite image with configurable layout direction, spacing, and output format. Supports vertical or horizontal arrangement with customizable spacing color and format conversion."""
 
     # Construct request model with validation
@@ -6270,6 +6499,7 @@ async def join_images(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -6284,7 +6514,7 @@ async def convert_images_to_pdf(
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space for the output PDF. Use 'default' to preserve original image colors, or specify a standard color space for consistent output."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Generate a PDF/A-1b compliant document suitable for long-term archival and preservation."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert one or more images to a PDF document with optional image processing capabilities including rotation and color space adjustment. Supports PDF/A-1b compliance for archival purposes."""
 
     # Call helper functions
@@ -6319,6 +6549,7 @@ async def convert_images_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -6334,7 +6565,7 @@ async def convert_jfif_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Color profile to apply to the output PDF. Some profiles override the ColorSpace setting. Use 'isocoatedv2' for ISO Coated v2 standard compliance."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for the output document. When true, creates an archival-grade PDF suitable for long-term preservation."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert JFIF image files to PDF format with support for rotation, color space configuration, and PDF/A compliance. Accepts file input as URL or binary content and generates a properly named output PDF file."""
 
     # Call helper functions
@@ -6369,6 +6600,7 @@ async def convert_jfif_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6380,7 +6612,7 @@ async def compress_jpg_image(
     file_: str | None = Field(None, alias="File", description="The JPG image file to compress. Can be provided as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output compressed image file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique and safe file naming."),
     compression_level: Literal["Lossless", "Good", "Extreme"] | None = Field(None, alias="CompressionLevel", description="The compression quality level to apply to the image. Lossless preserves all image data, Good provides balanced compression, and Extreme maximizes file size reduction."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Compress a JPG image file with configurable compression levels. Accepts image files via URL or direct upload and generates an optimized output file with the specified compression quality."""
 
     # Construct request model with validation
@@ -6412,6 +6644,7 @@ async def compress_jpg_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6426,7 +6659,7 @@ async def convert_image_to_gif(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only scale the output if the input image dimensions exceed the target size."),
     animation_delay: int | None = Field(None, alias="AnimationDelay", description="Delay between animation frames, specified in hundredths of a second (e.g., 100 = 1 second).", ge=0, le=20000),
     animation_iterations: int | None = Field(None, alias="AnimationIterations", description="Number of times the animation loops. Set to 0 for infinite looping.", ge=0, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert one or more JPG images to animated GIF format with customizable animation timing and looping behavior."""
 
     # Construct request model with validation
@@ -6458,6 +6691,7 @@ async def convert_image_to_gif(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -6471,7 +6705,7 @@ async def convert_image_format(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space profile for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a JPG image to JPG format with optional scaling and color space adjustments. Useful for optimizing image properties such as dimensions and color profile while maintaining the same format."""
 
     # Construct request model with validation
@@ -6503,6 +6737,7 @@ async def convert_image_format(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6516,7 +6751,7 @@ async def convert_image_jpg_to_jxl(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Use 'default' for automatic detection, or specify a particular color space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a JPG image to JXL (JPEG XL) format with optional scaling and color space adjustments. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -6548,6 +6783,7 @@ async def convert_image_jpg_to_jxl(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6563,7 +6799,7 @@ async def convert_image_to_pdf_jpeg(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="The color profile to embed in the output PDF. Some profiles may override the ColorSpace setting."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for long-term archival and preservation of the document."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,20')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert JPG images to PDF format with optional image processing capabilities including rotation, color space adjustment, and PDF/A compliance."""
 
     # Call helper functions
@@ -6598,6 +6834,7 @@ async def convert_image_to_pdf_jpeg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6614,7 +6851,7 @@ async def convert_image_jpg_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a JPG image to PNG format with optional scaling and proportional constraints. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -6649,6 +6886,7 @@ async def convert_image_jpg_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6665,7 +6903,7 @@ async def convert_image_jpg_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a JPG image to PNM (Portable Anymap) format with optional scaling and proportional constraints. Supports both URL-based and direct file uploads."""
 
     # Call helper functions
@@ -6700,6 +6938,7 @@ async def convert_image_jpg_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6714,7 +6953,7 @@ async def convert_image_to_svg_jpg(
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Determines whether the image is traced in full color or converted to black-and-white during vectorization."),
     layering: Literal["cutout", "stacked"] | None = Field(None, alias="Layering", description="Controls how color regions are arranged in the output SVG: cutout mode isolates regions as separate layers, while stacked mode overlays regions for blending effects."),
     curve_mode: Literal["pixel", "polygon", "spline"] | None = Field(None, alias="CurveMode", description="Defines the shape approximation method during tracing. Pixel mode follows exact pixel boundaries with minimal smoothing, Polygon creates straight-edged paths with sharp corners, and Spline generates smooth continuous curves for natural-looking shapes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a JPG image to scalable vector graphics (SVG) format using configurable tracing and vectorization settings. Supports preset configurations for different image types and offers fine-grained control over color handling, layering, and curve approximation."""
 
     # Construct request model with validation
@@ -6746,6 +6985,7 @@ async def convert_image_to_svg_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6759,7 +6999,7 @@ async def convert_image_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a multi-page TIFF file when processing multiple images or pages."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a JPG image to TIFF format with optional scaling and multi-page support. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -6791,6 +7031,7 @@ async def convert_image_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6803,7 +7044,7 @@ async def extract_text_from_image(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output text file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files."),
     preprocessing: bool | None = Field(None, alias="Preprocessing", description="Enable advanced image preprocessing techniques such as deskew, thresholding, resizing, and sharpening to improve text extraction accuracy. Increases processing time when enabled."),
     ocr_language: Literal["ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fa", "de", "el", "he", "it", "ja", "ko", "lt", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="The language to use for OCR text recognition. Supports multiple languages; contact support to request additional language support."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a JPG image to text by performing optical character recognition (OCR). Supports optional image preprocessing to enhance text clarity and multiple language recognition."""
 
     # Construct request model with validation
@@ -6835,6 +7076,7 @@ async def extract_text_from_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6848,7 +7090,7 @@ async def convert_image_jpg_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert JPG images to WebP format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -6880,6 +7122,7 @@ async def convert_image_jpg_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6890,7 +7133,7 @@ async def convert_image_jpg_to_webp(
 async def convert_presentation_to_pptx(
     file_: str | None = Field(None, alias="File", description="The Keynote presentation file to convert. Can be provided as a URL or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct .pptx extension, and adds numeric indexing (e.g., output_0.pptx, output_1.pptx) if multiple files are generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Keynote presentation file to PowerPoint format (PPTX). Accepts file input as a URL or binary content and generates a properly named output file."""
 
     # Construct request model with validation
@@ -6922,6 +7165,7 @@ async def convert_presentation_to_pptx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6932,7 +7176,7 @@ async def convert_presentation_to_pptx(
 async def convert_log_to_docx(
     file_: str | None = Field(None, alias="File", description="The log file to convert. Provide either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The API automatically sanitizes the filename, appends the .docx extension, and adds numeric indexing (e.g., report_0.docx, report_1.docx) if multiple files are generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a log file to Microsoft Word (.docx) format. Accepts log file content or URL and generates a formatted Word document with the specified output filename."""
 
     # Construct request model with validation
@@ -6964,6 +7208,7 @@ async def convert_log_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -6976,7 +7221,7 @@ async def convert_log_to_pdf(
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to include in the output PDF using a range format (e.g., 1-10 for pages 1 through 10). Defaults to the first 6000 pages."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Sets the PDF/A compliance version for archival-grade PDF output. Use 'none' for standard PDF without compliance requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts log files to PDF format with optional page range selection and PDF/A compliance. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -7008,6 +7253,7 @@ async def convert_log_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7021,7 +7267,7 @@ async def convert_log_to_text(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected log files."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="Enable replacement of special symbols with their text equivalents (e.g., © becomes (c)) in the output text."),
     end_line_char: Literal["crlf", "cr", "lfcr", "lf"] | None = Field(None, alias="EndLineChar", description="Specifies the line ending character(s) to use when breaking lines in the output text file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts log files to plain text format with optional symbol substitution and configurable line ending characters. Supports protected documents via password and customizable output file naming."""
 
     # Construct request model with validation
@@ -7053,6 +7299,7 @@ async def convert_log_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7063,7 +7310,7 @@ async def convert_log_to_text(
 async def convert_markdown_to_html(
     file_: str | None = Field(None, alias="File", description="The Markdown content to convert, provided either as a URL or raw file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated HTML output file. The system automatically sanitizes the filename, appends the .html extension, and adds numeric suffixes (e.g., output_0.html, output_1.html) when generating multiple files from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Markdown content to HTML format. Accepts Markdown input as file content or URL and generates corresponding HTML output."""
 
     # Construct request model with validation
@@ -7095,6 +7342,7 @@ async def convert_markdown_to_html(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7109,7 +7357,7 @@ async def convert_markdown_to_pdf(
     margin_right: int | None = Field(None, alias="MarginRight", description="Right margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500),
     margin_bottom: int | None = Field(None, alias="MarginBottom", description="Bottom margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500),
     margin_left: int | None = Field(None, alias="MarginLeft", description="Left margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Markdown documents to PDF format with customizable page margins. Accepts Markdown content via URL or file upload and generates a formatted PDF output."""
 
     # Construct request model with validation
@@ -7141,6 +7389,7 @@ async def convert_markdown_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7152,7 +7401,7 @@ async def convert_mhtml_to_docx(
     file_: str | None = Field(None, alias="File", description="The MHTML file to convert, provided either as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) when multiple files are generated from a single input."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in inches as 'horizontal,vertical' (e.g., '1.0,0.5')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an MHTML (MIME HTML) file to DOCX format. Accepts file input as a URL or binary content and generates a properly named output document."""
 
     # Call helper functions
@@ -7187,6 +7436,7 @@ async def convert_mhtml_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7200,7 +7450,7 @@ async def convert_mobi_to_jpg(
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="JPG color mode for the output image. Choose between standard JPEG, CMYK for print-ready output, or grayscale for reduced file size."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when resizing the output image to prevent distortion."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions, preserving quality for smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts MOBI eBook files to JPG image format with configurable output quality and scaling options. Supports multiple JPG color modes and intelligent scaling to optimize output file size."""
 
     # Construct request model with validation
@@ -7232,6 +7482,7 @@ async def convert_mobi_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7244,7 +7495,7 @@ async def convert_mobi_to_pdf(
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated from a single input."),
     base_font_size: float | None = Field(None, alias="BaseFontSize", description="The base font size in points (pt) for the converted PDF. All text scaling is relative to this value.", ge=1, le=50),
     margins: str | None = Field(None, alias="Margins", description="Page margins in points (pt) in CSS shorthand format: 'top right bottom left' (e.g., '72 36 72 36')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts MOBI eBook files to PDF format with customizable font sizing. Accepts file input as URL or binary content and generates a properly named output PDF file."""
 
     # Call helper functions
@@ -7279,6 +7530,7 @@ async def convert_mobi_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7291,7 +7543,7 @@ async def convert_mobi_to_png(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when resizing the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert MOBI eBook files to PNG image format. Supports URL or file content input with optional scaling and proportional resizing controls."""
 
     # Construct request model with validation
@@ -7323,6 +7575,7 @@ async def convert_mobi_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7338,7 +7591,7 @@ async def convert_mobi_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Defines the bit order within each byte of the TIFF data. Use 0 for most standard applications or 1 for specific compatibility requirements."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when resizing the output image to fit specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, only applies scaling if the input image dimensions exceed the target output dimensions. Prevents upscaling of smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts MOBI eBook files to TIFF image format with configurable output options including color depth, compression, and multi-page support."""
 
     # Construct request model with validation
@@ -7370,6 +7623,7 @@ async def convert_mobi_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7382,7 +7636,7 @@ async def convert_email_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors will not prevent the email body from being converted to JPG. Only applies when attachments are being processed."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body content with extracted attachments during conversion. Only applies when attachments are being processed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an email message file (MSG format) to JPG image format, with optional support for extracting and merging attachments into the output."""
 
     # Construct request model with validation
@@ -7414,6 +7668,7 @@ async def convert_email_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7428,7 +7683,7 @@ async def convert_msg_to_pdf(
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into a single PDF document. Only applies when attachments are being converted."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-1b compliant document for long-term archival and preservation."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in millimeters as space-separated values: 'top right bottom left' (e.g., '10 10 10 10')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts MSG (Outlook email) files to PDF format with optional attachment handling and PDF/A compliance. Supports file input via URL or binary content."""
 
     # Call helper functions
@@ -7463,6 +7718,7 @@ async def convert_msg_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7475,7 +7731,7 @@ async def convert_email_to_png_outlook(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., email_0.png, email_1.png) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, the conversion process will continue even if errors occur while processing email attachments. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, email body content and attachments are combined into a single output during conversion. Only applies when attachments are being converted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an email message file (MSG format) to PNG image format, with optional support for embedding attachments into the output. Useful for archiving, sharing, or preserving email content as images."""
 
     # Construct request model with validation
@@ -7507,6 +7763,7 @@ async def convert_email_to_png_outlook(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7520,7 +7777,7 @@ async def convert_msg_to_tiff(
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="If enabled, attachment conversion errors will not prevent the email body from being converted. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="If enabled, merges the email body with converted attachments into the output. Only applies when attachments are being converted."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="If enabled, creates a single multi-page TIFF file containing all content. If disabled, generates separate TIFF files for each page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts MSG email files to TIFF image format, with support for embedding attachments and creating multi-page documents. Useful for archiving emails as image files or integrating with document management systems."""
 
     # Construct request model with validation
@@ -7552,6 +7809,7 @@ async def convert_msg_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7564,7 +7822,7 @@ async def convert_message_to_webp(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a message file to WebP image format with optional scaling and proportional constraints. Supports both URL and file content input."""
 
     # Construct request model with validation
@@ -7596,6 +7854,7 @@ async def convert_message_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7606,7 +7865,7 @@ async def convert_message_to_webp(
 async def convert_numbers_to_csv(
     file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated CSV output file. The system automatically sanitizes the filename, appends the .csv extension, and adds numeric indexing (e.g., output_0.csv, output_1.csv) if multiple files are generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a numbers file to CSV format. Accepts file input as a URL or file content and generates a properly named CSV output file."""
 
     # Construct request model with validation
@@ -7638,6 +7897,7 @@ async def convert_numbers_to_csv(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7648,7 +7908,7 @@ async def convert_numbers_to_csv(
 async def convert_numbers_to_xlsx(
     file_: str | None = Field(None, alias="File", description="The Numbers file to convert, provided either as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct .xlsx extension, and adds numeric indexing (e.g., report_0.xlsx, report_1.xlsx) if multiple files are generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Numbers spreadsheet file to Excel (XLSX) format. Accepts file input as a URL or binary content and generates a properly named output file."""
 
     # Construct request model with validation
@@ -7680,6 +7940,7 @@ async def convert_numbers_to_xlsx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7690,7 +7951,7 @@ async def convert_numbers_to_xlsx(
 async def convert_document_to_jpg_spreadsheet(
     file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL reference or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple generated files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODC (OpenDocument Chart) file to JPG image format. Accepts file input as a URL or binary content and generates a JPG output file with optional custom naming."""
 
     # Construct request model with validation
@@ -7722,6 +7983,7 @@ async def convert_document_to_jpg_spreadsheet(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7733,7 +7995,7 @@ async def convert_odc_to_pdf(
     file_: str | None = Field(None, alias="File", description="The ODC file to convert. Accepts either a file upload or a URL pointing to the source file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODC (OpenDocument Chart) file to PDF format with optional PDF/A compliance. Supports both file uploads and URL-based sources."""
 
     # Construct request model with validation
@@ -7765,6 +8027,7 @@ async def convert_odc_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7776,7 +8039,7 @@ async def convert_odc_to_png(
     file_: str | None = Field(None, alias="File", description="The ODC file to convert, provided as either a URL or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `output_0.png`, `output_1.png`) for multiple files to ensure unique, safe naming."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color applied to transparent areas in the converted image. Accepts color names (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), HEX format (e.g., `#FF0000`), or `transparent` to preserve transparency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODC (OpenDocument Chart) files to PNG image format. Supports URL or file content input with optional background color customization for transparent areas."""
 
     # Construct request model with validation
@@ -7808,6 +8071,7 @@ async def convert_odc_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7818,7 +8082,7 @@ async def convert_odc_to_png(
 async def convert_document_to_jpg_formula(
     file_: str | None = Field(None, alias="File", description="The document file to convert, provided either as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODF (OpenDocument Format) documents to JPG image format. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -7850,6 +8114,7 @@ async def convert_document_to_jpg_formula(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7861,7 +8126,7 @@ async def convert_document_to_pdf_odf(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. PDF/A formats ensure long-term archival compatibility. Use 'none' for standard PDF output without archival compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODF (Open Document Format) files to PDF format with optional PDF/A compliance. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -7893,6 +8158,7 @@ async def convert_document_to_pdf_odf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7904,7 +8170,7 @@ async def convert_document_to_png(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `_0`, `_1`) when multiple files are generated from a single input."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="The background color applied to transparent areas in the converted images. Accepts color names, RGB values (comma-separated), HEX codes, or the value `transparent` to preserve transparency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODF (OpenDocument Format) documents to PNG images. Supports customization of output filename and background color for transparent areas."""
 
     # Construct request model with validation
@@ -7936,6 +8202,7 @@ async def convert_document_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7947,7 +8214,7 @@ async def convert_odg_to_pdf(
     file_: str | None = Field(None, alias="File", description="The ODG file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `document_0.pdf`, `document_1.pdf`) when multiple files are generated."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODG (OpenDocument Graphics) file to PDF format with optional PDF/A compliance. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -7979,6 +8246,7 @@ async def convert_odg_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -7989,7 +8257,7 @@ async def convert_odg_to_pdf(
 async def convert_presentation_to_jpg(
     file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a file upload (binary content) or a URL pointing to the ODP file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.jpg, presentation_1.jpg) when multiple images are generated from slides."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODP (OpenDocument Presentation) file to JPG image format. Supports both file uploads and URL-based sources, generating one or more JPG images from the presentation slides."""
 
     # Construct request model with validation
@@ -8021,6 +8289,7 @@ async def convert_presentation_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8032,7 +8301,7 @@ async def convert_odp_to_pdf(
     file_: str | None = Field(None, alias="File", description="The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `_0`, `_1`) if multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODP (OpenDocument Presentation) file to PDF format with optional PDF/A compliance. Supports file input via URL or direct file content and allows customization of output filename and PDF/A version."""
 
     # Construct request model with validation
@@ -8064,6 +8333,7 @@ async def convert_odp_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8075,7 +8345,7 @@ async def convert_presentation_to_png(
     file_: str | None = Field(None, alias="File", description="The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file(s). The system automatically sanitizes the name, appends the correct file extension, and adds numeric indexing (e.g., `presentation_0.png`, `presentation_1.png`) when multiple files are generated from a single input."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color applied to transparent areas in the generated PNG images. Accepts color names (e.g., `white`, `black`), RGB format (comma-separated values 0-255), HEX format (with # prefix), or `transparent` to preserve transparency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODP (OpenDocument Presentation) files to PNG image format. Supports file input via URL or direct file content, with optional background color customization for transparent areas."""
 
     # Construct request model with validation
@@ -8107,6 +8377,7 @@ async def convert_presentation_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8117,7 +8388,7 @@ async def convert_presentation_to_png(
 async def convert_spreadsheet_to_image(
     file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert, provided either as a URL or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output image file. The system automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple images are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODS (OpenDocument Spreadsheet) file to JPG image format. Accepts file input as a URL or binary content and generates a named output image file."""
 
     # Construct request model with validation
@@ -8149,6 +8420,7 @@ async def convert_spreadsheet_to_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8160,7 +8432,7 @@ async def convert_ods_to_pdf(
     file_: str | None = Field(None, alias="File", description="The ODS file to convert. Can be provided as a file upload or as a URL pointing to the source file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. PDF/A versions provide long-term archival compatibility. Use 'none' for standard PDF output without PDF/A compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODS (OpenDocument Spreadsheet) file to PDF format with optional PDF/A compliance. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -8192,6 +8464,7 @@ async def convert_ods_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8203,7 +8476,7 @@ async def convert_ods_to_png(
     file_: str | None = Field(None, alias="File", description="The ODS file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file(s). The system automatically sanitizes the name, appends the correct file extension, and adds numeric indexing (e.g., `report_0.png`, `report_1.png`) when multiple files are generated from a single input."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for the generated PNG image. Specify a color name (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), or HEX format (e.g., `#FF0000`). Use `transparent` to preserve transparency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODS (OpenDocument Spreadsheet) file to PNG image format. Supports file input via URL or direct content, with customizable output naming and background color options."""
 
     # Construct request model with validation
@@ -8235,6 +8508,7 @@ async def convert_ods_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8248,7 +8522,7 @@ async def convert_document_odt_to_docx(
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Whether to automatically update all tables of content in the converted document."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="Whether to automatically update all reference fields in the converted document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODT (OpenDocument Text) document to DOCX (Microsoft Word) format. Supports password-protected documents and optional updates to tables of content and reference fields."""
 
     # Construct request model with validation
@@ -8280,6 +8554,7 @@ async def convert_document_odt_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8290,7 +8565,7 @@ async def convert_document_odt_to_docx(
 async def convert_document_to_jpg_text(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a URL reference or raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODT (OpenDocument Text) document to JPG image format. Supports both file uploads and URL-based file sources."""
 
     # Construct request model with validation
@@ -8322,6 +8597,7 @@ async def convert_document_to_jpg_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8333,7 +8609,7 @@ async def convert_document_to_pdf_odt(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source document."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="PDF/A compliance version for the output file. Select 'none' for standard PDF, or choose a PDF/A version (1b, 2b, or 3b) for long-term archival compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODT (OpenDocument Text) document to PDF format with optional PDF/A compliance. Supports both file uploads and URL-based sources, with customizable output naming and PDF/A version selection."""
 
     # Construct request model with validation
@@ -8365,6 +8641,7 @@ async def convert_document_to_pdf_odt(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8376,7 +8653,7 @@ async def convert_document_to_png_text(
     file_: str | None = Field(None, alias="File", description="The ODT file to convert. Accepts either a file URL or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `output_0.png`, `output_1.png`) for multiple files to ensure unique, safe naming."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for transparent areas in the converted images. Accepts color names (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), HEX format (e.g., `#FF0000`), or `transparent` to preserve transparency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODT (OpenDocument Text) files to PNG images. Supports file input via URL or direct content, with optional background color customization for transparent areas."""
 
     # Construct request model with validation
@@ -8408,6 +8685,7 @@ async def convert_document_to_png_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8421,7 +8699,7 @@ async def convert_document_odt_to_txt(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected ODT documents."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c))."),
     end_line_char: Literal["crlf", "cr", "lfcr", "lf"] | None = Field(None, alias="EndLineChar", description="Specifies the line ending character to use in the output text file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts ODT (OpenDocument Text) documents to plain text format. Supports password-protected documents, symbol substitution, and configurable line ending characters."""
 
     # Construct request model with validation
@@ -8453,6 +8731,7 @@ async def convert_document_odt_to_txt(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8467,7 +8746,7 @@ async def convert_document_to_xml(
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document during conversion."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="When enabled, automatically updates all reference fields in the document during conversion."),
     xml_type: Literal["word2003", "flatWordXml", "strictOpenXml"] | None = Field(None, alias="XmlType", description="Specifies the XML schema format to use for the output. Word2003 uses legacy XML, flatWordXml uses a flat structure, and strictOpenXml uses the modern Office Open XML standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an ODT (OpenDocument Text) document to XML format with optional support for updating tables of content and reference fields. Supports password-protected documents and multiple XML output formats."""
 
     # Construct request model with validation
@@ -8499,6 +8778,7 @@ async def convert_document_to_xml(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8511,7 +8791,7 @@ async def convert_office_document_to_pdf(
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents. Only needed if the input document is encrypted."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, generates a PDF/A-1b compliant document suitable for long-term archival and preservation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts office documents (Word, Excel, PowerPoint, etc.) to PDF format with optional password protection and PDF/A compliance. Supports both file uploads and URL-based document sources."""
 
     # Construct request model with validation
@@ -8543,6 +8823,7 @@ async def convert_office_document_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8553,7 +8834,7 @@ async def convert_office_document_to_pdf(
 async def convert_pages_to_docx(
     file_: str | None = Field(None, alias="File", description="The Pages document to convert, provided as either a URL reference or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated DOCX output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) when multiple files are produced from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Pages document to DOCX format. Accepts file input as a URL or binary content and generates a properly named output file."""
 
     # Construct request model with validation
@@ -8585,6 +8866,7 @@ async def convert_pages_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8595,7 +8877,7 @@ async def convert_pages_to_docx(
 async def convert_pages_to_text(
     file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a URL or raw file content in binary format."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file(s). The system automatically sanitizes the filename, appends the correct extension for the target format, and adds numeric indexing (e.g., `output_0.txt`, `output_1.txt`) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts document pages to plain text format. Supports file uploads via URL or direct file content and generates appropriately named output files."""
 
     # Construct request model with validation
@@ -8627,6 +8909,7 @@ async def convert_pages_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8651,7 +8934,7 @@ async def compress_pdf(
     remove_unused_resources: bool | None = Field(None, alias="RemoveUnusedResources", description="Remove unused resource references such as fonts, images, and patterns that are defined but not displayed in the document."),
     linearize: bool | None = Field(None, alias="Linearize", description="Linearize the PDF structure and optimize for fast web viewing, enabling progressive rendering as the file downloads."),
     preserve_pdfa: bool | None = Field(None, alias="PreservePdfa", description="Maintain PDF/A compliance standards during compression to ensure long-term archival compatibility."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Compress a PDF file using configurable optimization techniques to reduce file size while preserving document quality. Supports preset compression profiles or granular control over specific compression options."""
 
     # Construct request model with validation
@@ -8683,6 +8966,7 @@ async def compress_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8702,7 +8986,7 @@ async def crop_pdf(
     anchor: Literal["center", "topleft", "top", "topright", "left", "right", "bottom", "bottomright"] | None = Field(None, alias="Anchor", description="Reference point for positioning the crop rectangle when using fixed width and height dimensions."),
     vertical_margin: float | None = Field(None, alias="VerticalMargin", description="Top and bottom margin distances to apply when cropping with margins, using the selected measurement unit. Only applies when CropMode is set to margins.", ge=0, le=30000),
     horizontal_margin: float | None = Field(None, alias="HorizontalMargin", description="Left and right margin distances to apply when cropping with margins, using the selected measurement unit. Only applies when CropMode is set to margins.", ge=0, le=30000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Crop PDF pages by automatically detecting content, applying margins, or resizing to specific dimensions. Supports selective page ranges and multiple cropping strategies."""
 
     # Construct request model with validation
@@ -8734,6 +9018,7 @@ async def crop_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8749,7 +9034,7 @@ async def convert_pdf_to_csv(
     enable_ocr: Literal["Scanned", "All", "None"] | None = Field(None, alias="EnableOcr", description="Controls optical character recognition behavior. Use 'Scanned' for OCR on scanned pages only, 'All' for all pages, or 'None' to disable OCR."),
     ocr_language: Literal["ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fa", "de", "el", "he", "it", "ja", "ko", "lt", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="Language for OCR processing. Supports multiple languages including English, Spanish, Chinese, Arabic, and others. Contact support to request additional languages."),
     delimiter: str | None = Field(None, alias="Delimiter", description="Character used to separate fields in the output CSV file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to CSV format with support for password-protected files, selective page ranges, and optical character recognition. Automatically handles file naming and delimiter configuration for structured data extraction."""
 
     # Construct request model with validation
@@ -8781,6 +9066,7 @@ async def convert_pdf_to_csv(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8794,7 +9080,7 @@ async def delete_pdf_pages(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Pages to delete specified as a range (e.g., 1-10) or comma-separated individual page numbers (e.g., 1,2,5)."),
     delete_blank_pages: bool | None = Field(None, alias="DeleteBlankPages", description="Automatically detect and remove blank pages from the PDF."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove specified pages from a PDF document. Supports deletion by page range, individual pages, or automatic blank page detection."""
 
     # Construct request model with validation
@@ -8826,6 +9112,7 @@ async def delete_pdf_pages(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8842,7 +9129,7 @@ async def convert_pdf_to_docx(
     ocr_mode: Literal["auto", "force", "never"] | None = Field(None, alias="OcrMode", description="Controls OCR application during conversion. Use 'auto' to apply OCR only when needed, 'force' to OCR all pages, or 'never' to disable OCR entirely."),
     ocr_language: Literal["auto", "ar", "ca", "zh", "da", "nl", "en", "fi", "fr", "de", "el", "ko", "it", "ja", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="Specifies the language for OCR text recognition. Use 'auto' for automatic detection, or manually select a language code if auto-detection fails."),
     annotations_: Literal["textBox", "comment", "none"] | None = Field(None, alias="Annotations", description="Determines how PDF annotations are handled in the output. Use 'textBox' to convert annotations to editable text boxes, 'comment' to convert them to Word comments, or 'none' to exclude annotations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to DOCX format with support for password-protected files, selective page ranges, OCR processing, and annotation handling. Preserves formatting through text box conversion and supports multiple OCR languages for accurate text recognition."""
 
     # Construct request model with validation
@@ -8874,6 +9161,7 @@ async def convert_pdf_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8888,7 +9176,7 @@ async def extract_data_from_pdf(
     document_type: Literal["auto", "invoice", "receipt", "contract", "identification", "financial", "form", "manual"] | None = Field(None, alias="DocumentType", description="Document category to apply optimized extraction rules. Use 'Auto' for automatic detection, select a specific type (Invoice, Receipt, Contract, etc.) for improved accuracy, or choose 'Manual' to use only custom extraction fields."),
     custom_extraction_data: str | None = Field(None, alias="CustomExtractionData", description="JSON array of custom field definitions for extraction. Each object specifies a FieldName (output key) and Extract (description of what to extract). Used when DocumentType is 'Manual' or to supplement predefined extraction."),
     minimum_confidence: float | None = Field(None, alias="MinimumConfidence", description="Minimum confidence score (0.01 to 0.99) for AI-based sensitive data detection. Higher values reduce false positives but may miss subtle matches.", ge=0.01, le=0.99),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extract structured data from PDF documents using AI-powered recognition. Supports predefined document types (invoices, receipts, contracts, etc.) or custom field extraction with configurable confidence thresholds."""
 
     # Construct request model with validation
@@ -8920,6 +9208,7 @@ async def extract_data_from_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8935,7 +9224,7 @@ async def extract_images_from_pdf(
     image_output_format: Literal["default", "jpg", "png", "tiff"] | None = Field(None, alias="ImageOutputFormat", description="Output format for extracted images. Use 'default' to automatically select the most suitable format and extract all images including hidden ones; other formats apply the MinimumImageWidth and MinimumImageHeight filters."),
     minimum_image_width: int | None = Field(None, alias="MinimumImageWidth", description="Minimum width in pixels for extracted images. Images narrower than this threshold are excluded.", ge=0, le=1000),
     minimum_image_height: int | None = Field(None, alias="MinimumImageHeight", description="Minimum height in pixels for extracted images. Images shorter than this threshold are excluded.", ge=0, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extract images from PDF documents with configurable filtering by size and page range. Supports password-protected PDFs and multiple output formats."""
 
     # Construct request model with validation
@@ -8967,6 +9256,7 @@ async def extract_images_from_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -8979,7 +9269,7 @@ async def extract_pdf_form_fields(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output FDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.fdf, output_1.fdf) for multiple files to ensure unique, safe naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     include_alternate_names: bool | None = Field(None, alias="IncludeAlternateNames", description="When enabled, includes alternate field names (tooltip text) from the PDF in the FDF output for better field identification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to FDF (Forms Data Format) while extracting form field data. Optionally includes alternate field names as tooltips in the output."""
 
     # Construct request model with validation
@@ -9011,6 +9301,7 @@ async def extract_pdf_form_fields(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9023,7 +9314,7 @@ async def import_pdf_with_fdf_form_data(
     fdf_file: str | None = Field(None, alias="FdfFile", description="The FDF (Forms Data Format) file containing structured form field data to be imported into the PDF. Accepts either a URL reference or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s) generated by the conversion. The system automatically sanitizes the filename, appends the appropriate file extension, and adds numeric indexing (e.g., `_0`, `_1`) when multiple output files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents. Only needed if the input PDF is encrypted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PDF document by importing and merging structured form data from an FDF file. This operation combines a PDF with FDF form data to populate form fields and generate the merged output."""
 
     # Construct request model with validation
@@ -9055,6 +9346,7 @@ async def import_pdf_with_fdf_form_data(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File", "FdfFile"],
         headers=_http_headers,
     )
 
@@ -9069,7 +9361,7 @@ async def flatten_pdf(
     flatten_controls: bool | None = Field(None, alias="FlattenControls", description="Convert form controls (text fields, checkboxes, dropdowns) into static content, preventing editing while maintaining their original visual appearance."),
     flatten_widgets: bool | None = Field(None, alias="FlattenWidgets", description="Convert widget annotations (buttons, list boxes, signature fields) into static content, removing interactivity while preserving their original visual appearance."),
     flatten_text: bool | None = Field(None, alias="FlattenText", description="Convert text into vectorial paths to prevent text selection, copying, and extraction, making the PDF read-only while maintaining original vector quality."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PDF document into a flattened format by removing interactivity from form controls, widgets, and text elements. This operation transforms editable and interactive PDF components into static page content while preserving visual appearance."""
 
     # Construct request model with validation
@@ -9101,6 +9393,7 @@ async def flatten_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9116,7 +9409,7 @@ async def convert_pdf_to_html(
     wysiwyg: bool | None = Field(None, alias="Wysiwyg", description="When enabled, preserves exact PDF formatting by converting text to HTML text boxes. Maintains visual layout fidelity during conversion."),
     ocr_mode: Literal["auto", "force", "never"] | None = Field(None, alias="OcrMode", description="Controls OCR application during conversion. Auto applies OCR only when needed, Force applies OCR to all pages, and Never disables OCR entirely."),
     ocr_language: Literal["auto", "ar", "ca", "zh", "da", "nl", "en", "fi", "fr", "de", "el", "ko", "it", "ja", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="Specifies the language for OCR text recognition. Use auto-detection by default, or manually select a language if auto-detection fails."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to HTML format with support for password-protected files, selective page ranges, and optical character recognition. Preserves formatting using text boxes and offers flexible OCR configuration for accurate text extraction."""
 
     # Construct request model with validation
@@ -9148,6 +9441,7 @@ async def convert_pdf_to_html(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9171,7 +9465,7 @@ async def add_watermark_to_pdf(
     vertical_alignment: Literal["top", "center", "bottom"] | None = Field(None, alias="VerticalAlignment", description="Vertical alignment of the watermark on the page."),
     measurement_unit: Literal["pt", "in", "mm", "cm"] | None = Field(None, alias="MeasurementUnit", description="Unit of measurement used for watermark position and size parameters."),
     offset: str | None = Field(None, alias="Offset", description="Watermark offset as a coordinate pair in the format 'x,y' using the selected MeasurementUnit. Positive X moves right, negative left. Positive Y moves down, negative up."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PDF document to images with an optional watermark overlay or stamp. Supports customizable watermark positioning, styling, opacity, and interactive click-through functionality."""
 
     # Call helper functions
@@ -9206,6 +9500,7 @@ async def add_watermark_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File", "ImageFile"],
         headers=_http_headers,
     )
 
@@ -9221,7 +9516,7 @@ async def convert_pdf_to_jpg(
     rotate: Literal["default", "none", "rotate90", "rotate180", "rotate270"] | None = Field(None, alias="Rotate", description="Applies rotation to PDF pages before conversion. Select 'default' to use the PDF's embedded rotation settings, or specify a fixed rotation angle."),
     crop_to: Literal["BoundingBox", "TrimBox", "MediaBox", "ArtBox", "BleedBox"] | None = Field(None, alias="CropTo", description="Defines which page boundary to use for cropping during conversion. Different box types represent different content areas within the PDF page."),
     color_space: Literal["rgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Sets the color space for the output JPG image. Choose RGB for standard color, CMYK for print-ready output, or grayscale for black and white."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PDF documents to JPG image format with support for page selection, rotation, cropping, and color space customization. Handles password-protected PDFs and generates multiple images for multi-page documents."""
 
     # Construct request model with validation
@@ -9253,6 +9548,7 @@ async def convert_pdf_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9267,7 +9563,7 @@ async def merge_pdfs(
     remove_duplicate_fonts: bool | None = Field(None, alias="RemoveDuplicateFonts", description="When enabled, prevents duplicate fonts from being included in the merged PDF, reducing file size."),
     bookmarks_toc: Literal["disabled", "filename", "title"] | None = Field(None, alias="BookmarksToc", description="Adds a top-level bookmark for each merged file using either the filename or the PDF title from metadata."),
     open_page: int | None = Field(None, alias="OpenPage", description="Specifies the page number where the merged PDF document should open when first displayed.", ge=1, le=3000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge multiple PDF files into a single document with optional font deduplication, table of contents bookmarks, and password protection support."""
 
     # Construct request model with validation
@@ -9299,6 +9595,7 @@ async def merge_pdfs(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -9310,7 +9607,7 @@ async def convert_pdf_to_metadata(
     file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="The password required to open the PDF if it is password-protected. Only needed for encrypted documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to metadata format, extracting structured information from the file. Supports password-protected documents and customizable output file naming."""
 
     # Construct request model with validation
@@ -9342,6 +9639,7 @@ async def convert_pdf_to_metadata(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9358,7 +9656,7 @@ async def extract_text_from_pdf(
     ocr_language: Literal["ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fa", "de", "el", "he", "it", "ja", "ko", "lt", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="Language for text recognition. Supports multiple languages including English, Spanish, Chinese, Arabic, and others. Contact support to request additional languages."),
     output_type: Literal["pdf", "txt"] | None = Field(None, alias="OutputType", description="Format for the extracted text. PDF embeds the OCR text layer into the document for searchability, while TXT returns plain text content only."),
     page_segmentation_mode: Literal["sparseText", "sparseTextOsd", "auto", "autoOsd", "singleLine", "singleColumn", "singleWord"] | None = Field(None, alias="PageSegmentationMode", description="Determines how the OCR engine analyzes document layout and detects text. SparseText finds scattered text without ordering, SparseTextOsd adds orientation detection, Auto selects the best mode automatically, AutoOsd combines auto-detection with orientation handling, SingleColumn assumes single-column layouts, SingleLine treats content as one line, and SingleWord recognizes isolated words."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to searchable text using OCR (Optical Character Recognition). Supports multiple languages, flexible page ranges, and configurable text extraction modes to handle various document layouts and existing text layers."""
 
     # Construct request model with validation
@@ -9390,6 +9688,7 @@ async def extract_text_from_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9402,7 +9701,7 @@ async def convert_pdf_to_pcl(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PCL file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pcl, output_1.pcl) for multiple output files."),
     color_mode: Literal["color", "monochrome"] | None = Field(None, alias="ColorMode", description="The color mode for the output document. Choose between full color or monochrome rendering."),
     resolution: int | None = Field(None, alias="Resolution", description="The output resolution in dots per inch (DPI). Higher values improve image quality but increase file size. Valid range is 10 to 1000 DPI.", ge=10, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to PCL (Printer Command Language) format with customizable output settings. Supports color mode selection and resolution adjustment for optimal print quality and file size balance."""
 
     # Construct request model with validation
@@ -9434,6 +9733,7 @@ async def convert_pdf_to_pcl(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9453,7 +9753,7 @@ async def convert_pdf_to_pdf(
     open_page: int | None = Field(None, alias="OpenPage", description="The page number where the PDF should open when first displayed. Must be between 1 and 3000.", ge=1, le=3000),
     open_zoom: Literal["Default", "ActualSize", "FitPage", "FitWidth", "FitHeight", "FitVisible", "25", "50", "75", "100", "125", "150", "200", "400", "800", "1600", "2400", "3200", "6400"] | None = Field(None, alias="OpenZoom", description="The default zoom level applied when opening the PDF. Choose from preset percentages or fit-to-page options."),
     color_space: Literal["Default", "RGB", "CMYK", "Gray"] | None = Field(None, alias="ColorSpace", description="The color space model for the output PDF. RGB is suitable for screen display, CMYK for professional printing, and Gray for grayscale documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PDF document while optionally customizing metadata, viewer settings, and color space properties. Useful for updating PDF versions, embedding document information, or adjusting display preferences."""
 
     # Construct request model with validation
@@ -9485,6 +9785,7 @@ async def convert_pdf_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9509,7 +9810,7 @@ async def add_watermark_to_pdf_document(
     horizontal_alignment: Literal["left", "center", "right"] | None = Field(None, alias="HorizontalAlignment", description="Horizontal alignment of the watermark relative to the page."),
     vertical_alignment: Literal["top", "center", "bottom"] | None = Field(None, alias="VerticalAlignment", description="Vertical alignment of the watermark relative to the page."),
     offset: str | None = Field(None, alias="Offset", description="Watermark offset as a coordinate in the format 'x,y' using the selected MeasurementUnit. Positive X moves right, negative left. Positive Y moves down, negative up."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a watermark or stamp overlay to a PDF document with customizable positioning, opacity, and interactive elements. Supports applying watermarks across specified page ranges with flexible alignment and styling options."""
 
     # Call helper functions
@@ -9544,6 +9845,7 @@ async def add_watermark_to_pdf_document(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File", "OverlayFile"],
         headers=_http_headers,
     )
 
@@ -9559,7 +9861,7 @@ async def convert_pdf_to_pdfa(
     invoice_format: Literal["none", "facturX", "zugferd1", "zugferd2"] | None = Field(None, alias="InvoiceFormat", description="E-invoice format to embed in the PDF. When specified, overrides the PdfaVersion setting and outputs PDF/A-3 format. Requires a valid structured invoice XML file."),
     invoice_file: str | None = Field(None, alias="InvoiceFile", description="Structured invoice XML file (ZUGFeRD or Factur-X format) to embed for hybrid-invoice compatibility. Required when InvoiceFormat is set to a value other than 'none'."),
     linearize: bool | None = Field(None, alias="Linearize", description="Linearize the PDF structure and optimize for fast web viewing and streaming."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to PDF/A format for long-term archival compliance. Supports optional password-protected PDFs, e-invoice embedding (ZUGFeRD/Factur-X), and web optimization."""
 
     # Construct request model with validation
@@ -9591,6 +9893,7 @@ async def convert_pdf_to_pdfa(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File", "InvoiceFile"],
         headers=_http_headers,
     )
 
@@ -9603,7 +9906,7 @@ async def convert_pdf_to_pdfua(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input PDF if it is password-protected."),
     linearize: bool | None = Field(None, alias="Linearize", description="Enables linearization of the PDF file to optimize for fast web viewing and streaming."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a standard PDF file to PDF/UA (Universal Accessibility) format, ensuring compliance with accessibility standards. Optionally linearizes the output for optimized web viewing performance."""
 
     # Construct request model with validation
@@ -9635,6 +9938,7 @@ async def convert_pdf_to_pdfua(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9650,7 +9954,7 @@ async def convert_pdf_to_png(
     rotate: Literal["default", "none", "rotate90", "rotate180", "rotate270"] | None = Field(None, alias="Rotate", description="Applies rotation to PDF pages before conversion to PNG. Select from predefined rotation angles or use the default orientation."),
     crop_to: Literal["BoundingBox", "TrimBox", "MediaBox", "ArtBox", "BleedBox"] | None = Field(None, alias="CropTo", description="Defines which PDF box boundary to use for cropping the page during conversion. Different box types capture different content areas of the PDF page."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Sets the background color for transparent areas in the PDF. Accepts color names, RGB values, or hexadecimal color codes. Use 'transparent' to preserve transparency in the output PNG."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to PNG image format with support for page selection, rotation, cropping, and background color customization. Handles password-protected PDFs and generates multiple output images for multi-page documents."""
 
     # Construct request model with validation
@@ -9682,6 +9986,7 @@ async def convert_pdf_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9697,7 +10002,7 @@ async def convert_pdf_to_pptx(
     ocr_mode: Literal["auto", "force", "never"] | None = Field(None, alias="OcrMode", description="Controls when optical character recognition is applied during conversion. Auto applies OCR only when needed, Force applies it to all pages, and Never disables it entirely."),
     ocr_language: Literal["auto", "ar", "ca", "zh", "da", "nl", "en", "fi", "fr", "de", "el", "ko", "it", "ja", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="Specifies the language for OCR text recognition. Use auto-detection by default, or manually select a language if auto-detection fails."),
     text_recovery_mode: Literal["auto", "always", "never"] | None = Field(None, alias="TextRecoveryMode", description="Determines how text is recovered from PDFs with non-standard encodings. Auto detects and recovers text only when needed, Always forces recovery for all text, and Never disables recovery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to PowerPoint (PPTX) format with support for password-protected files, selective page ranges, and optical character recognition (OCR) for text extraction."""
 
     # Construct request model with validation
@@ -9729,6 +10034,7 @@ async def convert_pdf_to_pptx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9753,7 +10059,7 @@ async def convert_pdf_to_print(
     downsample_images: bool | None = Field(None, alias="DownsampleImages", description="When enabled, reduces resolution of images exceeding the target resolution to minimize file size while maintaining quality."),
     resolution: int | None = Field(None, alias="Resolution", description="Target resolution in pixels per inch (PPI) used for rasterization tasks such as bleed fabrication and image downsampling. Valid range is 10 to 800 PPI.", ge=10, le=800),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a comma-separated range (e.g., 1,2,5-last). Supports keywords 'even', 'odd', and 'last'. Maximum of 100 pages will be processed per conversion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to print-ready format with support for professional print specifications including trim sizes, bleed modes, color spaces, and registration marks. Supports page range selection and ICC profile embedding for color-managed workflows."""
 
     # Construct request model with validation
@@ -9785,6 +10091,7 @@ async def convert_pdf_to_print(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File", "OutputIntentIccFile"],
         headers=_http_headers,
     )
 
@@ -9808,7 +10115,7 @@ async def protect_pdf(
     fill_form_fields: bool | None = Field(None, alias="FillFormFields", description="Whether to allow filling in existing interactive form fields, including signature fields."),
     print_document: bool | None = Field(None, alias="PrintDocument", description="Whether to allow printing the document."),
     print_faithful_copy: bool | None = Field(None, alias="PrintFaithfulCopy", description="Whether to allow printing the document to a representation from which a faithful digital copy of the PDF content could be generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert and protect a PDF document by applying encryption, setting access passwords, and configuring user permissions. Supports multiple encryption algorithms and granular control over document operations like printing, editing, and content extraction."""
 
     # Construct request model with validation
@@ -9840,6 +10147,7 @@ async def protect_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9852,7 +10160,7 @@ async def convert_pdf_to_rasterized_image(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the appropriate image extension, and adds numeric indexing (e.g., filename_0.png, filename_1.png) when multiple output files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     resolution: int | None = Field(None, alias="Resolution", description="Resolution for rasterized output measured in dots per inch (DPI). Higher values produce sharper images but increase file size. Valid range is 10 to 800 DPI.", ge=10, le=800),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PDF documents to rasterized image files at a specified resolution. Supports password-protected PDFs and allows customization of output image quality through DPI settings."""
 
     # Construct request model with validation
@@ -9884,6 +10192,7 @@ async def convert_pdf_to_rasterized_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9907,7 +10216,7 @@ async def redact_pdf(
     redaction_text_values: list[str] | None = Field(None, description="List of exact text strings to be redacted"),
     redaction_regex_patterns: list[str] | None = Field(None, description="List of regular expression patterns (unescaped) for flexible text matching. Patterns will be automatically escaped during construction."),
     redaction_detect_descriptions: list[str] | None = Field(None, description="List of AI-based detection descriptions (e.g., 'Bank account number', 'Social security number')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert and redact sensitive data from a PDF document based on compliance presets or custom detection rules. Supports automatic AI-based detection of PII, financial, and health information, or manual redaction configuration."""
 
     # Call helper functions
@@ -9942,6 +10251,7 @@ async def redact_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -9955,7 +10265,7 @@ async def resize_pdf_pages(
     password: str | None = Field(None, alias="Password", description="Password required to open a protected or encrypted PDF file."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using page numbers and keywords. Supports comma-separated values, ranges with hyphens, and keywords like 'even', 'odd', and 'last' to select specific pages."),
     measurement_unit: Literal["pt", "in", "mm", "cm"] | None = Field(None, alias="MeasurementUnit", description="The unit of measurement for page dimensions (height and width)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Resize PDF pages to specified dimensions. Supports selective page conversion with customizable measurement units and password-protected PDF handling."""
 
     # Construct request model with validation
@@ -9987,6 +10297,7 @@ async def resize_pdf_pages(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10001,7 +10312,7 @@ async def rotate_pdf_pages(
     auto_rotate: bool | None = Field(None, alias="AutoRotate", description="Enable automatic detection and correction of page orientation to the optimal reading angle."),
     angle: Literal["0", "90", "180", "270"] | None = Field(None, alias="Angle", description="Rotation angle in degrees to apply to selected pages."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which pages to rotate using page numbers, ranges, or keywords. Use comma-separated values for multiple selections and hyphens for ranges (e.g., 1,2,5-last or even, odd)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rotate pages in a PDF document by a specified angle or automatically detect optimal orientation. Supports selective page ranges and password-protected PDFs."""
 
     # Construct request model with validation
@@ -10033,6 +10344,7 @@ async def rotate_pdf_pages(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10048,7 +10360,7 @@ async def convert_pdf_to_rtf(
     wysiwyg: bool | None = Field(None, alias="Wysiwyg", description="When enabled, preserves exact formatting from the source PDF by using text boxes in the output RTF."),
     ocr_mode: Literal["auto", "force", "never"] | None = Field(None, alias="OcrMode", description="Controls OCR (Optical Character Recognition) behavior during conversion. Auto applies OCR only when needed, Force applies to all pages, and Never disables OCR entirely."),
     ocr_language: Literal["auto", "ar", "ca", "zh", "da", "nl", "en", "fi", "fr", "de", "el", "ko", "it", "ja", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="Specifies the language for OCR text recognition. Use auto-detection by default, or manually select a language if auto-detection fails."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to RTF (Rich Text Format) with support for password-protected files, selective page ranges, and OCR capabilities. Preserves formatting and enables text recognition for scanned documents."""
 
     # Construct request model with validation
@@ -10080,6 +10392,7 @@ async def convert_pdf_to_rtf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10095,7 +10408,7 @@ async def split_pdf(
     split_by_text_pattern: str | None = Field(None, alias="SplitByTextPattern", description="A regular expression pattern that triggers a new document split whenever matching text is found on a page. For example, `Chapter\\s+\\d+` splits at pages containing \"Chapter 1\", \"Chapter 2\", etc. Pages before the first match are grouped together, and any remaining pages after the last match form a final segment."),
     split_by_bookmark: bool | None = Field(None, alias="SplitByBookmark", description="When enabled, automatically splits the PDF at each bookmarked page. For nested bookmarks, splitting occurs at the deepest level, and output filenames reflect the full bookmark hierarchy (e.g., `ParentBookmark-ChildBookmark.pdf`). PDFs without bookmarks are returned unchanged."),
     merge_output: bool | None = Field(None, alias="MergeOutput", description="When enabled, merges all split segments back into a single PDF file instead of returning separate files for each segment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Splits a PDF document into multiple files based on page ranges, text patterns, or bookmarks. Optionally merges the split segments back into a single file."""
 
     # Construct request model with validation
@@ -10127,6 +10440,7 @@ async def split_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10145,7 +10459,7 @@ async def convert_pdf_to_svg(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to SVG (Scalable Vector Graphics) format, with support for page range selection, rotation, and password-protected documents. Useful for extracting vector-based graphics from PDFs while maintaining scalability."""
 
     # Call helper functions
@@ -10180,6 +10494,7 @@ async def convert_pdf_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10214,7 +10529,7 @@ async def convert_pdf_to_text_with_watermark(
     font_embed: bool | None = Field(None, alias="FontEmbed", description="Whether to embed fonts in the output document for consistent rendering across systems."),
     font_subset: bool | None = Field(None, alias="FontSubset", description="Whether to subset fonts (include only used characters) to reduce file size."),
     offset: str | None = Field(None, alias="Offset", description="Watermark offset as 'x,y' coordinates. Positive X moves right, negative left. Positive Y moves down, negative up. Uses the selected MeasurementUnit."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to text format while applying customizable watermark or stamp overlays. Supports dynamic watermark text with variables, advanced styling options, and precise positioning control."""
 
     # Call helper functions
@@ -10249,6 +10564,7 @@ async def convert_pdf_to_text_with_watermark(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10266,7 +10582,7 @@ async def convert_pdf_to_tiff(
     background_color: str | None = Field(None, alias="BackgroundColor", description="Sets the background color for transparent areas in the PDF. Accepts color names (white, black), RGB format (255,0,0), HEX format (#FF0000), or 'transparent' to preserve transparency."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="When enabled, creates a single multi-page TIFF file containing all converted pages. When disabled, generates separate TIFF files for each page."),
     color_mode: Literal["default", "cmyk", "grayscale", "bitonal"] | None = Field(None, alias="ColorMode", description="Specifies the color mode for the output TIFF image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to TIFF image format with support for page selection, rotation, cropping, and color mode customization. Handles password-protected PDFs and can generate single or multi-page TIFF files."""
 
     # Construct request model with validation
@@ -10298,6 +10614,7 @@ async def convert_pdf_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10313,7 +10630,7 @@ async def convert_pdf_to_tiff_fax(
     multi_page: bool | None = Field(None, alias="MultiPage", description="When enabled, combines all converted pages into a single multi-page TIFF file. When disabled, generates separate TIFF files for each page."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert from the PDF. Use hyphen for ranges (e.g., 1-10) or comma-separated values for individual pages (e.g., 1,2,5)."),
     crop_to: Literal["BoundingBox", "TrimBox", "MediaBox", "ArtBox", "BleedBox"] | None = Field(None, alias="CropTo", description="Defines which page boundary box to use for cropping during conversion. Different box types capture different content areas of the PDF page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to TIFF FAX format with support for multi-page output, custom compression types, and selective page range processing. Ideal for fax transmission and archival purposes."""
 
     # Construct request model with validation
@@ -10345,6 +10662,7 @@ async def convert_pdf_to_tiff_fax(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10364,7 +10682,7 @@ async def convert_pdf_to_text(
     remove_headers_footers: bool | None = Field(None, alias="RemoveHeadersFooters", description="Exclude headers and footers from the extracted text output."),
     remove_footnotes: bool | None = Field(None, alias="RemoveFootnotes", description="Exclude footnotes from the extracted text output."),
     remove_tables: bool | None = Field(None, alias="RemoveTables", description="Exclude tables from the extracted text output."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PDF documents to plain text format with optional OCR, formatting preservation, and content filtering. Supports password-protected files, page range selection, and multi-language text recognition."""
 
     # Construct request model with validation
@@ -10396,6 +10714,7 @@ async def convert_pdf_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10407,7 +10726,7 @@ async def unprotect_pdf(
     file_: str | None = Field(None, alias="File", description="The PDF file to unprotect. Provide either a publicly accessible URL or the raw file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `document_0.pdf`, `document_1.pdf`) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="The password protecting the PDF. Provide the user password to remove user-level protection, or leave empty to remove owner-level protection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove password protection from a PDF file. Specify a user password to remove user-level protection, or leave the password empty to remove owner-level protection."""
 
     # Construct request model with validation
@@ -10439,6 +10758,7 @@ async def unprotect_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10457,7 +10777,7 @@ async def convert_pdf_to_webp(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PDF documents to WebP image format with support for page selection, rotation, and scaling options. Handles password-protected PDFs and generates uniquely named output files."""
 
     # Call helper functions
@@ -10492,6 +10812,7 @@ async def convert_pdf_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10510,7 +10831,7 @@ async def convert_pdf_to_xlsx(
     single_sheet: bool | None = Field(None, alias="SingleSheet", description="When enabled, combines all extracted tables into a single worksheet instead of creating separate sheets."),
     decimal_separator: Literal["auto", "period", "comma"] | None = Field(None, alias="DecimalSeparator", description="Specifies the character used as a decimal separator in numeric values. Auto-detection uses the formatting from the document, or you can force a specific separator."),
     thousands_separator: Literal["auto", "period", "comma", "space"] | None = Field(None, alias="ThousandsSeparator", description="Specifies the character used as a thousands separator in numeric values. Auto-detection uses the formatting from the document, or you can force a specific separator."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PDF documents to Excel spreadsheet format, with support for OCR text recognition, table extraction, and numeric formatting customization."""
 
     # Construct request model with validation
@@ -10542,6 +10863,7 @@ async def convert_pdf_to_xlsx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10554,7 +10876,7 @@ async def validate_pdfa_conformance(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output validation report file. The system sanitizes the filename, appends the appropriate extension, and adds indexing for multiple output files to ensure unique and safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open the PDF if it is password-protected."),
     expected_conformance: Literal["auto", "pdfA1a", "pdfA1b", "pdfA2a", "pdfA2b", "pdfA2u", "pdfA3a", "pdfA3b", "pdfA3u", "pdfA4", "pdfA4e", "pdfA4f"] | None = Field(None, alias="ExpectedConformance", description="The PDF/A conformance level to validate against. Use 'auto' to automatically detect the document's claimed conformance level, or specify a particular PDF/A version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validates a PDF file against PDF/A conformance standards. Analyzes the document to ensure it meets the specified PDF/A version requirements, with support for password-protected files and automatic conformance level detection."""
 
     # Construct request model with validation
@@ -10586,6 +10908,7 @@ async def validate_pdfa_conformance(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10600,7 +10923,7 @@ async def convert_png_to_gif(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     animation_delay: int | None = Field(None, alias="AnimationDelay", description="Time interval between animation frames, specified in hundredths of a second. Controls the playback speed of the animated GIF.", ge=0, le=20000),
     animation_iterations: int | None = Field(None, alias="AnimationIterations", description="Number of times the animation loops. Set to 0 for infinite looping.", ge=0, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PNG image files to animated GIF format with customizable animation settings. Supports single or batch file conversion with optional scaling and frame delay control."""
 
     # Construct request model with validation
@@ -10632,6 +10955,7 @@ async def convert_png_to_gif(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -10646,7 +10970,7 @@ async def convert_image_png_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Replace transparent areas with a specific color. Accepts RGBA or CMYK hex strings, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PNG image to JPG format with optional scaling, color space adjustment, and alpha channel handling. Supports both URL and file content input."""
 
     # Construct request model with validation
@@ -10678,6 +11002,7 @@ async def convert_image_png_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10693,7 +11018,7 @@ async def convert_image_to_pdf_png(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Color profile for the output PDF. Some profiles override the ColorSpace setting."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for long-term archival and preservation of the document."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PNG images to PDF format with optional image processing capabilities including rotation, color space adjustment, and PDF/A compliance."""
 
     # Call helper functions
@@ -10728,6 +11053,7 @@ async def convert_image_to_pdf_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10744,7 +11070,7 @@ async def convert_image_png_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PNG image to PNM (Portable Anymap) format with optional scaling and proportional constraint controls. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -10779,6 +11105,7 @@ async def convert_image_png_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10793,7 +11120,7 @@ async def convert_image_to_svg(
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Determines whether the image is traced in black-and-white or full color mode."),
     layering: Literal["cutout", "stacked"] | None = Field(None, alias="Layering", description="Specifies how color regions are arranged in the output SVG: cutout layers isolate each color region separately, while stacked overlays layer regions on top of each other."),
     curve_mode: Literal["pixel", "polygon", "spline"] | None = Field(None, alias="CurveMode", description="Defines the shape approximation method during tracing. Pixel mode follows exact pixel boundaries with minimal smoothing, Polygon creates straight-edged paths with sharp corners, and Spline generates smooth continuous curves for more natural shapes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PNG image to scalable vector graphics (SVG) format using configurable tracing and vectorization settings. Supports preset configurations for different image types and offers fine-grained control over color handling, layering, and curve approximation."""
 
     # Construct request model with validation
@@ -10825,6 +11152,7 @@ async def convert_image_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10838,7 +11166,7 @@ async def convert_png_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a multi-page TIFF file when converting multiple images or pages."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PNG images to TIFF format with optional scaling and multi-page support. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -10870,6 +11198,7 @@ async def convert_png_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10883,7 +11212,7 @@ async def convert_image_png_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Choose from standard color profiles or use the default setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PNG images to WebP format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -10915,6 +11244,7 @@ async def convert_image_png_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10929,7 +11259,7 @@ async def translate_po_file(
     translation_context: str | None = Field(None, alias="TranslationContext", description="Optional context to guide the translation engine. Provide a brief description of the product, audience, or domain to improve tone, terminology, and translation accuracy."),
     source_language: Literal["auto", "ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fr", "de", "el", "he", "hi", "id", "ko", "it", "ja", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "uk", "vi", "th"] | None = Field(None, alias="SourceLanguage", description="The source language for translation. Use 'auto' to automatically detect the language from the PO file content, or specify a concrete language code."),
     target_language: Literal["auto", "ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fr", "de", "el", "he", "hi", "id", "ko", "it", "ja", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "uk", "vi", "th"] | None = Field(None, alias="TargetLanguage", description="The target language for translation. Use 'auto' to preserve the language already defined in the PO file, or specify a concrete language code to override it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PO (Portable Object) localization file and translates its strings to a target language. Supports automatic language detection, selective translation of untranslated strings, and optional context guidance for improved translation accuracy."""
 
     # Construct request model with validation
@@ -10961,6 +11291,7 @@ async def translate_po_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -10974,7 +11305,7 @@ async def convert_presentation_to_jpg_template(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000."),
     convert_hidden_slides: bool | None = Field(None, alias="ConvertHiddenSlides", description="When enabled, includes hidden slides in the conversion output. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (POTX format) to JPG images. Supports password-protected files, selective page ranges, and optional inclusion of hidden slides."""
 
     # Construct request model with validation
@@ -11006,6 +11337,7 @@ async def convert_presentation_to_jpg_template(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11022,7 +11354,7 @@ async def convert_presentation_template_to_pdf(
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="When enabled, preserves document metadata such as title, author, and keywords in the PDF output. Defaults to true."),
     convert_speaker_notes: Literal["Disabled", "SeparatePage", "PageComments"] | None = Field(None, alias="ConvertSpeakerNotes", description="Determines how speaker notes are handled during conversion. Choose Disabled to exclude notes, SeparatePage to add notes on separate pages, or PageComments to embed notes as PDF comments."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-3a compliant document for long-term archival. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (POTX format) to PDF documents with support for selective page ranges, speaker notes handling, and PDF/A compliance options."""
 
     # Construct request model with validation
@@ -11054,6 +11386,7 @@ async def convert_presentation_template_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11073,7 +11406,7 @@ async def convert_presentation_to_png_template(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (POTX format) to PNG images. Supports page range selection, hidden slide inclusion, image scaling, and rotation adjustments."""
 
     # Call helper functions
@@ -11108,6 +11441,7 @@ async def convert_presentation_to_png_template(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11119,7 +11453,7 @@ async def convert_potx_to_pptx(
     file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for the target format, and adds indexing (e.g., _0, _1) when multiple output files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="The password required to open the input file if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PowerPoint template file (POTX format) to a standard PowerPoint presentation (PPTX format). Supports both file uploads and URL-based file sources, with optional password protection for encrypted documents."""
 
     # Construct request model with validation
@@ -11151,6 +11485,7 @@ async def convert_potx_to_pptx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11169,7 +11504,7 @@ async def convert_presentation_template_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Defines the bit order within each byte in the TIFF output."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (POTX format) to TIFF image files with support for selective page ranges, hidden slides, and customizable image compression and scaling options."""
 
     # Construct request model with validation
@@ -11201,6 +11536,7 @@ async def convert_presentation_template_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11216,7 +11552,7 @@ async def convert_presentation_to_webp_template(
     convert_hidden_slides: bool | None = Field(None, alias="ConvertHiddenSlides", description="When enabled, includes hidden slides in the conversion output."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, applies scaling only if the input image dimensions exceed the output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (POTX format) to WebP images. Supports page range selection, hidden slide inclusion, and image scaling options for flexible output control."""
 
     # Construct request model with validation
@@ -11248,6 +11584,7 @@ async def convert_presentation_to_webp_template(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11261,7 +11598,7 @@ async def convert_presentation_to_jpg_slideshow(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentation documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000."),
     convert_hidden_slides: bool | None = Field(None, alias="ConvertHiddenSlides", description="When enabled, includes hidden slides in the conversion output. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PPSX presentation files to JPG image format. Supports password-protected documents, selective page ranges, and optional inclusion of hidden slides."""
 
     # Construct request model with validation
@@ -11293,6 +11630,7 @@ async def convert_presentation_to_jpg_slideshow(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11309,7 +11647,7 @@ async def convert_presentation_slideshow_to_pdf(
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="When enabled, preserves document metadata such as title, author, and keywords in the PDF output."),
     convert_speaker_notes: Literal["Disabled", "SeparatePage", "PageComments"] | None = Field(None, alias="ConvertSpeakerNotes", description="Determines how speaker notes are handled during conversion: Disabled (omitted), SeparatePage (on separate pages), or PageComments (as PDF comments)."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-3a compliant document for long-term archival purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (PPSX format) to PDF documents with support for selective page ranges, speaker notes handling, and PDF/A compliance options."""
 
     # Construct request model with validation
@@ -11341,6 +11679,7 @@ async def convert_presentation_slideshow_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11360,7 +11699,7 @@ async def convert_presentation_to_png_slideshow(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PPSX presentation files to PNG image format, with support for selective slide conversion, hidden slide inclusion, and image transformation options."""
 
     # Call helper functions
@@ -11395,6 +11734,7 @@ async def convert_presentation_to_png_slideshow(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11405,7 +11745,7 @@ async def convert_presentation_to_png_slideshow(
 async def convert_presentation_ppsx_to_pptx(
     file_: str | None = Field(None, alias="File", description="The presentation file to convert, provided either as a URL reference or as direct binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the converted output file. The system automatically sanitizes the filename, appends the correct PPTX extension, and adds numeric indexing (e.g., filename_0.pptx, filename_1.pptx) when multiple output files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PowerPoint Show file (PPSX) to PowerPoint Presentation format (PPTX). Accepts file input via URL or direct file content and generates a properly named output file."""
 
     # Construct request model with validation
@@ -11437,6 +11777,7 @@ async def convert_presentation_ppsx_to_pptx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11455,7 +11796,7 @@ async def convert_presentation_slideshow_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Defines the bit order within each byte in the TIFF file. Use 0 for least-significant-bit-first or 1 for most-significant-bit-first."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when scaling the output image dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, applies scaling only if the input image dimensions exceed the target output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PPSX presentation files to TIFF image format with support for selective slide ranges, hidden slides, and customizable TIFF compression and color settings."""
 
     # Construct request model with validation
@@ -11487,6 +11828,7 @@ async def convert_presentation_slideshow_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11502,7 +11844,7 @@ async def convert_presentation_to_webp_slideshow(
     convert_hidden_slides: bool | None = Field(None, alias="ConvertHiddenSlides", description="When enabled, includes hidden slides in the conversion output."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, scales the image only if the input is larger than the target output size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (PPSX format) to WebP image format. Supports selective page conversion, hidden slide inclusion, and image scaling options."""
 
     # Construct request model with validation
@@ -11534,6 +11876,7 @@ async def convert_presentation_to_webp_slideshow(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11545,7 +11888,7 @@ async def convert_presentation_ppt_to_pptx(
     file_: str | None = Field(None, alias="File", description="The presentation file to convert, provided either as a URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PPTX file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.pptx, presentation_1.pptx) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input presentation if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PowerPoint presentation from legacy PPT format to modern PPTX format. Supports password-protected documents and accepts file input via URL or direct file content."""
 
     # Construct request model with validation
@@ -11577,6 +11920,7 @@ async def convert_presentation_ppt_to_pptx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11590,7 +11934,7 @@ async def convert_presentation_to_images(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PowerPoint documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 slides."),
     convert_hidden_slides: bool | None = Field(None, alias="ConvertHiddenSlides", description="When enabled, includes hidden slides in the conversion output. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PowerPoint presentations to individual JPG image files. Supports password-protected documents, selective page ranges, and optional inclusion of hidden slides."""
 
     # Construct request model with validation
@@ -11622,6 +11966,7 @@ async def convert_presentation_to_images(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11638,7 +11983,7 @@ async def convert_presentation_to_pdf(
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="When enabled, converts document metadata (title, author, keywords) to PDF metadata properties. Defaults to true."),
     convert_speaker_notes: Literal["Disabled", "SeparatePage", "PageComments"] | None = Field(None, alias="ConvertSpeakerNotes", description="Determines how speaker notes are handled during conversion. Choose Disabled to exclude notes, SeparatePage to append notes on separate pages, or PageComments to embed notes as PDF comments."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-3a compliant document for long-term archival. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (PPTX) to PDF format with support for selective page ranges, speaker notes handling, and PDF/A compliance. Allows customization of metadata conversion, hidden slide inclusion, and password-protected document access."""
 
     # Construct request model with validation
@@ -11670,6 +12015,7 @@ async def convert_presentation_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11686,7 +12032,7 @@ async def convert_presentation_to_images_png(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output images."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotate the output images by the specified angle in degrees.", ge=-360, le=360),
     transparent_color: str | None = Field(None, alias="TransparentColor", description="Make pixels matching the specified color transparent by adding an alpha channel. Accepts RGBA or CMYK hex strings, color names, or RGB format (e.g., 255,255,255 or 255,255,255,150 with alpha channel)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PowerPoint presentations to PNG images with support for selective slide ranges, hidden slides, image transformations, and transparency settings."""
 
     # Construct request model with validation
@@ -11718,6 +12064,7 @@ async def convert_presentation_to_images_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11729,7 +12076,7 @@ async def convert_presentation(
     file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output presentation file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.pptx, presentation_1.pptx) if multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input presentation if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PowerPoint presentation to PowerPoint format, with support for password-protected documents. Useful for standardizing presentation formats or re-encoding existing presentations."""
 
     # Construct request model with validation
@@ -11761,6 +12108,7 @@ async def convert_presentation(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11772,7 +12120,7 @@ async def encrypt_presentation(
     file_: str | None = Field(None, alias="File", description="The PowerPoint file to encrypt. Accepts either a file URL or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output encrypted presentation file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing if multiple files are generated."),
     encrypt_password: str | None = Field(None, alias="EncryptPassword", description="Password to encrypt the presentation. Only users with this password can open and view the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert and encrypt a PowerPoint presentation with password protection. The output file is automatically named and formatted for secure distribution."""
 
     # Construct request model with validation
@@ -11804,6 +12152,7 @@ async def encrypt_presentation(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11822,7 +12171,7 @@ async def convert_presentation_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="The logical order of bits within each byte in the TIFF output."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image is larger than the target output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PowerPoint presentations (PPTX) to TIFF image format with support for multi-page output, custom compression, and selective slide inclusion. Useful for creating archival-quality image files or preparing presentations for systems that require TIFF format."""
 
     # Construct request model with validation
@@ -11854,6 +12203,7 @@ async def convert_presentation_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11869,7 +12219,7 @@ async def convert_presentation_to_webp(
     convert_hidden_slides: bool | None = Field(None, alias="ConvertHiddenSlides", description="Include hidden slides in the conversion output. By default, hidden slides are excluded."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image dimensions. Enabled by default to prevent image distortion."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the output dimensions. Prevents upscaling of smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PowerPoint presentations to WebP image format with support for selective slide conversion, scaling options, and hidden slide inclusion. Each slide is converted to a separate WebP image file."""
 
     # Construct request model with validation
@@ -11901,6 +12251,7 @@ async def convert_presentation_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11911,7 +12262,7 @@ async def convert_presentation_to_webp(
 async def convert_prn_to_jpg(
     file_: str | None = Field(None, alias="File", description="The PRN file to convert, provided as either a publicly accessible URL or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The desired name for the output JPG file. The API automatically sanitizes the filename, appends the .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PRN (printer) file to JPG image format. Accepts file input as either a URL or raw file content and generates a JPG output file with sanitized naming."""
 
     # Construct request model with validation
@@ -11943,6 +12294,7 @@ async def convert_prn_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -11962,7 +12314,7 @@ async def convert_prn_to_pdf(
     open_page: int | None = Field(None, alias="OpenPage", description="Page number where the PDF should open when first displayed in a viewer.", ge=1, le=3000),
     open_zoom: Literal["Default", "ActualSize", "FitPage", "FitWidth", "FitHeight", "FitVisible", "25", "50", "75", "100", "125", "150", "200", "400", "800", "1600", "2400", "3200", "6400"] | None = Field(None, alias="OpenZoom", description="Default zoom level applied when opening the PDF in a viewer. Select from preset percentages or fit-to-page options."),
     color_space: Literal["Default", "RGB", "CMYK", "Gray"] | None = Field(None, alias="ColorSpace", description="Color space model for the PDF output. RGB is standard for screen viewing, CMYK for print production, and Gray for monochrome documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PRN (printer) files to PDF format with customizable metadata, resolution, and viewing preferences. Supports PDF version selection, color space configuration, and document properties customization."""
 
     # Construct request model with validation
@@ -11994,6 +12346,7 @@ async def convert_prn_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12004,7 +12357,7 @@ async def convert_prn_to_pdf(
 async def convert_prn_to_png(
     file_: str | None = Field(None, alias="File", description="The PRN file to convert, provided as either a publicly accessible URL or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) if multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PRN (printer) file to PNG image format. Accepts file input as either a URL or raw file content and generates a PNG output file with automatic naming."""
 
     # Construct request model with validation
@@ -12036,6 +12389,7 @@ async def convert_prn_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12046,7 +12400,7 @@ async def convert_prn_to_png(
 async def convert_prn_to_tiff(
     file_: str | None = Field(None, alias="File", description="The PRN file to convert, provided either as a URL reference or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file. The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric indexing (e.g., output_0.tiff, output_1.tiff) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PRN (printer) file to TIFF image format. Accepts file input as a URL or binary content and generates a TIFF output file with automatic naming and extension handling."""
 
     # Construct request model with validation
@@ -12078,6 +12432,7 @@ async def convert_prn_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12088,7 +12443,7 @@ async def convert_prn_to_tiff(
 async def convert_postscript_to_jpg(
     file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Can be provided as a URL or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file. The system automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PostScript (PS) files to JPG image format. Accepts file input as a URL or binary content and generates a uniquely named output file."""
 
     # Construct request model with validation
@@ -12120,6 +12475,7 @@ async def convert_postscript_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12139,7 +12495,7 @@ async def convert_postscript_to_pdf(
     open_page: int | None = Field(None, alias="OpenPage", description="Page number where the PDF should open when first viewed.", ge=1, le=3000),
     open_zoom: Literal["Default", "ActualSize", "FitPage", "FitWidth", "FitHeight", "FitVisible", "25", "50", "75", "100", "125", "150", "200", "400", "800", "1600", "2400", "3200", "6400"] | None = Field(None, alias="OpenZoom", description="Default zoom level when opening the PDF. Choose from preset percentages or fit-to-page options."),
     color_space: Literal["Default", "RGB", "CMYK", "Gray"] | None = Field(None, alias="ColorSpace", description="Color space for the PDF output. RGB is suitable for screen viewing, CMYK for professional printing, and Gray for monochrome documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PostScript files to PDF format with customizable metadata, resolution, and viewer settings. Supports URL or file content input with options to control PDF version, color space, and initial document appearance."""
 
     # Construct request model with validation
@@ -12171,6 +12527,7 @@ async def convert_postscript_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12181,7 +12538,7 @@ async def convert_postscript_to_pdf(
 async def convert_postscript_to_png(
     file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Can be provided as a URL reference or raw binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a PostScript file to PNG image format. Accepts file input as a URL or binary content and generates a PNG output file with optional custom naming."""
 
     # Construct request model with validation
@@ -12213,6 +12570,7 @@ async def convert_postscript_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12223,7 +12581,7 @@ async def convert_postscript_to_png(
 async def convert_postscript_to_tiff(
     file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Provide either a publicly accessible URL or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output TIFF file(s). The system automatically sanitizes the name, appends the .tiff extension, and adds numeric indexing (e.g., document_0.tiff, document_1.tiff) if multiple files are generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts PostScript (PS) files to TIFF image format. Accepts file input via URL or direct file content and generates output with sanitized, uniquely-named TIFF file(s)."""
 
     # Construct request model with validation
@@ -12255,6 +12613,7 @@ async def convert_postscript_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12269,7 +12628,7 @@ async def convert_psd_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Specify a color to replace transparent areas in the image. Accepts RGBA or CMYK hex strings, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PSD (Photoshop) file to JPG format with optional scaling, color space, and transparency handling. Supports both file uploads and URL-based sources."""
 
     # Construct request model with validation
@@ -12301,6 +12660,7 @@ async def convert_psd_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12317,7 +12677,7 @@ async def convert_image_psd_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PSD (Photoshop) image file to PNG format with optional scaling and proportional constraints. Supports both URL-based and direct file uploads."""
 
     # Call helper functions
@@ -12352,6 +12712,7 @@ async def convert_image_psd_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12368,7 +12729,7 @@ async def convert_image_psd_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PSD (Photoshop) image file to PNM (Portable Anymap) format with optional scaling and proportional constraints."""
 
     # Call helper functions
@@ -12403,6 +12764,7 @@ async def convert_image_psd_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12416,7 +12778,7 @@ async def convert_psd_to_svg(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only if the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PSD (Photoshop) file to SVG (Scalable Vector Graphics) format. Supports URL or file content input with optional scaling and color space configuration."""
 
     # Construct request model with validation
@@ -12448,6 +12810,7 @@ async def convert_psd_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12461,7 +12824,7 @@ async def convert_psd_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a single multi-page TIFF file containing all layers or pages from the input PSD, rather than separate single-page files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert PSD (Photoshop) files to TIFF format with optional scaling and multi-page support. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -12493,6 +12856,7 @@ async def convert_psd_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12506,7 +12870,7 @@ async def convert_image_psd_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Use 'default' for automatic detection, or specify a particular color model."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a PSD (Photoshop) image file to WebP format with optional scaling and color space adjustments. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -12538,6 +12902,7 @@ async def convert_image_psd_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12552,7 +12917,7 @@ async def convert_publication_to_jpg(
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="The JPG color mode and encoding type for the output image."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a publication file (PUB format) to JPG image format with configurable output quality, color mode, and scaling options. Supports password-protected documents and customizable output file naming."""
 
     # Construct request model with validation
@@ -12584,6 +12949,7 @@ async def convert_publication_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12606,7 +12972,7 @@ async def convert_pub_to_pdf(
     open_zoom: Literal["Default", "ActualSize", "FitPage", "FitWidth", "FitHeight", "FitVisible", "25", "50", "75", "100", "125", "150", "200", "400", "800", "1600", "2400", "3200", "6400"] | None = Field(None, alias="OpenZoom", description="Default zoom level when opening the PDF. Choose from preset percentages or fit-to-page options."),
     rotate_page: Literal["Disabled", "ByPage", "All"] | None = Field(None, alias="RotatePage", description="Automatically rotate pages based on text orientation. 'ByPage' rotates each page individually, 'All' rotates based on the majority text direction, 'Disabled' skips rotation."),
     color_space: Literal["Default", "RGB", "CMYK", "Gray"] | None = Field(None, alias="ColorSpace", description="Color space for the PDF output. RGB is standard for screen viewing, CMYK for professional printing, and Gray for monochrome documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Publisher document to PDF format with customizable metadata, resolution, and viewer settings. Supports password-protected documents and automatic page rotation based on text orientation."""
 
     # Construct request model with validation
@@ -12638,6 +13004,7 @@ async def convert_pub_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12651,7 +13018,7 @@ async def convert_pub_to_png(
     password: str | None = Field(None, alias="Password", description="Password required to open the Publisher file if it is password-protected."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Applies scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Microsoft Publisher (.pub) file to PNG image format. Supports password-protected documents and provides scaling options to control output image dimensions."""
 
     # Construct request model with validation
@@ -12683,6 +13050,7 @@ async def convert_pub_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12699,7 +13067,7 @@ async def convert_pub_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Defines the logical bit order within each byte of the TIFF data. Use 0 for most standard applications or 1 for specific compatibility requirements."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when resizing the output image. When disabled, allows free scaling without proportion constraints."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, scaling is applied only if the input image dimensions exceed the target output dimensions. When disabled, scaling is applied regardless of input size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Microsoft Publisher (.pub) files to TIFF image format with configurable compression, color depth, and scaling options. Supports password-protected documents and multi-page output."""
 
     # Construct request model with validation
@@ -12731,6 +13099,7 @@ async def convert_pub_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12742,7 +13111,7 @@ async def convert_rtf_to_html(
     file_: str | None = Field(None, alias="File", description="The RTF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated HTML output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `document_0.html`, `document_1.html`) when multiple files are produced from a single input."),
     inline_images: bool | None = Field(None, alias="InlineImages", description="Whether to embed images directly into the HTML output as base64-encoded data URIs, creating a single self-contained file without external image dependencies."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts RTF (Rich Text Format) documents to HTML format. Optionally embeds images inline within the HTML output for self-contained documents."""
 
     # Construct request model with validation
@@ -12774,6 +13143,7 @@ async def convert_rtf_to_html(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12786,7 +13156,7 @@ async def convert_rtf_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the RTF document if it is password-protected."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format. Only pages within this range will be included in the output."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts RTF (Rich Text Format) documents to JPG image format. Supports password-protected documents and allows specifying which pages to convert."""
 
     # Construct request model with validation
@@ -12818,6 +13188,7 @@ async def convert_rtf_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12836,7 +13207,7 @@ async def convert_rtf_to_pdf(
     bookmark_mode: Literal["none", "headings", "bookmarks"] | None = Field(None, alias="BookmarkMode", description="Controls bookmark generation in the output PDF. Use 'none' to disable bookmarks, 'headings' to generate from document headings, or 'bookmarks' to use existing bookmarks from the source document."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document before conversion."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-3a compliant document for long-term archival and preservation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts RTF (Rich Text Format) documents to PDF format with support for advanced features like bookmarks, metadata preservation, and PDF/A compliance. Handles protected documents, page range selection, and document structure conversion."""
 
     # Construct request model with validation
@@ -12868,6 +13239,7 @@ async def convert_rtf_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12881,7 +13253,7 @@ async def convert_rtf_to_text(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected RTF documents."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c))."),
     end_line_char: Literal["crlf", "cr", "lfcr", "lf"] | None = Field(None, alias="EndLineChar", description="Specifies the line ending character to use in the output text file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts RTF (Rich Text Format) documents to plain text format. Supports password-protected files, symbol substitution, and configurable line ending characters."""
 
     # Construct request model with validation
@@ -12913,6 +13285,7 @@ async def convert_rtf_to_text(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12927,7 +13300,7 @@ async def convert_svg_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Replace transparent areas with a specific color. Accepts RGBA or CMYK hex strings, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert SVG vector graphics to JPG raster format with customizable scaling, color space, and transparency handling options."""
 
     # Construct request model with validation
@@ -12959,6 +13332,7 @@ async def convert_svg_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -12973,7 +13347,7 @@ async def convert_svg_to_pdf(
     vertical_alignment: Literal["top", "center", "bottom"] | None = Field(None, alias="VerticalAlignment", description="Controls how the SVG image is positioned vertically within the PDF page."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Sets the background color of the PDF page. Accepts hexadecimal color codes (e.g., #FFFFFF), RGB values, HSL values, or standard color names."),
     use_image_page_size: bool | None = Field(None, alias="UseImagePageSize", description="When enabled, uses the SVG image's intrinsic width and height to determine the PDF page size, overriding any explicit page size settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts SVG (Scalable Vector Graphics) files to PDF format with customizable layout, alignment, and styling options. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -13005,6 +13379,7 @@ async def convert_svg_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13021,7 +13396,7 @@ async def convert_svg_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert SVG (Scalable Vector Graphics) files to PNG (Portable Network Graphics) format. Supports both URL-based and direct file content input with optional scaling controls."""
 
     # Call helper functions
@@ -13056,6 +13431,7 @@ async def convert_svg_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13072,7 +13448,7 @@ async def convert_svg_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts SVG (Scalable Vector Graphics) files to PNM (Portable Anymap) format. Supports URL or file content input with optional scaling and proportional constraint controls."""
 
     # Call helper functions
@@ -13107,6 +13483,7 @@ async def convert_svg_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13120,7 +13497,7 @@ async def convert_svg_image(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling transformations only when the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Use 'default' to preserve the source color space, or specify a target color space for conversion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an SVG image file with optional scaling and color space adjustments. Supports URL or direct file content input and produces a new SVG file with customizable output naming."""
 
     # Construct request model with validation
@@ -13152,6 +13529,7 @@ async def convert_svg_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13165,7 +13543,7 @@ async def convert_svg_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a single multi-page TIFF file containing all converted pages, or create separate TIFF files for each page when disabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert SVG (Scalable Vector Graphics) files to TIFF (Tagged Image File Format) with configurable scaling and multi-page output options. Supports both URL-based and direct file content input."""
 
     # Construct request model with validation
@@ -13197,6 +13575,7 @@ async def convert_svg_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13210,7 +13589,7 @@ async def convert_svg_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output WebP image. Choose from standard color profiles to optimize for different use cases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert SVG images to WebP format with optional scaling and color space adjustments. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -13242,6 +13621,7 @@ async def convert_svg_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13254,7 +13634,7 @@ async def fill_template_to_docx(
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple outputs."),
     binding_method: Literal["properties", "placeholders"] | None = Field(None, alias="BindingMethod", description="Specifies how data values are bound to the template. Use 'properties' to fill Word document custom property fields, or 'placeholders' to search for and replace named placeholders within the document text."),
     json_payload: str | None = Field(None, alias="JsonPayload", description="JSON array of key-value pairs to populate the template. Structure varies by binding method: for properties, include Name, Value, and Type fields; for placeholders, supports strings, integers, images, tables, HTML, and conditional values with optional dimensions and links."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Word document template to DOCX format by populating it with data values. Supports binding data to either document properties or text placeholders, enabling dynamic document generation from templates."""
 
     # Construct request model with validation
@@ -13286,6 +13666,7 @@ async def fill_template_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13298,7 +13679,7 @@ async def convert_template_to_pdf(
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are generated."),
     json_payload: str | None = Field(None, alias="JsonPayload", description="JSON array of data to populate into the template. Supports custom document properties (string, integer, datetime, boolean types) and placeholders (string, image, table, html, conditional types). Images should be provided as base64-encoded strings with optional dimensions and links."),
     binding_method: Literal["properties", "placeholders"] | None = Field(None, alias="BindingMethod", description="Specifies how data is bound to the template. Use 'properties' to fill Word document custom properties fields, or 'placeholders' to search for and replace named placeholders within the document text."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a template document to PDF format while populating custom properties or placeholders with provided data. Supports dynamic content injection including text, images, tables, and HTML elements."""
 
     # Construct request model with validation
@@ -13330,6 +13711,7 @@ async def convert_template_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13344,7 +13726,7 @@ async def convert_tiff_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Specify a color to replace transparent areas in the image. Accepts RGBA or CMYK hex color codes, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Use 'default' for automatic detection, or specify a particular color model."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert TIFF image files to JPG format with optional scaling, color space adjustment, and transparency handling. Supports both file uploads and URL-based inputs."""
 
     # Construct request model with validation
@@ -13376,6 +13758,7 @@ async def convert_tiff_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13393,7 +13776,7 @@ async def convert_tiff_to_pdf(
     margin_vertical: int | None = Field(None, alias="MarginVertical", description="Vertical margin for the PDF page in millimeters. Valid range is 0 to 500 mm.", ge=0, le=500),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for long-term archival and preservation of the output PDF document."),
     alpha_channel: bool | None = Field(None, alias="AlphaChannel", description="Enable or disable the alpha channel (transparency) in the output image if available in the source TIFF."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert TIFF image files to PDF format with support for color space management, page margins, rotation, and PDF/A compliance. Handles single or multiple TIFF images and produces properly formatted PDF output."""
 
     # Construct request model with validation
@@ -13425,6 +13808,7 @@ async def convert_tiff_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13441,7 +13825,7 @@ async def convert_tiff_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert TIFF image files to PNG format with optional scaling and proportional constraint controls. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -13476,6 +13860,7 @@ async def convert_tiff_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13492,7 +13877,7 @@ async def convert_tiff_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a TIFF image file to PNM (Portable Anymap) format. Supports optional image scaling with proportional constraints and conditional scaling based on input dimensions."""
 
     # Call helper functions
@@ -13527,6 +13912,7 @@ async def convert_tiff_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13541,7 +13927,7 @@ async def convert_tiff_to_svg(
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Color processing mode for tracing the image. Choose between full color vectorization or black-and-white conversion."),
     layering: Literal["cutout", "stacked"] | None = Field(None, alias="Layering", description="Arrangement method for color regions in the output SVG. Cutout mode creates isolated layers, while stacked mode overlays regions for blending effects."),
     curve_mode: Literal["pixel", "polygon", "spline"] | None = Field(None, alias="CurveMode", description="Shape approximation method during tracing. Pixel mode follows exact boundaries with minimal smoothing, Polygon creates straight-edged paths with sharp corners, and Spline generates smooth continuous curves for natural-looking shapes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts TIFF raster images to scalable SVG vector format using configurable tracing and vectorization settings. Supports preset configurations for different image types, color modes, and curve approximation methods."""
 
     # Construct request model with validation
@@ -13573,6 +13959,7 @@ async def convert_tiff_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13586,7 +13973,7 @@ async def convert_tiff_image(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a multi-page TIFF file when processing multiple images or pages."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert and optimize TIFF images with scaling and multi-page support. Accepts file input as URL or binary content and generates output with customizable naming and formatting options."""
 
     # Construct request model with validation
@@ -13618,6 +14005,7 @@ async def convert_tiff_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13631,7 +14019,7 @@ async def convert_image_tiff_to_webp(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image. Choose from standard color profiles or use the default setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert TIFF image files to WebP format with optional scaling and color space adjustments. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -13663,6 +14051,7 @@ async def convert_image_tiff_to_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13675,7 +14064,7 @@ async def convert_text_to_image(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10 inclusive)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts text documents to JPG image format. Supports file uploads or URLs, with optional password protection for secured documents and configurable page range selection."""
 
     # Construct request model with validation
@@ -13707,6 +14096,7 @@ async def convert_text_to_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13722,7 +14112,7 @@ async def convert_text_to_pdf(
     font_size: int | None = Field(None, alias="FontSize", description="The font size in points for text in the PDF.", ge=4, le=72),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, creates a PDF/A-1b compliant document suitable for long-term archival and preservation."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in millimeters as a comma-separated string in the format: left,right,top,bottom (e.g., '10,10,15,15')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts text files to PDF format with customizable formatting options including font selection, size, and page range specification. Supports PDF/A-1b compliance for archival purposes."""
 
     # Call helper functions
@@ -13757,6 +14147,7 @@ async def convert_text_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13767,7 +14158,7 @@ async def convert_text_to_pdf(
 async def convert_vsdx_to_jpg(
     file_: str | None = Field(None, alias="File", description="The Visio file to convert, provided either as a publicly accessible URL or as binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPEG file. The system automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple files are generated from a single input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Visio diagram file (VSDX format) to JPEG image format. Accepts file input as a URL or binary content and generates optimized JPEG output with customizable naming."""
 
     # Construct request model with validation
@@ -13799,6 +14190,7 @@ async def convert_vsdx_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13810,7 +14202,7 @@ async def convert_vsdx_to_pdf(
     file_: str | None = Field(None, alias="File", description="The Visio file to convert. Accepts either a URL reference or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `document_0.pdf`, `document_1.pdf`) when multiple files are produced."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="PDF/A compliance version for the output file. Use 'none' for standard PDF, or specify a PDF/A version for long-term archival compliance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Visio diagram file (VSDX format) to PDF format. Supports optional PDF/A compliance versions for archival purposes."""
 
     # Construct request model with validation
@@ -13842,6 +14234,7 @@ async def convert_vsdx_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13853,7 +14246,7 @@ async def convert_vsdx_to_png(
     file_: str | None = Field(None, alias="File", description="The Visio file to convert. Provide either a URL pointing to the file or the raw file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PNG output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `diagram_0.png`, `diagram_1.png`) for multiple output files."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for the generated PNG image. Specify a color name, RGB values (comma-separated), or HEX code. Use `transparent` to preserve transparency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a Visio diagram file (VSDX format) to PNG image format. Supports file input via URL or direct file content, with optional background color customization."""
 
     # Construct request model with validation
@@ -13885,6 +14278,7 @@ async def convert_vsdx_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13897,7 +14291,7 @@ async def convert_vsdx_to_tiff(
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `diagram_0.tiff`, `diagram_1.tiff`) for multi-page outputs to ensure unique, safe file naming."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for the generated TIFF images. Specify a color name (e.g., `white`, `black`), RGB values (comma-separated), HEX code, or `transparent` to preserve transparency."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Whether to generate a single multi-page TIFF file or separate single-page files. When enabled, all pages are combined into one TIFF; when disabled, each page becomes a separate file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Visio diagram files (VSDX format) to TIFF image format. Supports single or multi-page TIFF output with customizable background color handling."""
 
     # Construct request model with validation
@@ -13929,6 +14323,7 @@ async def convert_vsdx_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -13948,7 +14343,7 @@ async def convert_webpage_to_jpg(
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the page request. Provide headers as pipe-separated pairs with colon-delimited name and value."),
     zoom: float | None = Field(None, alias="Zoom", description="Set the zoom level for webpage rendering. Values below 1.0 zoom out, values above 1.0 zoom in.", ge=0.1, le=10),
     url: str | None = Field(None, alias="Url", description="The URL of the webpage to convert. Special characters in the URL must be properly encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a webpage to a JPG image file with support for JavaScript rendering, ad blocking, cookie consent removal, and custom styling. Allows fine-grained control over page rendering behavior including element waiting, custom CSS, HTTP headers, and zoom levels."""
 
     # Construct request model with validation
@@ -14025,7 +14420,7 @@ async def convert_webpage_to_pdf(
     header_include_total_pages: bool | None = Field(None, description="If true, include a span with class 'totalPages' for total page count."),
     header_include_title: bool | None = Field(None, description="If true, include a span with class 'title' for document title."),
     header_include_date: bool | None = Field(None, description="If true, include a span with class 'date' for current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a web page to PDF format with advanced rendering options including JavaScript execution, custom styling, viewport configuration, and page layout controls. Supports ad blocking, cookie consent removal, lazy content loading, and granular page break management."""
 
     # Call helper functions
@@ -14081,7 +14476,7 @@ async def convert_webpage_to_png(
     zoom: float | None = Field(None, alias="Zoom", description="Zoom level for rendering the webpage. Values below 1.0 zoom out, values above 1.0 zoom in.", ge=0.1, le=10),
     transparent_background: bool | None = Field(None, alias="TransparentBackground", description="Use a transparent background instead of the default white background. The source HTML body element should have its background color set to 'none' for this to work effectively."),
     url: str | None = Field(None, alias="Url", description="The URL of the web page to convert. Special characters in the URL must be properly encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a web page to a PNG image with support for JavaScript rendering, ad blocking, cookie consent removal, and custom styling. Allows fine-grained control over rendering behavior through CSS media types, zoom levels, and DOM element waiting."""
 
     # Construct request model with validation
@@ -14132,7 +14527,7 @@ async def convert_webpage_to_text(
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the page request. Provide headers as name-value pairs separated by pipe characters, with each pair separated by a colon."),
     url: str | None = Field(None, alias="Url", description="URL of the web page to convert. Special characters such as query parameters must be properly URL-encoded."),
     extract_elements: str | None = Field(None, alias="ExtractElements", description="CSS selector to extract specific DOM elements instead of converting the entire page. Use class selectors (.class-name), ID selectors (#elementId), or tag names for targeted content retrieval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts a web page to plain text format with optional content filtering, JavaScript execution, and targeted element extraction. Supports custom headers, cookies, CSS styling, and DOM element waiting for dynamic content."""
 
     # Construct request model with validation
@@ -14178,7 +14573,7 @@ async def convert_webp_to_gif(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only resize the image if the input dimensions are larger than the target output size."),
     animation_delay: int | None = Field(None, alias="AnimationDelay", description="Time interval between animation frames, specified in hundredths of a second. Controls animation playback speed.", ge=0, le=20000),
     animation_iterations: int | None = Field(None, alias="AnimationIterations", description="Number of times the animation loops. Set to 0 for infinite looping.", ge=0, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert WebP image files to animated GIF format with customizable animation settings. Supports single or batch file conversion with optional scaling and frame delay control."""
 
     # Construct request model with validation
@@ -14210,6 +14605,7 @@ async def convert_webp_to_gif(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["Files"],
         headers=_http_headers,
     )
 
@@ -14224,7 +14620,7 @@ async def convert_webp_to_jpg(
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     alpha_color: str | None = Field(None, alias="AlphaColor", description="Replace transparent areas with a solid color. Accepts RGBA or CMYK hex strings, or standard color names."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert WebP image files to JPG format with optional scaling and color space adjustments. Supports both URL-based and direct file uploads."""
 
     # Construct request model with validation
@@ -14256,6 +14652,7 @@ async def convert_webp_to_jpg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14271,7 +14668,7 @@ async def convert_webp_to_pdf(
     color_profile: Literal["default", "isocoatedv2"] | None = Field(None, alias="ColorProfile", description="Apply a specific color profile to the output PDF. Some profiles may override the ColorSpace setting. Use 'isocoatedv2' for ISO Coated v2 profile compliance."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Enable PDF/A-1b compliance for the output document. When true, creates an archival-grade PDF suitable for long-term preservation."),
     margin: str | None = Field(None, alias="Margin", description="Page margins in millimeters as 'horizontal,vertical' (e.g., '10,20')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert WebP image files to PDF format with support for rotation, color space configuration, and PDF/A compliance. Accepts file input as URL or binary content and generates a properly named output PDF file."""
 
     # Call helper functions
@@ -14306,6 +14703,7 @@ async def convert_webp_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14322,7 +14720,7 @@ async def convert_webp_to_png(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert WebP image files to PNG format with optional scaling and proportional constraints. Supports both URL-based and direct file content input."""
 
     # Call helper functions
@@ -14357,6 +14755,7 @@ async def convert_webp_to_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14373,7 +14772,7 @@ async def convert_webp_to_pnm(
     green: int | None = Field(None, description="Green channel value (0-255)"),
     blue: int | None = Field(None, description="Blue channel value (0-255)"),
     alpha: int | None = Field(None, description="Alpha channel value (0-255), where 0 is fully transparent and 255 is fully opaque. Optional; if not provided, defaults to 255 (fully opaque)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a WebP image to PNM (Portable Anymap) format with optional scaling and proportional constraint controls."""
 
     # Call helper functions
@@ -14408,6 +14807,7 @@ async def convert_webp_to_pnm(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14421,7 +14821,7 @@ async def convert_webp_to_svg(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Define the color space for the output SVG image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert WebP image files to SVG vector format. Supports URL or file content input with optional scaling and color space configuration."""
 
     # Construct request model with validation
@@ -14453,6 +14853,7 @@ async def convert_webp_to_svg(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14466,7 +14867,7 @@ async def convert_webp_to_tiff(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a multi-page TIFF file when converting. If disabled, creates a single-page TIFF."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert WebP image files to TIFF format with optional scaling and multi-page support. Accepts file input as URL or binary content and generates properly named output file(s)."""
 
     # Construct request model with validation
@@ -14498,6 +14899,7 @@ async def convert_webp_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14511,7 +14913,7 @@ async def convert_webp_image(
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="The color space to apply to the output image."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a WebP image to WebP format with optional scaling and color space adjustments. Supports URL or file content input and generates a uniquely named output file."""
 
     # Construct request model with validation
@@ -14543,6 +14945,7 @@ async def convert_webp_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14561,7 +14964,7 @@ async def convert_wpd_to_pdf(
     bookmark_mode: Literal["none", "headings", "bookmarks"] | None = Field(None, alias="BookmarkMode", description="Controls bookmark generation in the output PDF. Use 'none' to disable bookmarks, 'headings' to auto-generate from document headings, or 'bookmarks' to use existing bookmarks from the source file."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Automatically updates all tables of content in the document before conversion to ensure accuracy in the PDF output."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Generates a PDF/A-3a compliant document for long-term archival and compliance requirements."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts WordPerfect documents (.wpd) to PDF format with support for metadata preservation, accessibility tags, and PDF/A compliance. Handles protected documents and allows selective page range conversion."""
 
     # Construct request model with validation
@@ -14593,6 +14996,7 @@ async def convert_wpd_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14604,7 +15008,7 @@ async def convert_spreadsheet_format(
     file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `report_0.xlsx`, `report_1.xlsx`) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input file if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel spreadsheet file to Excel format, with support for password-protected documents. Useful for standardizing file formats or re-encoding existing spreadsheets."""
 
     # Construct request model with validation
@@ -14636,6 +15040,7 @@ async def convert_spreadsheet_format(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14647,7 +15052,7 @@ async def convert_spreadsheet_xls_to_xlsx(
     file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct XLSX extension, and adds numeric indexing (e.g., report_0.xlsx, report_1.xlsx) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="The password required to open the input file if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Microsoft Excel files from the legacy XLS format to the modern XLSX format. Supports password-protected documents and generates uniquely named output files."""
 
     # Construct request model with validation
@@ -14679,6 +15084,7 @@ async def convert_spreadsheet_xls_to_xlsx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14690,7 +15096,7 @@ async def convert_xlsb_to_csv(
     file_: str | None = Field(None, alias="File", description="The XLSB file to convert. Can be provided as a file upload or as a URL pointing to the source file."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output CSV file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.csv, output_1.csv) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the XLSB file if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel Binary Workbook (XLSB) file to CSV format. Supports both file uploads and URL-based sources, with optional password protection for encrypted documents."""
 
     # Construct request model with validation
@@ -14722,6 +15128,7 @@ async def convert_xlsb_to_csv(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14740,7 +15147,7 @@ async def convert_xlsb_to_pdf(
     decimal_separator: str | None = Field(None, alias="DecimalSeparator", description="Character used to separate decimal places in numeric values."),
     date_format: Literal["us", "iso", "eu", "german", "japanese"] | None = Field(None, alias="DateFormat", description="Sets the date format for the output document, overriding the default US locale to ensure consistency across regional Excel settings."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Creates a PDF/A-1b compliant document for long-term archival and preservation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Excel Binary Workbook (XLSB) files to PDF format with support for metadata preservation, formatting options, and PDF/A compliance. Handles protected documents and provides flexible control over layout, number formatting, and date localization."""
 
     # Construct request model with validation
@@ -14772,6 +15179,7 @@ async def convert_xlsb_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14783,7 +15191,7 @@ async def convert_spreadsheet_to_csv(
     file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a URL reference or binary file content."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output CSV file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., report_0.csv, report_1.csv) if multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the Excel file if it is password-protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel spreadsheet (XLSX) file to CSV format. Supports password-protected documents and customizable output file naming."""
 
     # Construct request model with validation
@@ -14815,6 +15223,7 @@ async def convert_spreadsheet_to_csv(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14829,7 +15238,7 @@ async def convert_spreadsheet_to_image_xlsx(
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="The JPG color format to use for the output image."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the output dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel spreadsheet file to JPG image format. Supports password-protected documents and provides options for image type, scaling, and proportional resizing."""
 
     # Construct request model with validation
@@ -14861,6 +15270,7 @@ async def convert_spreadsheet_to_image_xlsx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14879,7 +15289,7 @@ async def convert_spreadsheet_to_pdf(
     decimal_separator: str | None = Field(None, alias="DecimalSeparator", description="Character used to separate decimal places in numeric values (e.g., period for 1.5 or comma for 1,5)."),
     date_format: Literal["us", "iso", "eu", "german", "japanese"] | None = Field(None, alias="DateFormat", description="Date format standard for the output PDF. Overrides the default US locale format to ensure consistent date representation regardless of regional Excel settings."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Generates a PDF/A-1b compliant document for long-term archival and preservation purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Excel spreadsheets (XLSX format) to PDF documents with support for formatting options, metadata preservation, and PDF/A compliance. Handles protected documents, customizable number/date formatting, and multi-page layout control."""
 
     # Construct request model with validation
@@ -14911,6 +15321,7 @@ async def convert_spreadsheet_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14924,7 +15335,7 @@ async def convert_spreadsheet_to_image_png(
     password: str | None = Field(None, alias="Password", description="Password required to open the Excel file if it is password-protected."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to fit the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Applies scaling only when the input image dimensions exceed the target output dimensions, preventing upscaling of smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel spreadsheet file to PNG image format. Supports URL or file content input with optional scaling and password protection for secured documents."""
 
     # Construct request model with validation
@@ -14956,6 +15367,7 @@ async def convert_spreadsheet_to_image_png(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -14967,7 +15379,7 @@ async def encrypt_xlsx_workbook(
     file_: str | None = Field(None, alias="File", description="The Excel file to encrypt. Accepts either a file URL or raw file content."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output encrypted file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.xlsx`, `report_1.xlsx`) if multiple files are generated."),
     encrypt_password: str | None = Field(None, alias="EncryptPassword", description="The password required to open the encrypted Excel workbook. Users must enter this password to access the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an Excel workbook to a password-protected format. Encrypts the file with a specified password that must be entered to open it."""
 
     # Construct request model with validation
@@ -14999,6 +15411,7 @@ async def encrypt_xlsx_workbook(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -15015,7 +15428,7 @@ async def convert_spreadsheet_to_tiff(
     fill_order: Literal["0", "1"] | None = Field(None, alias="FillOrder", description="Defines the bit order within each byte: use 0 for most significant bit first (standard), or 1 for least significant bit first."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="When enabled, maintains the original aspect ratio when scaling the output image to fit specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="When enabled, scaling is applied only if the input image dimensions exceed the target output dimensions. Smaller images are not enlarged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Excel spreadsheet files to TIFF image format with configurable compression, color depth, and multi-page support. Supports password-protected documents and optional image scaling."""
 
     # Construct request model with validation
@@ -15047,6 +15460,7 @@ async def convert_spreadsheet_to_tiff(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -15060,7 +15474,7 @@ async def convert_spreadsheet_to_image_webp(
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected Excel documents."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to fit the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Applies scaling only when the input image dimensions exceed the output dimensions, preserving quality for smaller images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel spreadsheet file to WebP image format. Supports password-protected documents and configurable image scaling options."""
 
     # Construct request model with validation
@@ -15092,6 +15506,7 @@ async def convert_spreadsheet_to_image_webp(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -15103,7 +15518,7 @@ async def convert_spreadsheet_format_modern(
     file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., filename_0, filename_1) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="The password required to open password-protected spreadsheets. Only needed if the input file is encrypted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an Excel spreadsheet to Excel format, with support for password-protected documents. Useful for standardizing file formats or re-encoding existing spreadsheets."""
 
     # Construct request model with validation
@@ -15135,6 +15550,7 @@ async def convert_spreadsheet_format_modern(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -15153,7 +15569,7 @@ async def convert_spreadsheet_template_to_pdf(
     decimal_separator: str | None = Field(None, alias="DecimalSeparator", description="Character used to separate decimal places in numeric values."),
     date_format: Literal["us", "iso", "eu", "german", "japanese"] | None = Field(None, alias="DateFormat", description="Date format standard for the output document, overriding the default US locale format to ensure consistency across regional Excel settings."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="Generates a PDF/A-1b compliant document for long-term archival and preservation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts Excel spreadsheet files (XLTX format) to PDF documents with customizable formatting, metadata handling, and locale-specific number/date formatting options."""
 
     # Construct request model with validation
@@ -15185,6 +15601,7 @@ async def convert_spreadsheet_template_to_pdf(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -15198,7 +15615,7 @@ async def convert_xml_to_docx(
     password: str | None = Field(None, alias="Password", description="Password required to open the input XML file if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Automatically updates all tables of content in the converted document."),
     update_references: bool | None = Field(None, alias="UpdateReferences", description="Automatically updates all reference fields in the converted document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts XML documents to DOCX format with optional support for password-protected files and automatic updates to tables of content and reference fields."""
 
     # Construct request model with validation
@@ -15230,6 +15647,7 @@ async def convert_xml_to_docx(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 
@@ -15240,7 +15658,7 @@ async def convert_xml_to_docx(
 async def extract_archive(
     file_: str | None = Field(None, alias="File", description="The ZIP archive file to extract. Can be provided as a URL or raw file content in binary format."),
     password: str | None = Field(None, alias="Password", description="Password for opening password-protected ZIP archives. Required only if the archive is encrypted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extracts contents from a ZIP archive file. Supports password-protected archives by providing the required password."""
 
     # Construct request model with validation
@@ -15272,6 +15690,7 @@ async def extract_archive(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["File"],
         headers=_http_headers,
     )
 

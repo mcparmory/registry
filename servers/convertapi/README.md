@@ -1,11 +1,12 @@
 # ConvertAPI MCP Server
+<!-- mcp-name: com.mcparmory/convertapi -->
 
 Base URL: https://v2.convertapi.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
 | **Tools** | 303 |
-| **Auth** | Bearer Token, JWTBearerAuth |
+| **Auth** | Bearer Token |
 
 ## API Info
 - **API License:** Apache 2.0 — [http://www.apache.org/licenses/LICENSE-2.0.html](http://www.apache.org/licenses/LICENSE-2.0.html)
@@ -20,8 +21,6 @@ Base URL: https://v2.convertapi.com
 ```bash
 SECRET_BEARER_TOKEN=YOUR_SECRET_BEARER_TOKEN \
 TOKEN_BEARER_TOKEN=YOUR_TOKEN_BEARER_TOKEN \
-JWT_PRIVATE_KEY=YOUR_JWT_PRIVATE_KEY \
-JWT_ISSUER_ID=YOUR_JWT_ISSUER_ID \
 uvx mcparmory-convertapi
 ```
 
@@ -31,8 +30,6 @@ uvx mcparmory-convertapi
 pip install mcparmory-convertapi
 SECRET_BEARER_TOKEN=YOUR_SECRET_BEARER_TOKEN \
 TOKEN_BEARER_TOKEN=YOUR_TOKEN_BEARER_TOKEN \
-JWT_PRIVATE_KEY=YOUR_JWT_PRIVATE_KEY \
-JWT_ISSUER_ID=YOUR_JWT_ISSUER_ID \
 mcparmory-convertapi
 ```
 
@@ -48,9 +45,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "args": ["mcparmory-convertapi"],
       "env": {
         "SECRET_BEARER_TOKEN": "YOUR_SECRET_BEARER_TOKEN",
-        "TOKEN_BEARER_TOKEN": "YOUR_TOKEN_BEARER_TOKEN",
-        "JWT_PRIVATE_KEY": "YOUR_JWT_PRIVATE_KEY",
-        "JWT_ISSUER_ID": "YOUR_JWT_ISSUER_ID"
+        "TOKEN_BEARER_TOKEN": "YOUR_TOKEN_BEARER_TOKEN"
       }
     }
   }
@@ -65,21 +60,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `SECRET_BEARER_TOKEN` — Bearer token
 - `TOKEN_BEARER_TOKEN` — Bearer token
-- `JWT_PRIVATE_KEY` — Path to .pem file or inline PEM key
-- `JWT_ISSUER_ID` — Issuer ID (App ID, Team ID, etc.)
 Do not commit credentials to version control.
-
-### JWT Bearer
-
-This server uses **JWT Bearer authentication** — tokens are generated automatically from a private key.
-
-Set `JWT_PRIVATE_KEY` to either:
-- **File path:** `/path/to/private-key.pem`
-- **Inline PEM:** paste the full PEM content with newlines replaced by `\n`
-
-Set `JWT_ISSUER_ID` to the application/issuer ID provided by the API (e.g. GitHub App ID).
-
-Optional settings (see `.env` for details): algorithm (default RS256), expiry (default 600s), audience, key ID, token exchange URL.
 
 ---
 
@@ -112,6 +93,17 @@ Example (if server is at `/home/user/mcp-servers/convertapi`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e SECRET_BEARER_TOKEN=YOUR_SECRET_BEARER_TOKEN \
+  -e TOKEN_BEARER_TOKEN=YOUR_TOKEN_BEARER_TOKEN \
+  ghcr.io/mcparmory/convertapi:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -119,7 +111,9 @@ docker build -t convertapi .
 docker run -p 8000:8000 --env-file .env convertapi
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

@@ -5,15 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "mcparmory-convertapi"
 version = "1.0.0"
-description = "MCP server for ConvertAPI"
+description = "Convert files across 500+ formats: documents, PDFs, and images"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=3.1.0",
+    "fastmcp>=3.2.4",
     "httpx>=0.27.0,<1.0.0",
     "pydantic>=2.0.0,<3.0.0",
-    "PyJWT[crypto]>=2.8.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0"
 ]
 classifiers = [
