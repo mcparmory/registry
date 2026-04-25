@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-rootly"
-version = "1.0.2"
+version = "1.0.3"
 description = "Manage incident alerts, events, and workflows with custom automations"
 readme = "README.md"
 license = "MIT"

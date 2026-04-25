@@ -1,7 +1,7 @@
 """
 Authentication module for Rootly MCP server.
 
-Generated: 2026-04-24 08:34:45 UTC
+Generated: 2026-04-24 22:40:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -303,7 +303,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_on_call_role": [["bearer_auth"]],
     "get_on_call_role": [["bearer_auth"]],
     "update_on_call_role": [["bearer_auth"]],
-    "delete_on_call_role": [["bearer_auth"]],
     "list_on_call_shadows": [["bearer_auth"]],
     "create_on_call_shadow": [["bearer_auth"]],
     "get_on_call_shadow": [["bearer_auth"]],

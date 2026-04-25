@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Rootly MCP Server
-Generated: 2026-04-24 08:34:45 UTC
+Generated: 2026-04-24 22:40:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -41,7 +41,7 @@ from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.rootly.com")
 SERVER_NAME = "Rootly"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -11255,42 +11255,6 @@ async def update_on_call_role(
         request_id=_request_id,
         body=_http_body,
         body_content_type="application/vnd.api+json",
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: OnCallRoles
-@mcp.tool()
-async def delete_on_call_role(id_: str = Field(..., alias="id", description="The unique identifier of the On-Call Role to delete.")) -> dict[str, Any] | ToolResult:
-    """Permanently delete a specific On-Call Role by its unique identifier. This action cannot be undone."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.DeleteOnCallRoleRequest(
-            path=_models.DeleteOnCallRoleRequestPath(id_=id_)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_on_call_role: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/v1/on_call_roles/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/on_call_roles/{id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_on_call_role")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("delete_on_call_role", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_on_call_role",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
         headers=_http_headers,
     )
 

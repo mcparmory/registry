@@ -5,7 +5,7 @@ Base URL: https://api.rootly.com
 | | |
 |---|---|
 | **Category** | Infrastructure |
-| **Tools** | 349 |
+| **Tools** | 348 |
 | **Auth** | Bearer Token |
 
 ---

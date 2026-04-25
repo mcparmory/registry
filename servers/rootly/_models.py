@@ -1,7 +1,7 @@
 """
 Rootly MCP Server - Pydantic Models
 
-Generated: 2026-04-24 08:34:45 UTC
+Generated: 2026-04-24 22:40:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -109,7 +109,6 @@ __all__ = [
     "DeleteIncidentStatusPageRequest",
     "DeleteIncidentTypeRequest",
     "DeleteLiveCallRouterRequest",
-    "DeleteOnCallRoleRequest",
     "DeleteOnCallShadowRequest",
     "DeleteOverrideShiftRequest",
     "DeletePlaybookRequest",
@@ -3586,13 +3585,6 @@ class UpdateOnCallRoleRequest(StrictModel):
     """Update an existing On-Call Role with new configuration, including slug, system role type, and granular permissions across alert sources, contacts, schedules, and other resources."""
     path: UpdateOnCallRoleRequestPath
     body: UpdateOnCallRoleRequestBody
-
-# Operation: delete_on_call_role
-class DeleteOnCallRoleRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the On-Call Role to delete.")
-class DeleteOnCallRoleRequest(StrictModel):
-    """Permanently delete a specific On-Call Role by its unique identifier. This action cannot be undone."""
-    path: DeleteOnCallRoleRequestPath
 
 # Operation: list_on_call_shadows
 class ListOnCallShadowsRequestPath(StrictModel):
