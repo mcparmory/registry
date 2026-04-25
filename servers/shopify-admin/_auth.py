@@ -1,0 +1,1695 @@
+"""
+Authentication module for Shopify Admin MCP server.
+
+Generated: 2026-04-25 19:22:51 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
+
+This module contains:
+1. Authentication class implementations (OAuth2)
+2. Operation-to-auth requirements mapping (OPERATION_AUTH_MAP)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import collections
+import hashlib
+import json
+import logging
+import os
+import re
+import time
+import webbrowser
+from pathlib import Path
+from urllib.parse import urlparse
+
+from authlib.common.security import generate_token
+from authlib.integrations.httpx_client import OAuth2Client
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "OAuth2Auth",
+    "APIKeyAuth",
+    "OPERATION_AUTH_MAP",
+]
+
+# ============================================================================
+# Callback Port Configuration
+# ============================================================================
+
+# OAuth2/OIDC callback server ports (configured in .env)
+# Each auth scheme uses a different port to avoid conflicts when multiple
+# schemes are active simultaneously (e.g., OAuth2 + OIDC).
+OAUTH2_CALLBACK_PORT = int(os.environ.get("OAUTH2_CALLBACK_PORT", 9400))
+
+# ============================================================================
+# Authentication Classes
+# ============================================================================
+
+class OAuth2Auth:
+    """
+    OAuth 2.0 authentication for Shopify Admin API.
+
+    Flow: authorizationCode
+    Uses: authlib for OAuth2 protocol handling
+
+    NOTE: Access tokens are obtained automatically through OAuth2 flow.
+    By default they are sent as "Authorization: Bearer <token>", but some
+    providers use a custom header instead.
+
+    Configuration (environment variables):
+        - OAUTH2_CLIENT_ID: OAuth2 client ID (required)
+        - OAUTH2_CLIENT_SECRET: OAuth2 client secret (required)
+        - OAUTH2_SCOPES: Comma-separated scopes (required)
+    Redirect URI:
+        - Fixed: http://localhost:<OAUTH2_CALLBACK_PORT>/callback
+        - Configured via OAUTH2_CALLBACK_PORT in .env (default: 9400)
+        - Must match redirect URI in your OAuth application configuration
+    Token Storage:
+        Location: ./tokens/oauth2auth_tokens.json
+        Permissions: 0o600 (owner read/write only)
+        Format: JSON with access_token, refresh_token, expires_at
+
+    URLs:
+        Authorization URL: https://{store_name}.myshopify.com/admin/oauth/authorize
+        Token URL: https://{store_name}.myshopify.com/admin/oauth/access_token
+
+    Available Scopes (configure via OAUTH2_SCOPES):
+        - read_analytics
+        - read_app_proxy
+        - write_app_proxy
+        - read_assigned_fulfillment_orders
+        - write_assigned_fulfillment_orders
+        - read_audit_events
+        - read_customer_events
+        - read_cart_transforms
+        - write_cart_transforms
+        - read_all_cart_transforms
+        - read_validations
+        - write_validations
+        - read_cash_tracking
+        - write_cash_tracking
+        - read_channels
+        - write_channels
+        - read_checkout_and_accounts_configurations
+        - write_checkout_and_accounts_configurations
+        - read_checkout_branding_settings
+        - write_checkout_branding_settings
+        - write_checkouts
+        - read_checkouts
+        - read_companies
+        - write_companies
+        - read_custom_fulfillment_services
+        - write_custom_fulfillment_services
+        - read_custom_pixels
+        - write_custom_pixels
+        - read_customers
+        - write_customers
+        - read_customer_data_erasure
+        - write_customer_data_erasure
+        - read_customer_merge
+        - write_customer_merge
+        - read_delivery_customizations
+        - write_delivery_customizations
+        - read_price_rules
+        - write_price_rules
+        - read_discounts
+        - write_discounts
+        - read_discounts_allocator_functions
+        - write_discounts_allocator_functions
+        - read_discovery
+        - write_discovery
+        - write_draft_orders
+        - read_draft_orders
+        - read_files
+        - write_files
+        - read_fulfillment_constraint_rules
+        - write_fulfillment_constraint_rules
+        - read_fulfillments
+        - write_fulfillments
+        - read_gift_card_transactions
+        - write_gift_card_transactions
+        - read_gift_cards
+        - write_gift_cards
+        - write_inventory
+        - read_inventory
+        - write_inventory_shipments
+        - read_inventory_shipments
+        - write_inventory_shipments_received_items
+        - read_inventory_shipments_received_items
+        - write_inventory_transfers
+        - read_inventory_transfers
+        - read_legal_policies
+        - write_legal_policies
+        - read_delivery_option_generators
+        - write_delivery_option_generators
+        - read_locales
+        - write_locales
+        - write_locations
+        - read_locations
+        - read_marketing_integrated_campaigns
+        - write_marketing_integrated_campaigns
+        - write_marketing_events
+        - read_marketing_events
+        - read_markets
+        - write_markets
+        - read_markets_home
+        - write_markets_home
+        - read_merchant_managed_fulfillment_orders
+        - write_merchant_managed_fulfillment_orders
+        - read_metaobject_definitions
+        - write_metaobject_definitions
+        - read_metaobjects
+        - write_metaobjects
+        - read_online_store_navigation
+        - write_online_store_navigation
+        - read_online_store_pages
+        - write_online_store_pages
+        - write_order_edits
+        - read_order_edits
+        - read_orders
+        - write_orders
+        - write_packing_slip_templates
+        - read_packing_slip_templates
+        - read_payment_terms
+        - write_payment_terms
+        - read_payment_customizations
+        - write_payment_customizations
+        - read_privacy_settings
+        - write_privacy_settings
+        - read_product_feeds
+        - write_product_feeds
+        - read_product_listings
+        - write_product_listings
+        - read_products
+        - write_products
+        - read_publications
+        - write_publications
+        - read_purchase_options
+        - write_purchase_options
+        - write_reports
+        - read_reports
+        - read_resource_feedbacks
+        - write_resource_feedbacks
+        - read_returns
+        - write_returns
+        - read_script_tags
+        - write_script_tags
+        - read_shopify_payments_provider_accounts_sensitive
+        - read_shipping
+        - write_shipping
+        - read_shopify_payments_accounts
+        - read_shopify_payments_payouts
+        - read_shopify_payments_bank_accounts
+        - read_shopify_payments_disputes
+        - write_shopify_payments_disputes
+        - read_content
+        - write_content
+        - read_store_credit_account_transactions
+        - write_store_credit_account_transactions
+        - read_store_credit_accounts
+        - write_theme_code
+        - read_themes
+        - write_themes
+        - read_third_party_fulfillment_orders
+        - write_third_party_fulfillment_orders
+        - read_translations
+        - write_translations
+        - read_pixels
+        - write_pixels
+    """
+
+    def __init__(self):
+        """Initialize OAuth2 authentication with authlib."""
+        # Store flow type for lifecycle management
+        self.flow_type = "authorizationCode"
+
+        # Load configuration from environment
+        self.client_id = os.getenv("OAUTH2_CLIENT_ID", "").strip()
+        self.client_secret = os.getenv("OAUTH2_CLIENT_SECRET", "").strip()
+        self.access_token_header_name = "X-Shopify-Access-Token"
+        self.access_token_header_prefix = "Bearer" if self.access_token_header_name == "Authorization" else None
+
+        # Validate required credentials
+        if not self.client_id or not self.client_secret:
+            raise ValueError(
+                "OAUTH2_CLIENT_ID and OAUTH2_CLIENT_SECRET must be set. "
+                "Leave empty in .env to disable OAuth2."
+            )
+
+        # Detect common placeholder patterns
+        placeholders = ["placeholder", "your-", "example", "change-me", "todo"]
+        if any(p in self.client_id.lower() for p in placeholders):
+            raise ValueError(
+                f"OAUTH2_CLIENT_ID appears to be a placeholder ({self.client_id[:20]}...). "
+                "Please set real credentials or leave empty to disable OAuth2."
+            )
+        if any(p in self.client_secret.lower() for p in placeholders):
+            raise ValueError(
+                "OAUTH2_CLIENT_SECRET appears to be a placeholder. "
+                "Please set real credentials or leave empty to disable OAuth2."
+            )
+
+        # Parse scopes from environment (required)
+        scopes_env = os.getenv("OAUTH2_SCOPES", "").strip()
+        self.scopes = [s.strip() for s in scopes_env.split(",") if s.strip()]
+        # Redirect URI for authorization flows
+        self.callback_port = int(os.getenv("OAUTH2_CALLBACK_PORT", "9400"))
+        self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
+
+        # OAuth2 token URL (required for all flows that fetch tokens)
+        self.token_url = self._resolve_url_template("https://{store_name}.myshopify.com/admin/oauth/access_token")
+        self.auth_url = self._resolve_url_template("https://{store_name}.myshopify.com/admin/oauth/authorize")
+        self.refresh_url = None
+
+        # Token storage (secure file-based, unique per scheme)
+        self.token_dir = Path(__file__).parent / "tokens"
+        self.token_file = self.token_dir / "oauth2auth_tokens.json"
+        self.client: OAuth2Client | None = None
+        self.token: dict | None = None
+        self._auth_lock = asyncio.Lock()  # Prevents concurrent auth flows (dual browser tabs)
+
+        # Load existing token if available
+        self._load_token()
+
+    def _load_token(self) -> None:
+        """Load saved token from disk."""
+        if self.token_file.exists():
+            try:
+                data = json.loads(self.token_file.read_text())
+                if data.get("access_token"):
+                    self.token = data
+            except (json.JSONDecodeError, IOError):
+                pass
+
+    def _save_token(self, token: dict) -> None:
+        """Save token to disk with restricted permissions."""
+        normalized = dict(token)
+        # Only set expires_at when expires_in is positive. A value of 0 (some
+        # providers return this for non-expiring tokens) would otherwise mark
+        # the token as immediately expired on every request.
+        if "expires_at" not in normalized:
+            expires_in = normalized.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                normalized["expires_at"] = time.time() + int(expires_in)
+        self.token_dir.mkdir(parents=True, exist_ok=True)
+        self.token_file.write_text(json.dumps(normalized, indent=2))
+        self.token_file.chmod(0o600)
+        self.token = normalized
+
+    def _create_client(self) -> OAuth2Client:
+        """Create authlib OAuth2Client."""
+        return OAuth2Client(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            token_endpoint_auth_method="client_secret_post",
+        )
+
+    def _resolve_url_template(self, url: str | None) -> str:
+        """Resolve {server_var} placeholders from SERVER_* environment variables."""
+        if not url or "{" not in url:
+            return url or ""
+        replacements: dict[str, str] = {}
+        for var_name in re.findall(r"\{([^}]+)\}", url):
+            env_var = "SERVER_" + re.sub(r"[^A-Za-z0-9_]", "_", var_name).upper()
+            raw_value = os.getenv(env_var, "").strip()
+            replacements[var_name] = self._resolve_template_host_value(url, var_name, env_var, raw_value)
+        return url.format_map(collections.defaultdict(str, replacements))
+
+    def _resolve_template_host_value(
+        self,
+        url: str,
+        var_name: str,
+        env_var: str,
+        raw_value: str,
+    ) -> str:
+        """Normalize and validate env values used inside the URL host."""
+        parsed_template = urlparse(url)
+        template_host = parsed_template.hostname or parsed_template.netloc or ""
+        token = "{" + var_name + "}"
+        if not raw_value:
+            if token in template_host:
+                logger.warning(
+                    "%s is blank; OAuth URL template %r still requires placeholder %s. "
+                    "Authorization may fail until this server variable is configured.",
+                    env_var,
+                    url,
+                    var_name,
+                )
+            return ""
+        if token not in template_host:
+            return raw_value
+
+        prefix, _, suffix = template_host.partition(token)
+        parsed_value = urlparse(raw_value)
+        host = parsed_value.hostname or raw_value
+
+        if host:
+            host_matches = (not prefix or host.startswith(prefix)) and (not suffix or host.endswith(suffix))
+            if host_matches:
+                start = len(prefix)
+                end = len(host) - len(suffix) if suffix else len(host)
+                extracted = host[start:end].strip(".")
+                if extracted:
+                    return extracted
+
+        looks_like_urlish_value = bool(
+            parsed_value.scheme
+            or parsed_value.netloc
+            or parsed_value.path.strip("/") != raw_value.strip("/")
+            or "/" in raw_value
+            or "." in raw_value
+        )
+        if looks_like_urlish_value:
+            raise ValueError(
+                f"{env_var} must contain only the value for '{var_name}' in {url!r}, "
+                f"not {raw_value!r}."
+            )
+        return raw_value
+
+    def _is_token_expired(self) -> bool:
+        """Check if current token is expired or about to expire."""
+        if not self.token:
+            return False  # Caller handles missing token separately
+        expires_at = self.token.get("expires_at")
+        if expires_at is None:
+            return False  # No expiry info — assume valid
+        return time.time() > (expires_at - 300)  # 5-minute buffer
+
+    async def _refresh_token(self) -> bool:
+        """Try to refresh the access token using the refresh token."""
+        if not self.token or not self.token.get("refresh_token"):
+            return False
+        if not self.token_url:
+            return False
+
+        loop = asyncio.get_running_loop()
+        refresh_token_val = self.token["refresh_token"]
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                new_token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.refresh_token(
+                        self.token_url,
+                        refresh_token=refresh_token_val,
+                    ),
+                )
+                if new_token and new_token.get("access_token"):
+                    self._save_token(dict(new_token))
+                    return True
+            except Exception as exc:
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                logger.debug("Token refresh failed (%s): %s", auth_method, exc)
+                break
+        return False
+
+    async def authorize(self, port: int | None = None) -> dict:
+        """
+        Run OAuth2 authorization code flow with async local callback server.
+
+        Starts an asyncio TCP server on localhost to receive the callback,
+        opens the browser to the authorization URL, and waits for the user
+        to authorize. Retries up to 5 adjacent ports if the primary port is in use.
+
+        Args:
+            port: Local callback server port (default: from OAUTH2_CALLBACK_PORT env or 9400)
+
+        Returns:
+            OAuth2 token dict with access_token, refresh_token, etc.
+
+        Raises:
+            ValueError: If authorization fails or is denied
+            TimeoutError: If user doesn't complete authorization in 120 seconds
+        """
+        import errno
+        import html as _html
+        import urllib.parse
+
+        base_port = port or self.callback_port
+
+        # PKCE
+        code_verifier = generate_token(48)
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        state = generate_token(30)
+
+        callback_done: asyncio.Event = asyncio.Event()
+        result: dict = {}
+
+        async def _handle_connection(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                request_line = (await reader.readline()).decode(errors="replace").strip()
+                while True:
+                    line = await reader.readline()
+                    if not line or line == b"\r\n":
+                        break
+
+                path = request_line.split(" ", 2)[1] if request_line.startswith("GET ") else ""
+                parsed = urllib.parse.urlparse(path)
+                params = urllib.parse.parse_qs(parsed.query)
+
+                if parsed.path == "/callback" and ("code" in params or "error" in params):
+                    if "error" in params:
+                        result["error"] = params["error"][0]
+                        result["error_description"] = params.get("error_description", [""])[0]
+                        status = "400 Bad Request"
+                        title = "Authorization failed"
+                        body = f"<p style='color:#ff8787'>{_html.escape(result.get('error_description') or result['error'])}</p>"
+                    else:
+                        cb_state = params.get("state", [None])[0]
+                        if cb_state != state:
+                            result["error"] = "state_mismatch"
+                            result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
+                            status = "400 Bad Request"
+                            title = "Authorization failed"
+                            body = "<p style='color:#ff8787'>State mismatch — possible CSRF attack.</p>"
+                        else:
+                            result["code"] = params["code"][0]
+                            status = "200 OK"
+                            title = "Authorization successful"
+                            body = "<p>You can close this window.</p>"
+                    callback_done.set()
+                else:
+                    status, title, body = "200 OK", "Please wait\u2026", ""
+
+                html = (
+                    "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    f"<title>{title}</title>"
+                    "<style>*{margin:0;padding:0;box-sizing:border-box}"
+                    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+                    "background:#1a1a1a;color:#e8e8e8;display:flex;align-items:center;"
+                    "justify-content:center;min-height:100vh}"
+                    ".card{background:#242424;border:1px solid #333;border-radius:16px;"
+                    "padding:48px 40px;text-align:center;max-width:420px;width:90%;"
+                    "box-shadow:0 8px 32px rgba(0,0,0,.4)}"
+                    ".logo{width:64px;height:64px;margin-bottom:32px;border-radius:12px}"
+                    "h1{font-size:28px;font-weight:600;margin-bottom:10px}"
+                    "p{font-size:15px;color:#888;line-height:1.5}"
+                    ".footer{margin-top:32px;padding-top:20px;border-top:1px solid #333}"
+                    ".footer a{color:#ff5722;text-decoration:none;font-size:13px}</style>"
+                    "</head><body><div class='card'>"
+                    "<img src='https://wjxawmrpsfuivlicnepc.supabase.co/storage/v1/object/public/newsletter/logo-blacksmith.png'"
+                    " alt='MCP Blacksmith' class='logo'>"
+                    f"<h1>{title}</h1>{body}"
+                    "<div class='footer'><a href='https://mcpblacksmith.com'>mcpblacksmith.com</a></div>"
+                    "</div></body></html>"
+                )
+                payload = html.encode()
+                response = (
+                    f"HTTP/1.1 {status}\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(payload)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode() + payload
+                writer.write(response)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        # Bind to port with retry on EADDRINUSE
+        bound_port = base_port
+        server = None
+        for attempt in range(5):
+            try:
+                server = await asyncio.start_server(
+                    _handle_connection, "localhost", base_port + attempt
+                )
+                bound_port = base_port + attempt
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE or attempt == 4:
+                    raise
+        if server is None:
+            raise OSError(f"Could not bind to any port in range {base_port}–{base_port + 4}")
+
+        redirect_uri = f"http://localhost:{bound_port}/callback"
+
+        auth_params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(self.scopes),
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        auth_url = f"{self.auth_url}?{urllib.parse.urlencode(auth_params)}"
+
+        async with server:
+            logger.info("OAuth2 callback server listening on port %d", bound_port)
+            print(f"\nAuthorize this application:\n\n  {auth_url}\n")
+            webbrowser.open(auth_url)
+            try:
+                await asyncio.wait_for(callback_done.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    "Authorization timed out (120s). "
+                    "Please try again and complete authorization in the browser."
+                )
+
+        if "error" in result:
+            raise ValueError(
+                f"Authorization denied: {result['error']} — {result.get('error_description', '')}"
+            )
+        if "code" not in result:
+            raise ValueError("Authorization failed: no code received after callback")
+
+        # Token exchange with client_secret_post / client_secret_basic fallback
+        loop = asyncio.get_running_loop()
+        token = None
+        last_exc: Exception | None = None
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.fetch_token(
+                        self.token_url,
+                        code=result["code"],
+                        redirect_uri=redirect_uri,
+                        code_verifier=code_verifier,
+                    ),
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                raise
+
+        if not token or not token.get("access_token"):
+            raise ValueError(
+                "Token exchange failed — no access_token received"
+                + (f": {last_exc}" if last_exc else "")
+            )
+
+        # Scope validation — warn only, don't fail
+        returned_scope = token.get("scope", "")
+        if returned_scope:
+            missing = set(self.scopes) - set(returned_scope.split())
+            if missing:
+                logger.warning(
+                    "OAuth2 provider returned fewer scopes than requested. "
+                    "Missing: %s. Some API operations may fail.",
+                    ", ".join(sorted(missing)),
+                )
+
+        self._save_token(dict(token))
+        return dict(token)
+
+    async def get_auth_headers(self) -> dict:
+        """
+        Get authorization headers for API requests.
+
+        Handles token lifecycle:
+        1. If no token, trigger authorization flow
+        2. If token expired, try refresh first
+        3. If refresh fails, re-authorize
+
+        Returns:
+            Dict with authentication header for the provider
+        """
+        # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
+        async with self._auth_lock:
+            # Re-check after acquiring lock (another call may have completed auth)
+            if not self.token:
+                await self.authorize()
+
+            # Token expired — try refresh, then re-authorize
+            # elif: skip expiry check if authorize() just ran above (prevents double browser tab)
+            elif self._is_token_expired():
+                if not await self._refresh_token():
+                    await self.authorize()
+
+        if not self.token or not self.token.get("access_token"):
+            raise ValueError("Failed to obtain access token after authorization attempt")
+
+        access_token = self.token["access_token"]
+        if self.access_token_header_prefix:
+            return {
+                self.access_token_header_name: (
+                    f"{self.access_token_header_prefix} {access_token}"
+                )
+            }
+        return {self.access_token_header_name: access_token}
+
+    def get_auth_params(self) -> dict:
+        """OAuth2 uses headers, not query params."""
+        return {}
+
+class APIKeyAuth:
+    """
+    API Key authentication for Shopify Admin API.
+
+    Supports header, query parameter, cookie, and path-based API key injection.
+    Configure location and parameter name via constructor arguments.
+    """
+
+    def __init__(self, env_var: str = "API_KEY", location: str = "header",
+                 param_name: str = "Authorization", prefix: str = ""):
+        """Initialize API key authentication from environment variable.
+
+        Args:
+            env_var: Environment variable name containing the API key.
+            location: Where to inject the key - 'header', 'query', 'cookie', or 'path'.
+            param_name: Name of the header, query parameter, cookie, or path placeholder.
+            prefix: Optional prefix before the key value (e.g., 'Bearer').
+        """
+        self.location = location
+        self.param_name = param_name
+        self.prefix = prefix
+        self.api_key = os.getenv(env_var, "").strip()
+
+        # Check for empty API key
+        if not self.api_key:
+            raise ValueError(
+                f"{env_var} environment variable not set. "
+                "Leave empty in .env to disable API Key auth."
+            )
+
+        # Detect common placeholder patterns
+        placeholders = ["placeholder", "your-", "example", "change-me", "todo", "bot placeholder"]
+        api_key_lower = self.api_key.lower()
+
+        if any(p in api_key_lower for p in placeholders):
+            raise ValueError(
+                f"API key appears to be a placeholder ({self.api_key[:20]}...). "
+                "Please set a real API key or leave empty to disable API Key auth."
+            )
+
+    def get_auth_headers(self) -> dict[str, str]:
+        """Get authentication headers for API requests."""
+        if self.location != "header":
+            return {}
+        if self.param_name == "Authorization":
+            # Use explicit prefix if set; otherwise send the key raw (no Bearer assumption —
+            # apiKey schemes that happen to use the Authorization header don't imply Bearer)
+            prefix = self.prefix + " " if self.prefix else ""
+            return {"Authorization": f"{prefix}{self.api_key}"}
+        value = f"{self.prefix} {self.api_key}" if self.prefix else self.api_key
+        return {self.param_name: value}
+
+    def get_auth_params(self) -> dict[str, str]:
+        """Get authentication query parameters."""
+        if self.location != "query":
+            return {}
+        return {self.param_name: self.api_key}
+
+    def get_auth_cookies(self) -> dict[str, str]:
+        """Get authentication cookies."""
+        if self.location != "cookie":
+            return {}
+        return {self.param_name: self.api_key}
+
+    def get_auth_path_params(self) -> dict[str, str]:
+        """Get authentication path parameters for URL template substitution."""
+        if self.location != "path":
+            return {}
+        return {self.param_name: self.api_key}
+
+
+# ============================================================================
+# Operation Auth Requirements Map
+# ============================================================================
+
+"""
+Operation-to-authentication requirements mapping.
+
+This dictionary defines which authentication schemes are required for each operation,
+using OR/AND relationships (outer list = OR, inner list = AND).
+"""
+OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
+    "list_application_charges_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_charge_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_credits_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_assigned_fulfillment_orders_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_blog": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_blog": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_articles_for_blog": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_count_for_blog_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_article_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_carrier_service_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_carrier_service_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_abandoned_checkouts_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_rates_for_checkout_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_collection_listing_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_product_ids_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_products_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collects_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collects_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collect_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "remove_product_from_collection_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "approve_comment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "mark_comment_not_spam": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "restore_comment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "mark_comment_as_spam": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_countries_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_countries_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_country_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_country_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_provinces_for_country_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_province_count_for_country_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_currencies_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_custom_collections_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_for_saved_search_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customers_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_v202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "generate_customer_account_activation_url_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_addresses_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_customer_address": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "bulk_update_customer_addresses_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_address_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_address_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_address_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "set_customer_default_address_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_orders_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_customer_invite_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_events_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_events_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_event_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_order_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_order_cancellation_request_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_order_cancellation_request_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_order_cancellation_request_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_fulfillment_order_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_request_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_request_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_request_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_for_fulfillment_order_move_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_services_legacy_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_fulfillment_service_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_tracking_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_gift_cards_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_gift_cards": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_gift_cards_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_gift_card_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "disable_gift_card_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_items_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_inventory_item_legacy_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_inventory_level_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_locations_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_location_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_for_location_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafields_count_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_metafield_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_orders": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_orders_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_orders_for_order_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillments_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_for_order_legacy_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_count_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_fulfillment_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_events_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reopen_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_refunds_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_refund_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "calculate_order_refund_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_refund_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_risks_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_risk_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order_risk_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_risk_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_risk_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_policies_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_codes_batch_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_batch_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_batch_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_price_rule_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_for_price_rule": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_discount_code_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_discount_code_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_listing": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_listing": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_products_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_products_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_images_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product_image_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_images_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_image_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_image_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_recurring_application_charges_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_recurring_application_charge_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_recurring_application_charge_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_recurring_application_charge_capped_amount_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_usage_charges_for_recurring_application_charge_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_usage_charge_for_recurring_application_charge_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_usage_charge_for_recurring_application_charge_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_redirects_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_redirect_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirects_count_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirect_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_redirect_v202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_redirect_v202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_report_legacy_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_report_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_report_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tags_count_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_zones_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shop_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_balance_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_balance_transactions": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_disputes": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_payouts_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_payout_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_smart_collections_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_smart_collections_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_smart_collection_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_tender_transactions_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_themes_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_theme_from_zip_url": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_theme_deprecated": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_2020_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_asset_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_webhooks_legacy_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_webhooks_202001": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_charges_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_charge_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_credits_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_articles_for_blog_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_article_for_blog_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_count_for_blog_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_article_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_article_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_carrier_service_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_carrier_service_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_carrier_service_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_abandoned_checkouts_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_rates_for_checkout_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_collection_listing_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_products_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collects_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collects_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collect_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "remove_product_from_collection_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_countries_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_country_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_countries_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_country_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_country_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_provinces_for_country_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_province_count_for_country_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_province_for_country_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_currencies_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_custom_collections_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_custom_collections_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_custom_collection_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customers_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_customers_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "generate_customer_account_activation_url_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_addresses_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_customer_address_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "bulk_update_customer_addresses_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_address_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_address_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_address_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "set_customer_default_address_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_orders_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_customer_invite_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_events_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_events_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_event_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_order_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_order_cancellation_request_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_order_cancellation_request_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_order_cancellation_request_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_fulfillment_order_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_request_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_request_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_request_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_for_fulfillment_order_move_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "move_fulfillment_order_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_fulfillment_service_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_tracking_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_gift_cards_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_gift_cards_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_gift_cards_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_gift_card_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "disable_gift_card_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_items_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_inventory_item_legacy_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_inventory_level_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_locations_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_location_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_for_location_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafields_count_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_orders_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_orders_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_v2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_v2": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_order_v2": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_order_v2": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_orders_for_order_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillments_for_order_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_for_order_legacy_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_count_for_order_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_fulfillment_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_events_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "open_fulfillment_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reopen_order_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_refunds_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_refund_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "calculate_order_refund_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_refund_for_order_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_risks_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_risk_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order_risk_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_risk_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_risk_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_codes_batch_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_batch_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_batch_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_price_rule_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_for_price_rule_v2": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_discount_code_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_discount_code_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_listing_v2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_products_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_products_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_images_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product_image_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_images_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_image_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_image_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_recurring_application_charges_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_recurring_application_charge_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_recurring_application_charge_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_recurring_application_charge_capped_amount_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_usage_charge_for_recurring_application_charge_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_redirects_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_redirect_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirects_count_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirect_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_redirect_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_redirect_v202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_report_legacy_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_report_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_report_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tags_count_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_zones_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shop_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_balance_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_disputes_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_payouts_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_payout_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_smart_collections_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_smart_collections_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_smart_collection_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_themes_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_theme_with_zip": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_theme_archived": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_2020_04": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_asset_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_webhooks_legacy_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_webhooks_202004": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_charges_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_charge_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_credits_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_articles_for_blog_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_article_for_blog_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_articles_in_blog_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_article_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_carrier_service_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_abandoned_checkouts_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_rates_for_checkout_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_collection_listing_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_ids_for_collection_listing": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_products_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collects_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "add_product_to_collection_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collects_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collect_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "remove_product_from_collection_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_countries_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_country_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_countries_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_country_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_country_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_provinces_for_country_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_province_count_for_country_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_province_for_country_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_currencies_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_custom_collections_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_custom_collection_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_custom_collection_legacy_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_for_saved_search_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customers_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "generate_customer_account_activation_url_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_addresses_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_customer_address_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "bulk_update_customer_addresses_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_address_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_address_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_address_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "set_customer_default_address_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_orders_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_customer_invite_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_location": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_events_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_events_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_event_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_order_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_order_cancellation_request_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_order_cancellation_request_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_order_cancellation_request_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_fulfillment_order_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_request_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_request_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_request_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_for_fulfillment_order_move_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_services_legacy_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_tracking_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_gift_cards_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_gift_cards_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_gift_cards_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_gift_card_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "disable_gift_card_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_items_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_inventory_item_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_inventory_level_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_locations_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_location_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_for_location_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafields_count_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_orders_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_orders_for_order_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillments_for_order_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_for_order_legacy_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_count_for_order_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_fulfillment_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_events_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "open_fulfillment_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_refunds_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_refund_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "calculate_order_refund_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_refund_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_risks_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_risk_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_risk_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_risk_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_policies_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_codes_batch_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_batch_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_batch_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_price_rule_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_code_for_price_rule_deprecated": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_discount_code_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_listing_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_listing_v2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_products_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_products_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_images_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product_image_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_images_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_image_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_image_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_image_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_recurring_application_charges_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_recurring_application_charge_capped_amount_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_usage_charge_for_recurring_application_charge_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_usage_charge_for_recurring_application_charge_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_redirects_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_redirect_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirects_count_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirect_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_redirect_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_redirect_v202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_report_legacy_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_report_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_report_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tags_count_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_zones_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shop_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_balance_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_payouts": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_payout_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_smart_collections_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_smart_collection_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_smart_collections_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_smart_collection_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_smart_collection_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_tender_transactions_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_themes_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_theme_from_archive": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_theme_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_2020_07": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_asset_deprecated": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_asset_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_webhooks_legacy_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_webhooks_202007": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_charges": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_credits": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_credit": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_article_authors": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_article_tags": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_assigned_fulfillment_orders": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_articles": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_articles_in_blog": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_article": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_article": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_carrier_services": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_carrier_service": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_carrier_service": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_carrier_service": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_abandoned_checkouts_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection_listing": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "publish_collection_to_sales_channel": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_collection_listing": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_product_ids": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_products": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collects": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collects_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collect": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "remove_product_from_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_countries": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_countries_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_country": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_country": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_provinces_for_country": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_province_count_for_country": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_province_for_country": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_currencies": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_custom_collections": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_custom_collections": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_custom_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_custom_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_custom_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customers_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_customers": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "generate_customer_account_activation_url": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_addresses": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_address_for_customer": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "bulk_update_customer_addresses": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_address": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_address": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_address": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "set_customer_default_address": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_orders": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_customer_invite": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "lookup_discount_code_location": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_events": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_events_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_event": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_order_cancellation_request": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_order_cancellation_request": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_order_cancellation_request": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_request": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_request": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_request": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillments_for_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_for_fulfillment_order_move": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "move_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_services": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_service": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_service": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_fulfillment_service": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_direct": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_tracking": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_gift_cards": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_gift_cards_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_gift_cards": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_gift_card": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_gift_card": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "disable_gift_card": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_items": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_inventory_item": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_inventory_item": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_inventory_level": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_locations_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_location": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_for_location": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_metafields_for_product_image": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafields_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafield": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_metafield": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_metafield": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_orders": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_fulfillments": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillments_count_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_fulfillment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_events": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_event": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_event": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_fulfillment_event": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "open_fulfillment": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_refunds": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_refund": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "calculate_order_refund": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_refund": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_risks": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_risk": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order_risk": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_risk": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_risk": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_policies": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_codes_batch": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_batch": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_batch": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_price_rule": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_code_for_price_rule": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_discount_code": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_discount_code": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_products": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_products_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_images": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product_image": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_images_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_image": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_image": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_image": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_recurring_application_charges": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_recurring_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_recurring_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_recurring_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_recurring_application_charge_capped_amount": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_usage_charges_for_recurring_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_usage_charge_for_recurring_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_usage_charge_for_recurring_application_charge": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_redirects": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_redirect": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirects_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirect": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_redirect": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_redirect": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_reports": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_report": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_report": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_report": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_report": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_script_tags": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_script_tag": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tags_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tag": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_script_tag": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_script_tag": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_zones": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shop": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_balance": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_payouts": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_payout": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_smart_collections": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_smart_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_smart_collections": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_smart_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_smart_collection": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_storefront_access_tokens": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_storefront_access_token": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_storefront_access_token": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_tender_transactions": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_themes": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_asset": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_asset": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_user": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_webhooks": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_webhooks_count": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_webhook": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_charge_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_credits_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_blog_articles": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_article_for_blog_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_count_for_blog_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_article_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_article_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_carrier_service_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_carrier_service_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_abandoned_checkouts_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_checkout_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_rates_for_checkout_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_collection_listing_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_ids_for_collection_listing_v2021": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_products_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collects_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collects_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collect_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "remove_product_from_collection_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_countries_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_countries_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_country_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_provinces_for_country_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_province_count_for_country_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_currencies_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_custom_collections_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_custom_collection_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_custom_collection_legacy_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_saved_search_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_saved_search_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_for_saved_search_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customers_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_customers_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_v202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "generate_customer_account_activation_url_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_addresses_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_customer_address_v202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "bulk_update_customer_addresses_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_address_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_address_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_address_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "set_default_customer_address": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_orders_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_customer_invite_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_events_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_events_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_event_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_order_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_order_cancellation_request_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_order_cancellation_request_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_order_cancellation_request_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_fulfillment_order_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_request_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_request_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_request_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_for_fulfillment_order_move_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "open_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_services_legacy_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_tracking_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_gift_cards_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_gift_cards_v202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_gift_cards_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_gift_card_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "disable_gift_card_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_items_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_inventory_item_legacy_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_inventory_level_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_locations_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_location_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_for_location_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafields_count_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_orders_for_order_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillments_for_order_v202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_for_order_legacy_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_count_for_order_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_fulfillment_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_events_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_refunds_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_refund_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "calculate_order_refund_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_refund_for_order_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_risks_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_risk_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order_risk_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_risk_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_risk_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_policies_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_code_batch": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_batch_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_batch_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_price_rule_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_discount_code_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_discount_code_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_products_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_products_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_images_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product_image_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_images_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_image_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_image_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_recurring_application_charges_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_recurring_application_charge_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_recurring_application_charge_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_recurring_application_charge_capped_amount_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_usage_charges_for_recurring_application_charge_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_usage_charge_for_recurring_application_charge_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_usage_charge_for_recurring_application_charge_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_redirects_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirects_count_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirect_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_redirect_v202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_redirect_v202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_report_legacy_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_report_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_report_legacy": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_report_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tags_count_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_zones_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shop_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_balance_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_payouts_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_payout_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_smart_collections_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_smart_collections_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_smart_collection_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_tender_transactions_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_themes_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_2021_01": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_asset_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_webhooks_legacy_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_webhooks_202101": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_charges_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_charge_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_application_credits_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_application_credit_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_article_tags_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_blog_articles_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_article_count_for_blog": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_article_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_carrier_services_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_carrier_service_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_abandoned_checkouts_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collection_products_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_collects_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collects_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_collect_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "remove_product_from_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_currencies_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_custom_collections_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_custom_collections_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_custom_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_custom_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_custom_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customers_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customers_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "search_customers_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_customer_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "generate_customer_account_activation_url_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_addresses_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "bulk_update_customer_addresses_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_customer_address_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_customer_address_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "set_customer_default_address_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_customer_orders_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_customer_invite_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_events_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_events_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_order_cancellation_request_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_order_cancellation_request_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_order_cancellation_request_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "close_fulfillment_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "send_fulfillment_request_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "accept_fulfillment_request_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reject_fulfillment_request_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_for_fulfillment_order_move_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "open_fulfillment_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "reschedule_fulfillment_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_tracking_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_gift_cards_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_gift_card_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_gift_card_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "disable_gift_card_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_items_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_inventory_item_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_inventory_level_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_locations_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_locations_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_location_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_inventory_levels_for_location_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafields_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_metafield_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_metafield_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillment_orders_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_fulfillments_for_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_for_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_count_for_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_fulfillment_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_fulfillment_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "cancel_fulfillment_order_unstable_2": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "complete_fulfillment_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_fulfillment_event_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "open_fulfillment_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_refunds_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_refund_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "calculate_refund_for_order": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_refund_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_order_risks_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_order_risk_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_order_risk_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_order_risk_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_order_risk_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_policies_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_discount_codes_batch_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_batch_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_batch_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_discount_codes_for_price_rule_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_discount_code_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_discount_code_for_price_rule": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_discount_code_for_price_rule": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_product_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_product_images_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_product_image_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_product_images_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_product_image_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_recurring_application_charges_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_recurring_application_charge_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_recurring_application_charge_capped_amount_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_usage_charges_for_recurring_application_charge_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_usage_charge_for_recurring_application_charge_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_usage_charge_for_recurring_application_charge_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_redirects_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_redirects": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_redirect_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_redirect_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_redirect_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_reports_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_report_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_script_tags_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_script_tags_count_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shipping_zones_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shop_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_balance_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_shopify_payments_payouts_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_shopify_payments_payout": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_smart_collections_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_smart_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_smart_collections_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_smart_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_smart_collection_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "update_smart_collection_order_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_storefront_access_token_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_tender_transactions_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_themes_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "create_theme_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_theme_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_theme_asset_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "list_users_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_current_user_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_user_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "count_webhooks": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "get_webhook_unstable": [["OAuth2Auth"], ["CustomAppAccessToken"]],
+    "delete_webhook": [["OAuth2Auth"], ["CustomAppAccessToken"]]
+}
