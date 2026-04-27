@@ -1,4 +1,4 @@
-# Shopify Admin MCP Server
+# Shopify Admin API MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-shopify-admin .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Shopify Admin MCP Server" \
+LABEL org.opencontainers.image.title="Shopify Admin API MCP Server" \
       org.opencontainers.image.vendor="MCP Armory" \
       org.opencontainers.image.source="https://github.com/mcparmory/registry" \
       io.modelcontextprotocol.server.name="com.mcparmory/shopify-admin"

@@ -1,11 +1,11 @@
-# Shopify Admin MCP Server
+# Shopify Admin API MCP Server
 <!-- mcp-name: com.mcparmory/shopify-admin -->
 
 Base URL: https://.myshopify.com/admin/api/2024-01
 | | |
 |---|---|
 | **Category** | E-commerce |
-| **Tools** | 952 |
+| **Tools** | 177 |
 | **Auth** | OAuth2, API Key |
 
 ---

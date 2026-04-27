@@ -1,7 +1,7 @@
 """
-Shopify Admin MCP Server - Validators
+Shopify Admin Api MCP Server - Validators
 
-Generated: 2026-04-25 19:22:51 UTC
+Generated: 2026-04-27 21:01:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

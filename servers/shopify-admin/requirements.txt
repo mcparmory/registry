@@ -1,5 +1,5 @@
-# Shopify Admin - Dependencies
-# Generated: 2026-04-25 19:22:51 UTC
+# Shopify Admin API - Dependencies
+# Generated: 2026-04-27 21:01:14 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.2.4
 httpx>=0.27.0,<1.0.0
