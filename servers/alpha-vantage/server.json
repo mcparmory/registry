@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.mcparmory/alpha-vantage",
   "description": "Track stock prices, search symbols, and compute 50+ technical indicators",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "repository": {
     "url": "https://github.com/mcparmory/registry",
     "source": "github"
@@ -11,7 +11,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcparmory-alpha-vantage",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -19,7 +19,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/mcparmory/alpha-vantage:1.0.0",
+      "identifier": "ghcr.io/mcparmory/alpha-vantage:1.0.2",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"

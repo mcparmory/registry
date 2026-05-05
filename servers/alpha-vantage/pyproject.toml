@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-alpha-vantage"
-version = "1.0.0"
+version = "1.0.2"
 description = "Track stock prices, search symbols, and compute 50+ technical indicators"
 readme = "README.md"
 license = "MIT"
