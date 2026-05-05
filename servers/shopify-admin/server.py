@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Shopify Admin API MCP Server
-Generated: 2026-04-27 21:01:14 UTC
+Generated: 2026-05-05 16:21:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -46,7 +46,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{store_name}.myshopify.com/admin/api/2024-01".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Shopify Admin API"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -612,7 +612,7 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _form_content = None
+            _form_content: bytes | str | None = None
             if body_content_type == "application/x-www-form-urlencoded":
                 _data = body if isinstance(body, dict) else None
                 if isinstance(body, bytearray):
@@ -674,7 +674,7 @@ async def _make_request(
                         (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
                     )
                 _files = _multipart_parts
-            _content = None
+            _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
                 if isinstance(_raw, (dict, list)):
