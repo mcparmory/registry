@@ -1,7 +1,7 @@
 """
 Customer.io Journeys Track MCP Server - Validators
 
-Generated: 2026-04-23 21:10:42 UTC
+Generated: 2026-05-05 14:47:42 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

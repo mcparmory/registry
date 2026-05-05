@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-customerio-journeys-track"
-version = "1.0.0"
+version = "1.0.4"
 description = "Track customer data, manage audience segments, and trigger personalized campaigns"
 readme = "README.md"
 license = "MIT"
