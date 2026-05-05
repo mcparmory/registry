@@ -1,7 +1,7 @@
 """
 Atlassian Confluence MCP Server - Pydantic Models
 
-Generated: 2026-04-23 20:59:52 UTC
+Generated: 2026-05-05 14:18:16 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

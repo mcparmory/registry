@@ -1,7 +1,7 @@
 """
 Authentication module for Atlassian Confluence MCP server.
 
-Generated: 2026-04-23 20:59:52 UTC
+Generated: 2026-05-05 14:18:16 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -13,13 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import hashlib
 import json
 import logging
 import os
+import re
+import ssl
 import time
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
 
 from authlib.common.security import generate_token
 from authlib.integrations.httpx_client import OAuth2Client
@@ -52,17 +56,18 @@ class OAuth2Auth:
     Flow: authorizationCode
     Uses: authlib for OAuth2 protocol handling
 
-    NOTE: Authorization scheme prefix ("Bearer ") is automatically inserted.
-    Access tokens are obtained automatically through OAuth2 flow.
+    NOTE: Access tokens are obtained automatically through OAuth2 flow.
+    By default they are sent as "Authorization: Bearer <token>", but some
+    providers use a custom header instead.
 
     Configuration (environment variables):
         - OAUTH2_CLIENT_ID: OAuth2 client ID (required)
         - OAUTH2_CLIENT_SECRET: OAuth2 client secret (required)
         - OAUTH2_SCOPES: Comma-separated scopes (required)
+
     Redirect URI:
-        - Fixed: http://localhost:<OAUTH2_CALLBACK_PORT>/callback
-        - Configured via OAUTH2_CALLBACK_PORT in .env (default: 9400)
-        - Must match redirect URI in your OAuth application configuration
+        - Default: http://localhost:<OAUTH2_CALLBACK_PORT>/callback
+        - Configured via OAUTH2_CALLBACK_PORT in .env (default: 9400)        - Must match redirect URI in your OAuth application configuration
     Token Storage:
         Location: ./tokens/oauthdefinitions_tokens.json
         Permissions: 0o600 (owner read/write only)
@@ -176,6 +181,8 @@ class OAuth2Auth:
         # Load configuration from environment
         self.client_id = os.getenv("OAUTH2_CLIENT_ID", "").strip()
         self.client_secret = os.getenv("OAUTH2_CLIENT_SECRET", "").strip()
+        self.access_token_header_name = "Authorization"
+        self.access_token_header_prefix = "Bearer" if self.access_token_header_name == "Authorization" else None
 
         # Validate required credentials
         if not self.client_id or not self.client_secret:
@@ -200,13 +207,16 @@ class OAuth2Auth:
         # Parse scopes from environment (required)
         scopes_env = os.getenv("OAUTH2_SCOPES", "").strip()
         self.scopes = [s.strip() for s in scopes_env.split(",") if s.strip()]
+        self.extra_scope_params = {}
         # Redirect URI for authorization flows
         self.callback_port = int(os.getenv("OAUTH2_CALLBACK_PORT", "9400"))
-        self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
+        self.tls_cert_file = ""
+        self.tls_key_file = ""
+        self.redirect_uri = self._build_callback_redirect_uri()
 
         # OAuth2 token URL (required for all flows that fetch tokens)
-        self.token_url = "https://auth.atlassian.com/oauth/token"
-        self.auth_url = "https://auth.atlassian.com/authorize"
+        self.token_url = self._resolve_url_template("https://auth.atlassian.com/oauth/token")
+        self.auth_url = self._resolve_url_template("https://auth.atlassian.com/authorize")
         self.refresh_url = None
 
         # Token storage (secure file-based, unique per scheme)
@@ -251,6 +261,98 @@ class OAuth2Auth:
             client_secret=self.client_secret,
             token_endpoint_auth_method="client_secret_post",
         )
+
+    def _resolve_url_template(self, url: str | None) -> str:
+        """Resolve {server_var} placeholders from SERVER_* environment variables."""
+        if not url or "{" not in url:
+            return url or ""
+        replacements: dict[str, str] = {}
+        for var_name in re.findall(r"\{([^}]+)\}", url):
+            env_var = "SERVER_" + re.sub(r"[^A-Za-z0-9_]", "_", var_name).upper()
+            raw_value = os.getenv(env_var, "").strip()
+            replacements[var_name] = self._resolve_template_host_value(url, var_name, env_var, raw_value)
+        return url.format_map(collections.defaultdict(str, replacements))
+
+    def _resolve_template_host_value(
+        self,
+        url: str,
+        var_name: str,
+        env_var: str,
+        raw_value: str,
+    ) -> str:
+        """Normalize and validate env values used inside the URL host."""
+        parsed_template = urlparse(url)
+        template_host = parsed_template.hostname or parsed_template.netloc or ""
+        token = "{" + var_name + "}"
+        if not raw_value:
+            if token in template_host:
+                logger.warning(
+                    "%s is blank; OAuth URL template %r still requires placeholder %s. "
+                    "Authorization may fail until this server variable is configured.",
+                    env_var,
+                    url,
+                    var_name,
+                )
+            return ""
+        if token not in template_host:
+            return raw_value
+
+        prefix, _, suffix = template_host.partition(token)
+        parsed_value = urlparse(raw_value)
+        host = parsed_value.hostname or raw_value
+
+        if host:
+            host_matches = (not prefix or host.startswith(prefix)) and (not suffix or host.endswith(suffix))
+            if host_matches:
+                start = len(prefix)
+                end = len(host) - len(suffix) if suffix else len(host)
+                extracted = host[start:end].strip(".")
+                if extracted:
+                    return extracted
+
+        looks_like_urlish_value = bool(
+            parsed_value.scheme
+            or parsed_value.netloc
+            or parsed_value.path.strip("/") != raw_value.strip("/")
+            or "/" in raw_value
+            or "." in raw_value
+        )
+        if looks_like_urlish_value:
+            raise ValueError(
+                f"{env_var} must contain only the value for '{var_name}' in {url!r}, "
+                f"not {raw_value!r}."
+            )
+        return raw_value
+
+    def _build_callback_redirect_uri(self, port: int | None = None) -> str:
+        """Build the local callback redirect URI."""
+        default_scheme = "https" if False else "http"
+        callback_port = port or self.callback_port
+        default_port = 443 if default_scheme == "https" else 80
+        netloc = "localhost" if callback_port == default_port else f"localhost:{callback_port}"
+        return f"{default_scheme}://{netloc}/callback"
+
+    def _build_callback_ssl_context(self, redirect_uri: str) -> ssl.SSLContext | None:
+        """Create TLS context for HTTPS localhost callbacks when configured."""
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme != "https":
+            return None
+        if not self.tls_cert_file:
+            raise ValueError(
+                "HTTPS OAuth2 redirect URI requires a TLS certificate file."
+            )
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            if self.tls_key_file:
+                context.load_cert_chain(self.tls_cert_file, self.tls_key_file)
+            else:
+                context.load_cert_chain(self.tls_cert_file)
+        except OSError as exc:
+            raise ValueError(
+                f"Failed to load OAuth2 callback TLS certificate for {redirect_uri}: {exc}"
+            ) from exc
+        return context
 
     def _is_token_expired(self) -> bool:
         """Check if current token is expired or about to expire."""
@@ -318,7 +420,12 @@ class OAuth2Auth:
         import html as _html
         import urllib.parse
 
-        base_port = port or self.callback_port
+        redirect_template = self._build_callback_redirect_uri()
+        parsed_redirect = urlparse(redirect_template)
+        callback_host = parsed_redirect.hostname or "localhost"
+        callback_path = parsed_redirect.path or "/callback"
+        callback_ssl = self._build_callback_ssl_context(redirect_template)
+        base_port = port or parsed_redirect.port or self.callback_port
 
         # PKCE
         code_verifier = generate_token(48)
@@ -344,7 +451,7 @@ class OAuth2Auth:
                 parsed = urllib.parse.urlparse(path)
                 params = urllib.parse.parse_qs(parsed.query)
 
-                if parsed.path == "/callback" and ("code" in params or "error" in params):
+                if parsed.path == callback_path and ("code" in params or "error" in params):
                     if "error" in params:
                         result["error"] = params["error"][0]
                         result["error_description"] = params.get("error_description", [""])[0]
@@ -410,7 +517,10 @@ class OAuth2Auth:
         for attempt in range(5):
             try:
                 server = await asyncio.start_server(
-                    _handle_connection, "localhost", base_port + attempt
+                    _handle_connection,
+                    callback_host,
+                    base_port + attempt,
+                    ssl=callback_ssl,
                 )
                 bound_port = base_port + attempt
                 break
@@ -420,7 +530,7 @@ class OAuth2Auth:
         if server is None:
             raise OSError(f"Could not bind to any port in range {base_port}–{base_port + 4}")
 
-        redirect_uri = f"http://localhost:{bound_port}/callback"
+        redirect_uri = self._build_callback_redirect_uri(port=bound_port)
 
         auth_params = {
             "response_type": "code",
@@ -431,6 +541,9 @@ class OAuth2Auth:
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
+        for _param_name, _scopes in self.extra_scope_params.items():
+            if _scopes:
+                auth_params[_param_name] = " ".join(_scopes)
         auth_url = f"{self.auth_url}?{urllib.parse.urlencode(auth_params)}"
 
         async with server:
@@ -511,7 +624,7 @@ class OAuth2Auth:
         3. If refresh fails, re-authorize
 
         Returns:
-            Dict with Authorization header (Bearer token)
+            Dict with authentication header for the provider
         """
         # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
         async with self._auth_lock:
@@ -528,7 +641,14 @@ class OAuth2Auth:
         if not self.token or not self.token.get("access_token"):
             raise ValueError("Failed to obtain access token after authorization attempt")
 
-        return {"Authorization": f"Bearer {self.token['access_token']}"}
+        access_token = self.token["access_token"]
+        if self.access_token_header_prefix:
+            return {
+                self.access_token_header_name: (
+                    f"{self.access_token_header_prefix} {access_token}"
+                )
+            }
+        return {self.access_token_header_name: access_token}
 
     def get_auth_params(self) -> dict:
         """OAuth2 uses headers, not query params."""
