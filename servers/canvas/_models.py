@@ -1,7 +1,7 @@
 """
 Canvas MCP Server - Pydantic Models
 
-Generated: 2026-04-23 21:06:31 UTC
+Generated: 2026-05-05 14:35:11 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
