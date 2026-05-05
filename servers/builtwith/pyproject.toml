@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-builtwith"
-version = "1.0.0"
+version = "1.0.2"
 description = "Detect technologies and tech stacks used on any website"
 readme = "README.md"
 license = "MIT"
