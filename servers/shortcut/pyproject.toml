@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-shortcut"
-version = "1.0.0"
+version = "1.0.1"
 description = "Track stories, organize sprints, and manage project workflows across your team"
 readme = "README.md"
 license = "MIT"
