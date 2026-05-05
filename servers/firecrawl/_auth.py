@@ -1,7 +1,7 @@
 """
 Authentication module for Firecrawl MCP server.
 
-Generated: 2026-04-23 21:16:32 UTC
+Generated: 2026-05-05 14:59:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
