@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-apollo"
-version = "1.0.0"
+version = "1.0.3"
 description = "Search and enrich contact and company data from 210M+ people and 35M+ companies"
 readme = "README.md"
 license = "MIT"

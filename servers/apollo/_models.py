@@ -1,7 +1,7 @@
 """
 Apollo MCP Server - Pydantic Models
 
-Generated: 2026-04-23 20:58:30 UTC
+Generated: 2026-05-05 14:14:40 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
