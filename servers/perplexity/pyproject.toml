@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-perplexity"
-version = "1.0.0"
+version = "1.0.1"
 description = "Search the web, generate AI responses, and create embeddings with real-time information"
 readme = "README.md"
 license = "MIT"

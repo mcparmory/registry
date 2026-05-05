@@ -30,7 +30,7 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 <!-- SERVERS:BEGIN -->
 ## Servers
 
-🧠 **AI & Machine Learning** &ensp; [ElevenLabs](servers/elevenlabs) · [Linkup](servers/linkup) · [Parallel API](servers/parallel) · [Perplexity AI](servers/perplexity) · [Ragie](servers/ragie) · [Replicate](servers/replicate)
+🧠 **AI & Machine Learning** &ensp; [ElevenLabs](servers/elevenlabs) · [Linkup](servers/linkup) · [Parallel API](servers/parallel) · [Perplexity AI API](servers/perplexity) · [Ragie](servers/ragie) · [Replicate](servers/replicate)
 
 📊 **Analytics** &ensp; [Ahrefs API](servers/ahrefs) · [Datadog](servers/datadog) · [Google Analytics](servers/google-analytics) · [Google Search Console](servers/google-search-console) · [Linkly](servers/linkly) · [Mixpanel](servers/mixpanel) · [PostHog](servers/posthog)
 
