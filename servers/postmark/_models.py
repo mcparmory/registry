@@ -1,7 +1,7 @@
 """
 Postmark MCP Server - Pydantic Models
 
-Generated: 2026-04-22 10:56:12 UTC
+Generated: 2026-05-05 13:51:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
