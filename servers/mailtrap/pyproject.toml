@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-mailtrap"
-version = "1.0.0"
+version = "1.0.1"
 description = "Send emails and manage sending domains, suppression lists, and delivery analytics"
 readme = "README.md"
 license = "MIT"

@@ -1,7 +1,7 @@
 """
 Mailtrap MCP Server - Validators
 
-Generated: 2026-04-23 21:27:46 UTC
+Generated: 2026-05-05 15:33:37 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
