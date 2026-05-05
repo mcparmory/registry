@@ -1,7 +1,7 @@
 """
 Perigon Api MCP Server - Validators
 
-Generated: 2026-04-23 21:36:15 UTC
+Generated: 2026-05-05 15:51:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

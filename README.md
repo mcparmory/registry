@@ -60,7 +60,7 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 
 📣 **Marketing** &ensp; [Customer.io Journeys Track](servers/customerio-journeys-track) · [Klaviyo](servers/klaviyo)
 
-🎬 **Media & Entertainment** &ensp; [Canva](servers/canva) · [Perigon](servers/perigon)
+🎬 **Media & Entertainment** &ensp; [Canva](servers/canva) · [Perigon API](servers/perigon)
 
 ✅ **Productivity** &ensp; [Airtable](servers/airtable) · [Asana](servers/asana) · [Atlassian Jira](servers/atlassian-jira) · [ClickUp](servers/clickup) · [Figma](servers/figma) · [Google Sheets](servers/google-sheets) · [Miro](servers/miro) · [Notion](servers/notion) · [Outline](servers/outline) · [Shortcut](servers/shortcut)
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-perigon"
-version = "1.0.0"
+version = "1.0.2"
 description = "Search real-time news articles, companies, journalists, and trending topics"
 readme = "README.md"
 license = "MIT"
