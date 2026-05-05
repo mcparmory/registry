@@ -1,7 +1,7 @@
 """
 Authentication module for Google Maps Platform MCP server.
 
-Generated: 2026-04-23 21:21:53 UTC
+Generated: 2026-05-05 15:12:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
