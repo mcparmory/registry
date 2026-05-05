@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-contentful-management"
-version = "1.0.0"
+version = "1.0.2"
 description = "Create, update, and publish content across spaces and environments"
 readme = "README.md"
 license = "MIT"
