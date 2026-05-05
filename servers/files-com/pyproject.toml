@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-files-com"
-version = "1.0.0"
+version = "1.0.2"
 description = "Manage files, users, and automated workflows across cloud storage and protocols"
 readme = "README.md"
 license = "MIT"
