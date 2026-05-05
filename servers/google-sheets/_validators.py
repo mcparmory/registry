@@ -1,7 +1,7 @@
 """
 Google Sheets MCP Server - Validators
 
-Generated: 2026-04-23 21:22:43 UTC
+Generated: 2026-05-05 15:17:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
