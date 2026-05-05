@@ -1,7 +1,7 @@
 """
 Authentication module for PDF.co API MCP server.
 
-Generated: 2026-04-23 21:35:49 UTC
+Generated: 2026-05-05 15:49:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-pdfco"
-version = "1.0.0"
+version = "1.0.1"
 description = "Extract data, edit, convert, and parse PDF documents with OCR and AI"
 readme = "README.md"
 license = "MIT"
