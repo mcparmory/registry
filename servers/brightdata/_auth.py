@@ -1,7 +1,7 @@
 """
 Authentication module for Bright Data MCP server.
 
-Generated: 2026-05-05 14:29:25 UTC
+Generated: 2026-05-05 20:33:08 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
