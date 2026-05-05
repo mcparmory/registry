@@ -1,7 +1,7 @@
 """
 Authentication module for E2B MCP server.
 
-Generated: 2026-04-23 21:14:22 UTC
+Generated: 2026-05-05 14:51:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
