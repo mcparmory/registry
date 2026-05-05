@@ -1,7 +1,7 @@
 """
 Ragie MCP Server - Pydantic Models
 
-Generated: 2026-04-22 20:46:34 UTC
+Generated: 2026-05-05 16:03:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
