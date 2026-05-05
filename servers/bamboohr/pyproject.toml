@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-bamboohr"
-version = "1.0.0"
+version = "1.0.5"
 description = "Manage employee records, time off, benefits, and payroll data"
 readme = "README.md"
 license = "MIT"
