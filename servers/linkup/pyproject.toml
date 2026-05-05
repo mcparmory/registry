@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-linkup"
-version = "1.0.0"
+version = "1.0.1"
 description = "Search the web and fetch pages with sourced results, optimized for AI agents"
 readme = "README.md"
 license = "MIT"
