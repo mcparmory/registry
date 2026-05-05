@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-circleci"
-version = "1.0.0"
+version = "1.0.3"
 description = "Manage CI/CD pipelines, workflows, and job metrics across projects"
 readme = "README.md"
 license = "MIT"
