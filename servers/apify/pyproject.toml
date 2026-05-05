@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-apify"
-version = "1.0.0"
+version = "1.0.4"
 description = "Build, deploy, and run web scraping and automation actors in the cloud"
 readme = "README.md"
 license = "MIT"

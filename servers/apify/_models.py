@@ -1,7 +1,7 @@
 """
 Apify MCP Server - Pydantic Models
 
-Generated: 2026-04-23 20:57:56 UTC
+Generated: 2026-05-05 14:12:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
