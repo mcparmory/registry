@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-ip2location-geolocation"
-version = "1.0.0"
+version = "1.0.2"
 description = "Look up IP address location and geolocation data with country, city, timezone, and ISP details"
 readme = "README.md"
 license = "MIT"
