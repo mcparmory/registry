@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-google-drive"
-version = "1.0.0"
+version = "1.0.2"
 description = "Manage files, folders, permissions, and collaborative content in Google Drive"
 readme = "README.md"
 license = "MIT"
