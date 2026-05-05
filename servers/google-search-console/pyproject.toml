@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-google-search-console"
-version = "1.0.0"
+version = "1.0.2"
 description = "Query search analytics, manage sitemaps, and inspect site URLs and status"
 readme = "README.md"
 license = "MIT"
