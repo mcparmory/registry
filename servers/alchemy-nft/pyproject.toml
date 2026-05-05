@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-alchemy-nft"
-version = "1.0.0"
+version = "1.0.2"
 description = "Retrieve NFT metadata, ownership, and contract details across blockchains"
 readme = "README.md"
 license = "MIT"
