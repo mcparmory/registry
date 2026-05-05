@@ -1,7 +1,7 @@
 """
 Ahrefs Api MCP Server - Validators
 
-Generated: 2026-04-23 20:56:02 UTC
+Generated: 2026-05-05 14:03:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
