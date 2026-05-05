@@ -1,7 +1,7 @@
 """
 Authentication module for Browserbase MCP server.
 
-Generated: 2026-04-23 21:05:05 UTC
+Generated: 2026-05-05 14:29:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

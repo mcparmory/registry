@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-browserbase"
-version = "1.0.0"
+version = "1.0.3"
 description = "Create and control browser sessions for web automation, testing, and AI agent tasks"
 readme = "README.md"
 license = "MIT"
