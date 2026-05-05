@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-google-gmail"
-version = "1.0.0"
+version = "1.0.3"
 description = "Send, read, organize emails, manage labels, drafts, and filters"
 readme = "README.md"
 license = "MIT"
