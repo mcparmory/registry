@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-asana"
-version = "1.0.0"
+version = "1.0.4"
 description = "Manage tasks, projects, portfolios, and team workflows"
 readme = "README.md"
 license = "MIT"
