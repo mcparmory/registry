@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-sentry"
-version = "1.0.0"
+version = "1.0.1"
 description = "Track errors, manage performance alerts, and configure dashboards and monitors"
 readme = "README.md"
 license = "MIT"

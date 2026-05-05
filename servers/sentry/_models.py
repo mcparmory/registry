@@ -1,7 +1,7 @@
 """
 Api Reference MCP Server - Pydantic Models
 
-Generated: 2026-04-24 11:01:40 UTC
+Generated: 2026-05-05 16:19:13 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
