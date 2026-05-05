@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-google-analytics"
-version = "1.0.0"
+version = "1.0.2"
 description = "Query GA4 analytics data with custom reports, pivot tables, and audience exports"
 readme = "README.md"
 license = "MIT"

@@ -1,7 +1,7 @@
 """
 Google Analytics MCP Server - Pydantic Models
 
-Generated: 2026-04-23 21:20:34 UTC
+Generated: 2026-05-05 15:07:54 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
