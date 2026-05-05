@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-agentql"
-version = "1.0.0"
+version = "1.0.7"
 description = "Query webpages and extract structured data using natural language"
 readme = "README.md"
 license = "MIT"
