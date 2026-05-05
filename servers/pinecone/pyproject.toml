@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-pinecone"
-version = "1.0.0"
+version = "1.0.1"
 description = "Create and manage vector database indexes, backups, and collections"
 readme = "README.md"
 license = "MIT"

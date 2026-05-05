@@ -40,7 +40,7 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 
 💬 **Communication** &ensp; [Atlassian Confluence](servers/atlassian-confluence) · [Google Gmail](servers/google-gmail) · [MailerSend](servers/mailersend) · [Mailtrap](servers/mailtrap) · [Postmark](servers/postmark) · [Resend](servers/resend)
 
-🗄️ **Data & Databases** &ensp; [Enigma](servers/enigma) · [Pinecone Control Plane](servers/pinecone)
+🗄️ **Data & Databases** &ensp; [Enigma](servers/enigma) · [Pinecone Control Plane API](servers/pinecone)
 
 🛠️ **Developer Tools** &ensp; [AgentQL](servers/agentql) · [Apify](servers/apify) · [Bitbucket](servers/bitbucket) · [Bright Data](servers/brightdata) · [Browserbase](servers/browserbase) · [BuiltWith](servers/builtwith) · [Canvas](servers/canvas) · [CircleCI](servers/circleci) · [Codacy](servers/codacy) · [Contentful Management](servers/contentful-management) · [ConvertAPI](servers/convertapi) · [E2B](servers/e2b) · [Firecrawl](servers/firecrawl) · [GitHub](servers/github) · [GitLab](servers/gitlab) · [LaunchDarkly](servers/launchdarkly) · [Postman](servers/postman) · [Scrapingant](servers/scrapingant) · [Semrush AppCenter](servers/semrush-appcenter) · [Sentry](servers/sentry)
 
