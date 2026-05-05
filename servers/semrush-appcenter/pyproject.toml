@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-semrush-appcenter"
-version = "1.0.0"
+version = "1.0.1"
 description = "Manage subscriptions, users, and send event notifications for Semrush apps"
 readme = "README.md"
 license = "MIT"

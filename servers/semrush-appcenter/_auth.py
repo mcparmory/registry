@@ -1,7 +1,7 @@
 """
 Authentication module for Semrush AppCenter MCP server.
 
-Generated: 2026-04-23 18:56:41 UTC
+Generated: 2026-05-05 16:17:36 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
