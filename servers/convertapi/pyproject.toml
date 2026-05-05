@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-convertapi"
-version = "1.0.0"
+version = "1.0.3"
 description = "Convert files across 500+ formats: documents, PDFs, and images"
 readme = "README.md"
 license = "MIT"

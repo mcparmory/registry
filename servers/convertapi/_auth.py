@@ -1,7 +1,7 @@
 """
 Authentication module for ConvertAPI MCP server.
 
-Generated: 2026-04-24 08:32:26 UTC
+Generated: 2026-05-05 14:45:22 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
