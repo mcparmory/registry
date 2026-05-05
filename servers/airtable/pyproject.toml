@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-airtable"
-version = "1.0.0"
+version = "1.0.2"
 description = "Create, read, update, and delete records in Airtable bases and tables"
 readme = "README.md"
 license = "MIT"
