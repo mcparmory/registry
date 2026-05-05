@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-netlicensing"
-version = "1.0.0"
+version = "1.0.1"
 description = "Create and manage software licenses, products, modules, and customer licensing agreements"
 readme = "README.md"
 license = "MIT"

@@ -1,7 +1,7 @@
 """
 Authentication module for NetLicensing MCP server.
 
-Generated: 2026-04-23 21:29:11 UTC
+Generated: 2026-05-05 15:38:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
