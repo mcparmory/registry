@@ -17,6 +17,7 @@ Base URL: https://ALGOLIA_APPLICATION_ID.algolia.net
 ```bash
 APP_ID_API_KEY=YOUR_APP_ID_API_KEY \
 API_KEY=YOUR_API_KEY \
+SERVER_APPID=YOUR_SERVER_APPID \
 uvx mcparmory-algolia-search
 ```
 
@@ -26,6 +27,7 @@ uvx mcparmory-algolia-search
 pip install mcparmory-algolia-search
 APP_ID_API_KEY=YOUR_APP_ID_API_KEY \
 API_KEY=YOUR_API_KEY \
+SERVER_APPID=YOUR_SERVER_APPID \
 mcparmory-algolia-search
 ```
 
@@ -41,7 +43,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "args": ["mcparmory-algolia-search"],
       "env": {
         "APP_ID_API_KEY": "YOUR_APP_ID_API_KEY",
-        "API_KEY": "YOUR_API_KEY"
+        "API_KEY": "YOUR_API_KEY",
+        "SERVER_APPID": "YOUR_SERVER_APPID"
       }
     }
   }
@@ -56,6 +59,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `APP_ID_API_KEY` — API Key Authentication (x-algolia-application-id)
 - `API_KEY` — API Key Authentication (x-algolia-api-key)
+- `SERVER_APPID` — Server variable: appId (default: `ALGOLIA_APPLICATION_ID`)
 Do not commit credentials to version control.
 
 ---
@@ -89,6 +93,18 @@ Example (if server is at `/home/user/mcp-servers/algolia-search`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e APP_ID_API_KEY=YOUR_APP_ID_API_KEY \
+  -e API_KEY=YOUR_API_KEY \
+  -e SERVER_APPID=YOUR_SERVER_APPID \
+  ghcr.io/mcparmory/algolia-search:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -96,7 +112,9 @@ docker build -t algolia-search .
 docker run -p 8000:8000 --env-file .env algolia-search
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
