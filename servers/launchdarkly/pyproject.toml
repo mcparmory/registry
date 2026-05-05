@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-launchdarkly"
-version = "1.0.0"
+version = "1.0.3"
 description = "Manage feature flags, segments, projects, environments, and team members"
 readme = "README.md"
 license = "MIT"
