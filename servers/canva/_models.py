@@ -1,7 +1,7 @@
 """
 Canva MCP Server - Pydantic Models
 
-Generated: 2026-04-23 21:05:52 UTC
+Generated: 2026-05-05 14:33:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
