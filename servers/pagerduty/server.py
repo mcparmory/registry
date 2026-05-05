@@ -5,7 +5,7 @@ PagerDuty MCP Server
 API Info:
 - Contact: PagerDuty Support <support@pagerduty.com> (http://www.pagerduty.com/support)
 
-Generated: 2026-04-23 21:34:30 UTC
+Generated: 2026-05-05 15:46:23 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -45,7 +45,7 @@ from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.pagerduty.com")
 SERVER_NAME = "PagerDuty"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.0.1"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -496,6 +496,46 @@ class UpstreamAPIError(Exception):
         self.error_message = error_message
 
 
+def _resolve_request_url(base_url: str, path: str) -> str:
+    """Resolve request URL without duplicating absolute API prefixes.
+
+    Some specs provide a base URL with a path prefix (for example
+    ``https://host/admin/api/2024-01``) while operation paths are already
+    absolute from the API root (for example ``/admin/api/2020-01/shop.json``).
+    Passing that path directly to an httpx client with ``base_url`` would
+    incorrectly produce ``.../admin/api/2024-01/admin/api/2020-01/...``.
+
+    When the request path already starts with the same absolute API root (or
+    the base URL path itself), send it against the origin instead.
+    """
+    if not path or "://" in path or not path.startswith("/"):
+        return path
+
+    try:
+        base = httpx.URL(base_url)
+    except Exception:
+        return path
+
+    if not base.host:
+        return path
+
+    if base.port is not None:
+        origin = f"{base.scheme}://{base.host}:{base.port}"
+    else:
+        origin = f"{base.scheme}://{base.host}"
+
+    base_path = (base.path or "").rstrip("/")
+    if not base_path:
+        return path
+
+    base_parent = base_path.rsplit("/", 1)[0] if "/" in base_path else ""
+    if path == base_path or path.startswith(base_path + "/"):
+        return f"{origin}{path}"
+    if base_parent and base_parent != "/" and (path == base_parent or path.startswith(base_parent + "/")):
+        return f"{origin}{path}"
+    return path
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -563,6 +603,7 @@ async def _make_request(
     if raw_querystring:
         _qs_sep = "&" if "?" in path else "?"
         path = f"{path}{_qs_sep}{raw_querystring}"
+    _request_url = _resolve_request_url(BASE_URL, path)
 
     last_error: httpx.HTTPStatusError | Exception | None = None
     _auth_retried = False  # Guard: only attempt one auth refresh per request
@@ -570,7 +611,7 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _form_content = None
+            _form_content: bytes | str | None = None
             if body_content_type == "application/x-www-form-urlencoded":
                 _data = body if isinstance(body, dict) else None
                 if isinstance(body, bytearray):
@@ -632,7 +673,7 @@ async def _make_request(
                         (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
                     )
                 _files = _multipart_parts
-            _content = None
+            _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
                 if isinstance(_raw, (dict, list)):
@@ -645,7 +686,7 @@ async def _make_request(
                 _content = _form_content
             response = await client.request(
                 method=method,
-                url=path,
+                url=_request_url,
                 params=params,
                 json=_json,
                 data=_data,

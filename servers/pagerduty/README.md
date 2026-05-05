@@ -20,6 +20,7 @@ Base URL: https://api.pagerduty.com
 ```bash
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 API_KEY=YOUR_API_KEY \
 uvx mcparmory-pagerduty
 ```
@@ -30,6 +31,7 @@ uvx mcparmory-pagerduty
 pip install mcparmory-pagerduty
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 API_KEY=YOUR_API_KEY \
 mcparmory-pagerduty
 ```
@@ -47,6 +49,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "env": {
         "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
         "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
+        "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",
         "API_KEY": "YOUR_API_KEY"
       }
     }
@@ -54,7 +57,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 }
 ```
 
-Set `OAUTH2_SCOPES` to a comma-separated list of scopes your app requires (e.g. `OAUTH2_SCOPES=scope_a,scope_b`). Open `.env` to see all available scopes with descriptions.
+Set `OAUTH2_SCOPES` to a comma-separated list of scopes your app requires (e.g. `OAUTH2_SCOPES=scope_a,scope_b`). Some OAuth2 providers may also use additional scope env vars such as `OAUTH2_USER_SCOPES`; open `.env` to see all generated scope buckets and descriptions.
 
 ---
 
@@ -64,6 +67,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `OAUTH2_CLIENT_ID` — OAuth2 client ID
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
+- `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `API_KEY` — API Key Authentication (Authorization)
 Do not commit credentials to version control.
 
@@ -118,6 +122,7 @@ Example (if server is at `/home/user/mcp-servers/pagerduty`):
 docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
   -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
   -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
   -e API_KEY=YOUR_API_KEY \
   ghcr.io/mcparmory/pagerduty:latest
 ```

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-pagerduty"
-version = "1.0.0"
+version = "1.0.1"
 description = "Manage incidents, on-call schedules, escalation policies, and alert notifications"
 readme = "README.md"
 license = "MIT"
