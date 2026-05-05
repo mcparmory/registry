@@ -48,7 +48,7 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 
 🛒 **E-commerce** &ensp; [Shopify Admin API](servers/shopify-admin)
 
-💰 **Finance** &ensp; [Alpha Vantage](servers/alpha-vantage) · [Polygon](servers/polygon) · [Ramp](servers/ramp)
+💰 **Finance** &ensp; [Alpha Vantage](servers/alpha-vantage) · [Polygon API](servers/polygon) · [Ramp](servers/ramp)
 
 👥 **HR & Recruiting** &ensp; [BambooHR](servers/bamboohr)
 
