@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-figma"
-version = "1.0.0"
+version = "1.0.5"
 description = "Export files, access design data, manage projects, comments, and team assets"
 readme = "README.md"
 license = "MIT"

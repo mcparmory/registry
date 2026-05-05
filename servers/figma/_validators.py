@@ -1,7 +1,7 @@
 """
 Figma MCP Server - Validators
 
-Generated: 2026-04-23 21:15:19 UTC
+Generated: 2026-05-05 14:55:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
