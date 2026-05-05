@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-mixpanel"
-version = "1.0.0"
+version = "1.0.1"
 description = "Analyze user behavior with funnels, retention, cohorts, and event segmentation"
 readme = "README.md"
 license = "MIT"
