@@ -1,7 +1,7 @@
 """
 Bitbucket MCP Server - Validators
 
-Generated: 2026-04-23 21:02:39 UTC
+Generated: 2026-05-05 14:24:36 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

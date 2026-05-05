@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-bitbucket"
-version = "1.0.0"
+version = "1.0.4"
 description = "Manage repositories, branches, webhooks, and pull requests in Bitbucket workspaces"
 readme = "README.md"
 license = "MIT"
