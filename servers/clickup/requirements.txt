@@ -1,5 +1,5 @@
 # ClickUp - Dependencies
-# Generated: 2026-04-23 21:08:30 UTC
+# Generated: 2026-05-05 14:39:21 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.2.4
 httpx>=0.27.0,<1.0.0
