@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-opencage-geocoding"
-version = "1.0.0"
+version = "1.0.1"
 description = "Convert addresses to coordinates and reverse-geocode locations worldwide"
 readme = "README.md"
 license = "MIT"
