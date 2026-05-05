@@ -64,7 +64,7 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 
 ✅ **Productivity** &ensp; [Airtable](servers/airtable) · [Asana](servers/asana) · [Atlassian Jira](servers/atlassian-jira) · [ClickUp](servers/clickup) · [Figma](servers/figma) · [Google Sheets](servers/google-sheets) · [Miro](servers/miro) · [Notion](servers/notion) · [Outline](servers/outline) · [Shortcut](servers/shortcut)
 
-🔍 **Search** &ensp; [Algolia Search](servers/algolia-search) · [Google Search](servers/google-search)
+🔍 **Search** &ensp; [Algolia Search](servers/algolia-search) · [Google Search API](servers/google-search)
 
 📦 **Storage** &ensp; [Box](servers/box) · [Files.com](servers/files-com) · [Google Drive](servers/google-drive)
 
