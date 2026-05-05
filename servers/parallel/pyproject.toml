@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-parallel"
-version = "1.0.0"
+version = "1.0.1"
 description = "Search the web, extract content, and run distributed tasks with AI-powered automation"
 readme = "README.md"
 license = "MIT"
