@@ -6,7 +6,7 @@ API Info:
 - Contact: Alpha Vantage Support <support@alphavantage.co> (https://www.alphavantage.co/support/)
 - Terms of Service: https://www.alphavantage.co/terms_of_service/
 
-Generated: 2026-05-05 14:10:47 UTC
+Generated: 2026-05-11 22:57:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.alphavantage.co")
 SERVER_NAME = "Alpha Vantage"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -987,6 +1018,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1011,6 +1044,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1218,7 +1253,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Alpha Vantage", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Intraday Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_intraday_time_series(
     function: Literal["TIME_SERIES_INTRADAY"] = Field(..., description="The time series function to query. Must be TIME_SERIES_INTRADAY for intraday data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
@@ -1262,7 +1303,13 @@ async def get_intraday_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Daily Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_daily_time_series(
     function: Literal["TIME_SERIES_DAILY"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_DAILY for daily candlestick data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
@@ -1302,7 +1349,13 @@ async def get_daily_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Daily Adjusted Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_daily_adjusted_time_series(
     function: Literal["TIME_SERIES_DAILY_ADJUSTED"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_DAILY_ADJUSTED for daily adjusted price and volume data."),
     symbol: str = Field(..., description="The stock ticker symbol of the equity to query (e.g., IBM, AAPL). Case-insensitive."),
@@ -1342,7 +1395,13 @@ async def get_daily_adjusted_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Weekly Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_weekly_time_series(
     function: Literal["TIME_SERIES_WEEKLY"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_WEEKLY for weekly equity data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
@@ -1381,7 +1440,13 @@ async def get_weekly_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Weekly Adjusted Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_weekly_adjusted_time_series(
     function: Literal["TIME_SERIES_WEEKLY_ADJUSTED"] = Field(..., description="The time series function type. Must be set to TIME_SERIES_WEEKLY_ADJUSTED to retrieve weekly adjusted historical data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL). Case-insensitive."),
@@ -1420,7 +1485,13 @@ async def get_weekly_adjusted_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Equity Monthly Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_equity_monthly_time_series(
     function: Literal["TIME_SERIES_MONTHLY"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_MONTHLY for monthly aggregated equity data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL, MSFT)."),
@@ -1459,7 +1530,13 @@ async def get_equity_monthly_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Monthly Adjusted Time Series",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monthly_adjusted_time_series(
     function: Literal["TIME_SERIES_MONTHLY_ADJUSTED"] = Field(..., description="The time series function type. Must be set to TIME_SERIES_MONTHLY_ADJUSTED to retrieve monthly adjusted data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
@@ -1498,7 +1575,13 @@ async def get_monthly_adjusted_time_series(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Realtime Quotes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_realtime_quotes(
     function: Literal["REALTIME_BULK_QUOTES"] = Field(..., description="The API function type; must be set to REALTIME_BULK_QUOTES to retrieve real-time quotes."),
     symbol: str = Field(..., description="One or more stock symbols separated by commas (e.g., MSFT,AAPL,IBM). Up to 100 symbols are accepted per request; additional symbols beyond 100 will be ignored."),
@@ -1537,7 +1620,13 @@ async def get_realtime_quotes(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Search Symbols",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_symbols(
     function: Literal["SYMBOL_SEARCH"] = Field(..., description="The search function to execute. Must be set to SYMBOL_SEARCH to perform symbol lookups."),
     keywords: str = Field(..., description="A text string containing one or more keywords to search for symbols. For example, company names like 'microsoft' or 'tesco'."),
@@ -1576,7 +1665,13 @@ async def search_symbols(
     return _response_data
 
 # Tags: Core Stock APIs
-@mcp.tool()
+@mcp.tool(
+    title="Check Market Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_market_status(function: Literal["MARKET_STATUS"] = Field(..., description="The function to execute; must be set to MARKET_STATUS to retrieve global market status information.")) -> dict[str, Any] | ToolResult:
     """Check the current open or closed status of major global trading venues across equities, forex, and cryptocurrency markets."""
 
@@ -1612,7 +1707,13 @@ async def check_market_status(function: Literal["MARKET_STATUS"] = Field(..., de
     return _response_data
 
 # Tags: Index Data APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Index Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_index_data(
     function: Literal["INDEX_DATA"] = Field(..., description="The data function type to retrieve. Must be set to INDEX_DATA to fetch index time series information."),
     symbol: Literal["COMP"] = Field(..., description="The stock market index symbol. Must be set to COMP to retrieve NASDAQ Composite Index data."),
@@ -1652,7 +1753,13 @@ async def get_index_data(
     return _response_data
 
 # Tags: Index Data APIs
-@mcp.tool()
+@mcp.tool(
+    title="List Index Symbols",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_index_symbols(function: Literal["INDEX_CATALOG"] = Field(..., description="The catalog function to execute. Must be set to INDEX_CATALOG to retrieve the index symbol catalog.")) -> dict[str, Any] | ToolResult:
     """Retrieves a complete catalog of all supported index symbols with their full names. Use this to discover available indices for market data queries."""
 
@@ -1688,7 +1795,13 @@ async def list_index_symbols(function: Literal["INDEX_CATALOG"] = Field(..., des
     return _response_data
 
 # Tags: Options Data APIs
-@mcp.tool()
+@mcp.tool(
+    title="List Realtime Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_realtime_options(
     function: Literal["REALTIME_OPTIONS"] = Field(..., description="The data type to retrieve. Must be set to REALTIME_OPTIONS to fetch current options market data."),
     symbol: str = Field(..., description="The stock symbol for which to retrieve options data (e.g., IBM)."),
@@ -1730,7 +1843,13 @@ async def list_realtime_options(
     return _response_data
 
 # Tags: Options Data APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Realtime Put Call Ratio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_realtime_put_call_ratio(
     function: Literal["REALTIME_PUT_CALL_RATIO"] = Field(..., description="The function type for this operation, which must be set to REALTIME_PUT_CALL_RATIO to retrieve realtime put-call ratio data."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity to analyze (e.g., IBM). This identifies which company's option chain data to retrieve."),
@@ -1769,7 +1888,13 @@ async def get_realtime_put_call_ratio(
     return _response_data
 
 # Tags: Options Data APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Historical Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_historical_options(
     function: Literal["HISTORICAL_OPTIONS"] = Field(..., description="The data type to retrieve. Must be set to HISTORICAL_OPTIONS to fetch historical options chain data."),
     symbol: str = Field(..., description="The equity ticker symbol (e.g., IBM). Used to identify which stock's options data to retrieve."),
@@ -1809,7 +1934,13 @@ async def get_historical_options(
     return _response_data
 
 # Tags: Options Data APIs
-@mcp.tool()
+@mcp.tool(
+    title="Get Historical Put/Call Ratio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_historical_put_call_ratio(
     function: Literal["HISTORICAL_PUT_CALL_RATIO"] = Field(..., description="The function type for this operation. Must be set to HISTORICAL_PUT_CALL_RATIO to retrieve put-call ratio data."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity (e.g., IBM). This identifies which company's options data to retrieve."),
@@ -1849,7 +1980,13 @@ async def get_historical_put_call_ratio(
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="Search News Sentiment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_news_sentiment(
     function: Literal["NEWS_SENTIMENT"] = Field(..., description="The operation type to perform. Must be set to NEWS_SENTIMENT to retrieve news and sentiment data."),
     tickers: str | None = Field(None, description="Filter articles by one or more asset symbols (e.g., AAPL for stocks, CRYPTO:BTC for Bitcoin, FOREX:USD for US Dollar). Use comma-separated values to match articles mentioning multiple symbols simultaneously."),
@@ -1893,7 +2030,13 @@ async def search_news_sentiment(
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="Get Earnings Call Transcript",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_earnings_call_transcript(
     function: Literal["EARNINGS_CALL_TRANSCRIPT"] = Field(..., description="The function identifier for this operation. Must be set to EARNINGS_CALL_TRANSCRIPT to retrieve earnings call transcripts."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., IBM). Used to identify which company's earnings call transcript to retrieve."),
@@ -1933,7 +2076,13 @@ async def get_earnings_call_transcript(
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="List Market Movers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_market_movers(function: Literal["TOP_GAINERS_LOSERS"] = Field(..., description="The function to execute. Must be set to TOP_GAINERS_LOSERS to retrieve market mover data.")) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 gainers, losers, and most actively traded stocks in the US market. Historical data is returned by default, with real-time or 15-minute delayed data available for premium members."""
 
@@ -1969,7 +2118,13 @@ async def list_market_movers(function: Literal["TOP_GAINERS_LOSERS"] = Field(...
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="List Insider Transactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_insider_transactions(
     function: Literal["INSIDER_TRANSACTIONS"] = Field(..., description="The function type to invoke. Must be set to INSIDER_TRANSACTIONS to retrieve insider transaction data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company for which to retrieve insider transactions (e.g., IBM, AAPL)."),
@@ -2008,7 +2163,13 @@ async def list_insider_transactions(
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="Get Institutional Holdings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_institutional_holdings(
     function: Literal["INSTITUTIONAL_HOLDINGS"] = Field(..., description="The function type to execute; must be set to INSTITUTIONAL_HOLDINGS to retrieve institutional ownership data."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity of interest (e.g., IBM, AAPL). Use the standard market symbol without exchange suffix."),
@@ -2047,7 +2208,13 @@ async def get_institutional_holdings(
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Analytics Fixed Window",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_analytics_fixed_window(
     function: Literal["ANALYTICS_FIXED_WINDOW"] = Field(..., description="The analytics function to execute. Must be set to ANALYTICS_FIXED_WINDOW for this operation."),
     symbols: str = Field(..., alias="SYMBOLS", description="Comma-separated list of stock symbols to analyze. Free API keys support up to 5 symbols per request; premium keys support up to 50 symbols."),
@@ -2090,7 +2257,13 @@ async def calculate_analytics_fixed_window(
     return _response_data
 
 # Tags: Alpha Intelligence
-@mcp.tool()
+@mcp.tool(
+    title="Analyze Sliding Window Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def analyze_sliding_window_metrics(
     function: Literal["ANALYTICS_SLIDING_WINDOW"] = Field(..., description="The analytics function to execute. Must be set to ANALYTICS_SLIDING_WINDOW."),
     symbols: str = Field(..., alias="SYMBOLS", description="One or more stock symbols to analyze, provided as a comma-separated list. Free API keys support up to 5 symbols per request; premium keys support up to 50."),
@@ -2134,7 +2307,13 @@ async def analyze_sliding_window_metrics(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Company Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_company_overview(
     function: Literal["OVERVIEW"] = Field(..., description="The type of company data to retrieve. Must be set to OVERVIEW to fetch company information and financial metrics."),
     symbol: str = Field(..., description="The stock ticker symbol of the company you want to look up (e.g., IBM, AAPL)."),
@@ -2173,7 +2352,13 @@ async def get_company_overview(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get ETF Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_etf_profile(
     function: Literal["ETF_PROFILE"] = Field(..., description="The function type to execute; must be set to ETF_PROFILE to retrieve ETF profile and holdings data."),
     symbol: str = Field(..., description="The ticker symbol of the ETF to retrieve profile information for (e.g., QQQ, SPY)."),
@@ -2212,7 +2397,13 @@ async def get_etf_profile(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Dividend History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dividend_history(
     function: Literal["DIVIDENDS"] = Field(..., description="The dividend query function type. Must be set to DIVIDENDS to retrieve dividend data."),
     symbol: str = Field(..., description="The equity ticker symbol for which to retrieve dividend information (e.g., IBM, AAPL)."),
@@ -2251,7 +2442,13 @@ async def get_dividend_history(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Stock Splits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stock_splits(
     function: Literal["SPLITS"] = Field(..., description="The function type to execute. Must be set to SPLITS to retrieve stock split data."),
     symbol: str = Field(..., description="The stock ticker symbol for which to retrieve historical split data (e.g., IBM, AAPL)."),
@@ -2290,7 +2487,13 @@ async def get_stock_splits(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Income Statement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_income_statement(
     function: Literal["INCOME_STATEMENT"] = Field(..., description="The financial statement type to retrieve. Must be set to INCOME_STATEMENT to fetch income statement data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company whose income statement you want to retrieve (e.g., IBM, AAPL)."),
@@ -2329,7 +2532,13 @@ async def get_income_statement(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Balance Sheet",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_balance_sheet(
     function: Literal["BALANCE_SHEET"] = Field(..., description="The balance sheet data type to retrieve. Must be set to BALANCE_SHEET."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., IBM, AAPL). Used to identify which equity's balance sheet to retrieve."),
@@ -2368,7 +2577,13 @@ async def get_balance_sheet(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Cash Flow Statement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cash_flow_statement(
     function: Literal["CASH_FLOW"] = Field(..., description="The cash flow statement function type. Must be set to CASH_FLOW to retrieve cash flow data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company for which to retrieve cash flow statements (e.g., IBM, AAPL)."),
@@ -2407,7 +2622,13 @@ async def get_cash_flow_statement(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Shares Outstanding",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_shares_outstanding(
     function: Literal["SHARES_OUTSTANDING"] = Field(..., description="The function identifier for this operation. Must be set to SHARES_OUTSTANDING to retrieve shares outstanding data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., MSFT). Use the standard market ticker symbol for the equity of interest."),
@@ -2446,7 +2667,13 @@ async def get_shares_outstanding(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Earnings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_earnings(
     function: Literal["EARNINGS"] = Field(..., description="The earnings data function type. Must be set to EARNINGS to retrieve earnings data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., IBM, AAPL). Used to identify which company's earnings data to retrieve."),
@@ -2485,7 +2712,13 @@ async def get_earnings(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="Get Earnings Estimates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_earnings_estimates(
     function: Literal["EARNINGS_ESTIMATES"] = Field(..., description="The earnings estimates function type. Must be set to EARNINGS_ESTIMATES to retrieve consensus analyst estimates."),
     symbol: str = Field(..., description="The stock ticker symbol for the company of interest (e.g., IBM, AAPL). Used to identify which equity's earnings estimates to retrieve."),
@@ -2524,7 +2757,13 @@ async def get_earnings_estimates(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="List Listing Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_listing_status(
     function: Literal["LISTING_STATUS"] = Field(..., description="The function type for this operation. Must be set to LISTING_STATUS to query asset listing status."),
     date: str | None = Field(None, description="The date for which to retrieve listing status. Use YYYY-MM-DD format for any date from January 1, 2010 onwards. If omitted, returns data as of the latest trading day."),
@@ -2564,7 +2803,13 @@ async def list_listing_status(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="List Earnings Calendar",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_earnings_calendar(
     function: Literal["EARNINGS_CALENDAR"] = Field(..., description="The function identifier for this operation. Must be set to EARNINGS_CALENDAR."),
     symbol: str | None = Field(None, description="Optional company stock symbol to filter results for a specific company. When omitted, returns earnings data for all companies."),
@@ -2604,7 +2849,13 @@ async def list_earnings_calendar(
     return _response_data
 
 # Tags: Fundamental Data
-@mcp.tool()
+@mcp.tool(
+    title="List IPO Calendar",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ipo_calendar(function: Literal["IPO_CALENDAR"] = Field(..., description="The API function to invoke. Must be set to IPO_CALENDAR to retrieve IPO calendar data.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of upcoming IPO events scheduled in the US market over the next 3 months."""
 
@@ -2640,7 +2891,13 @@ async def list_ipo_calendar(function: Literal["IPO_CALENDAR"] = Field(..., descr
     return _response_data
 
 # Tags: Cryptocurrencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Exchange Rate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_exchange_rate(
     function: Literal["CURRENCY_EXCHANGE_RATE"] = Field(..., description="The function identifier for this operation; must be set to CURRENCY_EXCHANGE_RATE."),
     from_currency: str = Field(..., description="The source currency code (e.g., BTC for Bitcoin, USD for US Dollar). Accepts both cryptocurrency and fiat currency codes."),
@@ -2680,7 +2937,13 @@ async def get_exchange_rate(
     return _response_data
 
 # Tags: Forex (FX)
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Intraday",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_intraday(
     function: Literal["FX_INTRADAY"] = Field(..., description="The time series function type; must be set to FX_INTRADAY for forex intraday data."),
     from_symbol: str = Field(..., description="The three-letter ISO 4217 currency code for the base currency (e.g., EUR, GBP, JPY).", min_length=3, max_length=3),
@@ -2722,7 +2985,13 @@ async def get_forex_intraday(
     return _response_data
 
 # Tags: Forex (FX)
-@mcp.tool()
+@mcp.tool(
+    title="Get FX Daily",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_fx_daily(
     function: Literal["FX_DAILY"] = Field(..., description="The time series function type. Must be set to FX_DAILY for daily forex data."),
     from_symbol: str = Field(..., description="The base currency as a three-letter ISO 4217 code (e.g., EUR, GBP, JPY)."),
@@ -2763,7 +3032,13 @@ async def get_fx_daily(
     return _response_data
 
 # Tags: Forex (FX)
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Weekly",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_weekly(
     function: Literal["FX_WEEKLY"] = Field(..., description="The time series function type. Must be set to FX_WEEKLY to retrieve weekly forex data."),
     from_symbol: str = Field(..., description="The three-letter ISO 4217 currency code for the base currency (e.g., EUR, GBP, JPY).", min_length=3, max_length=3),
@@ -2803,7 +3078,13 @@ async def get_forex_weekly(
     return _response_data
 
 # Tags: Forex (FX)
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Monthly",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_monthly(
     function: Literal["FX_MONTHLY"] = Field(..., description="The time series function type. Must be set to FX_MONTHLY to retrieve monthly forex data."),
     from_symbol: str = Field(..., description="The base currency as a three-letter ISO 4217 code (e.g., EUR, GBP, JPY). This is the currency being converted from."),
@@ -2843,7 +3124,13 @@ async def get_forex_monthly(
     return _response_data
 
 # Tags: Cryptocurrencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto Intraday",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_intraday(
     function: Literal["CRYPTO_INTRADAY"] = Field(..., description="The function type for this request. Must be set to CRYPTO_INTRADAY to retrieve intraday cryptocurrency time series data."),
     symbol: str = Field(..., description="The cryptocurrency symbol to retrieve data for (e.g., ETH for Ethereum, BTC for Bitcoin). Must be a valid cryptocurrency code from the supported list."),
@@ -2885,7 +3172,13 @@ async def get_crypto_intraday(
     return _response_data
 
 # Tags: Cryptocurrencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Cryptocurrency Daily Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cryptocurrency_daily_prices(
     function: Literal["DIGITAL_CURRENCY_DAILY"] = Field(..., description="The API function to invoke. Must be set to DIGITAL_CURRENCY_DAILY to retrieve daily cryptocurrency price history."),
     symbol: str = Field(..., description="The cryptocurrency symbol to query (e.g., BTC for Bitcoin). Use any valid cryptocurrency code from the supported currency list."),
@@ -2925,7 +3218,13 @@ async def get_cryptocurrency_daily_prices(
     return _response_data
 
 # Tags: Cryptocurrencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Cryptocurrency Weekly Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cryptocurrency_weekly_prices(
     function: Literal["DIGITAL_CURRENCY_WEEKLY"] = Field(..., description="The API function to invoke. Must be set to DIGITAL_CURRENCY_WEEKLY to retrieve weekly cryptocurrency time series data."),
     symbol: str = Field(..., description="The cryptocurrency symbol to query (e.g., BTC for Bitcoin). Use any valid cryptocurrency code from the supported currency list."),
@@ -2965,7 +3264,13 @@ async def get_cryptocurrency_weekly_prices(
     return _response_data
 
 # Tags: Cryptocurrencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Cryptocurrency Monthly History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cryptocurrency_monthly_history(
     function: Literal["DIGITAL_CURRENCY_MONTHLY"] = Field(..., description="The API function to invoke. Must be set to DIGITAL_CURRENCY_MONTHLY to retrieve monthly time series data."),
     symbol: str = Field(..., description="The cryptocurrency symbol to query (e.g., BTC for Bitcoin). Must be a valid cryptocurrency code from the supported currency list."),
@@ -3005,7 +3310,13 @@ async def get_cryptocurrency_monthly_history(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Spot Price",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spot_price(
     function: Literal["GOLD_SILVER_SPOT"] = Field(..., description="The API function to invoke; must be set to GOLD_SILVER_SPOT to retrieve precious metal spot prices."),
     symbol: Literal["GOLD", "XAU", "SILVER", "XAG"] = Field(..., description="The precious metal symbol to query: use GOLD or XAU for gold prices, or SILVER or XAG for silver prices."),
@@ -3044,7 +3355,13 @@ async def get_spot_price(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Precious Metal History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_precious_metal_history(
     function: Literal["GOLD_SILVER_HISTORY"] = Field(..., description="The API function to invoke. Must be set to GOLD_SILVER_HISTORY to retrieve precious metal historical data."),
     symbol: Literal["GOLD", "XAU", "SILVER", "XAG"] = Field(..., description="The precious metal to query. Use GOLD or XAU for gold prices, or SILVER or XAG for silver prices."),
@@ -3084,7 +3401,13 @@ async def get_precious_metal_history(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get WTI Crude Oil Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_wti_crude_oil_prices(
     function: Literal["WTI"] = Field(..., description="The data function to retrieve. Must be set to WTI to fetch West Texas Intermediate crude oil prices."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for price data aggregation. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
@@ -3123,7 +3446,13 @@ async def get_wti_crude_oil_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Brent Crude Oil Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_brent_crude_oil_prices(
     function: Literal["BRENT"] = Field(..., description="The data source identifier. Must be set to BRENT to retrieve Brent crude oil prices."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for price data. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
@@ -3162,7 +3491,13 @@ async def get_brent_crude_oil_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Natural Gas Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_natural_gas_prices(
     function: Literal["NATURAL_GAS"] = Field(..., description="Specifies the data type to retrieve. Must be set to NATURAL_GAS to fetch Henry Hub natural gas spot prices."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Time interval for price data aggregation. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
@@ -3201,7 +3536,13 @@ async def get_natural_gas_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Copper Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_copper_prices(
     function: Literal["COPPER"] = Field(..., description="The commodity type to query. Must be set to COPPER to retrieve copper price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for price data aggregation. Choose from monthly (default), quarterly, or annual intervals to match your analysis needs."),
@@ -3240,7 +3581,13 @@ async def get_copper_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Aluminum Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_aluminum_prices(
     function: Literal["ALUMINUM"] = Field(..., description="Specifies the commodity type to query. Must be set to ALUMINUM to retrieve aluminum price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Time interval for the price data. Accepts monthly (default), quarterly, or annual aggregations."),
@@ -3279,7 +3626,13 @@ async def get_aluminum_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Wheat Price",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_wheat_price(
     function: Literal["WHEAT"] = Field(..., description="The commodity type to query. Must be set to WHEAT for this operation."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for the price data. Choose from monthly (default), quarterly, or annual aggregations."),
@@ -3318,7 +3671,13 @@ async def get_wheat_price(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Corn Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_corn_prices(
     function: Literal["CORN"] = Field(..., description="The commodity type to query. Must be set to CORN to retrieve corn price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for price data aggregation. Choose from monthly (default), quarterly, or annual intervals."),
@@ -3357,7 +3716,13 @@ async def get_corn_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Cotton Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cotton_prices(
     function: Literal["COTTON"] = Field(..., description="Specifies the commodity data to retrieve. Must be set to COTTON to fetch cotton price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Specifies the time interval for the price data. Choose from monthly (default), quarterly, or annual aggregations."),
@@ -3396,7 +3761,13 @@ async def get_cotton_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Sugar Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sugar_prices(
     function: Literal["SUGAR"] = Field(..., description="The commodity type to query. Must be set to SUGAR for sugar price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for price data aggregation. Choose from monthly, quarterly, or annual intervals. Defaults to monthly if not specified."),
@@ -3435,7 +3806,13 @@ async def get_sugar_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Coffee Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coffee_prices(
     function: Literal["COFFEE"] = Field(..., description="Specifies the commodity type to query. Must be set to COFFEE to retrieve coffee price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Defines the time period aggregation for price data. Accepts monthly, quarterly, or annual intervals, with monthly as the default."),
@@ -3474,7 +3851,13 @@ async def get_coffee_prices(
     return _response_data
 
 # Tags: Commodities
-@mcp.tool()
+@mcp.tool(
+    title="Get Commodity Price Index",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commodity_price_index(
     function: Literal["ALL_COMMODITIES"] = Field(..., description="Specifies the commodity dataset to retrieve. Must be set to ALL_COMMODITIES to fetch the global price index for all commodities."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Defines the time period granularity for the price index data. Accepts monthly (default), quarterly, or annual intervals."),
@@ -3513,7 +3896,13 @@ async def get_commodity_price_index(
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Real GDP",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_real_gdp(
     function: Literal["REAL_GDP"] = Field(..., description="The data function to retrieve; must be set to REAL_GDP to fetch Real Gross Domestic Product data."),
     interval: Literal["annual", "quarterly"] | None = Field(None, description="The time interval for the data; choose either annual or quarterly frequency. Defaults to annual if not specified."),
@@ -3552,7 +3941,13 @@ async def get_real_gdp(
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Real GDP Per Capita",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_real_gdp_per_capita(function: Literal["REAL_GDP_PER_CAPITA"] = Field(..., description="The data function to retrieve; must be set to REAL_GDP_PER_CAPITA to fetch quarterly Real GDP per Capita metrics.")) -> dict[str, Any] | ToolResult:
     """Retrieves quarterly Real GDP per Capita data for the United States from the Federal Reserve Economic Data (FRED) database, sourced from the U.S. Bureau of Economic Analysis."""
 
@@ -3588,7 +3983,13 @@ async def get_real_gdp_per_capita(function: Literal["REAL_GDP_PER_CAPITA"] = Fie
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Fetch Treasury Yield",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def fetch_treasury_yield(
     function: Literal["TREASURY_YIELD"] = Field(..., description="The data function to execute. Must be set to TREASURY_YIELD to retrieve Treasury yield data."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for data points. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
@@ -3628,7 +4029,13 @@ async def fetch_treasury_yield(
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Federal Funds Rate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_federal_funds_rate(
     function: Literal["FEDERAL_FUNDS_RATE"] = Field(..., description="The data function to retrieve; must be set to FEDERAL_FUNDS_RATE to fetch federal funds rate data."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for the data: daily for individual trading days, weekly for week-over-week rates, or monthly for month-over-month rates. Defaults to monthly if not specified."),
@@ -3667,7 +4074,13 @@ async def get_federal_funds_rate(
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get CPI Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cpi_data(
     function: Literal["CPI"] = Field(..., description="The data type to retrieve; must be set to CPI for Consumer Price Index data."),
     interval: Literal["monthly", "semiannual"] | None = Field(None, description="The reporting frequency for CPI data; choose either monthly (default) for month-over-month data or semiannual for six-month intervals."),
@@ -3706,7 +4119,13 @@ async def get_cpi_data(
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Inflation Rates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_inflation_rates(function: Literal["INFLATION"] = Field(..., description="Specifies the data function to retrieve; must be set to INFLATION to fetch annual consumer price inflation rates.")) -> dict[str, Any] | ToolResult:
     """Retrieves annual inflation rates based on consumer prices for the United States, sourced from the Federal Reserve Economic Data (FRED) database via the World Bank."""
 
@@ -3742,7 +4161,13 @@ async def get_inflation_rates(function: Literal["INFLATION"] = Field(..., descri
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Retail Sales",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retail_sales(function: Literal["RETAIL_SALES"] = Field(..., description="The data function to retrieve; must be set to RETAIL_SALES to fetch monthly retail trade sales data.")) -> dict[str, Any] | ToolResult:
     """Retrieves monthly Advance Retail Sales data for the United States from the U.S. Census Bureau, sourced through the Federal Reserve Economic Data (FRED) system."""
 
@@ -3778,7 +4203,13 @@ async def get_retail_sales(function: Literal["RETAIL_SALES"] = Field(..., descri
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Durable Goods Orders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_durable_goods_orders(function: Literal["DURABLES"] = Field(..., description="The data function to retrieve; must be set to DURABLES to fetch durable goods orders data.")) -> dict[str, Any] | ToolResult:
     """Retrieves monthly data on manufacturers' new orders for durable goods in the United States, sourced from the U.S. Census Bureau via the Federal Reserve Economic Data (FRED) database."""
 
@@ -3814,7 +4245,13 @@ async def get_durable_goods_orders(function: Literal["DURABLES"] = Field(..., de
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Unemployment Rate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_unemployment_rate(function: Literal["UNEMPLOYMENT"] = Field(..., description="Specifies the data function to retrieve; must be set to UNEMPLOYMENT to fetch unemployment rate data.")) -> dict[str, Any] | ToolResult:
     """Retrieves the monthly unemployment rate for the United States, showing the percentage of unemployed individuals within the labor force. Data covers the civilian population aged 16 and older residing in the 50 states or District of Columbia."""
 
@@ -3850,7 +4287,13 @@ async def get_unemployment_rate(function: Literal["UNEMPLOYMENT"] = Field(..., d
     return _response_data
 
 # Tags: Economic Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Nonfarm Payroll",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nonfarm_payroll(function: Literal["NONFARM_PAYROLL"] = Field(..., description="The data function to retrieve; must be set to NONFARM_PAYROLL to fetch monthly nonfarm payroll employment data.")) -> dict[str, Any] | ToolResult:
     """Retrieves monthly US nonfarm payroll employment figures from the Bureau of Labor Statistics, representing the total number of employed workers in the economy excluding farm workers, proprietors, and self-employed individuals."""
 
@@ -3886,7 +4329,13 @@ async def get_nonfarm_payroll(function: Literal["NONFARM_PAYROLL"] = Field(..., 
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate SMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_sma(
     function: Literal["SMA"] = Field(..., description="The technical indicator function to use. Must be set to SMA for simple moving average calculations."),
     symbol: str = Field(..., description="The ticker symbol of the equity or currency pair (e.g., IBM, AAPL, EUR/USD)."),
@@ -3929,7 +4378,13 @@ async def calculate_sma(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate EMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_ema(
     function: Literal["EMA"] = Field(..., description="The technical indicator type. Must be set to EMA for exponential moving average calculations."),
     symbol: str = Field(..., description="The ticker symbol of the equity or currency pair to analyze (e.g., IBM, AAPL, EUR/USD)."),
@@ -3972,7 +4427,13 @@ async def calculate_ema(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Weighted Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_weighted_moving_average(
     function: Literal["WMA"] = Field(..., description="The technical indicator function to apply. Must be WMA (Weighted Moving Average)."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL). Case-insensitive."),
@@ -4015,7 +4476,13 @@ async def calculate_weighted_moving_average(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate DEMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_dema(
     function: Literal["DEMA"] = Field(..., description="The technical indicator type; must be set to DEMA for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM) for which to calculate the moving average."),
@@ -4058,7 +4525,13 @@ async def calculate_dema(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate TEMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_tema(
     function: Literal["TEMA"] = Field(..., description="The technical indicator type; must be set to TEMA for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -4101,7 +4574,13 @@ async def calculate_tema(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Triangular Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_triangular_moving_average(
     function: Literal["TRIMA"] = Field(..., description="The technical indicator type. Must be set to TRIMA for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -4144,7 +4623,13 @@ async def calculate_triangular_moving_average(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate KAMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_kama(
     function: Literal["KAMA"] = Field(..., description="The technical indicator type. Must be set to KAMA for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -4187,7 +4672,13 @@ async def calculate_kama(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get MAMA Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_mama_indicator(
     function: Literal["MAMA"] = Field(..., description="The technical indicator type; must be set to MAMA for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -4231,7 +4722,13 @@ async def get_mama_indicator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate VWAP",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_vwap(
     function: Literal["VWAP"] = Field(..., description="The technical indicator type; must be set to VWAP for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM) for which to calculate VWAP."),
@@ -4272,7 +4769,13 @@ async def calculate_vwap(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate T3 Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_t3_moving_average(
     function: Literal["T3"] = Field(..., description="The technical indicator type. Must be set to T3 for Tilson triple exponential moving average calculations."),
     symbol: str = Field(..., description="The equity ticker symbol (e.g., IBM, AAPL) for which to calculate the moving average."),
@@ -4315,7 +4818,13 @@ async def calculate_t3_moving_average(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate MACD",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_macd(
     function: Literal["MACD"] = Field(..., description="The technical indicator type; must be set to MACD for this operation."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair to analyze (e.g., IBM, EURUSD)."),
@@ -4360,7 +4869,13 @@ async def calculate_macd(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate MACD Extended",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_macd_extended(
     function: Literal["MACDEXT"] = Field(..., description="The technical indicator function to execute. Must be set to MACDEXT for extended MACD calculation with configurable moving average types."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL). Case-insensitive."),
@@ -4405,7 +4920,13 @@ async def calculate_macd_extended(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Stochastic Oscillator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stochastic_oscillator(
     function: Literal["STOCH"] = Field(..., description="The technical indicator type. Must be set to STOCH for stochastic oscillator calculations."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair to analyze (e.g., IBM, EURUSD)."),
@@ -4448,7 +4969,13 @@ async def get_stochastic_oscillator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Stochastic Fast Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stochastic_fast_indicator(
     function: Literal["STOCHF"] = Field(..., description="The technical indicator type. Must be set to STOCHF for this operation."),
     symbol: str = Field(..., description="The equity ticker symbol (e.g., IBM, AAPL). Used to identify the security for which to calculate the indicator."),
@@ -4489,7 +5016,13 @@ async def get_stochastic_fast_indicator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate RSI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_rsi(
     function: Literal["RSI"] = Field(..., description="The technical indicator type. Must be set to RSI for this operation."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair to analyze (e.g., IBM, AAPL, EUR/USD)."),
@@ -4532,7 +5065,13 @@ async def calculate_rsi(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Stochastic RSI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_stochrsi(
     function: Literal["STOCHRSI"] = Field(..., description="The technical indicator type. Must be set to STOCHRSI for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -4575,7 +5114,13 @@ async def calculate_stochrsi(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Williams Percent R",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_williams_percent_r(
     function: Literal["WILLR"] = Field(..., description="The technical indicator type. Must be set to WILLR for Williams' %R calculation."),
     symbol: str = Field(..., description="The equity ticker symbol (e.g., IBM, AAPL). Used to identify which security to analyze."),
@@ -4617,7 +5162,13 @@ async def get_williams_percent_r(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate ADX",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_adx(
     function: Literal["ADX"] = Field(..., description="The technical indicator type; must be set to ADX for this operation."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair (e.g., IBM, EURUSD)."),
@@ -4659,7 +5210,13 @@ async def calculate_adx(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get ADXR Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_adxr_values(
     function: Literal["ADXR"] = Field(..., description="The technical indicator type; must be set to ADXR for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to retrieve ADXR values."),
@@ -4701,7 +5258,13 @@ async def get_adxr_values(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Absolute Price Oscillator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_absolute_price_oscillator(
     function: Literal["APO"] = Field(..., description="The technical indicator function to calculate. Must be set to APO for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol for which to calculate the APO (e.g., IBM, AAPL)."),
@@ -4745,7 +5308,13 @@ async def calculate_absolute_price_oscillator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate PPO",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_ppo(
     function: Literal["PPO"] = Field(..., description="The technical indicator type. Must be set to PPO for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the PPO."),
@@ -4789,7 +5358,13 @@ async def calculate_ppo(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Momentum",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_momentum(
     function: Literal["MOM"] = Field(..., description="The technical indicator type. Must be set to MOM for momentum calculations."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -4832,7 +5407,13 @@ async def calculate_momentum(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Balance of Power",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_balance_of_power(
     function: Literal["BOP"] = Field(..., description="The technical indicator type. Must be set to BOP for Balance of Power calculations."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the Balance of Power indicator."),
@@ -4873,7 +5454,13 @@ async def get_balance_of_power(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Commodity Channel Index",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_commodity_channel_index(
     function: Literal["CCI"] = Field(..., description="The technical indicator type. Must be set to CCI for this operation."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair to analyze (e.g., IBM, EURUSD)."),
@@ -4915,7 +5502,13 @@ async def calculate_commodity_channel_index(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Momentum Oscillator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_momentum_oscillator(
     function: Literal["CMO"] = Field(..., description="The technical indicator type; must be set to CMO for Chande Momentum Oscillator calculations."),
     symbol: str = Field(..., description="The stock ticker symbol for which to calculate the momentum oscillator (e.g., IBM, AAPL)."),
@@ -4958,7 +5551,13 @@ async def calculate_momentum_oscillator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Equity ROC",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_equity_roc(
     function: Literal["ROC"] = Field(..., description="The technical indicator type. Must be set to ROC for rate of change calculations."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate ROC values."),
@@ -5001,7 +5600,13 @@ async def calculate_equity_roc(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate ROCR",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_rocr(
     function: Literal["ROCR"] = Field(..., description="The technical indicator type. Must be set to ROCR for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate ROCR values."),
@@ -5044,7 +5649,13 @@ async def calculate_rocr(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Aroon Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_aroon_indicator(
     function: Literal["AROON"] = Field(..., description="The technical indicator type; must be set to AROON for this operation."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair to analyze (e.g., IBM, EURUSD)."),
@@ -5086,7 +5697,13 @@ async def calculate_aroon_indicator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Aroon Oscillator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_aroon_oscillator(
     function: Literal["AROONOSC"] = Field(..., description="The technical indicator type. Must be set to AROONOSC for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5128,7 +5745,13 @@ async def calculate_aroon_oscillator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Money Flow Index",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_money_flow_index(
     function: Literal["MFI"] = Field(..., description="The technical indicator type. Must be set to MFI for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5170,7 +5793,13 @@ async def calculate_money_flow_index(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate TRIX",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_trix(
     function: Literal["TRIX"] = Field(..., description="The technical indicator type. Must be set to TRIX for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5213,7 +5842,13 @@ async def calculate_trix(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Ultimate Oscillator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_ultimate_oscillator(
     function: Literal["ULTOSC"] = Field(..., description="The technical indicator function to execute. Must be set to ULTOSC for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5257,7 +5892,13 @@ async def calculate_ultimate_oscillator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Directional Index",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_directional_index(
     function: Literal["DX"] = Field(..., description="The technical indicator type. Must be set to DX for directional movement index calculations."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5299,7 +5940,13 @@ async def get_directional_index(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Minus Directional Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_minus_directional_indicator(
     function: Literal["MINUS_DI"] = Field(..., description="The technical indicator type. Must be set to MINUS_DI for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the indicator."),
@@ -5341,7 +5988,13 @@ async def get_minus_directional_indicator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Plus Directional Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_plus_directional_indicator(
     function: Literal["PLUS_DI"] = Field(..., description="The technical indicator type. Must be set to PLUS_DI for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM)."),
@@ -5383,7 +6036,13 @@ async def get_plus_directional_indicator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Minus Directional Movement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_minus_directional_movement(
     function: Literal["MINUS_DM"] = Field(..., description="The technical indicator type. Must be set to MINUS_DM for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the indicator."),
@@ -5425,7 +6084,13 @@ async def get_minus_directional_movement(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Plus Directional Movement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_plus_directional_movement(
     function: Literal["PLUS_DM"] = Field(..., description="The technical indicator type. Must be set to PLUS_DM for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL). Case-insensitive."),
@@ -5467,7 +6132,13 @@ async def get_plus_directional_movement(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Bollinger Bands",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_bollinger_bands(
     function: Literal["BBANDS"] = Field(..., description="The technical indicator function to execute. Must be set to BBANDS for Bollinger Bands calculation."),
     symbol: str = Field(..., description="The ticker symbol of the equity or forex pair to analyze (e.g., IBM, AAPL, EUR/USD)."),
@@ -5512,7 +6183,13 @@ async def calculate_bollinger_bands(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Midpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_midpoint(
     function: Literal["MIDPOINT"] = Field(..., description="The technical indicator function to use. Must be set to MIDPOINT for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate midpoint values."),
@@ -5555,7 +6232,13 @@ async def calculate_midpoint(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Midprice",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_midprice(
     function: Literal["MIDPRICE"] = Field(..., description="The technical indicator type. Must be set to MIDPRICE for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the midpoint price."),
@@ -5597,7 +6280,13 @@ async def calculate_midprice(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Parabolic SAR",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_parabolic_sar(
     function: Literal["SAR"] = Field(..., description="The technical indicator type; must be set to SAR for parabolic SAR calculations."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM) for which to calculate the parabolic SAR."),
@@ -5640,7 +6329,13 @@ async def get_parabolic_sar(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get True Range",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_true_range(
     function: Literal["TRANGE"] = Field(..., description="The technical indicator type. Must be set to TRANGE to calculate true range values."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL). Identifies which equity to retrieve true range data for."),
@@ -5681,7 +6376,13 @@ async def get_true_range(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get ATR",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_atr(
     function: Literal["ATR"] = Field(..., description="The technical indicator type. Must be set to ATR for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to retrieve ATR data."),
@@ -5723,7 +6424,13 @@ async def get_atr(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get NATR Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_natr_values(
     function: Literal["NATR"] = Field(..., description="The technical indicator type. Must be set to NATR for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5765,7 +6472,13 @@ async def get_natr_values(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Chaikin A/D Line",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_chaikin_ad_line(
     function: Literal["AD"] = Field(..., description="The technical indicator type. Must be set to AD for Chaikin A/D line calculations."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL). Identifies which equity to retrieve data for."),
@@ -5806,7 +6519,13 @@ async def get_chaikin_ad_line(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get ADOSC Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_adosc_values(
     function: Literal["ADOSC"] = Field(..., description="The technical indicator type; must be set to ADOSC for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -5849,7 +6568,13 @@ async def get_adosc_values(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get On-Balance Volume",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_obv(
     function: Literal["OBV"] = Field(..., description="The technical indicator type to calculate. Must be set to OBV (On-Balance Volume)."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity you want to analyze (e.g., IBM, AAPL)."),
@@ -5890,7 +6615,13 @@ async def get_obv(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Hilbert Trendline",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hilbert_trendline(
     function: Literal["HT_TRENDLINE"] = Field(..., description="The technical indicator type. Must be set to HT_TRENDLINE for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the trendline."),
@@ -5932,7 +6663,13 @@ async def get_hilbert_trendline(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Hilbert Sine Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hilbert_sine_indicator(
     function: Literal["HT_SINE"] = Field(..., description="The technical indicator function to calculate. Must be set to HT_SINE for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol for which to retrieve the indicator (e.g., IBM, AAPL)."),
@@ -5974,7 +6711,13 @@ async def get_hilbert_sine_indicator(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Analyze Hilbert Trend Cycle",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def analyze_hilbert_trend_cycle(
     function: Literal["HT_TRENDMODE"] = Field(..., description="The technical indicator function to apply. Must be set to HT_TRENDMODE for Hilbert Transform trend vs cycle analysis."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL, MSFT)."),
@@ -6016,7 +6759,13 @@ async def analyze_hilbert_trend_cycle(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Dominant Cycle Period",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dominant_cycle_period(
     function: Literal["HT_DCPERIOD"] = Field(..., description="The technical indicator to calculate. Must be set to HT_DCPERIOD for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the dominant cycle period."),
@@ -6058,7 +6807,13 @@ async def get_dominant_cycle_period(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Dominant Cycle Phase",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dominant_cycle_phase(
     function: Literal["HT_DCPHASE"] = Field(..., description="The technical indicator function to calculate. Must be set to HT_DCPHASE for this operation."),
     symbol: str = Field(..., description="The stock ticker symbol to analyze (e.g., IBM, AAPL)."),
@@ -6100,7 +6855,13 @@ async def get_dominant_cycle_phase(
     return _response_data
 
 # Tags: Technical Indicators
-@mcp.tool()
+@mcp.tool(
+    title="Get Hilbert Phasor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hilbert_phasor(
     function: Literal["HT_PHASOR"] = Field(..., description="The technical indicator type. Must be set to HT_PHASOR to retrieve Hilbert transform phasor components."),
     symbol: str = Field(..., description="The equity ticker symbol to analyze (e.g., IBM, AAPL). Case-insensitive."),
