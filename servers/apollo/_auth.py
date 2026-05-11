@@ -1,7 +1,7 @@
 """
 Authentication module for Apollo MCP server.
 
-Generated: 2026-05-05 14:14:40 UTC
+Generated: 2026-05-11 23:01:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

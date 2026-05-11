@@ -5,7 +5,7 @@ Base URL: https://api.apollo.io
 | | |
 |---|---|
 | **Category** | CRM & Sales |
-| **Tools** | 52 |
+| **Tools** | 45 |
 | **Auth** | API Key, OAuth2 |
 
 ---
@@ -66,6 +66,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `API_KEY` — API Key Authentication (x-api-key)
+
 Do not commit credentials to version control.
 
 ### OAuth2
