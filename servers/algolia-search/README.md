@@ -60,6 +60,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `APP_ID_API_KEY` — API Key Authentication (x-algolia-application-id)
 - `API_KEY` — API Key Authentication (x-algolia-api-key)
 - `SERVER_APPID` — Server variable: appId (default: `ALGOLIA_APPLICATION_ID`)
+
 Do not commit credentials to version control.
 
 ---

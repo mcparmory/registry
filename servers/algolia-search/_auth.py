@@ -1,7 +1,7 @@
 """
 Authentication module for Algolia Search MCP server.
 
-Generated: 2026-05-05 14:09:00 UTC
+Generated: 2026-05-11 22:56:19 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
