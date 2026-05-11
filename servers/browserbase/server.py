@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Browserbase MCP Server
-Generated: 2026-05-05 14:29:57 UTC
+Generated: 2026-05-11 23:11:54 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.browserbase.com")
 SERVER_NAME = "Browserbase"
-SERVER_VERSION = "1.0.3"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1025,6 +1056,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1049,6 +1082,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1256,7 +1291,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Browserbase", middleware=[_JsonCoercionMiddleware()])
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Context",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_context(project_id: str = Field(..., alias="projectId", description="The unique identifier of the project under which the context will be created. Locatable in the Browserbase account Settings page.")) -> dict[str, Any] | ToolResult:
     """Creates a new browser context within a specified project, enabling isolated session management and configuration for automated browsing tasks."""
 
@@ -1288,13 +1328,20 @@ async def create_context(project_id: str = Field(..., alias="projectId", descrip
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Context",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_context(id_: str = Field(..., alias="id", description="The unique identifier of the context to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific context by its unique identifier. Returns the full details of the requested context object."""
 
@@ -1330,7 +1377,13 @@ async def get_context(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Context",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_context(id_: str = Field(..., alias="id", description="The unique identifier of the context to update.")) -> dict[str, Any] | ToolResult:
     """Updates an existing context by its unique identifier. Use this to modify the properties or configuration of a previously created context."""
 
@@ -1366,8 +1419,13 @@ async def update_context(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 
-@mcp.tool()
-async def upload_extension(file_: str = Field(..., alias="file", description="The binary file containing the extension package to be uploaded.")) -> dict[str, Any] | ToolResult:
+@mcp.tool(
+    title="Upload Extension",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
+async def upload_extension(file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file containing the extension package to be uploaded.", json_schema_extra={'format': 'byte'})) -> dict[str, Any] | ToolResult:
     """Upload an extension package to the system, making it available for installation and use. Accepts a binary file representing the extension bundle."""
 
     # Construct request model with validation
@@ -1406,7 +1464,13 @@ async def upload_extension(file_: str = Field(..., alias="file", description="Th
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Extension",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_extension(id_: str = Field(..., alias="id", description="The unique identifier of the extension to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific extension by its unique identifier. Use this to inspect extension configuration, status, or metadata."""
 
@@ -1442,7 +1506,13 @@ async def get_extension(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Extension",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_extension(id_: str = Field(..., alias="id", description="The unique identifier of the extension to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific extension by its unique identifier. This action is irreversible and removes the extension and its associated data."""
 
@@ -1478,7 +1548,13 @@ async def delete_extension(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all projects accessible to the authenticated user. Use this to discover available projects and their associated metadata."""
 
@@ -1505,7 +1581,13 @@ async def list_projects() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific project by its unique identifier. Use this to fetch project metadata, status, and configuration."""
 
@@ -1541,7 +1623,13 @@ async def get_project(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_usage(id_: str = Field(..., alias="id", description="The unique identifier of the project whose usage data you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves usage statistics and consumption metrics for a specific project. Useful for monitoring resource utilization and tracking project activity over time."""
 
@@ -1577,7 +1665,13 @@ async def get_project_usage(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Sessions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sessions(status: Literal["RUNNING", "ERROR", "TIMED_OUT", "COMPLETED"] | None = Field(None, description="Filters the returned sessions by their current lifecycle status. Accepted values are RUNNING (active), ERROR (failed), TIMED_OUT (expired), or COMPLETED (finished successfully).")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of sessions, optionally filtered by their current status. Useful for monitoring active, completed, or failed sessions."""
 
@@ -1618,7 +1712,12 @@ async def list_sessions(status: Literal["RUNNING", "ERROR", "TIMED_OUT", "COMPLE
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Session",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_session(
     project_id: str = Field(..., alias="projectId", description="The unique identifier of the project under which this session will be created. Found in your Browserbase account Settings."),
     id_: str = Field(..., alias="id", description="The unique identifier of an existing browser context to associate with this session, enabling context persistence and reuse."),
@@ -1673,13 +1772,20 @@ async def create_session(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Session",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session(id_: str = Field(..., alias="id", description="The unique identifier of the session to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific session by its unique identifier. Useful for checking session status, metadata, or associated activity."""
 
@@ -1715,7 +1821,13 @@ async def get_session(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Release Session",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def release_session(
     id_: str = Field(..., alias="id", description="The unique identifier of the session to update."),
     project_id: str = Field(..., alias="projectId", description="The Project ID associated with the session. Can be found in the Browserbase Settings page."),
@@ -1752,13 +1864,20 @@ async def release_session(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Session Debug URLs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session_debug_urls(id_: str = Field(..., alias="id", description="The unique identifier of the session for which to retrieve debug URLs.")) -> dict[str, Any] | ToolResult:
     """Retrieves live debug URLs for an active browser session, enabling real-time inspection and monitoring of the session's state."""
 
@@ -1794,7 +1913,13 @@ async def get_session_debug_urls(id_: str = Field(..., alias="id", description="
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Session Downloads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_session_downloads(id_: str = Field(..., alias="id", description="The unique identifier of the session whose downloads you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all downloads associated with a specific session. Useful for reviewing files or resources that were downloaded during a given session."""
 
@@ -1830,7 +1955,13 @@ async def list_session_downloads(id_: str = Field(..., alias="id", description="
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Session Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session_logs(id_: str = Field(..., alias="id", description="The unique identifier of the session whose logs you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the log output for a specific session, useful for debugging, auditing, or monitoring session activity."""
 
@@ -1866,7 +1997,13 @@ async def get_session_logs(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Session Recording",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session_recording(id_: str = Field(..., alias="id", description="The unique identifier of the session whose recording you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the recording associated with a specific session. Returns the recording data or media for playback or download."""
 
@@ -1902,10 +2039,15 @@ async def get_session_recording(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Upload Session File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_session_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the session to which the file will be uploaded."),
-    file_: str = Field(..., alias="file", description="The binary file content to upload to the session."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file content to upload to the session.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a file to an existing session, attaching it as a resource for use within that session's context."""
 

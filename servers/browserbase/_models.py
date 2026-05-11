@@ -1,7 +1,7 @@
 """
 Browserbase MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:29:57 UTC
+Generated: 2026-05-11 23:11:54 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -60,7 +60,7 @@ class ContextsUpdateRequest(StrictModel):
 
 # Operation: upload_extension
 class ExtensionsUploadRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file containing the extension package to be uploaded.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file containing the extension package to be uploaded.", json_schema_extra={'format': 'byte'})
 class ExtensionsUploadRequest(StrictModel):
     """Upload an extension package to the system, making it available for installation and use. Accepts a binary file representing the extension bundle."""
     body: ExtensionsUploadRequestBody
@@ -177,7 +177,7 @@ class SessionsGetRecordingRequest(StrictModel):
 class SessionsUploadFileRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the session to which the file will be uploaded.")
 class SessionsUploadFileRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file content to upload to the session.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file content to upload to the session.", json_schema_extra={'format': 'byte'})
 class SessionsUploadFileRequest(StrictModel):
     """Uploads a file to an existing session, attaching it as a resource for use within that session's context."""
     path: SessionsUploadFileRequestPath
