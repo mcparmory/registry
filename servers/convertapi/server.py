@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: https://www.convertapi.com/terms
 
-Generated: 2026-05-05 14:45:22 UTC
+Generated: 2026-05-11 19:42:12 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://v2.convertapi.com")
 SERVER_NAME = "ConvertAPI"
-SERVER_VERSION = "1.0.3"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1112,6 +1143,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1136,6 +1169,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1352,11 +1387,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("ConvertAPI", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: File Server
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(
     filename: str | None = Field(None, description="The name of the file being uploaded. Required unless the content-disposition header is provided."),
     url: str | None = Field(None, description="A remote URL pointing to the file to upload. If provided, the file will be downloaded and stored directly from this location instead of uploading file contents."),
-    file_: str | None = Field(None, alias="file", description="The binary file content to upload. Provide the raw file data directly."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. The binary file content to upload. Provide the raw file data directly.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload a file to ConvertAPI servers for temporary storage and reuse across multiple conversion operations. The file is securely stored for up to 3 hours and assigned a unique File ID for referencing in subsequent conversion requests."""
 
@@ -1399,7 +1439,13 @@ async def upload_file(
     return _response_data
 
 # Tags: File Server
-@mcp.tool()
+@mcp.tool(
+    title="Download File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_file(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to download. Must be exactly 32 characters long.", min_length=32, max_length=32),
     download: Literal["attachment", "inline"] | None = Field(None, description="Specifies how the file should be delivered: as an attachment for download or inline for viewing in a web browser."),
@@ -1441,7 +1487,13 @@ async def download_file(
     return _response_data
 
 # Tags: File Server
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to delete. Must be exactly 32 characters.", min_length=32, max_length=32)) -> dict[str, Any] | ToolResult:
     """Permanently delete a file from storage. Files are automatically deleted after 3 hours if not manually removed."""
 
@@ -1477,7 +1529,13 @@ async def delete_file(file_id: str = Field(..., alias="fileId", description="The
     return _response_data
 
 # Tags: File Server
-@mcp.tool()
+@mcp.tool(
+    title="Get File Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_metadata(file_id: str = Field(..., alias="fileId", description="The unique identifier of the file. This is a 32-character alphanumeric string that uniquely identifies the file in the system.", min_length=32, max_length=32)) -> dict[str, Any] | ToolResult:
     """Retrieve metadata and information about a file without downloading its contents. Use this to check file existence, properties, and availability."""
 
@@ -1513,7 +1571,13 @@ async def get_file_metadata(file_id: str = Field(..., alias="fileId", descriptio
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account() -> dict[str, Any] | ToolResult:
     """Retrieve account information including balance status and other account details. Requires authentication with a secret key."""
 
@@ -1540,7 +1604,13 @@ async def get_account() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get Usage Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_usage_statistics(
     start_date: str = Field(..., alias="startDate", description="The start date for the statistics query period in YYYY-MM-DD format (inclusive)."),
     end_date: str = Field(..., alias="endDate", description="The end date for the statistics query period in YYYY-MM-DD format (inclusive)."),
@@ -1581,9 +1651,14 @@ async def get_usage_statistics(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided as either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPG file. The system automatically sanitizes the filename, appends the .jpg extension, and adds numeric indexing (e.g., image_0.jpg, image_1.jpg) if multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -1627,9 +1702,14 @@ async def convert_image_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert AI to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_ai_to_png(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -1679,9 +1759,14 @@ async def convert_ai_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pnm, output_1.pnm) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -1731,9 +1816,14 @@ async def convert_image_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert AI to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_ai_to_svg(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided as either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the output dimensions."),
@@ -1777,9 +1867,14 @@ async def convert_ai_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert AI to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_ai_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided as either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -1823,9 +1918,14 @@ async def convert_ai_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds indexing (e.g., image_0.webp, image_1.webp) for multiple outputs."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -1869,9 +1969,14 @@ async def convert_image_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image BMP to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_bmp_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Can be provided as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -1915,9 +2020,14 @@ async def convert_image_bmp_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees to apply to the image. Leave empty to use automatic rotation based on EXIF data in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the converted document."),
@@ -1966,9 +2076,14 @@ async def convert_image_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image BMP to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_bmp_to_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., image_0.png, image_1.png) if multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -2018,9 +2133,14 @@ async def convert_image_bmp_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image BMP to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_bmp_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided either as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for PNM format, and adds indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -2070,9 +2190,14 @@ async def convert_image_bmp_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to SVG (BMP)",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_svg_bmp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(None, alias="Preset", description="A vectorization preset that applies pre-configured tracing settings optimized for different image types. When selected, presets override individual converter options except ColorMode, providing consistent and balanced SVG results."),
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Controls whether the image is traced in full color or converted to black-and-white during vectorization."),
@@ -2117,9 +2242,14 @@ async def convert_image_to_svg_bmp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image BMP to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_bmp_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The BMP image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The BMP image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -2163,9 +2293,14 @@ async def convert_image_bmp_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image BMP to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_bmp_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output WebP file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing for multiple output files to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -2209,9 +2344,14 @@ async def convert_image_bmp_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert CSV to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_csv_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The CSV file to convert. Accepts either a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The CSV file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input CSV file if it is password-protected."),
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="Preserve document metadata such as title, author, and keywords in the output PDF."),
@@ -2260,9 +2400,14 @@ async def convert_csv_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert CSV to XLSX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_csv_to_xlsx(
-    file_: str | None = Field(None, alias="File", description="The CSV file to convert. Can be provided as a file upload or as a URL pointing to the CSV file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The CSV file to convert. Can be provided as a file upload or as a URL pointing to the CSV file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated Excel output file. The system automatically sanitizes the filename, appends the .xlsx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated."),
     delimiter: str | None = Field(None, alias="Delimiter", description="The character used to separate fields in the CSV file. Specify the delimiter that matches your CSV format."),
     cell_type: Literal["general", "text"] | None = Field(None, alias="CellType", description="Determines how cell values are formatted in the output Excel file. Use 'text' to preserve CSV formatting for dates and numbers, or 'general' for automatic Excel formatting."),
@@ -2305,9 +2450,14 @@ async def convert_csv_to_xlsx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DJVU to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_djvu_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The DJVU file to convert. Can be provided as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., report_0.jpg, report_1.jpg)."),
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="JPG encoding type for the output image. Choose between standard JPEG, CMYK color space, or grayscale."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
@@ -2351,9 +2501,14 @@ async def convert_djvu_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DJVU to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_djvu_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The DJVU file to convert. Can be provided as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     base_font_size: float | None = Field(None, alias="BaseFontSize", description="Base font size in points (pt) for the converted PDF. All text scaling is relative to this value.", ge=1, le=50),
     margin_left: float | None = Field(None, alias="MarginLeft", description="Left margin in points (pt) for text content on the PDF page.", ge=0, le=200),
@@ -2399,9 +2554,14 @@ async def convert_djvu_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DJVU to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_djvu_to_png(
-    file_: str | None = Field(None, alias="File", description="The DJVU file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to fit the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -2444,9 +2604,14 @@ async def convert_djvu_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DJVU to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_djvu_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The DJVU file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions."),
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(None, alias="TiffType", description="TIFF compression and color format. Choose from color variants (24-bit or 32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats with various compression methods."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a single multi-page TIFF file containing all pages, or separate TIFF files for each page."),
@@ -2492,9 +2657,14 @@ async def convert_djvu_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DJVU to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_djvu_to_webp(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided as either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -2537,9 +2707,14 @@ async def convert_djvu_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_docx(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .docx extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) if multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the converted document to reflect current document structure."),
@@ -2583,12 +2758,17 @@ async def convert_document_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Compare DOCX Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compare_docx_documents(
-    file_: str | None = Field(None, alias="File", description="The primary Word document to be compared. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The primary Word document to be compared. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output comparison file. The system automatically sanitizes the filename, appends the appropriate extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open the primary document if it is password-protected."),
-    compare_file: str | None = Field(None, alias="CompareFile", description="The Word document to compare against the primary document. Accepts either a file URL or binary file content."),
+    compare_file: str | None = Field(None, alias="CompareFile", description="Base64-encoded file content for upload. The Word document to compare against the primary document. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     compare_level: Literal["Word", "Character"] | None = Field(None, alias="CompareLevel", description="Specifies the granularity level for identifying differences between documents. Word-level comparison detects changes at word boundaries, while character-level comparison identifies changes at individual character positions."),
     compare_formatting: bool | None = Field(None, alias="CompareFormatting", description="Include formatting variations such as font, size, color, and style differences in the comparison results."),
     compare_case_changes: bool | None = Field(None, alias="CompareCaseChanges", description="Include capitalization and case differences in the comparison results."),
@@ -2641,9 +2821,14 @@ async def compare_docx_documents(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_html(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a file upload (binary content) or a URL pointing to a DOCX file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file upload (binary content) or a URL pointing to a DOCX file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated HTML output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.html, document_1.html) if multiple files are generated."),
     inline_images: bool | None = Field(None, alias="InlineImages", description="Whether to embed images from the document directly into the HTML output as inline content, or reference them externally."),
 ) -> dict[str, Any] | ToolResult:
@@ -2685,9 +2870,14 @@ async def convert_document_to_html(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_image(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., report_0.jpg, report_1.jpg) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password for opening password-protected DOCX documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10 inclusive)."),
@@ -2730,9 +2920,14 @@ async def convert_document_to_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to Markdown",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_markdown(
-    file_: str | None = Field(None, alias="File", description="The DOCX file to convert. Can be provided as a URL reference or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DOCX file to convert. Can be provided as a URL reference or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output Markdown file. The API automatically sanitizes the filename, appends the .md extension, and adds numeric suffixes (e.g., document_0.md, document_1.md) when generating multiple output files."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a DOCX document to Markdown format. Accepts a DOCX file via URL or direct file content and returns the converted Markdown output with a customizable filename."""
@@ -2773,9 +2968,14 @@ async def convert_document_to_markdown(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document DOCX to ODT",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_docx_to_odt(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .odt extension, and adds numeric indexing (e.g., document_0.odt, document_1.odt) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document during conversion."),
@@ -2819,9 +3019,14 @@ async def convert_document_docx_to_odt(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected DOCX documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to include in the output PDF using a range format (e.g., 1-10 for pages 1 through 10)."),
@@ -2870,9 +3075,14 @@ async def convert_document_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to PNG Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_image_png(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., report_0.png, report_1.png)."),
     password: str | None = Field(None, alias="Password", description="Password required to open protected or encrypted documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using range notation (e.g., 1-10 converts pages 1 through 10)."),
@@ -2924,9 +3134,14 @@ async def convert_document_to_image_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to Protected Word",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_protected_word(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct file extension, and adds indexing (e.g., filename_0, filename_1) when multiple files are produced from a single input."),
     encrypt_password: str | None = Field(None, alias="EncryptPassword", description="Password to encrypt the output Word document. When set, the password will be required to open and view the document content."),
 ) -> dict[str, Any] | ToolResult:
@@ -2968,9 +3183,14 @@ async def convert_document_to_protected_word(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document DOCX to RTF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_docx_to_rtf(
-    file_: str | None = Field(None, alias="File", description="The document file to convert, provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output RTF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.rtf, filename_1.rtf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected DOCX documents."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Automatically update all tables of content in the document during conversion."),
@@ -3014,9 +3234,14 @@ async def convert_document_docx_to_rtf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multi-file outputs."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected DOCX documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10)."),
@@ -3064,9 +3289,14 @@ async def convert_document_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_text(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output text file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c))."),
@@ -3110,9 +3340,14 @@ async def convert_document_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_webp(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected DOCX documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10)."),
@@ -3157,9 +3392,14 @@ async def convert_document_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DOCX to XML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_docx_to_xml(
-    file_: str | None = Field(None, alias="File", description="The Word document to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Word document to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output XML file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.xml, report_1.xml) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Whether to automatically update all tables of content in the document during conversion."),
@@ -3204,9 +3444,14 @@ async def convert_docx_to_xml(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format. Only the specified pages will be included in the output."),
@@ -3249,9 +3494,14 @@ async def convert_document_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DOTX to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dotx_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The Word document file to convert. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Word document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple outputs."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected Word documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10)."),
@@ -3300,9 +3550,14 @@ async def convert_dotx_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwf_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided as either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output image, affecting color representation and file size."),
@@ -3345,9 +3600,14 @@ async def convert_dwf_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwf_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The DWF file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are produced from a single input."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to preserve and export AutoCAD layers in the PDF output, maintaining the layer structure from the original DWF file."),
     auto_fit: bool | None = Field(None, alias="AutoFit", description="Automatically detects the drawing dimensions and adjusts the output to fit the page size, optionally rotating the page orientation to accommodate the drawing without clipping."),
@@ -3391,9 +3651,14 @@ async def convert_dwf_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWF to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwf_to_png(
-    file_: str | None = Field(None, alias="File", description="The DWF file to convert. Can be provided as a URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files to ensure unique identification."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output PNG image. Truecolors preserves full color information, grayscale converts to 256 shades of gray, and monochrome converts to pure black and white."),
@@ -3443,9 +3708,14 @@ async def convert_dwf_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWF to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwf_to_svg(
-    file_: str | None = Field(None, alias="File", description="The DWF file to convert. Provide either a publicly accessible URL or the binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique, safe naming."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the SVG output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output SVG. Choose between full color, grayscale, or monochrome rendering."),
@@ -3488,9 +3758,14 @@ async def convert_dwf_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWF to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwf_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The DWF file to convert. Provide either a publicly accessible URL or the binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., filename_0.tiff, filename_1.tiff) when multiple files are generated."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output TIFF."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output TIFF image. Choose truecolors for full color output, grayscale for reduced color depth, or monochrome for black and white only."),
@@ -3534,9 +3809,14 @@ async def convert_dwf_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWF to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwf_to_webp(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided as either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct WebP extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) when multiple files are generated from a single input."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output image."),
@@ -3586,9 +3866,14 @@ async def convert_dwf_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWG to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwg_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output JPG image. Choose between full color, grayscale, or monochrome rendering."),
@@ -3631,9 +3916,14 @@ async def convert_dwg_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWG to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwg_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The DWG file to convert. Can be provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the PDF output."),
     auto_fit: bool | None = Field(None, alias="AutoFit", description="Automatically detects and adjusts the drawing to fit the current page size, including automatic page orientation adjustment if needed."),
@@ -3677,9 +3967,14 @@ async def convert_dwg_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWG to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwg_to_png(
-    file_: str | None = Field(None, alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.png, filename_1.png) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output PNG image. Choose between full color, grayscale, or monochrome rendering."),
@@ -3729,9 +4024,14 @@ async def convert_dwg_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWG to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwg_to_svg(
-    file_: str | None = Field(None, alias="File", description="The DWG file to convert, provided as either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWG file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple generated files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate SVG elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output SVG, affecting how colors are rendered."),
@@ -3774,9 +4074,14 @@ async def convert_dwg_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWG to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwg_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output TIFF image."),
@@ -3820,9 +4125,14 @@ async def convert_dwg_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DWG to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dwg_to_webp(
-    file_: str | None = Field(None, alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output WebP file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output WebP image. Choose between full color, grayscale, or monochrome rendering."),
@@ -3872,9 +4182,14 @@ async def convert_dwg_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DXF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dxf_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The DXF file to convert. Provide either a publicly accessible URL or the binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPG file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output JPG image. Choose between full color, grayscale, or monochrome rendering."),
@@ -3917,9 +4232,14 @@ async def convert_dxf_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DXF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dxf_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The DXF file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique, safe naming."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to preserve and export AutoCAD layers in the output PDF."),
     auto_fit: bool | None = Field(None, alias="AutoFit", description="Automatically detects the drawing dimensions and adjusts the page size and orientation to fit the content without clipping."),
@@ -3963,9 +4283,14 @@ async def convert_dxf_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DXF to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dxf_to_png(
-    file_: str | None = Field(None, alias="File", description="The DXF file to convert, provided either as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DXF file to convert, provided either as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.png, filename_1.png) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="The color space for the output PNG image. Choose truecolors for full RGB output, grayscale for 8-bit grayscale, or monochrome for black and white."),
@@ -4015,9 +4340,14 @@ async def convert_dxf_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DXF to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dxf_to_svg(
-    file_: str | None = Field(None, alias="File", description="The DXF file to convert. Provide either a publicly accessible URL or the binary file content directly."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Provide either a publicly accessible URL or the binary file content directly.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to preserve and export AutoCAD layer information in the output SVG file."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output SVG. Choose between full color, grayscale, or monochrome rendering."),
@@ -4060,9 +4390,14 @@ async def convert_dxf_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DXF to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dxf_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The DXF file to convert. Accepts either a URL reference or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Accepts either a URL reference or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `filename_0.tiff`, `filename_1.tiff`) when generating multiple files."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output TIFF."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output image. Choose between full color, grayscale, or black-and-white rendering."),
@@ -4106,9 +4441,14 @@ async def convert_dxf_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert DXF to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_dxf_to_webp(
-    file_: str | None = Field(None, alias="File", description="The DXF file to convert. Can be provided as a URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output WebP file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     export_layers: bool | None = Field(None, alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output."),
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(None, alias="ColorSpace", description="Color space for the output WebP image. Choose between full color, grayscale, or monochrome rendering."),
@@ -4158,9 +4498,14 @@ async def convert_dxf_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Email Attachments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_email_attachments(
-    file_: str | None = Field(None, alias="File", description="The email file to process. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email file to process. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the name, appends the appropriate file extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated from a single input."),
     use_cid_as_file_name: bool | None = Field(None, alias="UseCIDAsFileName", description="When enabled, uses the Content ID (CID) of attachments as the filename instead of the original filename."),
     ignore_inline_attachments: bool | None = Field(None, alias="IgnoreInlineAttachments", description="When enabled, skips inline attachments such as embedded images and logos, processing only standalone attachments."),
@@ -4203,9 +4548,14 @@ async def extract_email_attachments(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Email Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_email_metadata(
-    file_: str | None = Field(None, alias="File", description="The email file to process. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email file to process. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output metadata file. The system automatically sanitizes the filename, appends the appropriate extension, and adds numeric indexing (e.g., metadata_0, metadata_1) when multiple output files are generated from a single input."),
     ignore_inline_attachments: bool | None = Field(None, alias="IgnoreInlineAttachments", description="When enabled, skips inline attachments such as embedded images and logos during processing, extracting only non-inline attachments."),
 ) -> dict[str, Any] | ToolResult:
@@ -4247,9 +4597,14 @@ async def extract_email_metadata(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Email to Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_email_to_image(
-    file_: str | None = Field(None, alias="File", description="The email file to convert. Accepts either a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., output_0.jpg, output_1.jpg) when multiple files are produced."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are suppressed and the email is still converted to the target format. Only applies when attachments are being processed."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body content with converted attachments into a single output. Only applies when attachments are being processed."),
@@ -4292,9 +4647,14 @@ async def convert_email_to_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EML to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eml_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The EML file to convert. Accepts either a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EML file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., report_0.pdf, report_1.pdf) when multiple files are produced."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to PDF. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into a single PDF document. Only applies when attachments are being converted."),
@@ -4342,9 +4702,14 @@ async def convert_eml_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Email to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_email_to_png(
-    file_: str | None = Field(None, alias="File", description="The email file to convert. Accepts either a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., output_0.png, output_1.png) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email is still converted to PNG. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into the final PNG output. Only applies when attachments are being converted."),
@@ -4387,9 +4752,14 @@ async def convert_email_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EML to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eml_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The email file to convert. Accepts either a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `document_0.tiff`, `document_1.tiff`) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to TIFF. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into the output TIFF file(s). Only applies when attachments are being converted."),
@@ -4433,9 +4803,14 @@ async def convert_eml_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EML to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eml_to_webp(
-    file_: str | None = Field(None, alias="File", description="The EML file to convert, provided as either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EML file to convert, provided as either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output WebP file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the output dimensions."),
@@ -4478,9 +4853,14 @@ async def convert_eml_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPS to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eps_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The EPS file to convert, provided either as a URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPS file to convert, provided either as a URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file. The API automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an EPS (Encapsulated PostScript) file to JPG format. Accepts file input as a URL or binary content and generates a converted JPG output file with automatic naming."""
@@ -4521,9 +4901,14 @@ async def convert_eps_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPS to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eps_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The EPS file to convert. Provide either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPS file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system sanitizes the filename, appends the correct extension, and adds indexing for multiple output files (e.g., report_0.pdf, report_1.pdf)."),
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(None, alias="PdfVersion", description="PDF specification version to use for the output document."),
     pdf_resolution: int | None = Field(None, alias="PdfResolution", description="Output resolution in dots per inch (DPI). Higher values produce better quality but larger file sizes.", ge=10, le=2400),
@@ -4573,9 +4958,14 @@ async def convert_eps_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPS to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eps_to_png(
-    file_: str | None = Field(None, alias="File", description="The EPS file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPS file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an EPS (Encapsulated PostScript) file to PNG format. Accepts file input as a URL or binary file content and generates a PNG output file with optional custom naming."""
@@ -4616,9 +5006,14 @@ async def convert_eps_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPS to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_eps_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The EPS file to convert, provided either as a URL reference or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPS file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file. The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric indexing (e.g., output_0.tiff, output_1.tiff) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an EPS (Encapsulated PostScript) file to TIFF (Tagged Image File Format) image format. Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -4659,9 +5054,14 @@ async def convert_eps_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPUB to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_epub_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The EPUB file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple outputs (e.g., report_0.jpg, report_1.jpg)."),
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="Color mode for the output JPG image. Choose between standard RGB (jpeg), CMYK for print (jpegcmyk), or grayscale (jpeggray)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to specified dimensions."),
@@ -4705,9 +5105,14 @@ async def convert_epub_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPUB to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_epub_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The EPUB file to convert. Accepts either a direct file upload or a URL pointing to the EPUB file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a direct file upload or a URL pointing to the EPUB file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes if multiple files are generated."),
     base_font_size: float | None = Field(None, alias="BaseFontSize", description="Base font size in points (pt) for the PDF. All text scales relative to this value.", ge=1, le=50),
     margin_left: float | None = Field(None, alias="MarginLeft", description="Left margin width in points (pt) for the PDF page content.", ge=0, le=200),
@@ -4753,9 +5158,14 @@ async def convert_epub_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPUB to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_epub_to_png(
-    file_: str | None = Field(None, alias="File", description="The EPUB file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -4798,9 +5208,14 @@ async def convert_epub_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPUB to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_epub_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The EPUB file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions."),
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(None, alias="TiffType", description="TIFF compression and color format. Choose between color variants (24-bit or 32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats with various compression methods."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Generate a single multi-page TIFF file containing all pages, or separate TIFF files for each page."),
@@ -4846,9 +5261,14 @@ async def convert_epub_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert EPUB to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_epub_to_webp(
-    file_: str | None = Field(None, alias="File", description="The EPUB file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -4891,9 +5311,14 @@ async def convert_epub_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert File to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_file_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The API automatically sanitizes the filename, appends the .pdf extension, and adds numeric indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple output files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a file to PDF format from a provided file or URL. Supports various input formats and generates uniquely named output files with automatic extension handling."""
@@ -4934,9 +5359,14 @@ async def convert_file_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Compress Files to Archive",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compress_files_to_archive(
-    files: list[str] | None = Field(None, alias="Files", description="Files to compress into the archive. Each file can be provided as a URL or raw file content. When using query or multipart parameters, append an index suffix to each file parameter (e.g., Files[0], Files[1])."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. Files to compress into the archive. Each file can be provided as a URL or raw file content. When using query or multipart parameters, append an index suffix to each file parameter (e.g., Files[0], Files[1])."),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output ZIP archive file. The system automatically sanitizes the filename to remove unsafe characters and appends the .zip extension. For multiple input files, output files are automatically indexed (e.g., archive_0.zip, archive_1.zip)."),
     compression_level: Literal["Optimal", "Medium", "Fastest", "NoCompression"] | None = Field(None, alias="CompressionLevel", description="Compression algorithm intensity for the archive. Controls the trade-off between file size and compression speed."),
     password: str | None = Field(None, alias="Password", description="Optional password to encrypt and protect the ZIP archive. When set, the archive requires this password to extract."),
@@ -4979,9 +5409,14 @@ async def compress_files_to_archive(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF Animation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_animation(
-    files: list[str] | None = Field(None, alias="Files", description="GIF files to convert. Accepts URLs or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1]) to distinguish multiple files."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. GIF files to convert. Accepts URLs or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1]) to distinguish multiple files."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and automatically indexes multiple outputs (e.g., output_0.gif, output_1.gif) to ensure unique identifiers."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -5026,9 +5461,14 @@ async def convert_gif_animation(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when resizing the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only resize the image if the input dimensions exceed the target output dimensions."),
@@ -5073,9 +5513,14 @@ async def convert_gif_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The GIF image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) for multiple files."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees for the output image. Use a value between -360 and 360, or leave empty to apply automatic rotation based on EXIF data if available.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the converted document."),
@@ -5124,9 +5569,14 @@ async def convert_gif_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_png(
-    file_: str | None = Field(None, alias="File", description="The GIF image file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when generating multiple files from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -5176,9 +5626,14 @@ async def convert_gif_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The GIF image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNM file. The system automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) if multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, leaving smaller images unchanged."),
@@ -5228,9 +5683,14 @@ async def convert_gif_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_svg(
-    file_: str | None = Field(None, alias="File", description="The GIF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated SVG output file. The system automatically sanitizes the filename, appends the correct .svg extension, and adds numeric indexing if multiple files are produced."),
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(None, alias="Preset", description="Vectorization preset that applies pre-configured tracing settings optimized for different image types. When selected, presets override all other converter options except ColorMode."),
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Output color mode for the traced SVG. Choose between full color or black-and-white vectorization."),
@@ -5275,9 +5735,14 @@ async def convert_gif_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The GIF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -5321,9 +5786,14 @@ async def convert_gif_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert GIF to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_gif_to_webp(
-    file_: str | None = Field(None, alias="File", description="The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
@@ -5367,9 +5837,14 @@ async def convert_gif_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIC to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heic_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple outputs."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -5414,9 +5889,14 @@ async def convert_heic_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image HEIC to JXL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_heic_to_jxl(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a file upload or a URL pointing to the source image."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The API automatically sanitizes the name, appends the correct file extension, and adds indexing for multiple output files to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -5460,9 +5940,14 @@ async def convert_image_heic_to_jxl(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIC to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heic_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The HEIC image file to convert. Provide either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HEIC image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotate the output image by the specified degrees. Leave empty to use automatic rotation based on EXIF data if available.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space for the output PDF. Choose from standard color space options or use default for automatic selection."),
@@ -5511,9 +5996,14 @@ async def convert_heic_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIC to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heic_to_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided either as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.png, image_1.png) for multiple outputs from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -5563,9 +6053,14 @@ async def convert_heic_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image HEIC to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_heic_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -5615,9 +6110,14 @@ async def convert_image_heic_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIC to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heic_to_svg(
-    file_: str | None = Field(None, alias="File", description="The HEIC image file to convert. Accepts either a URL pointing to the image or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HEIC image file to convert. Accepts either a URL pointing to the image or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.svg, image_1.svg) for multiple outputs."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit specified dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -5661,9 +6161,14 @@ async def convert_heic_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIC to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heic_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the name, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -5707,9 +6212,14 @@ async def convert_heic_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image HEIC to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_heic_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., image_0.webp, image_1.webp)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -5753,9 +6263,14 @@ async def convert_image_heic_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heif_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.jpg, image_1.jpg) for multiple outputs from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
@@ -5800,9 +6315,14 @@ async def convert_heif_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HEIF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_heif_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The HEIF image file to convert. Provide either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HEIF image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees for the output image. Specify a value between -360 and 360, or leave empty to automatically rotate based on EXIF data in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output PDF. Choose from standard color spaces or use the default setting."),
@@ -5851,9 +6371,14 @@ async def convert_heif_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_docx(
-    file_: str | None = Field(None, alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The desired name for the output DOCX file. The API automatically sanitizes the filename, appends the correct .docx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated from a single input."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in inches as 'horizontal,vertical' (e.g., '0.5,0.75')"),
 ) -> dict[str, Any] | ToolResult:
@@ -5898,7 +6423,12 @@ async def convert_html_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file(s). The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files to ensure unique identification."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Block advertisements from appearing in the converted page."),
@@ -5910,7 +6440,7 @@ async def convert_html_to_jpg(
     css_media_type: str | None = Field(None, alias="CssMediaType", description="CSS media type to use during conversion. Supports standard types (screen, print) and custom media types."),
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the page request. Separate multiple headers with pipe characters (|) and use colon (:) to separate header names from values."),
     zoom: float | None = Field(None, alias="Zoom", description="Set the default zoom level for webpage rendering. Values between 0.1 and 10 are supported.", ge=0.1, le=10),
-    file_: str | None = Field(None, alias="File", description="The HTML content or URL to convert. Accepts either a web URL or raw HTML file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content or URL to convert. Accepts either a web URL or raw HTML file content.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Convert HTML content or web pages to JPG image format. Supports URL-based or direct HTML content conversion with advanced rendering options including JavaScript execution, CSS customization, and DOM element waiting."""
 
@@ -5950,9 +6480,14 @@ async def convert_html_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to Markdown",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_markdown(
-    file_: str | None = Field(None, alias="File", description="The HTML content to convert. Provide either a URL pointing to an HTML file or the raw HTML content as a string."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content to convert. Provide either a URL pointing to an HTML file or the raw HTML content as a string.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated Markdown output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     github_flavored: bool | None = Field(None, alias="GithubFlavored", description="Enable GitHub-flavored Markdown (GFM) syntax in the output for enhanced compatibility with GitHub platforms."),
     remove_comments: bool | None = Field(None, alias="RemoveComments", description="Remove HTML comment tags from the output Markdown document."),
@@ -5998,7 +6533,12 @@ async def convert_html_to_markdown(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_pdf(
     file_name: str | None = Field(None, alias="FileName", description="Name for the generated PDF output file. The system sanitizes the filename, appends the .pdf extension automatically, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are generated."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Block advertisements from appearing in the converted PDF."),
@@ -6022,7 +6562,7 @@ async def convert_html_to_pdf(
     avoid_break_elements: str | None = Field(None, alias="AvoidBreakElements", description="CSS selector for elements where page breaks should be avoided. Prevents breaking content within these elements."),
     break_before_elements: str | None = Field(None, alias="BreakBeforeElements", description="CSS selector for elements that should trigger a page break before them."),
     break_after_elements: str | None = Field(None, alias="BreakAfterElements", description="CSS selector for elements that should trigger a page break after them."),
-    file_: str | None = Field(None, alias="File", description="The HTML content or URL to convert to PDF. Can be a full URL (http/https) or raw HTML file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content or URL to convert to PDF. Can be a full URL (http/https) or raw HTML file content.", json_schema_extra={'format': 'byte'}),
     margins: str | None = Field(None, alias="Margins", description="Page margins in millimeters as a space-separated string in CSS order: top right bottom left (e.g., '10 5 10 5')"),
 ) -> dict[str, Any] | ToolResult:
     """Converts HTML content from a URL or file to PDF format with advanced rendering options, including JavaScript execution, custom styling, headers/footers, and page layout control."""
@@ -6066,7 +6606,12 @@ async def convert_html_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_png(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file. The system sanitizes the filename, appends the .png extension automatically, and adds numeric suffixes (e.g., _0, _1) when generating multiple files from a single input."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Block advertisements from appearing in the converted page."),
@@ -6079,7 +6624,7 @@ async def convert_html_to_png(
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the page request. Provide headers as name-value pairs separated by pipes, with each pair separated by a colon."),
     zoom: float | None = Field(None, alias="Zoom", description="Zoom level for rendering the webpage. Values below 1 zoom out, values above 1 zoom in.", ge=0.1, le=10),
     transparent_background: bool | None = Field(None, alias="TransparentBackground", description="Use a transparent background instead of the default white background. The source HTML body background color must also be set to 'none' for transparency to work."),
-    file_: str | None = Field(None, alias="File", description="The HTML content or URL to convert. Provide either a web URL or raw HTML content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content or URL to convert. Provide either a web URL or raw HTML content.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Converts HTML content or web pages to PNG image format. Supports JavaScript execution, custom styling, cookie handling, and DOM element waiting for dynamic content rendering."""
 
@@ -6119,7 +6664,12 @@ async def convert_html_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_text(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output text file. The API sanitizes the filename, appends the correct extension, and uses indexing (e.g., output_0.txt, output_1.txt) for multiple files."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Remove advertisements from the HTML content during conversion."),
@@ -6130,7 +6680,7 @@ async def convert_html_to_text(
     user_css: str | None = Field(None, alias="UserCss", description="Custom CSS rules to apply to the page before conversion begins."),
     css_media_type: str | None = Field(None, alias="CssMediaType", description="CSS media type to use during conversion (e.g., screen, print, or custom types)."),
     headers: str | None = Field(None, alias="Headers", description="Custom HTTP headers to include in the request. Separate multiple headers with pipes and use colons to delimit header names from values."),
-    file_: str | None = Field(None, alias="File", description="HTML content to convert. Provide either a URL or raw HTML file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. HTML content to convert. Provide either a URL or raw HTML file content.", json_schema_extra={'format': 'byte'}),
     extract_elements: str | None = Field(None, alias="ExtractElements", description="CSS selector to extract specific DOM elements instead of converting the entire page. Use class selectors (.classname), ID selectors (#id), or tag names."),
 ) -> dict[str, Any] | ToolResult:
     """Converts HTML content from a URL or file to plain text format. Supports advanced options like JavaScript execution, element extraction, custom styling, and cookie/ad handling for flexible web content processing."""
@@ -6171,9 +6721,14 @@ async def convert_html_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to Spreadsheet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_spreadsheet(
-    file_: str | None = Field(None, alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output spreadsheet file. The system automatically sanitizes the filename, appends the correct .xls extension, and adds numeric indexing (e.g., report_0.xls, report_1.xls) if multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts HTML content or files to Excel spreadsheet format. Accepts HTML input as a URL or raw file content and generates a formatted XLS output file."""
@@ -6214,9 +6769,14 @@ async def convert_html_to_spreadsheet(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert HTML to XLSX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_html_to_xlsx(
-    file_: str | None = Field(None, alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output Excel file. The system automatically sanitizes the filename, appends the .xlsx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts HTML content or files to Excel spreadsheet format. Accepts HTML input as a URL or raw file content and generates a formatted XLSX output file."""
@@ -6257,9 +6817,14 @@ async def convert_html_to_xlsx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image ICO to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_ico_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only scale the image if the input is larger than the desired output dimensions."),
@@ -6304,9 +6869,14 @@ async def convert_image_ico_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ICO to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_ico_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The ICO image file to convert. Provide either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ICO image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees to apply to the image. For automatic rotation based on EXIF metadata in TIFF and JPEG images, leave empty.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the converted document."),
@@ -6355,9 +6925,14 @@ async def convert_ico_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image ICO to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_ico_to_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided as either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the output dimensions."),
@@ -6407,9 +6982,14 @@ async def convert_image_ico_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Icon to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_icon_to_svg(
-    file_: str | None = Field(None, alias="File", description="The ICO file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ICO file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(None, alias="Preset", description="Vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override individual converter options except ColorMode. Use 'none' for custom configuration."),
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Color processing mode for tracing. Choose 'color' for full-color output or 'bw' for black-and-white conversion."),
@@ -6454,9 +7034,14 @@ async def convert_icon_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image ICO to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_ico_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., image_0.webp, image_1.webp)."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -6500,9 +7085,14 @@ async def convert_image_ico_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Join Images",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def join_images(
-    files: list[str] | None = Field(None, alias="Files", description="Images to combine into a single composite image. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1])."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. Images to combine into a single composite image. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1])."),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output composite image file. The system automatically sanitizes the filename, appends the appropriate extension based on the target format, and adds indexing for multiple outputs to ensure unique, safe filenames."),
     join_direction: Literal["vertical", "horizontal"] | None = Field(None, alias="JoinDirection", description="Direction in which images are arranged in the composite. Choose vertical to stack images top-to-bottom or horizontal to arrange them left-to-right."),
     image_spacing: int | None = Field(None, alias="ImageSpacing", description="Space in pixels between individual images in the composite. Specify a value between 0 and 200 pixels.", ge=0, le=200),
@@ -6547,9 +7137,14 @@ async def join_images(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Images to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_images_to_pdf(
-    files: list[str] | None = Field(None, alias="Files", description="Images to convert to PDF. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index to each parameter name (e.g., Files[0], Files[1])."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. Images to convert to PDF. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index to each parameter name (e.g., Files[0], Files[1])."),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds an index suffix for multiple output files to ensure unique, safe naming."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotate images by the specified number of degrees. Leave empty to automatically rotate based on EXIF orientation data in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space for the output PDF. Use 'default' to preserve original image colors, or specify a standard color space for consistent output."),
@@ -6597,9 +7192,14 @@ async def convert_images_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert JFIF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_jfif_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Provide either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Provide either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple outputs to ensure unique, safe file naming."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees for the output image. Specify a value between -360 and 360, or leave empty to automatically rotate based on EXIF data in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output PDF. Select from standard color space options to control how colors are represented in the final document."),
@@ -6648,9 +7248,14 @@ async def convert_jfif_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Compress JPG Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compress_jpg_image(
-    file_: str | None = Field(None, alias="File", description="The JPG image file to compress. Can be provided as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The JPG image file to compress. Can be provided as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output compressed image file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique and safe file naming."),
     compression_level: Literal["Lossless", "Good", "Extreme"] | None = Field(None, alias="CompressionLevel", description="The compression quality level to apply to the image. Lossless preserves all image data, Good provides balanced compression, and Extreme maximizes file size reduction."),
 ) -> dict[str, Any] | ToolResult:
@@ -6692,9 +7297,14 @@ async def compress_jpg_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to GIF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_gif(
-    files: list[str] | None = Field(None, alias="Files", description="Image files to convert, provided as URLs or file content. When using query or multipart parameters, append an index to each file parameter (e.g., Files[0], Files[1])."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. Image files to convert, provided as URLs or file content. When using query or multipart parameters, append an index to each file parameter (e.g., Files[0], Files[1])."),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output GIF file(s). The API sanitizes the filename, appends the correct extension, and automatically indexes multiple output files to ensure unique naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only scale the output if the input image dimensions exceed the target size."),
@@ -6739,9 +7349,14 @@ async def convert_image_to_gif(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image Format",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_format(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple outputs to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -6785,9 +7400,14 @@ async def convert_image_format(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image JPG to JXL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_jpg_to_jxl(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to the image or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the image or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing for multiple outputs to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -6831,9 +7451,14 @@ async def convert_image_jpg_to_jxl(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to PDF (JPEG)",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_pdf_jpeg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple files are generated."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees to apply to the image. Leave empty to automatically detect and apply rotation from EXIF metadata in JPEG and TIFF images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="The color space to apply to the output PDF. Determines how colors are represented in the final document."),
@@ -6882,9 +7507,14 @@ async def convert_image_to_pdf_jpeg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image JPG to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_jpg_to_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided either as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.png, image_1.png) for multiple outputs from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -6934,9 +7564,14 @@ async def convert_image_jpg_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image JPG to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_jpg_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to the JPG file or the raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the JPG file or the raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNM file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.pnm, image_1.pnm) for multiple outputs from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, leaving smaller images unchanged."),
@@ -6986,9 +7621,14 @@ async def convert_image_jpg_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to SVG (JPG)",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_svg_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files."),
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(None, alias="Preset", description="A vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override individual converter options except ColorMode, ensuring consistent and balanced SVG output."),
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Determines whether the image is traced in full color or converted to black-and-white during vectorization."),
@@ -7033,9 +7673,14 @@ async def convert_image_to_svg_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to the JPG file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the JPG file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multi-file outputs."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -7079,9 +7724,14 @@ async def convert_image_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Text from Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_text_from_image(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output text file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files."),
     preprocessing: bool | None = Field(None, alias="Preprocessing", description="Enable advanced image preprocessing techniques such as deskew, thresholding, resizing, and sharpening to improve text extraction accuracy. Increases processing time when enabled."),
     ocr_language: Literal["ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fa", "de", "el", "he", "it", "ja", "ko", "lt", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(None, alias="OcrLanguage", description="The language to use for OCR text recognition. Supports multiple languages; contact support to request additional language support."),
@@ -7124,9 +7774,14 @@ async def extract_text_from_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image JPG to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_jpg_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a file upload or a URL pointing to the source image."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds numeric indexing for multiple output files to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -7170,9 +7825,14 @@ async def convert_image_jpg_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to PPTX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_pptx(
-    file_: str | None = Field(None, alias="File", description="The Keynote presentation file to convert. Can be provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Keynote presentation file to convert. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct .pptx extension, and adds numeric indexing (e.g., output_0.pptx, output_1.pptx) if multiple files are generated."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a Keynote presentation file to PowerPoint format (PPTX). Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -7213,9 +7873,14 @@ async def convert_presentation_to_pptx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert LOG to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_log_to_docx(
-    file_: str | None = Field(None, alias="File", description="The log file to convert. Provide either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The log file to convert. Provide either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The API automatically sanitizes the filename, appends the .docx extension, and adds numeric indexing (e.g., report_0.docx, report_1.docx) if multiple files are generated."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a log file to Microsoft Word (.docx) format. Accepts log file content or URL and generates a formatted Word document with the specified output filename."""
@@ -7256,9 +7921,14 @@ async def convert_log_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Log to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_log_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The log file to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The log file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to include in the output PDF using a range format (e.g., 1-10 for pages 1 through 10). Defaults to the first 6000 pages."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Sets the PDF/A compliance version for archival-grade PDF output. Use 'none' for standard PDF without compliance requirements."),
@@ -7301,9 +7971,14 @@ async def convert_log_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Log to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_log_to_text(
-    file_: str | None = Field(None, alias="File", description="The log file to convert. Accepts either a URL reference or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The log file to convert. Accepts either a URL reference or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the generated output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., file_0.txt, file_1.txt) for multiple outputs to ensure unique, safe file identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected log files."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="Enable replacement of special symbols with their text equivalents (e.g., © becomes (c)) in the output text."),
@@ -7347,9 +8022,14 @@ async def convert_log_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Markdown to HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_markdown_to_html(
-    file_: str | None = Field(None, alias="File", description="The Markdown content to convert, provided either as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Markdown content to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated HTML output file. The system automatically sanitizes the filename, appends the .html extension, and adds numeric suffixes (e.g., output_0.html, output_1.html) when generating multiple files from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts Markdown content to HTML format. Accepts Markdown input as file content or URL and generates corresponding HTML output."""
@@ -7390,9 +8070,14 @@ async def convert_markdown_to_html(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Markdown to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_markdown_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The Markdown file to convert. Provide either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Markdown file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated."),
     margin_top: int | None = Field(None, alias="MarginTop", description="Top margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500),
     margin_right: int | None = Field(None, alias="MarginRight", description="Right margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500),
@@ -7437,9 +8122,14 @@ async def convert_markdown_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MHTML to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_mhtml_to_docx(
-    file_: str | None = Field(None, alias="File", description="The MHTML file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MHTML file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) when multiple files are generated from a single input."),
     margins: str | None = Field(None, alias="Margins", description="Page margins in inches as 'horizontal,vertical' (e.g., '1.0,0.5')"),
 ) -> dict[str, Any] | ToolResult:
@@ -7484,9 +8174,14 @@ async def convert_mhtml_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MOBI to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_mobi_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The MOBI file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MOBI file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files."),
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="JPG color mode for the output image. Choose between standard JPEG, CMYK for print-ready output, or grayscale for reduced file size."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when resizing the output image to prevent distortion."),
@@ -7530,9 +8225,14 @@ async def convert_mobi_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MOBI to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_mobi_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The MOBI file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MOBI file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated from a single input."),
     base_font_size: float | None = Field(None, alias="BaseFontSize", description="The base font size in points (pt) for the converted PDF. All text scaling is relative to this value.", ge=1, le=50),
     margins: str | None = Field(None, alias="Margins", description="Page margins in points (pt) in CSS shorthand format: 'top right bottom left' (e.g., '72 36 72 36')"),
@@ -7578,9 +8278,14 @@ async def convert_mobi_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MOBI to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_mobi_to_png(
-    file_: str | None = Field(None, alias="File", description="The MOBI file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MOBI file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when resizing the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
@@ -7623,9 +8328,14 @@ async def convert_mobi_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MOBI to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_mobi_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The MOBI file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MOBI file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions."),
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(None, alias="TiffType", description="Specifies the TIFF color type and compression method. Choose from color variants (24/32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="When enabled, combines all pages into a single multi-page TIFF file. When disabled, generates separate TIFF files for each page."),
@@ -7671,9 +8381,14 @@ async def convert_mobi_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Email to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_email_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The email message file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email message file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors will not prevent the email body from being converted to JPG. Only applies when attachments are being processed."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body content with extracted attachments during conversion. Only applies when attachments are being processed."),
@@ -7716,9 +8431,14 @@ async def convert_email_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MSG to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_msg_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The MSG file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MSG file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) when multiple files are produced."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to PDF. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, merges the email body with converted attachments into a single PDF document. Only applies when attachments are being converted."),
@@ -7766,9 +8486,14 @@ async def convert_msg_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Email to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_email_to_png_outlook(
-    file_: str | None = Field(None, alias="File", description="The email message file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The email message file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., email_0.png, email_1.png) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="When enabled, the conversion process will continue even if errors occur while processing email attachments. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="When enabled, email body content and attachments are combined into a single output during conversion. Only applies when attachments are being converted."),
@@ -7811,9 +8536,14 @@ async def convert_email_to_png_outlook(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert MSG to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_msg_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The MSG file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The MSG file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The API automatically sanitizes the name, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated."),
     ignore_attachment_errors: bool | None = Field(None, alias="IgnoreAttachmentErrors", description="If enabled, attachment conversion errors will not prevent the email body from being converted. Only applies when attachments are being converted."),
     merge: bool | None = Field(None, alias="Merge", description="If enabled, merges the email body with converted attachments into the output. Only applies when attachments are being converted."),
@@ -7857,9 +8587,14 @@ async def convert_msg_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Message to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_message_to_webp(
-    file_: str | None = Field(None, alias="File", description="The message file to convert. Accepts either a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The message file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
@@ -7902,9 +8637,14 @@ async def convert_message_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Numbers to CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_numbers_to_csv(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated CSV output file. The system automatically sanitizes the filename, appends the .csv extension, and adds numeric indexing (e.g., output_0.csv, output_1.csv) if multiple files are generated."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a numbers file to CSV format. Accepts file input as a URL or file content and generates a properly named CSV output file."""
@@ -7945,9 +8685,14 @@ async def convert_numbers_to_csv(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Numbers to XLSX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_numbers_to_xlsx(
-    file_: str | None = Field(None, alias="File", description="The Numbers file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Numbers file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct .xlsx extension, and adds numeric indexing (e.g., report_0.xlsx, report_1.xlsx) if multiple files are generated."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a Numbers spreadsheet file to Excel (XLSX) format. Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -7988,9 +8733,14 @@ async def convert_numbers_to_xlsx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODC Document to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_jpg_spreadsheet(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL reference or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple generated files."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an ODC (OpenDocument Chart) file to JPG image format. Accepts file input as a URL or binary content and generates a JPG output file with optional custom naming."""
@@ -8031,9 +8781,14 @@ async def convert_document_to_jpg_spreadsheet(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODC to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_odc_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The ODC file to convert. Accepts either a file upload or a URL pointing to the source file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODC file to convert. Accepts either a file upload or a URL pointing to the source file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -8075,9 +8830,14 @@ async def convert_odc_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODC to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_odc_to_png(
-    file_: str | None = Field(None, alias="File", description="The ODC file to convert, provided as either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODC file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `output_0.png`, `output_1.png`) for multiple files to ensure unique, safe naming."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color applied to transparent areas in the converted image. Accepts color names (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), HEX format (e.g., `#FF0000`), or `transparent` to preserve transparency."),
 ) -> dict[str, Any] | ToolResult:
@@ -8119,9 +8879,14 @@ async def convert_odc_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_jpg_formula(
-    file_: str | None = Field(None, alias="File", description="The document file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts ODF (OpenDocument Format) documents to JPG image format. Supports both file uploads and URL-based file sources."""
@@ -8162,9 +8927,14 @@ async def convert_document_to_jpg_formula(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODF Document to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_pdf_odf(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. PDF/A formats ensure long-term archival compatibility. Use 'none' for standard PDF output without archival compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -8206,9 +8976,14 @@ async def convert_document_to_pdf_odf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_png(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `_0`, `_1`) when multiple files are generated from a single input."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="The background color applied to transparent areas in the converted images. Accepts color names, RGB values (comma-separated), HEX codes, or the value `transparent` to preserve transparency."),
 ) -> dict[str, Any] | ToolResult:
@@ -8250,9 +9025,14 @@ async def convert_document_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODG to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_odg_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The ODG file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODG file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `document_0.pdf`, `document_1.pdf`) when multiple files are generated."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -8294,9 +9074,14 @@ async def convert_odg_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a file upload (binary content) or a URL pointing to the ODP file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a file upload (binary content) or a URL pointing to the ODP file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.jpg, presentation_1.jpg) when multiple images are generated from slides."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an ODP (OpenDocument Presentation) file to JPG image format. Supports both file uploads and URL-based sources, generating one or more JPG images from the presentation slides."""
@@ -8337,9 +9122,14 @@ async def convert_presentation_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODP to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_odp_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `_0`, `_1`) if multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -8381,9 +9171,14 @@ async def convert_odp_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_png(
-    file_: str | None = Field(None, alias="File", description="The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file(s). The system automatically sanitizes the name, appends the correct file extension, and adds numeric indexing (e.g., `presentation_0.png`, `presentation_1.png`) when multiple files are generated from a single input."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color applied to transparent areas in the generated PNG images. Accepts color names (e.g., `white`, `black`), RGB format (comma-separated values 0-255), HEX format (with # prefix), or `transparent` to preserve transparency."),
 ) -> dict[str, Any] | ToolResult:
@@ -8425,9 +9220,14 @@ async def convert_presentation_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_image(
-    file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert, provided either as a URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert, provided either as a URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output image file. The system automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple images are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an ODS (OpenDocument Spreadsheet) file to JPG image format. Accepts file input as a URL or binary content and generates a named output image file."""
@@ -8468,9 +9268,14 @@ async def convert_spreadsheet_to_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODS to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_ods_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The ODS file to convert. Can be provided as a file upload or as a URL pointing to the source file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODS file to convert. Can be provided as a file upload or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. PDF/A versions provide long-term archival compatibility. Use 'none' for standard PDF output without PDF/A compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -8512,9 +9317,14 @@ async def convert_ods_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert ODS to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_ods_to_png(
-    file_: str | None = Field(None, alias="File", description="The ODS file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODS file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file(s). The system automatically sanitizes the name, appends the correct file extension, and adds numeric indexing (e.g., `report_0.png`, `report_1.png`) when multiple files are generated from a single input."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for the generated PNG image. Specify a color name (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), or HEX format (e.g., `#FF0000`). Use `transparent` to preserve transparency."),
 ) -> dict[str, Any] | ToolResult:
@@ -8556,9 +9366,14 @@ async def convert_ods_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document ODT to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_odt_to_docx(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Whether to automatically update all tables of content in the converted document."),
@@ -8602,9 +9417,14 @@ async def convert_document_odt_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to JPG Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_jpg_text(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts an ODT (OpenDocument Text) document to JPG image format. Supports both file uploads and URL-based file sources."""
@@ -8645,9 +9465,14 @@ async def convert_document_to_jpg_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to PDF (ODT)",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_pdf_odt(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source document."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source document.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple files are generated from a single input."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="PDF/A compliance version for the output file. Select 'none' for standard PDF, or choose a PDF/A version (1b, 2b, or 3b) for long-term archival compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -8689,9 +9514,14 @@ async def convert_document_to_pdf_odt(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to PNG Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_png_text(
-    file_: str | None = Field(None, alias="File", description="The ODT file to convert. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODT file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `output_0.png`, `output_1.png`) for multiple files to ensure unique, safe naming."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for transparent areas in the converted images. Accepts color names (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), HEX format (e.g., `#FF0000`), or `transparent` to preserve transparency."),
 ) -> dict[str, Any] | ToolResult:
@@ -8733,9 +9563,14 @@ async def convert_document_to_png_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document ODT to TXT",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_odt_to_txt(
-    file_: str | None = Field(None, alias="File", description="The ODT document to convert. Accepts either a file URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ODT document to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output text file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected ODT documents."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c))."),
@@ -8779,9 +9614,14 @@ async def convert_document_odt_to_txt(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Document to XML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_document_to_xml(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output XML file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.xml, document_1.xml) when multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input document if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document during conversion."),
@@ -8826,9 +9666,14 @@ async def convert_document_to_xml(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Office Document to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_office_document_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the document."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the document.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents. Only needed if the input document is encrypted."),
     pdfa: bool | None = Field(None, alias="Pdfa", description="When enabled, generates a PDF/A-1b compliant document suitable for long-term archival and preservation."),
@@ -8871,9 +9716,14 @@ async def convert_office_document_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Pages to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pages_to_docx(
-    file_: str | None = Field(None, alias="File", description="The Pages document to convert, provided as either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Pages document to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated DOCX output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) when multiple files are produced from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a Pages document to DOCX format. Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -8914,9 +9764,14 @@ async def convert_pages_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Pages to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pages_to_text(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Can be provided as a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file(s). The system automatically sanitizes the filename, appends the correct extension for the target format, and adds numeric indexing (e.g., `output_0.txt`, `output_1.txt`) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts document pages to plain text format. Supports file uploads via URL or direct file content and generates appropriately named output files."""
@@ -8957,9 +9812,14 @@ async def convert_pages_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Compress PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compress_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to compress. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to compress. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output compressed PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the PDF if it is password-protected."),
     preset: Literal["none", "lossless", "text", "archive", "web", "ebook", "printer"] | None = Field(None, alias="Preset", description="Predefined compression profile optimized for specific use cases. When selected, all other compression options are ignored. Choose 'none' for no compression or select a preset tailored to your needs (lossless preserves quality, text optimizes for documents, web reduces file size for online sharing, etc.)."),
@@ -9014,9 +9874,14 @@ async def compress_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Crop PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def crop_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to crop. Accepts a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to crop. Accepts a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., report_0.pdf, report_1.pdf)."),
     password: str | None = Field(None, alias="Password", description="Password to unlock a protected PDF file."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to crop using page numbers, ranges, or keywords. Supports comma-separated values and ranges (e.g., 1,2,5-last)."),
@@ -9066,9 +9931,14 @@ async def crop_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_csv(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output CSV file. The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.csv, report_1.csv) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -9114,9 +9984,15 @@ async def convert_pdf_to_csv(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Delete PDF Pages",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pdf_pages(
-    file_: str | None = Field(None, alias="File", description="The PDF file to process. Accepts a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.pdf, document_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Pages to delete specified as a range (e.g., 1-10) or comma-separated individual page numbers (e.g., 1,2,5)."),
@@ -9160,9 +10036,14 @@ async def delete_pdf_pages(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_docx(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output DOCX file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 pages."),
@@ -9209,9 +10090,14 @@ async def convert_pdf_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Data from PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_data_from_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to process. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple outputs to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     document_type: Literal["auto", "invoice", "receipt", "contract", "identification", "financial", "form", "manual"] | None = Field(None, alias="DocumentType", description="Document category to apply optimized extraction rules. Use 'Auto' for automatic detection, select a specific type (Invoice, Receipt, Contract, etc.) for improved accuracy, or choose 'Manual' to use only custom extraction fields."),
@@ -9256,9 +10142,14 @@ async def extract_data_from_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Images from PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_images_from_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to process. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., filename_0, filename_1) for multiple outputs."),
     password: str | None = Field(None, alias="Password", description="Password for opening password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to process. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5)."),
@@ -9304,9 +10195,14 @@ async def extract_images_from_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract PDF Form Fields",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_pdf_form_fields(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output FDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.fdf, output_1.fdf) for multiple files to ensure unique, safe naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     include_alternate_names: bool | None = Field(None, alias="IncludeAlternateNames", description="When enabled, includes alternate field names (tooltip text) from the PDF in the FDF output for better field identification."),
@@ -9349,10 +10245,15 @@ async def extract_pdf_form_fields(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Import PDF with FDF Form Data",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_pdf_with_fdf_form_data(
-    file_: str | None = Field(None, alias="File", description="The PDF file to be converted. Accepts either a URL reference or binary file content."),
-    fdf_file: str | None = Field(None, alias="FdfFile", description="The FDF (Forms Data Format) file containing structured form field data to be imported into the PDF. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to be converted. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
+    fdf_file: str | None = Field(None, alias="FdfFile", description="Base64-encoded file content for upload. The FDF (Forms Data Format) file containing structured form field data to be imported into the PDF. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s) generated by the conversion. The system automatically sanitizes the filename, appends the appropriate file extension, and adds numeric indexing (e.g., `_0`, `_1`) when multiple output files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents. Only needed if the input PDF is encrypted."),
 ) -> dict[str, Any] | ToolResult:
@@ -9394,9 +10295,14 @@ async def import_pdf_with_fdf_form_data(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Flatten PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def flatten_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to be flattened. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to be flattened. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files to ensure unique and safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open a protected or encrypted PDF document."),
     flatten_controls: bool | None = Field(None, alias="FlattenControls", description="Convert form controls (text fields, checkboxes, dropdowns) into static content, preventing editing while maintaining their original visual appearance."),
@@ -9441,9 +10347,14 @@ async def flatten_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_html(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output HTML file(s). The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.html, report_1.html) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 pages."),
@@ -9489,12 +10400,17 @@ async def convert_pdf_to_html(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Add Watermark to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_watermark_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output image file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
-    image_file: str | None = Field(None, alias="ImageFile", description="Image file to use as the watermark. Accepts a file URL or binary image content."),
+    image_file: str | None = Field(None, alias="ImageFile", description="Base64-encoded file content for upload. Image file to use as the watermark. Accepts a file URL or binary image content.", json_schema_extra={'format': 'byte'}),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to process. Use ranges (e.g., 1-10) or comma-separated page numbers (e.g., 1,2,5)."),
     opacity: int | None = Field(None, alias="Opacity", description="Controls the transparency of the watermark, where 0 is fully transparent and 100 is fully opaque.", ge=0, le=100),
     style: Literal["stamp", "watermark"] | None = Field(None, alias="Style", description="Determines watermark placement: 'stamp' overlays the watermark on top of page content, while 'watermark' places it behind the content."),
@@ -9548,9 +10464,14 @@ async def add_watermark_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multi-page conversions."),
     password: str | None = Field(None, alias="Password", description="Password required to open a password-protected PDF document."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to first 2000 pages."),
@@ -9596,9 +10517,14 @@ async def convert_pdf_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Merge PDFs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_pdfs(
-    files: list[str] | None = Field(None, alias="Files", description="Array of PDF files to merge. Each file can be provided as a URL or file content. Files are merged in the order provided."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. Array of PDF files to merge. Each file can be provided as a URL or file content. Files are merged in the order provided."),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output merged PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing if multiple output files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the source PDF files if they are password-protected."),
     remove_duplicate_fonts: bool | None = Field(None, alias="RemoveDuplicateFonts", description="When enabled, prevents duplicate fonts from being included in the merged PDF, reducing file size."),
@@ -9643,9 +10569,14 @@ async def merge_pdfs(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_metadata(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="The password required to open the PDF if it is password-protected. Only needed for encrypted documents."),
 ) -> dict[str, Any] | ToolResult:
@@ -9687,9 +10618,14 @@ async def convert_pdf_to_metadata(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Text from PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_text_from_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to process. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the name, appends the appropriate file extension based on output format, and adds numeric suffixes for multiple files to ensure unique, safe filenames."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to process. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5)."),
@@ -9736,9 +10672,14 @@ async def extract_text_from_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PCL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_pcl(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PCL file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pcl, output_1.pcl) for multiple output files."),
     color_mode: Literal["color", "monochrome"] | None = Field(None, alias="ColorMode", description="The color mode for the output document. Choose between full color or monochrome rendering."),
     resolution: int | None = Field(None, alias="Resolution", description="The output resolution in dots per inch (DPI). Higher values improve image quality but increase file size. Valid range is 10 to 1000 DPI.", ge=10, le=1000),
@@ -9781,9 +10722,14 @@ async def convert_pdf_to_pcl(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files."),
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(None, alias="PdfVersion", description="The PDF specification version to use for the output document."),
     pdf_title: str | None = Field(None, alias="PdfTitle", description="Custom title for the PDF document metadata. Use a single quote and space (' ') to remove the title entirely."),
@@ -9833,12 +10779,17 @@ async def convert_pdf_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Add Watermark to PDF Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_watermark_to_pdf_document(
-    file_: str | None = Field(None, alias="File", description="The PDF file to be watermarked. Can be provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to be watermarked. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output watermarked PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input PDF if it is password-protected."),
-    overlay_file: str | None = Field(None, alias="OverlayFile", description="PDF file to use as the watermark overlay. Can be provided as a URL or binary file content."),
+    overlay_file: str | None = Field(None, alias="OverlayFile", description="Base64-encoded file content for upload. PDF file to use as the watermark overlay. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     overlay_page: int | None = Field(None, alias="OverlayPage", description="Page number from the overlay file to use as the watermark. Must be a valid page within the overlay document.", ge=1, le=2000),
     page_range: str | None = Field(None, alias="PageRange", description="Pages to apply the watermark to, specified as a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to all pages."),
     opacity: int | None = Field(None, alias="Opacity", description="Watermark transparency level as a percentage. Lower values make the watermark more transparent.", ge=0, le=100),
@@ -9893,14 +10844,19 @@ async def add_watermark_to_pdf_document(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PDF/A",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_pdfa(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF/A file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open a password-protected PDF document."),
     pdfa_version: Literal["pdfA1a", "pdfA1b", "pdfA2a", "pdfA2b", "pdfA2u", "pdfA3a", "pdfA3b", "pdfA3u", "pdfA4", "pdfA4e", "pdfA4f"] | None = Field(None, alias="PdfaVersion", description="The PDF/A compliance version to target for the output document."),
     invoice_format: Literal["none", "facturX", "zugferd1", "zugferd2"] | None = Field(None, alias="InvoiceFormat", description="E-invoice format to embed in the PDF. When specified, overrides the PdfaVersion setting and outputs PDF/A-3 format. Requires a valid structured invoice XML file."),
-    invoice_file: str | None = Field(None, alias="InvoiceFile", description="Structured invoice XML file (ZUGFeRD or Factur-X format) to embed for hybrid-invoice compatibility. Required when InvoiceFormat is set to a value other than 'none'."),
+    invoice_file: str | None = Field(None, alias="InvoiceFile", description="Base64-encoded file content for upload. Structured invoice XML file (ZUGFeRD or Factur-X format) to embed for hybrid-invoice compatibility. Required when InvoiceFormat is set to a value other than 'none'.", json_schema_extra={'format': 'byte'}),
     linearize: bool | None = Field(None, alias="Linearize", description="Linearize the PDF structure and optimize for fast web viewing and streaming."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a PDF document to PDF/A format for long-term archival compliance. Supports optional password-protected PDFs, e-invoice embedding (ZUGFeRD/Factur-X), and web optimization."""
@@ -9941,9 +10897,14 @@ async def convert_pdf_to_pdfa(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PDF/UA",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_pdfua(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input PDF if it is password-protected."),
     linearize: bool | None = Field(None, alias="Linearize", description="Enables linearization of the PDF file to optimize for fast web viewing and streaming."),
@@ -9986,9 +10947,14 @@ async def convert_pdf_to_pdfua(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_png(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds an index suffix for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open a protected or encrypted PDF document."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range or comma-separated list format. Allows selective conversion of specific pages from the PDF."),
@@ -10034,9 +11000,14 @@ async def convert_pdf_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PowerPoint",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_pptx(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PowerPoint file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., report_0.pptx, report_1.pptx) when generating multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -10082,9 +11053,14 @@ async def convert_pdf_to_pptx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Print",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_print(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open a protected or encrypted PDF document."),
     trim_size: Literal["default", "a2", "a3", "a4", "a5", "a6", "letter", "legal", "custom"] | None = Field(None, alias="TrimSize", description="Page size to apply to every page in the output. Select 'default' to preserve each page's current size, or 'custom' to specify exact dimensions via TrimWidth and TrimHeight."),
@@ -10096,7 +11072,7 @@ async def convert_pdf_to_print(
     tint_bars: bool | None = Field(None, alias="TintBars", description="When enabled, adds grayscale and color control bars at the top of the page, positioned outside the trim box for quality verification."),
     color_space: Literal["default", "rgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Defines the color space for the output PDF. 'Default' preserves the original color space, or specify RGB, CMYK, or grayscale conversion."),
     output_intent: Literal["none", "fogra39", "fogra51", "gracol2013", "swop2013", "japancolor2011", "custom"] | None = Field(None, alias="OutputIntent", description="Embeds an ICC color profile as the PDF's output intent for color management. Select 'custom' to provide a custom ICC profile file via OutputIntentIccFile."),
-    output_intent_icc_file: str | None = Field(None, alias="OutputIntentIccFile", description="Custom ICC profile file to embed as the PDF output intent. Required when OutputIntent is set to 'custom'."),
+    output_intent_icc_file: str | None = Field(None, alias="OutputIntentIccFile", description="Base64-encoded file content for upload. Custom ICC profile file to embed as the PDF output intent. Required when OutputIntent is set to 'custom'.", json_schema_extra={'format': 'byte'}),
     downsample_images: bool | None = Field(None, alias="DownsampleImages", description="When enabled, reduces resolution of images exceeding the target resolution to minimize file size while maintaining quality."),
     resolution: int | None = Field(None, alias="Resolution", description="Target resolution in pixels per inch (PPI) used for rasterization tasks such as bleed fabrication and image downsampling. Valid range is 10 to 800 PPI.", ge=10, le=800),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a comma-separated range (e.g., 1,2,5-last). Supports keywords 'even', 'odd', and 'last'. Maximum of 100 pages will be processed per conversion."),
@@ -10139,9 +11115,14 @@ async def convert_pdf_to_print(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Protect PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def protect_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to protect. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to protect. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output protected PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.pdf, document_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the protected PDF document. Used when the document has existing protection that needs to be processed."),
     encryption_algorithm: Literal["Standard40Bit", "Standard128Bit", "Aes128Bit", "Aes256Bit"] | None = Field(None, alias="EncryptionAlgorithm", description="Algorithm used to encrypt the PDF document. Determines the strength and type of encryption applied."),
@@ -10195,9 +11176,14 @@ async def protect_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Rasterized Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_rasterized_image(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the appropriate image extension, and adds numeric indexing (e.g., filename_0.png, filename_1.png) when multiple output files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     resolution: int | None = Field(None, alias="Resolution", description="Resolution for rasterized output measured in dots per inch (DPI). Higher values produce sharper images but increase file size. Valid range is 10 to 800 DPI.", ge=10, le=800),
@@ -10240,9 +11226,15 @@ async def convert_pdf_to_rasterized_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Redact PDF",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def redact_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to redact. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to redact. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension, and adds indexing for multiple output files (e.g., report_0.pdf, report_1.pdf)."),
     password: str | None = Field(None, alias="Password", description="Password to open a protected PDF document."),
     preset: Literal["auto", "gdpr", "hipaa", "ferpa", "foia", "glba", "ccpa", "manual"] | None = Field(None, alias="Preset", description="Compliance preset that determines which categories of sensitive data the AI detects and redacts. Use 'manual' to rely exclusively on custom redaction parameters (PII, PHI, Financial)."),
@@ -10299,9 +11291,14 @@ async def redact_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Resize PDF Pages",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resize_pdf_pages(
-    file_: str | None = Field(None, alias="File", description="The PDF file to resize. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to resize. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) for multiple files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open a protected or encrypted PDF file."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using page numbers and keywords. Supports comma-separated values, ranges with hyphens, and keywords like 'even', 'odd', and 'last' to select specific pages."),
@@ -10345,9 +11342,14 @@ async def resize_pdf_pages(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Rotate PDF Pages",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rotate_pdf_pages(
-    file_: str | None = Field(None, alias="File", description="The PDF file to rotate. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to rotate. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.pdf, document_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open a protected or encrypted PDF document."),
     auto_rotate: bool | None = Field(None, alias="AutoRotate", description="Enable automatic detection and correction of page orientation to the optimal reading angle."),
@@ -10392,9 +11394,14 @@ async def rotate_pdf_pages(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to RTF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_rtf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output RTF file. The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.rtf, document_1.rtf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000."),
@@ -10440,9 +11447,14 @@ async def convert_pdf_to_rtf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Split PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def split_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to be split. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to be split. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and adds numeric indices (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     split_by_pattern: str | None = Field(None, alias="SplitByPattern", description="A comma-separated sequence of positive integers that defines the page count for each split segment. The pattern repeats cyclically until all pages are consumed. For example, a pattern of `3,2` creates segments of 3 pages, then 2 pages, repeating as needed."),
@@ -10488,9 +11500,14 @@ async def split_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_svg(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5)."),
@@ -10542,9 +11559,14 @@ async def convert_pdf_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Text with Watermark",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_text_with_watermark(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.txt, report_1.txt) for multiple outputs."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     text: str | None = Field(None, alias="Text", description="Text content for the watermark. Supports dynamic variables like %PAGE%, %FILENAME%, %DATE%, %TIME%, %DATETIME%, document metadata (%AUTHOR%, %TITLE%, %SUBJECT%, %KEYWORDS%), and %N% for line breaks."),
@@ -10612,9 +11634,14 @@ async def convert_pdf_to_text_with_watermark(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open a password-protected PDF document."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -10662,9 +11689,14 @@ async def convert_pdf_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to TIFF Fax",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_tiff_fax(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     tiff_type: Literal["monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(None, alias="TiffType", description="Compression type for the TIFF FAX output. Determines the encoding method used in the resulting file."),
@@ -10710,9 +11742,14 @@ async def convert_pdf_to_tiff_fax(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_text(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output text file(s). The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) when multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -10762,9 +11799,14 @@ async def convert_pdf_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Unprotect PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unprotect_pdf(
-    file_: str | None = Field(None, alias="File", description="The PDF file to unprotect. Provide either a publicly accessible URL or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to unprotect. Provide either a publicly accessible URL or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `document_0.pdf`, `document_1.pdf`) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="The password protecting the PDF. Provide the user password to remove user-level protection, or leave empty to remove owner-level protection."),
 ) -> dict[str, Any] | ToolResult:
@@ -10806,9 +11848,14 @@ async def unprotect_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_webp(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple outputs."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -10860,9 +11907,14 @@ async def convert_pdf_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to XLSX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_xlsx(
-    file_: str | None = Field(None, alias="File", description="The PDF file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated Excel output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.xlsx, report_1.xlsx) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PDF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to extract from the PDF. Use ranges (e.g., 1-10) or comma-separated page numbers (e.g., 1,2,5)."),
@@ -10911,9 +11963,14 @@ async def convert_pdf_to_xlsx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Validate PDF/A Conformance",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_pdfa_conformance(
-    file_: str | None = Field(None, alias="File", description="The PDF file to validate. Can be provided as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PDF file to validate. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output validation report file. The system sanitizes the filename, appends the appropriate extension, and adds indexing for multiple output files to ensure unique and safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open the PDF if it is password-protected."),
     expected_conformance: Literal["auto", "pdfA1a", "pdfA1b", "pdfA2a", "pdfA2b", "pdfA2u", "pdfA3a", "pdfA3b", "pdfA3u", "pdfA4", "pdfA4e", "pdfA4f"] | None = Field(None, alias="ExpectedConformance", description="The PDF/A conformance level to validate against. Use 'auto' to automatically detect the document's claimed conformance level, or specify a particular PDF/A version."),
@@ -10956,9 +12013,14 @@ async def validate_pdfa_conformance(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PNG to GIF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_png_to_gif(
-    files: list[str] | None = Field(None, alias="Files", description="PNG image files to convert to GIF format. Accepts file URLs or direct file content. When using query or multipart parameters, each file must be indexed (Files[0], Files[1], etc.)."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. PNG image files to convert to GIF format. Accepts file URLs or direct file content. When using query or multipart parameters, each file must be indexed (Files[0], Files[1], etc.)."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output GIF file(s). The system automatically sanitizes the filename, appends the .gif extension, and adds numeric suffixes for multiple outputs (e.g., animation_0.gif, animation_1.gif) to ensure unique, safe filenames."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -11003,9 +12065,14 @@ async def convert_png_to_gif(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image PNG to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_png_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Can be provided as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple outputs."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
@@ -11050,9 +12117,14 @@ async def convert_image_png_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to PDF (PNG)",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_pdf_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) for multiple files."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees for the image. Leave empty to automatically detect and apply rotation from EXIF metadata in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the document."),
@@ -11101,9 +12173,14 @@ async def convert_image_to_pdf_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image PNG to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_png_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., image_0.pnm, image_1.pnm) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, leaving smaller images unchanged."),
@@ -11153,9 +12230,14 @@ async def convert_image_png_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_to_svg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files."),
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(None, alias="Preset", description="A vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override all other converter options except ColorMode, ensuring consistent and balanced SVG output."),
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Determines whether the image is traced in black-and-white or full color mode."),
@@ -11200,9 +12282,14 @@ async def convert_image_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PNG to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_png_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The PNG image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PNG image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size."),
@@ -11246,9 +12333,14 @@ async def convert_png_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image PNG to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_png_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a file upload or a URL pointing to the PNG image."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a file upload or a URL pointing to the PNG image.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -11292,9 +12384,14 @@ async def convert_image_png_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Translate PO File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def translate_po_file(
-    file_: str | None = Field(None, alias="File", description="The PO file to be converted and translated. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PO file to be converted and translated. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., output_0.po, output_1.po) for multiple files to ensure unique, safe naming."),
     overwrite_translations: bool | None = Field(None, alias="OverwriteTranslations", description="When enabled, re-translates strings that already have existing translations in the PO file. Useful for updating outdated or low-quality translations."),
     translation_context: str | None = Field(None, alias="TranslationContext", description="Optional context to guide the translation engine. Provide a brief description of the product, audience, or domain to improve tone, terminology, and translation accuracy."),
@@ -11339,9 +12436,14 @@ async def translate_po_file(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_jpg_template(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., presentation_0.jpg, presentation_1.jpg)."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000."),
@@ -11385,9 +12487,14 @@ async def convert_presentation_to_jpg_template(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation Template to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_template_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 pages."),
@@ -11434,9 +12541,14 @@ async def convert_presentation_template_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to PNG Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_png_template(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which slides to convert using page numbers. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5)."),
@@ -11489,9 +12601,14 @@ async def convert_presentation_to_png_template(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert POTX to PPTX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_potx_to_pptx(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for the target format, and adds indexing (e.g., _0, _1) when multiple output files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="The password required to open the input file if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -11533,9 +12650,14 @@ async def convert_potx_to_pptx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation Template to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_template_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a file URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range or comma-separated list format."),
@@ -11584,9 +12706,14 @@ async def convert_presentation_template_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_webp_template(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a file URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -11632,9 +12759,14 @@ async def convert_presentation_to_webp_template(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to JPG Slideshow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_jpg_slideshow(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentation documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000."),
@@ -11678,9 +12810,14 @@ async def convert_presentation_to_jpg_slideshow(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation Slideshow to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_slideshow_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 pages."),
@@ -11727,9 +12864,14 @@ async def convert_presentation_slideshow_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to PNG Slideshow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_png_slideshow(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which slides to convert using a range or comma-separated list (e.g., 1-10 or 1,2,5)."),
@@ -11782,9 +12924,14 @@ async def convert_presentation_to_png_slideshow(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PPSX to PPTX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_ppsx_to_pptx(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert, provided either as a URL reference or as direct binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert, provided either as a URL reference or as direct binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the converted output file. The system automatically sanitizes the filename, appends the correct PPTX extension, and adds numeric indexing (e.g., filename_0.pptx, filename_1.pptx) when multiple output files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a PowerPoint Show file (PPSX) to PowerPoint Presentation format (PPTX). Accepts file input via URL or direct file content and generates a properly named output file."""
@@ -11825,9 +12972,14 @@ async def convert_presentation_ppsx_to_pptx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation Slideshow to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_slideshow_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -11876,9 +13028,14 @@ async def convert_presentation_slideshow_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to WebP Slideshow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_webp_slideshow(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., presentation_0.webp, presentation_1.webp)."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which slides to convert using page numbers or ranges. Separate multiple selections with commas."),
@@ -11924,9 +13081,14 @@ async def convert_presentation_to_webp_slideshow(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation PPT to PPTX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_ppt_to_pptx(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PPTX file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.pptx, presentation_1.pptx) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input presentation if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -11968,9 +13130,14 @@ async def convert_presentation_ppt_to_pptx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to Images",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_images(
-    file_: str | None = Field(None, alias="File", description="The PowerPoint file to convert. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PowerPoint documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 slides."),
@@ -12014,9 +13181,14 @@ async def convert_presentation_to_images(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 pages."),
@@ -12063,9 +13235,14 @@ async def convert_presentation_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to PNG Images",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_images_png(
-    file_: str | None = Field(None, alias="File", description="The PowerPoint file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., report_0.png, report_1.png) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open protected or encrypted presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -12112,9 +13289,14 @@ async def convert_presentation_to_images_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation(
-    file_: str | None = Field(None, alias="File", description="The presentation file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output presentation file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.pptx, presentation_1.pptx) if multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input presentation if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -12156,9 +13338,14 @@ async def convert_presentation(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Encrypt Presentation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def encrypt_presentation(
-    file_: str | None = Field(None, alias="File", description="The PowerPoint file to encrypt. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PowerPoint file to encrypt. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output encrypted presentation file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing if multiple files are generated."),
     encrypt_password: str | None = Field(None, alias="EncryptPassword", description="Password to encrypt the presentation. Only users with this password can open and view the file."),
 ) -> dict[str, Any] | ToolResult:
@@ -12200,9 +13387,14 @@ async def encrypt_presentation(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The PowerPoint file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected presentations."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5)."),
@@ -12251,9 +13443,14 @@ async def convert_presentation_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Presentation to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_presentation_to_webp(
-    file_: str | None = Field(None, alias="File", description="The PowerPoint file to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output WebP file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.webp, presentation_1.webp) when multiple slides are converted."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected PowerPoint documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 slides."),
@@ -12299,9 +13496,14 @@ async def convert_presentation_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PRN to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_prn_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The PRN file to convert, provided as either a publicly accessible URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PRN file to convert, provided as either a publicly accessible URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The desired name for the output JPG file. The API automatically sanitizes the filename, appends the .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a PRN (printer) file to JPG image format. Accepts file input as either a URL or raw file content and generates a JPG output file with sanitized naming."""
@@ -12342,9 +13544,14 @@ async def convert_prn_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PRN to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_prn_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The PRN file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PRN file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when generating multiple files from a single input."),
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(None, alias="PdfVersion", description="PDF specification version to use for the output document."),
     pdf_resolution: int | None = Field(None, alias="PdfResolution", description="Output resolution in dots per inch (DPI). Higher values produce better quality but larger file sizes.", ge=10, le=2400),
@@ -12394,9 +13601,14 @@ async def convert_prn_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PRN to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_prn_to_png(
-    file_: str | None = Field(None, alias="File", description="The PRN file to convert, provided as either a publicly accessible URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PRN file to convert, provided as either a publicly accessible URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) if multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a PRN (printer) file to PNG image format. Accepts file input as either a URL or raw file content and generates a PNG output file with automatic naming."""
@@ -12437,9 +13649,14 @@ async def convert_prn_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PRN to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_prn_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The PRN file to convert, provided either as a URL reference or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PRN file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file. The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric indexing (e.g., output_0.tiff, output_1.tiff) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a PRN (printer) file to TIFF image format. Accepts file input as a URL or binary content and generates a TIFF output file with automatic naming and extension handling."""
@@ -12480,9 +13697,14 @@ async def convert_prn_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PostScript to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_postscript_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Can be provided as a URL or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file. The system automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts PostScript (PS) files to JPG image format. Accepts file input as a URL or binary content and generates a uniquely named output file."""
@@ -12523,9 +13745,14 @@ async def convert_postscript_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PostScript to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_postscript_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files."),
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(None, alias="PdfVersion", description="PDF specification version to use for the output document."),
     pdf_resolution: int | None = Field(None, alias="PdfResolution", description="Output resolution in dots per inch (DPI). Higher values produce better quality but larger file sizes.", ge=10, le=2400),
@@ -12575,9 +13802,14 @@ async def convert_postscript_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PostScript to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_postscript_to_png(
-    file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Can be provided as a URL reference or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Can be provided as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a PostScript file to PNG image format. Accepts file input as a URL or binary content and generates a PNG output file with optional custom naming."""
@@ -12618,9 +13850,14 @@ async def convert_postscript_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PostScript to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_postscript_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The PostScript file to convert. Provide either a publicly accessible URL or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Provide either a publicly accessible URL or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output TIFF file(s). The system automatically sanitizes the name, appends the .tiff extension, and adds numeric indexing (e.g., document_0.tiff, document_1.tiff) if multiple files are generated."),
 ) -> dict[str, Any] | ToolResult:
     """Converts PostScript (PS) files to TIFF image format. Accepts file input via URL or direct file content and generates output with sanitized, uniquely-named TIFF file(s)."""
@@ -12661,9 +13898,14 @@ async def convert_postscript_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PSD to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_psd_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The PSD file to convert. Accepts either a file upload or a URL pointing to the source file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PSD file to convert. Accepts either a file upload or a URL pointing to the source file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -12708,9 +13950,14 @@ async def convert_psd_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image PSD to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_psd_to_png(
-    file_: str | None = Field(None, alias="File", description="The PSD image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PSD image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing for multiple output files to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size, preserving quality for smaller source images."),
@@ -12760,9 +14007,14 @@ async def convert_image_psd_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image PSD to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_psd_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for the target format, and adds indexing (e.g., filename_0.pnm, filename_1.pnm) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the desired output dimensions."),
@@ -12812,9 +14064,14 @@ async def convert_image_psd_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PSD to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_psd_to_svg(
-    file_: str | None = Field(None, alias="File", description="The PSD file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PSD file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only if the input image dimensions exceed the output dimensions."),
@@ -12858,9 +14115,14 @@ async def convert_psd_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PSD to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_psd_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The PSD file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The PSD file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the name, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -12904,9 +14166,14 @@ async def convert_psd_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image PSD to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_psd_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The system automatically sanitizes the name, appends the correct .webp extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -12950,9 +14217,14 @@ async def convert_image_psd_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Publication to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_publication_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The publication file to convert. Accepts either a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The publication file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) when multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the publication file if it is password-protected."),
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="The JPG color mode and encoding type for the output image."),
@@ -12997,9 +14269,14 @@ async def convert_publication_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PUB to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pub_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The Publisher file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Publisher file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the source document if it is password-protected."),
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="Whether to preserve document metadata (title, author, keywords) in the output PDF."),
@@ -13052,9 +14329,14 @@ async def convert_pub_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PUB to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pub_to_png(
-    file_: str | None = Field(None, alias="File", description="The Publisher file to convert. Accepts either a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Publisher file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the .png extension, and adds numeric suffixes (e.g., output_0.png, output_1.png) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the Publisher file if it is password-protected."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to the target dimensions."),
@@ -13098,9 +14380,14 @@ async def convert_pub_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PUB to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pub_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric suffixes (e.g., _0, _1) for multi-page outputs to ensure unique identification."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected Publisher documents."),
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(None, alias="TiffType", description="Specifies the TIFF compression type and color depth. Options range from color formats (24/32-bit with various compression) to grayscale and monochrome variants."),
@@ -13147,9 +14434,14 @@ async def convert_pub_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert RTF to HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_rtf_to_html(
-    file_: str | None = Field(None, alias="File", description="The RTF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated HTML output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `document_0.html`, `document_1.html`) when multiple files are produced from a single input."),
     inline_images: bool | None = Field(None, alias="InlineImages", description="Whether to embed images directly into the HTML output as base64-encoded data URIs, creating a single self-contained file without external image dependencies."),
 ) -> dict[str, Any] | ToolResult:
@@ -13191,9 +14483,14 @@ async def convert_rtf_to_html(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert RTF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_rtf_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The RTF file to convert. Accepts either a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the RTF document if it is password-protected."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format. Only pages within this range will be included in the output."),
@@ -13236,9 +14533,14 @@ async def convert_rtf_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert RTF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_rtf_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The RTF file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected RTF documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10)."),
@@ -13287,9 +14589,14 @@ async def convert_rtf_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert RTF to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_rtf_to_text(
-    file_: str | None = Field(None, alias="File", description="The RTF file to convert. Accepts either a file URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output text file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected RTF documents."),
     substitutions: bool | None = Field(None, alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c))."),
@@ -13333,9 +14640,14 @@ async def convert_rtf_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -13380,9 +14692,14 @@ async def convert_svg_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Can be provided as a file upload or as a URL pointing to the SVG resource."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Can be provided as a file upload or as a URL pointing to the SVG resource.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes if multiple files are generated."),
     horizontal_alignment: Literal["left", "center", "right"] | None = Field(None, alias="HorizontalAlignment", description="Controls how the SVG image is positioned horizontally within the PDF page."),
     vertical_alignment: Literal["top", "center", "bottom"] | None = Field(None, alias="VerticalAlignment", description="Controls how the SVG image is positioned vertically within the PDF page."),
@@ -13427,9 +14744,14 @@ async def convert_svg_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_to_png(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Accepts either a URL pointing to an SVG file or the raw SVG file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL pointing to an SVG file or the raw SVG file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -13479,9 +14801,14 @@ async def convert_svg_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to prevent distortion."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Applies scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -13531,9 +14858,14 @@ async def convert_svg_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_image(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Accepts either a URL reference or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple outputs to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling transformations only when the input image dimensions exceed the target output dimensions."),
@@ -13577,9 +14909,14 @@ async def convert_svg_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Accepts either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged."),
@@ -13623,9 +14960,14 @@ async def convert_svg_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert SVG to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_svg_to_webp(
-    file_: str | None = Field(None, alias="File", description="The SVG file to convert. Accepts either a file upload or a URL pointing to the SVG resource."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a file upload or a URL pointing to the SVG resource.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -13669,9 +15011,14 @@ async def convert_svg_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Fill Template to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fill_template_to_docx(
-    file_: str | None = Field(None, alias="File", description="The Word template file to be converted. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Word template file to be converted. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple outputs."),
     binding_method: Literal["properties", "placeholders"] | None = Field(None, alias="BindingMethod", description="Specifies how data values are bound to the template. Use 'properties' to fill Word document custom property fields, or 'placeholders' to search for and replace named placeholders within the document text."),
     json_payload: str | None = Field(None, alias="JsonPayload", description="JSON array of key-value pairs to populate the template. Structure varies by binding method: for properties, include Name, Value, and Type fields; for placeholders, supports strings, integers, images, tables, HTML, and conditional values with optional dimensions and links."),
@@ -13714,9 +15061,14 @@ async def fill_template_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Template to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_template_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The template document to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The template document to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are generated."),
     json_payload: str | None = Field(None, alias="JsonPayload", description="JSON array of data to populate into the template. Supports custom document properties (string, integer, datetime, boolean types) and placeholders (string, image, table, html, conditional types). Images should be provided as base64-encoded strings with optional dimensions and links."),
     binding_method: Literal["properties", "placeholders"] | None = Field(None, alias="BindingMethod", description="Specifies how data is bound to the template. Use 'properties' to fill Word document custom properties fields, or 'placeholders' to search for and replace named placeholders within the document text."),
@@ -13759,9 +15111,14 @@ async def convert_template_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert TIFF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_tiff_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Can be provided as a file upload or as a URL pointing to a TIFF image."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Can be provided as a file upload or as a URL pointing to a TIFF image.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.jpg, image_1.jpg) for multiple outputs from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -13806,9 +15163,14 @@ async def convert_tiff_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert TIFF to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_tiff_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The TIFF image file to convert. Accepts either a file URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The TIFF image file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated from a single input."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotation angle in degrees for the image. Specify a value between -360 and 360, or leave empty to automatically rotate based on EXIF data in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Color space for the output image. Choose from standard color spaces or use default for automatic detection."),
@@ -13856,9 +15218,14 @@ async def convert_tiff_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert TIFF to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_tiff_to_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided either as a URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., image_0.png, image_1.png) when multiple files are generated from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -13908,9 +15275,14 @@ async def convert_tiff_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert TIFF to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_tiff_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The TIFF image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The TIFF image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNM file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -13960,9 +15332,14 @@ async def convert_tiff_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert TIFF to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_tiff_to_svg(
-    file_: str | None = Field(None, alias="File", description="The TIFF image file to convert. Can be provided as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The TIFF image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(None, alias="Preset", description="Vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override individual converter options except ColorMode, providing consistent and balanced SVG results."),
     color_mode: Literal["color", "bw"] | None = Field(None, alias="ColorMode", description="Color processing mode for tracing the image. Choose between full color vectorization or black-and-white conversion."),
@@ -14007,9 +15384,14 @@ async def convert_tiff_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert TIFF Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_tiff_image(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -14053,9 +15435,14 @@ async def convert_tiff_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Image TIFF to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_image_tiff_to_webp(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to a TIFF file or raw binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a TIFF file or raw binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output WebP file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing for multiple output files to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions."),
@@ -14099,9 +15486,14 @@ async def convert_image_tiff_to_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Text to Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_text_to_image(
-    file_: str | None = Field(None, alias="File", description="The text document to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The text document to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10 inclusive)."),
@@ -14144,9 +15536,14 @@ async def convert_text_to_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Text to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_text_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The text file to convert. Accepts either a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The text file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple outputs."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to include in the output using a range format (e.g., 1-10 for pages 1 through 10)."),
     font_name: Literal["Arial", "Bahnschrift", "Calibri", "Cambria", "Consolas", "Constantia", "CourierNew", "Georgia", "Tahoma", "TimesNewRoman", "Verdana"] | None = Field(None, alias="FontName", description="The font to use for text rendering in the PDF. Select from available system fonts."),
@@ -14195,9 +15592,14 @@ async def convert_text_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert VSDX to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_vsdx_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The Visio file to convert, provided either as a publicly accessible URL or as binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Visio file to convert, provided either as a publicly accessible URL or as binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output JPEG file. The system automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple files are generated from a single input."),
 ) -> dict[str, Any] | ToolResult:
     """Converts a Visio diagram file (VSDX format) to JPEG image format. Accepts file input as a URL or binary content and generates optimized JPEG output with customizable naming."""
@@ -14238,9 +15640,14 @@ async def convert_vsdx_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert VSDX to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_vsdx_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The Visio file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Visio file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `document_0.pdf`, `document_1.pdf`) when multiple files are produced."),
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(None, alias="PdfaVersion", description="PDF/A compliance version for the output file. Use 'none' for standard PDF, or specify a PDF/A version for long-term archival compliance."),
 ) -> dict[str, Any] | ToolResult:
@@ -14282,9 +15689,14 @@ async def convert_vsdx_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert VSDX to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_vsdx_to_png(
-    file_: str | None = Field(None, alias="File", description="The Visio file to convert. Provide either a URL pointing to the file or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Visio file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PNG output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `diagram_0.png`, `diagram_1.png`) for multiple output files."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for the generated PNG image. Specify a color name, RGB values (comma-separated), or HEX code. Use `transparent` to preserve transparency."),
 ) -> dict[str, Any] | ToolResult:
@@ -14326,9 +15738,14 @@ async def convert_vsdx_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert VSDX to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_vsdx_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The Visio file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Visio file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `diagram_0.tiff`, `diagram_1.tiff`) for multi-page outputs to ensure unique, safe file naming."),
     background_color: str | None = Field(None, alias="BackgroundColor", description="Background color for the generated TIFF images. Specify a color name (e.g., `white`, `black`), RGB values (comma-separated), HEX code, or `transparent` to preserve transparency."),
     multi_page: bool | None = Field(None, alias="MultiPage", description="Whether to generate a single multi-page TIFF file or separate single-page files. When enabled, all pages are combined into one TIFF; when disabled, each page becomes a separate file."),
@@ -14371,7 +15788,12 @@ async def convert_vsdx_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Webpage to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webpage_to_jpg(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Block advertisements from rendering on the webpage during conversion."),
@@ -14422,7 +15844,12 @@ async def convert_webpage_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Webpage to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webpage_to_pdf(
     file_name: str | None = Field(None, alias="FileName", description="Name for the generated PDF output file. The system sanitizes the filename, appends the .pdf extension automatically, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are generated from a single conversion."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Enable ad blocking to remove advertisements from the web page during conversion."),
@@ -14503,7 +15930,12 @@ async def convert_webpage_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Webpage to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webpage_to_png(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PNG file. The system sanitizes the filename, appends the .png extension automatically, and adds numeric suffixes (e.g., _0, _1) when generating multiple files from a single conversion."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Block advertisements from appearing in the converted page."),
@@ -14555,7 +15987,12 @@ async def convert_webpage_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Webpage to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webpage_to_text(
     file_name: str | None = Field(None, alias="FileName", description="Name for the output text file. The API sanitizes the filename, appends the correct extension, and uses indexing (e.g., output_0.txt, output_1.txt) for multiple files to ensure unique, safe file naming."),
     ad_block: bool | None = Field(None, alias="AdBlock", description="Block advertisements and ad-related content from appearing in the converted text output."),
@@ -14606,9 +16043,14 @@ async def convert_webpage_to_text(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to GIF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_gif(
-    files: list[str] | None = Field(None, alias="Files", description="WebP image file(s) to convert. Accept file uploads or URLs pointing to WebP images. When providing multiple files, each is converted independently to GIF format."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, alias="Files", description="Base64-encoded file content for upload. WebP image file(s) to convert. Accept file uploads or URLs pointing to WebP images. When providing multiple files, each is converted independently to GIF format."),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output GIF file(s). The system automatically sanitizes the filename, appends the .gif extension, and adds numeric suffixes (e.g., image_0.gif, image_1.gif) when converting multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when resizing the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only resize the image if the input dimensions are larger than the target output size."),
@@ -14653,9 +16095,14 @@ async def convert_webp_to_gif(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_jpg(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL pointing to a WebP image or the raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a WebP image or the raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -14700,9 +16147,14 @@ async def convert_webp_to_jpg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The WebP image file to convert. Provide either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The WebP image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the output PDF file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming."),
     rotate: int | None = Field(None, alias="Rotate", description="Rotate the output image by the specified degrees. Use a value between -360 and 360. Leave empty to apply automatic rotation based on EXIF data in TIFF and JPEG images.", ge=-360, le=360),
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(None, alias="ColorSpace", description="Set the color space for the output PDF. Choose from standard color space options to control how colors are represented in the final document."),
@@ -14751,9 +16203,14 @@ async def convert_webp_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_png(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided either as a URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., image_0.png, image_1.png) when multiple files are generated from a single input."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -14803,9 +16260,14 @@ async def convert_webp_to_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to PNM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_pnm(
-    file_: str | None = Field(None, alias="File", description="The image file to convert, provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pnm, output_1.pnm) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions."),
@@ -14855,9 +16317,14 @@ async def convert_webp_to_pnm(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to SVG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_svg(
-    file_: str | None = Field(None, alias="File", description="The WebP image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The WebP image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions."),
@@ -14901,9 +16368,14 @@ async def convert_webp_to_svg(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The WebP image file to convert. Provide either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The WebP image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -14947,9 +16419,14 @@ async def convert_webp_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WebP Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_webp_image(
-    file_: str | None = Field(None, alias="File", description="The image file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple outputs to ensure unique identification."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image."),
     scale_if_larger: bool | None = Field(None, alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions."),
@@ -14993,9 +16470,14 @@ async def convert_webp_image(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert WPD to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_wpd_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The document file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected documents."),
     page_range: str | None = Field(None, alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10)."),
@@ -15044,9 +16526,14 @@ async def convert_wpd_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet Format",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_format(
-    file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `report_0.xlsx`, `report_1.xlsx`) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input file if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -15088,9 +16575,14 @@ async def convert_spreadsheet_format(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet XLS to XLSX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_xls_to_xlsx(
-    file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct XLSX extension, and adds numeric indexing (e.g., report_0.xlsx, report_1.xlsx) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="The password required to open the input file if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -15132,9 +16624,14 @@ async def convert_spreadsheet_xls_to_xlsx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert XLSB to CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_xlsb_to_csv(
-    file_: str | None = Field(None, alias="File", description="The XLSB file to convert. Can be provided as a file upload or as a URL pointing to the source file."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The XLSB file to convert. Can be provided as a file upload or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output CSV file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.csv, output_1.csv) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open the XLSB file if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -15176,9 +16673,14 @@ async def convert_xlsb_to_csv(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert XLSB to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_xlsb_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The file to convert, provided as a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected XLSB documents."),
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="Preserves document metadata such as Title, Author, and Keywords in the PDF output."),
@@ -15227,9 +16729,14 @@ async def convert_xlsb_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_csv(
-    file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output CSV file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., report_0.csv, report_1.csv) if multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open the Excel file if it is password-protected."),
 ) -> dict[str, Any] | ToolResult:
@@ -15271,9 +16778,14 @@ async def convert_spreadsheet_to_csv(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to Image (XLSX)",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_image_xlsx(
-    file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected Excel documents."),
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(None, alias="JpgType", description="The JPG color format to use for the output image."),
@@ -15318,9 +16830,14 @@ async def convert_spreadsheet_to_image_xlsx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are produced from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected Excel documents."),
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="Preserves document metadata such as title, author, and keywords in the PDF output."),
@@ -15369,9 +16886,14 @@ async def convert_spreadsheet_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to PNG Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_image_png(
-    file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a URL pointing to the file or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL pointing to the file or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the Excel file if it is password-protected."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to fit the target dimensions."),
@@ -15415,9 +16937,14 @@ async def convert_spreadsheet_to_image_png(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Encrypt XLSX Workbook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def encrypt_xlsx_workbook(
-    file_: str | None = Field(None, alias="File", description="The Excel file to encrypt. Accepts either a file URL or raw file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to encrypt. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output encrypted file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.xlsx`, `report_1.xlsx`) if multiple files are generated."),
     encrypt_password: str | None = Field(None, alias="EncryptPassword", description="The password required to open the encrypted Excel workbook. Users must enter this password to access the file."),
 ) -> dict[str, Any] | ToolResult:
@@ -15459,9 +16986,14 @@ async def encrypt_xlsx_workbook(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_tiff(
-    file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a file URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output TIFF file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions to ensure unique, safe file naming."),
     password: str | None = Field(None, alias="Password", description="Password required to open the Excel file if it is password-protected."),
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(None, alias="TiffType", description="Specifies the TIFF compression type and color depth. Choose from color variants (24-bit or 32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats with various compression algorithms."),
@@ -15508,9 +17040,14 @@ async def convert_spreadsheet_to_tiff(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to WebP Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_image_webp(
-    file_: str | None = Field(None, alias="File", description="The Excel file to convert. Accepts either a URL or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="Custom name for the output file. The system automatically sanitizes the filename, appends the .webp extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) if multiple files are generated."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected Excel documents."),
     scale_proportions: bool | None = Field(None, alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to fit the target dimensions."),
@@ -15554,9 +17091,14 @@ async def convert_spreadsheet_to_image_webp(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet Format Modern",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_format_modern(
-    file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., filename_0, filename_1) when multiple files are generated from a single input."),
     password: str | None = Field(None, alias="Password", description="The password required to open password-protected spreadsheets. Only needed if the input file is encrypted."),
 ) -> dict[str, Any] | ToolResult:
@@ -15598,9 +17140,14 @@ async def convert_spreadsheet_format_modern(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet Template to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_template_to_pdf(
-    file_: str | None = Field(None, alias="File", description="The spreadsheet file to convert. Accepts either a URL reference or binary file content."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) when multiple files are produced from a single input."),
     password: str | None = Field(None, alias="Password", description="Password required to open password-protected spreadsheet documents."),
     convert_metadata: bool | None = Field(None, alias="ConvertMetadata", description="Preserves document metadata such as title, author, and keywords in the PDF output."),
@@ -15649,9 +17196,14 @@ async def convert_spreadsheet_template_to_pdf(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert XML to DOCX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_xml_to_docx(
-    file_: str | None = Field(None, alias="File", description="The XML file to convert. Accepts either a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The XML file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     file_name: str | None = Field(None, alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple output files."),
     password: str | None = Field(None, alias="Password", description="Password required to open the input XML file if it is password-protected."),
     update_toc: bool | None = Field(None, alias="UpdateToc", description="Automatically updates all tables of content in the converted document."),
@@ -15695,9 +17247,14 @@ async def convert_xml_to_docx(
     return _response_data
 
 # Tags: Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Extract Archive",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_archive(
-    file_: str | None = Field(None, alias="File", description="The ZIP archive file to extract. Can be provided as a URL or raw file content in binary format."),
+    file_: str | None = Field(None, alias="File", description="Base64-encoded file content for upload. The ZIP archive file to extract. Can be provided as a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'}),
     password: str | None = Field(None, alias="Password", description="Password for opening password-protected ZIP archives. Required only if the archive is encrypted."),
 ) -> dict[str, Any] | ToolResult:
     """Extracts contents from a ZIP archive file. Supports password-protected archives by providing the required password."""

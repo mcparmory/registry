@@ -1,13 +1,13 @@
 """
 Convertapi MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:45:22 UTC
+Generated: 2026-05-11 19:42:12 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from _validators import StrictModel
 from pydantic import Field
@@ -326,7 +326,7 @@ class PostUploadRequestQuery(StrictModel):
     filename: str | None = Field(default=None, description="The name of the file being uploaded. Required unless the content-disposition header is provided.")
     url: str | None = Field(default=None, description="A remote URL pointing to the file to upload. If provided, the file will be downloaded and stored directly from this location instead of uploading file contents.", json_schema_extra={'format': 'uri'})
 class PostUploadRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="The binary file content to upload. Provide the raw file data directly.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file content to upload. Provide the raw file data directly.", json_schema_extra={'format': 'byte'})
 class PostUploadRequest(StrictModel):
     """Upload a file to ConvertAPI servers for temporary storage and reuse across multiple conversion operations. The file is securely stored for up to 3 hours and assigned a unique File ID for referencing in subsequent conversion requests."""
     query: PostUploadRequestQuery | None = None
@@ -366,7 +366,7 @@ class GetUserStatisticRequest(StrictModel):
 
 # Operation: convert_image_to_jpg
 class PostConvertAiToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output JPG file. The system automatically sanitizes the filename, appends the .jpg extension, and adds numeric indexing (e.g., image_0.jpg, image_1.jpg) if multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -377,7 +377,7 @@ class PostConvertAiToJpgRequest(StrictModel):
 
 # Operation: convert_ai_to_png
 class PostConvertAiToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -388,7 +388,7 @@ class PostConvertAiToPngRequest(StrictModel):
 
 # Operation: convert_image_to_pnm
 class PostConvertAiToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pnm, output_1.pnm) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -399,7 +399,7 @@ class PostConvertAiToPnmRequest(StrictModel):
 
 # Operation: convert_ai_to_svg
 class PostConvertAiToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the output dimensions.")
@@ -410,7 +410,7 @@ class PostConvertAiToSvgRequest(StrictModel):
 
 # Operation: convert_ai_to_tiff
 class PostConvertAiToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -421,7 +421,7 @@ class PostConvertAiToTiffRequest(StrictModel):
 
 # Operation: convert_image_to_webp
 class PostConvertAiToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds indexing (e.g., image_0.webp, image_1.webp) for multiple outputs.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -432,7 +432,7 @@ class PostConvertAiToWebpRequest(StrictModel):
 
 # Operation: convert_image_bmp_to_jpg
 class PostConvertBmpToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -443,7 +443,7 @@ class PostConvertBmpToJpgRequest(StrictModel):
 
 # Operation: convert_image_to_pdf
 class PostConvertBmpToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees to apply to the image. Leave empty to use automatic rotation based on EXIF data in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the converted document.")
@@ -457,7 +457,7 @@ class PostConvertBmpToPdfRequest(StrictModel):
 
 # Operation: convert_image_bmp_to_png
 class PostConvertBmpToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., image_0.png, image_1.png) if multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -468,7 +468,7 @@ class PostConvertBmpToPngRequest(StrictModel):
 
 # Operation: convert_image_bmp_to_pnm
 class PostConvertBmpToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for PNM format, and adds indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -479,7 +479,7 @@ class PostConvertBmpToPnmRequest(StrictModel):
 
 # Operation: convert_image_to_svg_bmp
 class PostConvertBmpToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="A vectorization preset that applies pre-configured tracing settings optimized for different image types. When selected, presets override individual converter options except ColorMode, providing consistent and balanced SVG results.")
     color_mode: Literal["color", "bw"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="Controls whether the image is traced in full color or converted to black-and-white during vectorization.")
@@ -491,7 +491,7 @@ class PostConvertBmpToSvgRequest(StrictModel):
 
 # Operation: convert_image_bmp_to_tiff
 class PostConvertBmpToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The BMP image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The BMP image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -502,7 +502,7 @@ class PostConvertBmpToTiffRequest(StrictModel):
 
 # Operation: convert_image_bmp_to_webp
 class PostConvertBmpToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a BMP file or the raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output WebP file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing for multiple output files to ensure unique, safe filenames.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -513,7 +513,7 @@ class PostConvertBmpToWebpRequest(StrictModel):
 
 # Operation: convert_csv_to_pdf
 class PostConvertCsvToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The CSV file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The CSV file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input CSV file if it is password-protected.")
     convert_metadata: bool | None = Field(default=None, validation_alias="ConvertMetadata", serialization_alias="ConvertMetadata", description="Preserve document metadata such as title, author, and keywords in the output PDF.")
@@ -529,7 +529,7 @@ class PostConvertCsvToPdfRequest(StrictModel):
 
 # Operation: convert_csv_to_xlsx
 class PostConvertCsvToXlsxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The CSV file to convert. Can be provided as a file upload or as a URL pointing to the CSV file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The CSV file to convert. Can be provided as a file upload or as a URL pointing to the CSV file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated Excel output file. The system automatically sanitizes the filename, appends the .xlsx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated.")
     delimiter: str | None = Field(default=None, validation_alias="Delimiter", serialization_alias="Delimiter", description="The character used to separate fields in the CSV file. Specify the delimiter that matches your CSV format.")
     cell_type: Literal["general", "text"] | None = Field(default=None, validation_alias="CellType", serialization_alias="CellType", description="Determines how cell values are formatted in the output Excel file. Use 'text' to preserve CSV formatting for dates and numbers, or 'general' for automatic Excel formatting.")
@@ -539,7 +539,7 @@ class PostConvertCsvToXlsxRequest(StrictModel):
 
 # Operation: convert_djvu_to_jpg
 class PostConvertDjvuToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DJVU file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., report_0.jpg, report_1.jpg).")
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(default=None, validation_alias="JpgType", serialization_alias="JpgType", description="JPG encoding type for the output image. Choose between standard JPEG, CMYK color space, or grayscale.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions.")
@@ -550,7 +550,7 @@ class PostConvertDjvuToJpgRequest(StrictModel):
 
 # Operation: convert_djvu_to_pdf
 class PostConvertDjvuToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DJVU file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     base_font_size: float | None = Field(default=None, validation_alias="BaseFontSize", serialization_alias="BaseFontSize", description="Base font size in points (pt) for the converted PDF. All text scaling is relative to this value.", ge=1, le=50)
     margin_left: float | None = Field(default=None, validation_alias="MarginLeft", serialization_alias="MarginLeft", description="Left margin in points (pt) for text content on the PDF page.", ge=0, le=200)
@@ -563,7 +563,7 @@ class PostConvertDjvuToPdfRequest(StrictModel):
 
 # Operation: convert_djvu_to_png
 class PostConvertDjvuToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DJVU file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to fit the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -573,7 +573,7 @@ class PostConvertDjvuToPngRequest(StrictModel):
 
 # Operation: convert_djvu_to_tiff
 class PostConvertDjvuToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DJVU file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DJVU file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions.")
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(default=None, validation_alias="TiffType", serialization_alias="TiffType", description="TIFF compression and color format. Choose from color variants (24-bit or 32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats with various compression methods.")
     multi_page: bool | None = Field(default=None, validation_alias="MultiPage", serialization_alias="MultiPage", description="Generate a single multi-page TIFF file containing all pages, or separate TIFF files for each page.")
@@ -586,7 +586,7 @@ class PostConvertDjvuToTiffRequest(StrictModel):
 
 # Operation: convert_djvu_to_webp
 class PostConvertDjvuToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -596,7 +596,7 @@ class PostConvertDjvuToWebpRequest(StrictModel):
 
 # Operation: convert_document_to_docx
 class PostConvertDocToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .docx extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) if multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input document if it is password-protected.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="When enabled, automatically updates all tables of content in the converted document to reflect current document structure.")
@@ -607,10 +607,10 @@ class PostConvertDocToDocxRequest(StrictModel):
 
 # Operation: compare_docx_documents
 class PostConvertDocxToCompareRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The primary Word document to be compared. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The primary Word document to be compared. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output comparison file. The system automatically sanitizes the filename, appends the appropriate extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the primary document if it is password-protected.")
-    compare_file: str | None = Field(default=None, validation_alias="CompareFile", serialization_alias="CompareFile", description="The Word document to compare against the primary document. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    compare_file: str | None = Field(default=None, validation_alias="CompareFile", serialization_alias="CompareFile", description="Base64-encoded file content for upload. The Word document to compare against the primary document. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     compare_level: Literal["Word", "Character"] | None = Field(default=None, validation_alias="CompareLevel", serialization_alias="CompareLevel", description="Specifies the granularity level for identifying differences between documents. Word-level comparison detects changes at word boundaries, while character-level comparison identifies changes at individual character positions.")
     compare_formatting: bool | None = Field(default=None, validation_alias="CompareFormatting", serialization_alias="CompareFormatting", description="Include formatting variations such as font, size, color, and style differences in the comparison results.")
     compare_case_changes: bool | None = Field(default=None, validation_alias="CompareCaseChanges", serialization_alias="CompareCaseChanges", description="Include capitalization and case differences in the comparison results.")
@@ -630,7 +630,7 @@ class PostConvertDocxToCompareRequest(StrictModel):
 
 # Operation: convert_document_to_html
 class PostConvertDocxToHtmlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a file upload (binary content) or a URL pointing to a DOCX file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file upload (binary content) or a URL pointing to a DOCX file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated HTML output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.html, document_1.html) if multiple files are generated.")
     inline_images: bool | None = Field(default=None, validation_alias="InlineImages", serialization_alias="InlineImages", description="Whether to embed images from the document directly into the HTML output as inline content, or reference them externally.")
 class PostConvertDocxToHtmlRequest(StrictModel):
@@ -639,7 +639,7 @@ class PostConvertDocxToHtmlRequest(StrictModel):
 
 # Operation: convert_document_to_image
 class PostConvertDocxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The API automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., report_0.jpg, report_1.jpg) when multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password for opening password-protected DOCX documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10 inclusive).")
@@ -649,7 +649,7 @@ class PostConvertDocxToJpgRequest(StrictModel):
 
 # Operation: convert_document_to_markdown
 class PostConvertDocxToMdRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DOCX file to convert. Can be provided as a URL reference or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DOCX file to convert. Can be provided as a URL reference or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output Markdown file. The API automatically sanitizes the filename, appends the .md extension, and adds numeric suffixes (e.g., document_0.md, document_1.md) when generating multiple output files.")
 class PostConvertDocxToMdRequest(StrictModel):
     """Converts a DOCX document to Markdown format. Accepts a DOCX file via URL or direct file content and returns the converted Markdown output with a customizable filename."""
@@ -657,7 +657,7 @@ class PostConvertDocxToMdRequest(StrictModel):
 
 # Operation: convert_document_docx_to_odt
 class PostConvertDocxToOdtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .odt extension, and adds numeric indexing (e.g., document_0.odt, document_1.odt) if multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input document if it is password-protected.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document during conversion.")
@@ -668,7 +668,7 @@ class PostConvertDocxToOdtRequest(StrictModel):
 
 # Operation: convert_document_to_pdf
 class PostConvertDocxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected DOCX documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to include in the output PDF using a range format (e.g., 1-10 for pages 1 through 10).")
@@ -684,7 +684,7 @@ class PostConvertDocxToPdfRequest(StrictModel):
 
 # Operation: convert_document_to_image_png
 class PostConvertDocxToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., report_0.png, report_1.png).")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open protected or encrypted documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using range notation (e.g., 1-10 converts pages 1 through 10).")
@@ -697,7 +697,7 @@ class PostConvertDocxToPngRequest(StrictModel):
 
 # Operation: convert_document_to_protected_word
 class PostConvertDocxToProtectRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct file extension, and adds indexing (e.g., filename_0, filename_1) when multiple files are produced from a single input.")
     encrypt_password: str | None = Field(default=None, validation_alias="EncryptPassword", serialization_alias="EncryptPassword", description="Password to encrypt the output Word document. When set, the password will be required to open and view the document content.")
 class PostConvertDocxToProtectRequest(StrictModel):
@@ -706,7 +706,7 @@ class PostConvertDocxToProtectRequest(StrictModel):
 
 # Operation: convert_document_docx_to_rtf
 class PostConvertDocxToRtfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output RTF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.rtf, filename_1.rtf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected DOCX documents.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="Automatically update all tables of content in the document during conversion.")
@@ -717,7 +717,7 @@ class PostConvertDocxToRtfRequest(StrictModel):
 
 # Operation: convert_document_to_tiff
 class PostConvertDocxToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multi-file outputs.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected DOCX documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10).")
@@ -732,7 +732,7 @@ class PostConvertDocxToTiffRequest(StrictModel):
 
 # Operation: convert_document_to_text
 class PostConvertDocxToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output text file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input document if it is password-protected.")
     substitutions: bool | None = Field(default=None, validation_alias="Substitutions", serialization_alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c)).")
@@ -743,7 +743,7 @@ class PostConvertDocxToTxtRequest(StrictModel):
 
 # Operation: convert_document_to_webp
 class PostConvertDocxToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected DOCX documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10).")
@@ -755,7 +755,7 @@ class PostConvertDocxToWebpRequest(StrictModel):
 
 # Operation: convert_docx_to_xml
 class PostConvertDocxToXmlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Word document to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Word document to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output XML file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.xml, report_1.xml) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input document if it is password-protected.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="Whether to automatically update all tables of content in the document during conversion.")
@@ -767,7 +767,7 @@ class PostConvertDocxToXmlRequest(StrictModel):
 
 # Operation: convert_document_to_jpg
 class PostConvertDotxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The API automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format. Only the specified pages will be included in the output.")
@@ -777,7 +777,7 @@ class PostConvertDotxToJpgRequest(StrictModel):
 
 # Operation: convert_dotx_to_pdf
 class PostConvertDotxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Word document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Word document file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple outputs.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected Word documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10).")
@@ -793,7 +793,7 @@ class PostConvertDotxToPdfRequest(StrictModel):
 
 # Operation: convert_dwf_to_jpg
 class PostConvertDwfToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="The color space for the output image, affecting color representation and file size.")
@@ -803,7 +803,7 @@ class PostConvertDwfToJpgRequest(StrictModel):
 
 # Operation: convert_dwf_to_pdf
 class PostConvertDwfToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are produced from a single input.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to preserve and export AutoCAD layers in the PDF output, maintaining the layer structure from the original DWF file.")
     auto_fit: bool | None = Field(default=None, validation_alias="AutoFit", serialization_alias="AutoFit", description="Automatically detects the drawing dimensions and adjusts the output to fit the page size, optionally rotating the page orientation to accommodate the drawing without clipping.")
@@ -814,7 +814,7 @@ class PostConvertDwfToPdfRequest(StrictModel):
 
 # Operation: convert_dwf_to_png
 class PostConvertDwfToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWF file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files to ensure unique identification.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PNG image. Truecolors preserves full color information, grayscale converts to 256 shades of gray, and monochrome converts to pure black and white.")
@@ -825,7 +825,7 @@ class PostConvertDwfToPngRequest(StrictModel):
 
 # Operation: convert_dwf_to_svg
 class PostConvertDwfToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output SVG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique, safe naming.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the SVG output.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output SVG. Choose between full color, grayscale, or monochrome rendering.")
@@ -835,7 +835,7 @@ class PostConvertDwfToSvgRequest(StrictModel):
 
 # Operation: convert_dwf_to_tiff
 class PostConvertDwfToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., filename_0.tiff, filename_1.tiff) when multiple files are generated.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output TIFF.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output TIFF image. Choose truecolors for full color output, grayscale for reduced color depth, or monochrome for black and white only.")
@@ -846,7 +846,7 @@ class PostConvertDwfToTiffRequest(StrictModel):
 
 # Operation: convert_dwf_to_webp
 class PostConvertDwfToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct WebP extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) when multiple files are generated from a single input.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="The color space for the output image.")
@@ -857,7 +857,7 @@ class PostConvertDwfToWebpRequest(StrictModel):
 
 # Operation: convert_dwg_to_jpg
 class PostConvertDwgToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output JPG image. Choose between full color, grayscale, or monochrome rendering.")
@@ -867,7 +867,7 @@ class PostConvertDwgToJpgRequest(StrictModel):
 
 # Operation: convert_dwg_to_pdf
 class PostConvertDwgToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWG file to convert. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the PDF output.")
     auto_fit: bool | None = Field(default=None, validation_alias="AutoFit", serialization_alias="AutoFit", description="Automatically detects and adjusts the drawing to fit the current page size, including automatic page orientation adjustment if needed.")
@@ -878,7 +878,7 @@ class PostConvertDwgToPdfRequest(StrictModel):
 
 # Operation: convert_dwg_to_png
 class PostConvertDwgToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.png, filename_1.png) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PNG image. Choose between full color, grayscale, or monochrome rendering.")
@@ -889,7 +889,7 @@ class PostConvertDwgToPngRequest(StrictModel):
 
 # Operation: convert_dwg_to_svg
 class PostConvertDwgToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWG file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWG file to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple generated files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate SVG elements in the output.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="The color space for the output SVG, affecting how colors are rendered.")
@@ -899,7 +899,7 @@ class PostConvertDwgToSvgRequest(StrictModel):
 
 # Operation: convert_dwg_to_tiff
 class PostConvertDwgToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output TIFF image.")
@@ -910,7 +910,7 @@ class PostConvertDwgToTiffRequest(StrictModel):
 
 # Operation: convert_dwg_to_webp
 class PostConvertDwgToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DWG file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output WebP file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output WebP image. Choose between full color, grayscale, or monochrome rendering.")
@@ -921,7 +921,7 @@ class PostConvertDwgToWebpRequest(StrictModel):
 
 # Operation: convert_dxf_to_jpg
 class PostConvertDxfToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DXF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Provide either a publicly accessible URL or the binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output JPG file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="The color space for the output JPG image. Choose between full color, grayscale, or monochrome rendering.")
@@ -931,7 +931,7 @@ class PostConvertDxfToJpgRequest(StrictModel):
 
 # Operation: convert_dxf_to_pdf
 class PostConvertDxfToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DXF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique, safe naming.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to preserve and export AutoCAD layers in the output PDF.")
     auto_fit: bool | None = Field(default=None, validation_alias="AutoFit", serialization_alias="AutoFit", description="Automatically detects the drawing dimensions and adjusts the page size and orientation to fit the content without clipping.")
@@ -942,7 +942,7 @@ class PostConvertDxfToPdfRequest(StrictModel):
 
 # Operation: convert_dxf_to_png
 class PostConvertDxfToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DXF file to convert, provided either as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DXF file to convert, provided either as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.png, filename_1.png) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output image.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="The color space for the output PNG image. Choose truecolors for full RGB output, grayscale for 8-bit grayscale, or monochrome for black and white.")
@@ -953,7 +953,7 @@ class PostConvertDxfToPngRequest(StrictModel):
 
 # Operation: convert_dxf_to_svg
 class PostConvertDxfToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DXF file to convert. Provide either a publicly accessible URL or the binary file content directly.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Provide either a publicly accessible URL or the binary file content directly.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to preserve and export AutoCAD layer information in the output SVG file.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output SVG. Choose between full color, grayscale, or monochrome rendering.")
@@ -963,7 +963,7 @@ class PostConvertDxfToSvgRequest(StrictModel):
 
 # Operation: convert_dxf_to_tiff
 class PostConvertDxfToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DXF file to convert. Accepts either a URL reference or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Accepts either a URL reference or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `filename_0.tiff`, `filename_1.tiff`) when generating multiple files.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output TIFF.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output image. Choose between full color, grayscale, or black-and-white rendering.")
@@ -974,7 +974,7 @@ class PostConvertDxfToTiffRequest(StrictModel):
 
 # Operation: convert_dxf_to_webp
 class PostConvertDxfToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The DXF file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The DXF file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output WebP file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     export_layers: bool | None = Field(default=None, validation_alias="ExportLayers", serialization_alias="ExportLayers", description="Whether to export AutoCAD layers as separate elements in the output.")
     color_space: Literal["truecolors", "grayscale", "monochrome"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output WebP image. Choose between full color, grayscale, or monochrome rendering.")
@@ -985,7 +985,7 @@ class PostConvertDxfToWebpRequest(StrictModel):
 
 # Operation: extract_email_attachments
 class PostConvertEmailToExtractRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email file to process. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email file to process. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the name, appends the appropriate file extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated from a single input.")
     use_cid_as_file_name: bool | None = Field(default=None, validation_alias="UseCIDAsFileName", serialization_alias="UseCIDAsFileName", description="When enabled, uses the Content ID (CID) of attachments as the filename instead of the original filename.")
     ignore_inline_attachments: bool | None = Field(default=None, validation_alias="IgnoreInlineAttachments", serialization_alias="IgnoreInlineAttachments", description="When enabled, skips inline attachments such as embedded images and logos, processing only standalone attachments.")
@@ -995,7 +995,7 @@ class PostConvertEmailToExtractRequest(StrictModel):
 
 # Operation: extract_email_metadata
 class PostConvertEmailToMetadataRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email file to process. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email file to process. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output metadata file. The system automatically sanitizes the filename, appends the appropriate extension, and adds numeric indexing (e.g., metadata_0, metadata_1) when multiple output files are generated from a single input.")
     ignore_inline_attachments: bool | None = Field(default=None, validation_alias="IgnoreInlineAttachments", serialization_alias="IgnoreInlineAttachments", description="When enabled, skips inline attachments such as embedded images and logos during processing, extracting only non-inline attachments.")
 class PostConvertEmailToMetadataRequest(StrictModel):
@@ -1004,7 +1004,7 @@ class PostConvertEmailToMetadataRequest(StrictModel):
 
 # Operation: convert_email_to_image
 class PostConvertEmlToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., output_0.jpg, output_1.jpg) when multiple files are produced.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are suppressed and the email is still converted to the target format. Only applies when attachments are being processed.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, merges the email body content with converted attachments into a single output. Only applies when attachments are being processed.")
@@ -1014,7 +1014,7 @@ class PostConvertEmlToJpgRequest(StrictModel):
 
 # Operation: convert_eml_to_pdf
 class PostConvertEmlToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EML file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EML file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., report_0.pdf, report_1.pdf) when multiple files are produced.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to PDF. Only applies when attachments are being converted.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, merges the email body with converted attachments into a single PDF document. Only applies when attachments are being converted.")
@@ -1029,7 +1029,7 @@ class PostConvertEmlToPdfRequest(StrictModel):
 
 # Operation: convert_email_to_png
 class PostConvertEmlToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., output_0.png, output_1.png) when multiple files are generated.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email is still converted to PNG. Only applies when attachments are being converted.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, merges the email body with converted attachments into the final PNG output. Only applies when attachments are being converted.")
@@ -1039,7 +1039,7 @@ class PostConvertEmlToPngRequest(StrictModel):
 
 # Operation: convert_eml_to_tiff
 class PostConvertEmlToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `document_0.tiff`, `document_1.tiff`) when multiple files are generated.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to TIFF. Only applies when attachments are being converted.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, merges the email body with converted attachments into the output TIFF file(s). Only applies when attachments are being converted.")
@@ -1050,7 +1050,7 @@ class PostConvertEmlToTiffRequest(StrictModel):
 
 # Operation: convert_eml_to_webp
 class PostConvertEmlToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EML file to convert, provided as either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EML file to convert, provided as either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output WebP file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the output dimensions.")
@@ -1060,7 +1060,7 @@ class PostConvertEmlToWebpRequest(StrictModel):
 
 # Operation: convert_eps_to_jpg
 class PostConvertEpsToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPS file to convert, provided either as a URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPS file to convert, provided either as a URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file. The API automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated from a single input.")
 class PostConvertEpsToJpgRequest(StrictModel):
     """Converts an EPS (Encapsulated PostScript) file to JPG format. Accepts file input as a URL or binary content and generates a converted JPG output file with automatic naming."""
@@ -1068,7 +1068,7 @@ class PostConvertEpsToJpgRequest(StrictModel):
 
 # Operation: convert_eps_to_pdf
 class PostConvertEpsToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPS file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPS file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system sanitizes the filename, appends the correct extension, and adds indexing for multiple output files (e.g., report_0.pdf, report_1.pdf).")
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(default=None, validation_alias="PdfVersion", serialization_alias="PdfVersion", description="PDF specification version to use for the output document.")
     pdf_resolution: int | None = Field(default=None, validation_alias="PdfResolution", serialization_alias="PdfResolution", description="Output resolution in dots per inch (DPI). Higher values produce better quality but larger file sizes.", ge=10, le=2400)
@@ -1085,7 +1085,7 @@ class PostConvertEpsToPdfRequest(StrictModel):
 
 # Operation: convert_eps_to_png
 class PostConvertEpsToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPS file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPS file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input.")
 class PostConvertEpsToPngRequest(StrictModel):
     """Converts an EPS (Encapsulated PostScript) file to PNG format. Accepts file input as a URL or binary file content and generates a PNG output file with optional custom naming."""
@@ -1093,7 +1093,7 @@ class PostConvertEpsToPngRequest(StrictModel):
 
 # Operation: convert_eps_to_tiff
 class PostConvertEpsToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPS file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPS file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file. The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric indexing (e.g., output_0.tiff, output_1.tiff) when multiple files are generated from a single input.")
 class PostConvertEpsToTiffRequest(StrictModel):
     """Converts an EPS (Encapsulated PostScript) file to TIFF (Tagged Image File Format) image format. Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -1101,7 +1101,7 @@ class PostConvertEpsToTiffRequest(StrictModel):
 
 # Operation: convert_epub_to_jpg
 class PostConvertEpubToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPUB file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple outputs (e.g., report_0.jpg, report_1.jpg).")
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(default=None, validation_alias="JpgType", serialization_alias="JpgType", description="Color mode for the output JPG image. Choose between standard RGB (jpeg), CMYK for print (jpegcmyk), or grayscale (jpeggray).")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to specified dimensions.")
@@ -1112,7 +1112,7 @@ class PostConvertEpubToJpgRequest(StrictModel):
 
 # Operation: convert_epub_to_pdf
 class PostConvertEpubToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPUB file to convert. Accepts either a direct file upload or a URL pointing to the EPUB file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a direct file upload or a URL pointing to the EPUB file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes if multiple files are generated.")
     base_font_size: float | None = Field(default=None, validation_alias="BaseFontSize", serialization_alias="BaseFontSize", description="Base font size in points (pt) for the PDF. All text scales relative to this value.", ge=1, le=50)
     margin_left: float | None = Field(default=None, validation_alias="MarginLeft", serialization_alias="MarginLeft", description="Left margin width in points (pt) for the PDF page content.", ge=0, le=200)
@@ -1125,7 +1125,7 @@ class PostConvertEpubToPdfRequest(StrictModel):
 
 # Operation: convert_epub_to_png
 class PostConvertEpubToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -1135,7 +1135,7 @@ class PostConvertEpubToPngRequest(StrictModel):
 
 # Operation: convert_epub_to_tiff
 class PostConvertEpubToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions.")
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(default=None, validation_alias="TiffType", serialization_alias="TiffType", description="TIFF compression and color format. Choose between color variants (24-bit or 32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats with various compression methods.")
     multi_page: bool | None = Field(default=None, validation_alias="MultiPage", serialization_alias="MultiPage", description="Generate a single multi-page TIFF file containing all pages, or separate TIFF files for each page.")
@@ -1148,7 +1148,7 @@ class PostConvertEpubToTiffRequest(StrictModel):
 
 # Operation: convert_epub_to_webp
 class PostConvertEpubToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The EPUB file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -1158,7 +1158,7 @@ class PostConvertEpubToWebpRequest(StrictModel):
 
 # Operation: convert_file_to_pdf
 class PostConvertFileToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided either as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The API automatically sanitizes the filename, appends the .pdf extension, and adds numeric indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple output files are generated from a single input.")
 class PostConvertFileToPdfRequest(StrictModel):
     """Converts a file to PDF format from a provided file or URL. Supports various input formats and generates uniquely named output files with automatic extension handling."""
@@ -1166,7 +1166,7 @@ class PostConvertFileToPdfRequest(StrictModel):
 
 # Operation: compress_files_to_archive
 class PostConvertFileToZipRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Files to compress into the archive. Each file can be provided as a URL or raw file content. When using query or multipart parameters, append an index suffix to each file parameter (e.g., Files[0], Files[1]).")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. Files to compress into the archive. Each file can be provided as a URL or raw file content. When using query or multipart parameters, append an index suffix to each file parameter (e.g., Files[0], Files[1]).")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output ZIP archive file. The system automatically sanitizes the filename to remove unsafe characters and appends the .zip extension. For multiple input files, output files are automatically indexed (e.g., archive_0.zip, archive_1.zip).")
     compression_level: Literal["Optimal", "Medium", "Fastest", "NoCompression"] | None = Field(default=None, validation_alias="CompressionLevel", serialization_alias="CompressionLevel", description="Compression algorithm intensity for the archive. Controls the trade-off between file size and compression speed.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Optional password to encrypt and protect the ZIP archive. When set, the archive requires this password to extract.")
@@ -1176,7 +1176,7 @@ class PostConvertFileToZipRequest(StrictModel):
 
 # Operation: convert_gif_animation
 class PostConvertGifToGifRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="GIF files to convert. Accepts URLs or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1]) to distinguish multiple files.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. GIF files to convert. Accepts URLs or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1]) to distinguish multiple files.")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and automatically indexes multiple outputs (e.g., output_0.gif, output_1.gif) to ensure unique identifiers.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -1188,7 +1188,7 @@ class PostConvertGifToGifRequest(StrictModel):
 
 # Operation: convert_gif_to_jpg
 class PostConvertGifToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when resizing the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only resize the image if the input dimensions exceed the target output dimensions.")
@@ -1200,7 +1200,7 @@ class PostConvertGifToJpgRequest(StrictModel):
 
 # Operation: convert_gif_to_pdf
 class PostConvertGifToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) for multiple files.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees for the output image. Use a value between -360 and 360, or leave empty to apply automatic rotation based on EXIF data if available.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the converted document.")
@@ -1214,7 +1214,7 @@ class PostConvertGifToPdfRequest(StrictModel):
 
 # Operation: convert_gif_to_png
 class PostConvertGifToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF image file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when generating multiple files from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -1225,7 +1225,7 @@ class PostConvertGifToPngRequest(StrictModel):
 
 # Operation: convert_gif_to_pnm
 class PostConvertGifToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNM file. The system automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) if multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, leaving smaller images unchanged.")
@@ -1236,7 +1236,7 @@ class PostConvertGifToPnmRequest(StrictModel):
 
 # Operation: convert_gif_to_svg
 class PostConvertGifToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated SVG output file. The system automatically sanitizes the filename, appends the correct .svg extension, and adds numeric indexing if multiple files are produced.")
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="Vectorization preset that applies pre-configured tracing settings optimized for different image types. When selected, presets override all other converter options except ColorMode.")
     color_mode: Literal["color", "bw"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="Output color mode for the traced SVG. Choose between full color or black-and-white vectorization.")
@@ -1248,7 +1248,7 @@ class PostConvertGifToSvgRequest(StrictModel):
 
 # Operation: convert_gif_to_tiff
 class PostConvertGifToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -1259,7 +1259,7 @@ class PostConvertGifToTiffRequest(StrictModel):
 
 # Operation: convert_gif_to_webp
 class PostConvertGifToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The GIF image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size.")
@@ -1270,7 +1270,7 @@ class PostConvertGifToWebpRequest(StrictModel):
 
 # Operation: convert_heic_to_jpg
 class PostConvertHeicToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple outputs.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -1282,7 +1282,7 @@ class PostConvertHeicToJpgRequest(StrictModel):
 
 # Operation: convert_image_heic_to_jxl
 class PostConvertHeicToJxlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The API automatically sanitizes the name, appends the correct file extension, and adds indexing for multiple output files to ensure unique, safe filenames.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -1293,7 +1293,7 @@ class PostConvertHeicToJxlRequest(StrictModel):
 
 # Operation: convert_heic_to_pdf
 class PostConvertHeicToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HEIC image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HEIC image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotate the output image by the specified degrees. Leave empty to use automatic rotation based on EXIF data if available.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Set the color space for the output PDF. Choose from standard color space options or use default for automatic selection.")
@@ -1307,7 +1307,7 @@ class PostConvertHeicToPdfRequest(StrictModel):
 
 # Operation: convert_heic_to_png
 class PostConvertHeicToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.png, image_1.png) for multiple outputs from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -1318,7 +1318,7 @@ class PostConvertHeicToPngRequest(StrictModel):
 
 # Operation: convert_image_heic_to_pnm
 class PostConvertHeicToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -1329,7 +1329,7 @@ class PostConvertHeicToPnmRequest(StrictModel):
 
 # Operation: convert_heic_to_svg
 class PostConvertHeicToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HEIC image file to convert. Accepts either a URL pointing to the image or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HEIC image file to convert. Accepts either a URL pointing to the image or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.svg, image_1.svg) for multiple outputs.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit specified dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -1340,7 +1340,7 @@ class PostConvertHeicToSvgRequest(StrictModel):
 
 # Operation: convert_heic_to_tiff
 class PostConvertHeicToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the name, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -1351,7 +1351,7 @@ class PostConvertHeicToTiffRequest(StrictModel):
 
 # Operation: convert_image_heic_to_webp
 class PostConvertHeicToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., image_0.webp, image_1.webp).")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -1362,7 +1362,7 @@ class PostConvertHeicToWebpRequest(StrictModel):
 
 # Operation: convert_heif_to_jpg
 class PostConvertHeifToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.jpg, image_1.jpg) for multiple outputs from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size.")
@@ -1374,7 +1374,7 @@ class PostConvertHeifToJpgRequest(StrictModel):
 
 # Operation: convert_heif_to_pdf
 class PostConvertHeifToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HEIF image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HEIF image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees for the output image. Specify a value between -360 and 360, or leave empty to automatically rotate based on EXIF data in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PDF. Choose from standard color spaces or use the default setting.")
@@ -1388,7 +1388,7 @@ class PostConvertHeifToPdfRequest(StrictModel):
 
 # Operation: convert_html_to_docx
 class PostConvertHtmlToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The desired name for the output DOCX file. The API automatically sanitizes the filename, appends the correct .docx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated from a single input.")
     margin_horizontal: dict | None = Field(default=None, validation_alias="MarginHorizontal", serialization_alias="MarginHorizontal", description="Set the page horizontal margin in inches (in).", ge=0, le=500)
     margin_vertical: float | None = Field(default=None, validation_alias="MarginVertical", serialization_alias="MarginVertical", description="Set the page vertical margin in inches (in).", ge=0, le=500)
@@ -1408,14 +1408,14 @@ class PostConvertHtmlToJpgRequestBody(StrictModel):
     css_media_type: str | None = Field(default=None, validation_alias="CssMediaType", serialization_alias="CssMediaType", description="CSS media type to use during conversion. Supports standard types (screen, print) and custom media types.")
     headers: str | None = Field(default=None, validation_alias="Headers", serialization_alias="Headers", description="Custom HTTP headers to include in the page request. Separate multiple headers with pipe characters (|) and use colon (:) to separate header names from values.")
     zoom: float | None = Field(default=None, validation_alias="Zoom", serialization_alias="Zoom", description="Set the default zoom level for webpage rendering. Values between 0.1 and 10 are supported.", ge=0.1, le=10)
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content or URL to convert. Accepts either a web URL or raw HTML file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content or URL to convert. Accepts either a web URL or raw HTML file content.", json_schema_extra={'format': 'byte'})
 class PostConvertHtmlToJpgRequest(StrictModel):
     """Convert HTML content or web pages to JPG image format. Supports URL-based or direct HTML content conversion with advanced rendering options including JavaScript execution, CSS customization, and DOM element waiting."""
     body: PostConvertHtmlToJpgRequestBody | None = None
 
 # Operation: convert_html_to_markdown
 class PostConvertHtmlToMdRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content to convert. Provide either a URL pointing to an HTML file or the raw HTML content as a string.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content to convert. Provide either a URL pointing to an HTML file or the raw HTML content as a string.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated Markdown output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     github_flavored: bool | None = Field(default=None, validation_alias="GithubFlavored", serialization_alias="GithubFlavored", description="Enable GitHub-flavored Markdown (GFM) syntax in the output for enhanced compatibility with GitHub platforms.")
     remove_comments: bool | None = Field(default=None, validation_alias="RemoveComments", serialization_alias="RemoveComments", description="Remove HTML comment tags from the output Markdown document.")
@@ -1450,7 +1450,7 @@ class PostConvertHtmlToPdfRequestBody(StrictModel):
     avoid_break_elements: str | None = Field(default=None, validation_alias="AvoidBreakElements", serialization_alias="AvoidBreakElements", description="CSS selector for elements where page breaks should be avoided. Prevents breaking content within these elements.")
     break_before_elements: str | None = Field(default=None, validation_alias="BreakBeforeElements", serialization_alias="BreakBeforeElements", description="CSS selector for elements that should trigger a page break before them.")
     break_after_elements: str | None = Field(default=None, validation_alias="BreakAfterElements", serialization_alias="BreakAfterElements", description="CSS selector for elements that should trigger a page break after them.")
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content or URL to convert to PDF. Can be a full URL (http/https) or raw HTML file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content or URL to convert to PDF. Can be a full URL (http/https) or raw HTML file content.", json_schema_extra={'format': 'byte'})
     margin_top: dict | None = Field(default=None, validation_alias="MarginTop", serialization_alias="MarginTop", description="Set the page top margin in millimeters (mm).", ge=0, le=500)
     margin_right: int | None = Field(default=None, validation_alias="MarginRight", serialization_alias="MarginRight", description="Set the page right margin in millimeters (mm).", ge=0, le=500)
     margin_bottom: int | None = Field(default=None, validation_alias="MarginBottom", serialization_alias="MarginBottom", description="Set the page bottom margin in millimeters (mm).", ge=0, le=500)
@@ -1472,7 +1472,7 @@ class PostConvertHtmlToPngRequestBody(StrictModel):
     headers: str | None = Field(default=None, validation_alias="Headers", serialization_alias="Headers", description="Custom HTTP headers to include in the page request. Provide headers as name-value pairs separated by pipes, with each pair separated by a colon.")
     zoom: float | None = Field(default=None, validation_alias="Zoom", serialization_alias="Zoom", description="Zoom level for rendering the webpage. Values below 1 zoom out, values above 1 zoom in.", ge=0.1, le=10)
     transparent_background: bool | None = Field(default=None, validation_alias="TransparentBackground", serialization_alias="TransparentBackground", description="Use a transparent background instead of the default white background. The source HTML body background color must also be set to 'none' for transparency to work.")
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content or URL to convert. Provide either a web URL or raw HTML content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content or URL to convert. Provide either a web URL or raw HTML content.", json_schema_extra={'format': 'byte'})
 class PostConvertHtmlToPngRequest(StrictModel):
     """Converts HTML content or web pages to PNG image format. Supports JavaScript execution, custom styling, cookie handling, and DOM element waiting for dynamic content rendering."""
     body: PostConvertHtmlToPngRequestBody | None = None
@@ -1488,7 +1488,7 @@ class PostConvertHtmlToTxtRequestBody(StrictModel):
     user_css: str | None = Field(default=None, validation_alias="UserCss", serialization_alias="UserCss", description="Custom CSS rules to apply to the page before conversion begins.")
     css_media_type: str | None = Field(default=None, validation_alias="CssMediaType", serialization_alias="CssMediaType", description="CSS media type to use during conversion (e.g., screen, print, or custom types).")
     headers: str | None = Field(default=None, validation_alias="Headers", serialization_alias="Headers", description="Custom HTTP headers to include in the request. Separate multiple headers with pipes and use colons to delimit header names from values.")
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="HTML content to convert. Provide either a URL or raw HTML file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. HTML content to convert. Provide either a URL or raw HTML file content.", json_schema_extra={'format': 'byte'})
     extract_elements: str | None = Field(default=None, validation_alias="ExtractElements", serialization_alias="ExtractElements", description="CSS selector to extract specific DOM elements instead of converting the entire page. Use class selectors (.classname), ID selectors (#id), or tag names.")
 class PostConvertHtmlToTxtRequest(StrictModel):
     """Converts HTML content from a URL or file to plain text format. Supports advanced options like JavaScript execution, element extraction, custom styling, and cookie/ad handling for flexible web content processing."""
@@ -1496,7 +1496,7 @@ class PostConvertHtmlToTxtRequest(StrictModel):
 
 # Operation: convert_html_to_spreadsheet
 class PostConvertHtmlToXlsRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output spreadsheet file. The system automatically sanitizes the filename, appends the correct .xls extension, and adds numeric indexing (e.g., report_0.xls, report_1.xls) if multiple files are generated from a single input.")
 class PostConvertHtmlToXlsRequest(StrictModel):
     """Converts HTML content or files to Excel spreadsheet format. Accepts HTML input as a URL or raw file content and generates a formatted XLS output file."""
@@ -1504,7 +1504,7 @@ class PostConvertHtmlToXlsRequest(StrictModel):
 
 # Operation: convert_html_to_xlsx
 class PostConvertHtmlToXlsxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The HTML content to convert, provided either as a publicly accessible URL or as raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output Excel file. The system automatically sanitizes the filename, appends the .xlsx extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated from a single input.")
 class PostConvertHtmlToXlsxRequest(StrictModel):
     """Converts HTML content or files to Excel spreadsheet format. Accepts HTML input as a URL or raw file content and generates a formatted XLSX output file."""
@@ -1512,7 +1512,7 @@ class PostConvertHtmlToXlsxRequest(StrictModel):
 
 # Operation: convert_image_ico_to_jpg
 class PostConvertIcoToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only scale the image if the input is larger than the desired output dimensions.")
@@ -1524,7 +1524,7 @@ class PostConvertIcoToJpgRequest(StrictModel):
 
 # Operation: convert_ico_to_pdf
 class PostConvertIcoToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ICO image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ICO image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees to apply to the image. For automatic rotation based on EXIF metadata in TIFF and JPEG images, leave empty.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the converted document.")
@@ -1538,7 +1538,7 @@ class PostConvertIcoToPdfRequest(StrictModel):
 
 # Operation: convert_image_ico_to_png
 class PostConvertIcoToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the output dimensions.")
@@ -1549,7 +1549,7 @@ class PostConvertIcoToPngRequest(StrictModel):
 
 # Operation: convert_icon_to_svg
 class PostConvertIcoToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ICO file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ICO file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="Vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override individual converter options except ColorMode. Use 'none' for custom configuration.")
     color_mode: Literal["color", "bw"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="Color processing mode for tracing. Choose 'color' for full-color output or 'bw' for black-and-white conversion.")
@@ -1561,7 +1561,7 @@ class PostConvertIcoToSvgRequest(StrictModel):
 
 # Operation: convert_image_ico_to_webp
 class PostConvertIcoToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., image_0.webp, image_1.webp).")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -1572,7 +1572,7 @@ class PostConvertIcoToWebpRequest(StrictModel):
 
 # Operation: join_images
 class PostConvertImagesToJoinRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Images to combine into a single composite image. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1]).")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. Images to combine into a single composite image. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index suffix (e.g., Files[0], Files[1]).")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output composite image file. The system automatically sanitizes the filename, appends the appropriate extension based on the target format, and adds indexing for multiple outputs to ensure unique, safe filenames.")
     join_direction: Literal["vertical", "horizontal"] | None = Field(default=None, validation_alias="JoinDirection", serialization_alias="JoinDirection", description="Direction in which images are arranged in the composite. Choose vertical to stack images top-to-bottom or horizontal to arrange them left-to-right.")
     image_spacing: int | None = Field(default=None, validation_alias="ImageSpacing", serialization_alias="ImageSpacing", description="Space in pixels between individual images in the composite. Specify a value between 0 and 200 pixels.", ge=0, le=200)
@@ -1584,7 +1584,7 @@ class PostConvertImagesToJoinRequest(StrictModel):
 
 # Operation: convert_images_to_pdf
 class PostConvertImagesToPdfRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Images to convert to PDF. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index to each parameter name (e.g., Files[0], Files[1]).")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. Images to convert to PDF. Each item can be provided as a URL or file content. When using query or multipart parameters, append an index to each parameter name (e.g., Files[0], Files[1]).")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds an index suffix for multiple output files to ensure unique, safe naming.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotate images by the specified number of degrees. Leave empty to automatically rotate based on EXIF orientation data in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Set the color space for the output PDF. Use 'default' to preserve original image colors, or specify a standard color space for consistent output.")
@@ -1597,7 +1597,7 @@ class PostConvertImagesToPdfRequest(StrictModel):
 
 # Operation: convert_jfif_to_pdf
 class PostConvertJfifToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Provide either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Provide either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple outputs to ensure unique, safe file naming.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees for the output image. Specify a value between -360 and 360, or leave empty to automatically rotate based on EXIF data in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PDF. Select from standard color space options to control how colors are represented in the final document.")
@@ -1611,7 +1611,7 @@ class PostConvertJfifToPdfRequest(StrictModel):
 
 # Operation: compress_jpg_image
 class PostConvertJpgToCompressRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The JPG image file to compress. Can be provided as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The JPG image file to compress. Can be provided as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output compressed image file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique and safe file naming.")
     compression_level: Literal["Lossless", "Good", "Extreme"] | None = Field(default=None, validation_alias="CompressionLevel", serialization_alias="CompressionLevel", description="The compression quality level to apply to the image. Lossless preserves all image data, Good provides balanced compression, and Extreme maximizes file size reduction.")
 class PostConvertJpgToCompressRequest(StrictModel):
@@ -1620,7 +1620,7 @@ class PostConvertJpgToCompressRequest(StrictModel):
 
 # Operation: convert_image_to_gif
 class PostConvertJpgToGifRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Image files to convert, provided as URLs or file content. When using query or multipart parameters, append an index to each file parameter (e.g., Files[0], Files[1]).")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. Image files to convert, provided as URLs or file content. When using query or multipart parameters, append an index to each file parameter (e.g., Files[0], Files[1]).")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output GIF file(s). The API sanitizes the filename, appends the correct extension, and automatically indexes multiple output files to ensure unique naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only scale the output if the input image dimensions exceed the target size.")
@@ -1632,7 +1632,7 @@ class PostConvertJpgToGifRequest(StrictModel):
 
 # Operation: convert_image_format
 class PostConvertJpgToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple outputs to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -1643,7 +1643,7 @@ class PostConvertJpgToJpgRequest(StrictModel):
 
 # Operation: convert_image_jpg_to_jxl
 class PostConvertJpgToJxlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to the image or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the image or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing for multiple outputs to ensure unique, safe filenames.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -1654,7 +1654,7 @@ class PostConvertJpgToJxlRequest(StrictModel):
 
 # Operation: convert_image_to_pdf_jpeg
 class PostConvertJpgToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple files are generated.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees to apply to the image. Leave empty to automatically detect and apply rotation from EXIF metadata in JPEG and TIFF images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="The color space to apply to the output PDF. Determines how colors are represented in the final document.")
@@ -1668,7 +1668,7 @@ class PostConvertJpgToPdfRequest(StrictModel):
 
 # Operation: convert_image_jpg_to_png
 class PostConvertJpgToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.png, image_1.png) for multiple outputs from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -1679,7 +1679,7 @@ class PostConvertJpgToPngRequest(StrictModel):
 
 # Operation: convert_image_jpg_to_pnm
 class PostConvertJpgToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to the JPG file or the raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the JPG file or the raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNM file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.pnm, image_1.pnm) for multiple outputs from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, leaving smaller images unchanged.")
@@ -1690,7 +1690,7 @@ class PostConvertJpgToPnmRequest(StrictModel):
 
 # Operation: convert_image_to_svg_jpg
 class PostConvertJpgToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files.")
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="A vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override individual converter options except ColorMode, ensuring consistent and balanced SVG output.")
     color_mode: Literal["color", "bw"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="Determines whether the image is traced in full color or converted to black-and-white during vectorization.")
@@ -1702,7 +1702,7 @@ class PostConvertJpgToSvgRequest(StrictModel):
 
 # Operation: convert_image_to_tiff
 class PostConvertJpgToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to the JPG file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the JPG file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multi-file outputs.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -1713,7 +1713,7 @@ class PostConvertJpgToTiffRequest(StrictModel):
 
 # Operation: extract_text_from_image
 class PostConvertJpgToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output text file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files.")
     preprocessing: bool | None = Field(default=None, validation_alias="Preprocessing", serialization_alias="Preprocessing", description="Enable advanced image preprocessing techniques such as deskew, thresholding, resizing, and sharpening to improve text extraction accuracy. Increases processing time when enabled.")
     ocr_language: Literal["ar", "ca", "zh-cn", "zh-tw", "da", "nl", "en", "fi", "fa", "de", "el", "he", "it", "ja", "ko", "lt", "no", "pl", "pt", "ro", "ru", "sl", "es", "sv", "tr", "ua", "th"] | None = Field(default=None, validation_alias="OcrLanguage", serialization_alias="OcrLanguage", description="The language to use for OCR text recognition. Supports multiple languages; contact support to request additional language support.")
@@ -1723,7 +1723,7 @@ class PostConvertJpgToTxtRequest(StrictModel):
 
 # Operation: convert_image_jpg_to_webp
 class PostConvertJpgToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a file upload or a URL pointing to the source image.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The API automatically sanitizes the filename, appends the correct .webp extension, and adds numeric indexing for multiple output files to ensure unique, safe filenames.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -1734,7 +1734,7 @@ class PostConvertJpgToWebpRequest(StrictModel):
 
 # Operation: convert_presentation_to_pptx
 class PostConvertKeyToPptxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Keynote presentation file to convert. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Keynote presentation file to convert. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct .pptx extension, and adds numeric indexing (e.g., output_0.pptx, output_1.pptx) if multiple files are generated.")
 class PostConvertKeyToPptxRequest(StrictModel):
     """Converts a Keynote presentation file to PowerPoint format (PPTX). Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -1742,7 +1742,7 @@ class PostConvertKeyToPptxRequest(StrictModel):
 
 # Operation: convert_log_to_docx
 class PostConvertLogToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The log file to convert. Provide either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The log file to convert. Provide either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file. The API automatically sanitizes the filename, appends the .docx extension, and adds numeric indexing (e.g., report_0.docx, report_1.docx) if multiple files are generated.")
 class PostConvertLogToDocxRequest(StrictModel):
     """Converts a log file to Microsoft Word (.docx) format. Accepts log file content or URL and generates a formatted Word document with the specified output filename."""
@@ -1750,7 +1750,7 @@ class PostConvertLogToDocxRequest(StrictModel):
 
 # Operation: convert_log_to_pdf
 class PostConvertLogToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The log file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The log file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to include in the output PDF using a range format (e.g., 1-10 for pages 1 through 10). Defaults to the first 6000 pages.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="Sets the PDF/A compliance version for archival-grade PDF output. Use 'none' for standard PDF without compliance requirements.")
@@ -1760,7 +1760,7 @@ class PostConvertLogToPdfRequest(StrictModel):
 
 # Operation: convert_log_to_text
 class PostConvertLogToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The log file to convert. Accepts either a URL reference or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The log file to convert. Accepts either a URL reference or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the generated output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., file_0.txt, file_1.txt) for multiple outputs to ensure unique, safe file identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected log files.")
     substitutions: bool | None = Field(default=None, validation_alias="Substitutions", serialization_alias="Substitutions", description="Enable replacement of special symbols with their text equivalents (e.g., © becomes (c)) in the output text.")
@@ -1771,7 +1771,7 @@ class PostConvertLogToTxtRequest(StrictModel):
 
 # Operation: convert_markdown_to_html
 class PostConvertMdToHtmlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Markdown content to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Markdown content to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated HTML output file. The system automatically sanitizes the filename, appends the .html extension, and adds numeric suffixes (e.g., output_0.html, output_1.html) when generating multiple files from a single input.")
 class PostConvertMdToHtmlRequest(StrictModel):
     """Converts Markdown content to HTML format. Accepts Markdown input as file content or URL and generates corresponding HTML output."""
@@ -1779,7 +1779,7 @@ class PostConvertMdToHtmlRequest(StrictModel):
 
 # Operation: convert_markdown_to_pdf
 class PostConvertMdToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Markdown file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Markdown file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., _0, _1) if multiple files are generated.")
     margin_top: int | None = Field(default=None, validation_alias="MarginTop", serialization_alias="MarginTop", description="Top margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500)
     margin_right: int | None = Field(default=None, validation_alias="MarginRight", serialization_alias="MarginRight", description="Right margin of the PDF page in millimeters. Valid range is 0-500 mm.", ge=0, le=500)
@@ -1791,7 +1791,7 @@ class PostConvertMdToPdfRequest(StrictModel):
 
 # Operation: convert_mhtml_to_docx
 class PostConvertMhtmlToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MHTML file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MHTML file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) when multiple files are generated from a single input.")
     margin_horizontal: dict | None = Field(default=None, validation_alias="MarginHorizontal", serialization_alias="MarginHorizontal", description="Set the page horizontal margin in inches (in).", ge=0, le=500)
     margin_vertical: float | None = Field(default=None, validation_alias="MarginVertical", serialization_alias="MarginVertical", description="Set the page vertical margin in inches (in).", ge=0, le=500)
@@ -1801,7 +1801,7 @@ class PostConvertMhtmlToDocxRequest(StrictModel):
 
 # Operation: convert_mobi_to_jpg
 class PostConvertMobiToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MOBI file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MOBI file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple output files.")
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(default=None, validation_alias="JpgType", serialization_alias="JpgType", description="JPG color mode for the output image. Choose between standard JPEG, CMYK for print-ready output, or grayscale for reduced file size.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when resizing the output image to prevent distortion.")
@@ -1812,7 +1812,7 @@ class PostConvertMobiToJpgRequest(StrictModel):
 
 # Operation: convert_mobi_to_pdf
 class PostConvertMobiToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MOBI file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MOBI file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct .pdf extension, and adds numeric indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated from a single input.")
     base_font_size: float | None = Field(default=None, validation_alias="BaseFontSize", serialization_alias="BaseFontSize", description="The base font size in points (pt) for the converted PDF. All text scaling is relative to this value.", ge=1, le=50)
     margin_left: float | None = Field(default=None, validation_alias="MarginLeft", serialization_alias="MarginLeft", description="Sets the left margin in points (pt) for text on the PDF page.", ge=0, le=200)
@@ -1825,7 +1825,7 @@ class PostConvertMobiToPdfRequest(StrictModel):
 
 # Operation: convert_mobi_to_png
 class PostConvertMobiToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MOBI file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MOBI file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when resizing the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size.")
@@ -1835,7 +1835,7 @@ class PostConvertMobiToPngRequest(StrictModel):
 
 # Operation: convert_mobi_to_tiff
 class PostConvertMobiToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MOBI file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MOBI file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions.")
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(default=None, validation_alias="TiffType", serialization_alias="TiffType", description="Specifies the TIFF color type and compression method. Choose from color variants (24/32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats.")
     multi_page: bool | None = Field(default=None, validation_alias="MultiPage", serialization_alias="MultiPage", description="When enabled, combines all pages into a single multi-page TIFF file. When disabled, generates separate TIFF files for each page.")
@@ -1848,7 +1848,7 @@ class PostConvertMobiToTiffRequest(StrictModel):
 
 # Operation: convert_email_to_jpg
 class PostConvertMsgToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email message file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email message file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors will not prevent the email body from being converted to JPG. Only applies when attachments are being processed.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, merges the email body content with extracted attachments during conversion. Only applies when attachments are being processed.")
@@ -1858,7 +1858,7 @@ class PostConvertMsgToJpgRequest(StrictModel):
 
 # Operation: convert_msg_to_pdf
 class PostConvertMsgToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MSG file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MSG file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) when multiple files are produced.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, attachment conversion errors are ignored and the email body is still converted to PDF. Only applies when attachments are being converted.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, merges the email body with converted attachments into a single PDF document. Only applies when attachments are being converted.")
@@ -1873,7 +1873,7 @@ class PostConvertMsgToPdfRequest(StrictModel):
 
 # Operation: convert_email_to_png_outlook
 class PostConvertMsgToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The email message file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The email message file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices (e.g., email_0.png, email_1.png) when multiple files are generated.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="When enabled, the conversion process will continue even if errors occur while processing email attachments. Only applies when attachments are being converted.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="When enabled, email body content and attachments are combined into a single output during conversion. Only applies when attachments are being converted.")
@@ -1883,7 +1883,7 @@ class PostConvertMsgToPngRequest(StrictModel):
 
 # Operation: convert_msg_to_tiff
 class PostConvertMsgToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The MSG file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The MSG file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The API automatically sanitizes the name, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated.")
     ignore_attachment_errors: bool | None = Field(default=None, validation_alias="IgnoreAttachmentErrors", serialization_alias="IgnoreAttachmentErrors", description="If enabled, attachment conversion errors will not prevent the email body from being converted. Only applies when attachments are being converted.")
     merge: bool | None = Field(default=None, validation_alias="Merge", serialization_alias="Merge", description="If enabled, merges the email body with converted attachments into the output. Only applies when attachments are being converted.")
@@ -1894,7 +1894,7 @@ class PostConvertMsgToTiffRequest(StrictModel):
 
 # Operation: convert_message_to_webp
 class PostConvertMsgToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The message file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The message file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files to ensure unique, safe filenames.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size.")
@@ -1904,7 +1904,7 @@ class PostConvertMsgToWebpRequest(StrictModel):
 
 # Operation: convert_numbers_to_csv
 class PostConvertNumbersToCsvRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided either as a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated CSV output file. The system automatically sanitizes the filename, appends the .csv extension, and adds numeric indexing (e.g., output_0.csv, output_1.csv) if multiple files are generated.")
 class PostConvertNumbersToCsvRequest(StrictModel):
     """Converts a numbers file to CSV format. Accepts file input as a URL or file content and generates a properly named CSV output file."""
@@ -1912,7 +1912,7 @@ class PostConvertNumbersToCsvRequest(StrictModel):
 
 # Operation: convert_numbers_to_xlsx
 class PostConvertNumbersToXlsxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Numbers file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Numbers file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file. The system automatically sanitizes the filename, appends the correct .xlsx extension, and adds numeric indexing (e.g., report_0.xlsx, report_1.xlsx) if multiple files are generated.")
 class PostConvertNumbersToXlsxRequest(StrictModel):
     """Converts a Numbers spreadsheet file to Excel (XLSX) format. Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -1920,7 +1920,7 @@ class PostConvertNumbersToXlsxRequest(StrictModel):
 
 # Operation: convert_document_to_jpg_spreadsheet
 class PostConvertOdcToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple generated files.")
 class PostConvertOdcToJpgRequest(StrictModel):
     """Converts an ODC (OpenDocument Chart) file to JPG image format. Accepts file input as a URL or binary content and generates a JPG output file with optional custom naming."""
@@ -1928,7 +1928,7 @@ class PostConvertOdcToJpgRequest(StrictModel):
 
 # Operation: convert_odc_to_pdf
 class PostConvertOdcToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODC file to convert. Accepts either a file upload or a URL pointing to the source file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODC file to convert. Accepts either a file upload or a URL pointing to the source file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance.")
 class PostConvertOdcToPdfRequest(StrictModel):
@@ -1937,7 +1937,7 @@ class PostConvertOdcToPdfRequest(StrictModel):
 
 # Operation: convert_odc_to_png
 class PostConvertOdcToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODC file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODC file to convert, provided as either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `output_0.png`, `output_1.png`) for multiple files to ensure unique, safe naming.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="Background color applied to transparent areas in the converted image. Accepts color names (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), HEX format (e.g., `#FF0000`), or `transparent` to preserve transparency.")
 class PostConvertOdcToPngRequest(StrictModel):
@@ -1946,7 +1946,7 @@ class PostConvertOdcToPngRequest(StrictModel):
 
 # Operation: convert_document_to_jpg_formula
 class PostConvertOdfToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated from a single input.")
 class PostConvertOdfToJpgRequest(StrictModel):
     """Converts ODF (OpenDocument Format) documents to JPG image format. Supports both file uploads and URL-based file sources."""
@@ -1954,7 +1954,7 @@ class PostConvertOdfToJpgRequest(StrictModel):
 
 # Operation: convert_document_to_pdf_odf
 class PostConvertOdfToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated from a single input.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. PDF/A formats ensure long-term archival compatibility. Use 'none' for standard PDF output without archival compliance.")
 class PostConvertOdfToPdfRequest(StrictModel):
@@ -1963,7 +1963,7 @@ class PostConvertOdfToPdfRequest(StrictModel):
 
 # Operation: convert_document_to_png
 class PostConvertOdfToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `_0`, `_1`) when multiple files are generated from a single input.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="The background color applied to transparent areas in the converted images. Accepts color names, RGB values (comma-separated), HEX codes, or the value `transparent` to preserve transparency.")
 class PostConvertOdfToPngRequest(StrictModel):
@@ -1972,7 +1972,7 @@ class PostConvertOdfToPngRequest(StrictModel):
 
 # Operation: convert_odg_to_pdf
 class PostConvertOdgToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODG file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODG file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `document_0.pdf`, `document_1.pdf`) when multiple files are generated.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance.")
 class PostConvertOdgToPdfRequest(StrictModel):
@@ -1981,7 +1981,7 @@ class PostConvertOdgToPdfRequest(StrictModel):
 
 # Operation: convert_presentation_to_jpg
 class PostConvertOdpToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a file upload (binary content) or a URL pointing to the ODP file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a file upload (binary content) or a URL pointing to the ODP file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.jpg, presentation_1.jpg) when multiple images are generated from slides.")
 class PostConvertOdpToJpgRequest(StrictModel):
     """Converts an ODP (OpenDocument Presentation) file to JPG image format. Supports both file uploads and URL-based sources, generating one or more JPG images from the presentation slides."""
@@ -1989,7 +1989,7 @@ class PostConvertOdpToJpgRequest(StrictModel):
 
 # Operation: convert_odp_to_pdf
 class PostConvertOdpToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `_0`, `_1`) if multiple files are generated from a single input.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. Use 'none' for standard PDF, or select a PDF/A version for archival compliance.")
 class PostConvertOdpToPdfRequest(StrictModel):
@@ -1998,7 +1998,7 @@ class PostConvertOdpToPdfRequest(StrictModel):
 
 # Operation: convert_presentation_to_png
 class PostConvertOdpToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODP file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PNG file(s). The system automatically sanitizes the name, appends the correct file extension, and adds numeric indexing (e.g., `presentation_0.png`, `presentation_1.png`) when multiple files are generated from a single input.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="Background color applied to transparent areas in the generated PNG images. Accepts color names (e.g., `white`, `black`), RGB format (comma-separated values 0-255), HEX format (with # prefix), or `transparent` to preserve transparency.")
 class PostConvertOdpToPngRequest(StrictModel):
@@ -2007,7 +2007,7 @@ class PostConvertOdpToPngRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_image
 class PostConvertOdsToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The spreadsheet file to convert, provided either as a URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert, provided either as a URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output image file. The system automatically sanitizes the filename, appends the correct JPG extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple images are generated from a single input.")
 class PostConvertOdsToJpgRequest(StrictModel):
     """Converts an ODS (OpenDocument Spreadsheet) file to JPG image format. Accepts file input as a URL or binary content and generates a named output image file."""
@@ -2015,7 +2015,7 @@ class PostConvertOdsToJpgRequest(StrictModel):
 
 # Operation: convert_ods_to_pdf
 class PostConvertOdsToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODS file to convert. Can be provided as a file upload or as a URL pointing to the source file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODS file to convert. Can be provided as a file upload or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated from a single input.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="Specifies the PDF/A compliance version for the output file. PDF/A versions provide long-term archival compatibility. Use 'none' for standard PDF output without PDF/A compliance.")
 class PostConvertOdsToPdfRequest(StrictModel):
@@ -2024,7 +2024,7 @@ class PostConvertOdsToPdfRequest(StrictModel):
 
 # Operation: convert_ods_to_png
 class PostConvertOdsToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODS file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODS file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PNG file(s). The system automatically sanitizes the name, appends the correct file extension, and adds numeric indexing (e.g., `report_0.png`, `report_1.png`) when multiple files are generated from a single input.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="Background color for the generated PNG image. Specify a color name (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), or HEX format (e.g., `#FF0000`). Use `transparent` to preserve transparency.")
 class PostConvertOdsToPngRequest(StrictModel):
@@ -2033,7 +2033,7 @@ class PostConvertOdsToPngRequest(StrictModel):
 
 # Operation: convert_document_odt_to_docx
 class PostConvertOdtToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input document if it is password-protected.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="Whether to automatically update all tables of content in the converted document.")
@@ -2044,7 +2044,7 @@ class PostConvertOdtToDocxRequest(StrictModel):
 
 # Operation: convert_document_to_jpg_text
 class PostConvertOdtToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Can be provided as a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple output files are generated from a single input.")
 class PostConvertOdtToJpgRequest(StrictModel):
     """Converts an ODT (OpenDocument Text) document to JPG image format. Supports both file uploads and URL-based file sources."""
@@ -2052,7 +2052,7 @@ class PostConvertOdtToJpgRequest(StrictModel):
 
 # Operation: convert_document_to_pdf_odt
 class PostConvertOdtToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source document.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the source document.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., filename_0.pdf, filename_1.pdf) when multiple files are generated from a single input.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="PDF/A compliance version for the output file. Select 'none' for standard PDF, or choose a PDF/A version (1b, 2b, or 3b) for long-term archival compliance.")
 class PostConvertOdtToPdfRequest(StrictModel):
@@ -2061,7 +2061,7 @@ class PostConvertOdtToPdfRequest(StrictModel):
 
 # Operation: convert_document_to_png_text
 class PostConvertOdtToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODT file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODT file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PNG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `output_0.png`, `output_1.png`) for multiple files to ensure unique, safe naming.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="Background color for transparent areas in the converted images. Accepts color names (e.g., `white`, `black`), RGB format (e.g., `255,0,0`), HEX format (e.g., `#FF0000`), or `transparent` to preserve transparency.")
 class PostConvertOdtToPngRequest(StrictModel):
@@ -2070,7 +2070,7 @@ class PostConvertOdtToPngRequest(StrictModel):
 
 # Operation: convert_document_odt_to_txt
 class PostConvertOdtToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ODT document to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ODT document to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output text file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected ODT documents.")
     substitutions: bool | None = Field(default=None, validation_alias="Substitutions", serialization_alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c)).")
@@ -2081,7 +2081,7 @@ class PostConvertOdtToTxtRequest(StrictModel):
 
 # Operation: convert_document_to_xml
 class PostConvertOdtToXmlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output XML file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.xml, document_1.xml) when multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input document if it is password-protected.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="When enabled, automatically updates all tables of content in the document during conversion.")
@@ -2093,7 +2093,7 @@ class PostConvertOdtToXmlRequest(StrictModel):
 
 # Operation: convert_office_document_to_pdf
 class PostConvertOfficeToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the document.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a file upload (binary content) or as a URL pointing to the document.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected documents. Only needed if the input document is encrypted.")
     pdfa: bool | None = Field(default=None, validation_alias="Pdfa", serialization_alias="Pdfa", description="When enabled, generates a PDF/A-1b compliant document suitable for long-term archival and preservation.")
@@ -2103,7 +2103,7 @@ class PostConvertOfficeToPdfRequest(StrictModel):
 
 # Operation: convert_pages_to_docx
 class PostConvertPagesToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Pages document to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Pages document to convert, provided as either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated DOCX output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.docx, document_1.docx) when multiple files are produced from a single input.")
 class PostConvertPagesToDocxRequest(StrictModel):
     """Converts a Pages document to DOCX format. Accepts file input as a URL or binary content and generates a properly named output file."""
@@ -2111,7 +2111,7 @@ class PostConvertPagesToDocxRequest(StrictModel):
 
 # Operation: convert_pages_to_text
 class PostConvertPagesToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Can be provided as a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Can be provided as a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file(s). The system automatically sanitizes the filename, appends the correct extension for the target format, and adds numeric indexing (e.g., `output_0.txt`, `output_1.txt`) when multiple files are generated from a single input.")
 class PostConvertPagesToTxtRequest(StrictModel):
     """Converts document pages to plain text format. Supports file uploads via URL or direct file content and generates appropriately named output files."""
@@ -2119,7 +2119,7 @@ class PostConvertPagesToTxtRequest(StrictModel):
 
 # Operation: compress_pdf
 class PostConvertPdfToCompressRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to compress. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to compress. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output compressed PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the PDF if it is password-protected.")
     preset: Literal["none", "lossless", "text", "archive", "web", "ebook", "printer"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="Predefined compression profile optimized for specific use cases. When selected, all other compression options are ignored. Choose 'none' for no compression or select a preset tailored to your needs (lossless preserves quality, text optimizes for documents, web reduces file size for online sharing, etc.).")
@@ -2141,7 +2141,7 @@ class PostConvertPdfToCompressRequest(StrictModel):
 
 # Operation: crop_pdf
 class PostConvertPdfToCropRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to crop. Accepts a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to crop. Accepts a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., report_0.pdf, report_1.pdf).")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password to unlock a protected PDF file.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to crop using page numbers, ranges, or keywords. Supports comma-separated values and ranges (e.g., 1,2,5-last).")
@@ -2158,7 +2158,7 @@ class PostConvertPdfToCropRequest(StrictModel):
 
 # Operation: convert_pdf_to_csv
 class PostConvertPdfToCsvRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output CSV file. The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.csv, report_1.csv) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2171,7 +2171,7 @@ class PostConvertPdfToCsvRequest(StrictModel):
 
 # Operation: delete_pdf_pages
 class PostConvertPdfToDeletePagesRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to process. Accepts a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.pdf, document_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Pages to delete specified as a range (e.g., 1-10) or comma-separated individual page numbers (e.g., 1,2,5).")
@@ -2182,7 +2182,7 @@ class PostConvertPdfToDeletePagesRequest(StrictModel):
 
 # Operation: convert_pdf_to_docx
 class PostConvertPdfToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output DOCX file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 pages.")
@@ -2196,7 +2196,7 @@ class PostConvertPdfToDocxRequest(StrictModel):
 
 # Operation: extract_data_from_pdf
 class PostConvertPdfToExtractRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple outputs to ensure unique, safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     document_type: Literal["auto", "invoice", "receipt", "contract", "identification", "financial", "form", "manual"] | None = Field(default=None, validation_alias="DocumentType", serialization_alias="DocumentType", description="Document category to apply optimized extraction rules. Use 'Auto' for automatic detection, select a specific type (Invoice, Receipt, Contract, etc.) for improved accuracy, or choose 'Manual' to use only custom extraction fields.")
@@ -2208,7 +2208,7 @@ class PostConvertPdfToExtractRequest(StrictModel):
 
 # Operation: extract_images_from_pdf
 class PostConvertPdfToExtractImagesRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., filename_0, filename_1) for multiple outputs.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password for opening password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to process. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5).")
@@ -2221,7 +2221,7 @@ class PostConvertPdfToExtractImagesRequest(StrictModel):
 
 # Operation: extract_pdf_form_fields
 class PostConvertPdfToFdfExtractRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output FDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.fdf, output_1.fdf) for multiple files to ensure unique, safe naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     include_alternate_names: bool | None = Field(default=None, validation_alias="IncludeAlternateNames", serialization_alias="IncludeAlternateNames", description="When enabled, includes alternate field names (tooltip text) from the PDF in the FDF output for better field identification.")
@@ -2231,8 +2231,8 @@ class PostConvertPdfToFdfExtractRequest(StrictModel):
 
 # Operation: import_pdf_with_fdf_form_data
 class PostConvertPdfToFdfImportRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to be converted. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
-    fdf_file: str | None = Field(default=None, validation_alias="FdfFile", serialization_alias="FdfFile", description="The FDF (Forms Data Format) file containing structured form field data to be imported into the PDF. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to be converted. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
+    fdf_file: str | None = Field(default=None, validation_alias="FdfFile", serialization_alias="FdfFile", description="Base64-encoded file content for upload. The FDF (Forms Data Format) file containing structured form field data to be imported into the PDF. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s) generated by the conversion. The system automatically sanitizes the filename, appends the appropriate file extension, and adds numeric indexing (e.g., `_0`, `_1`) when multiple output files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents. Only needed if the input PDF is encrypted.")
 class PostConvertPdfToFdfImportRequest(StrictModel):
@@ -2241,7 +2241,7 @@ class PostConvertPdfToFdfImportRequest(StrictModel):
 
 # Operation: flatten_pdf
 class PostConvertPdfToFlattenRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to be flattened. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to be flattened. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files to ensure unique and safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a protected or encrypted PDF document.")
     flatten_controls: bool | None = Field(default=None, validation_alias="FlattenControls", serialization_alias="FlattenControls", description="Convert form controls (text fields, checkboxes, dropdowns) into static content, preventing editing while maintaining their original visual appearance.")
@@ -2253,7 +2253,7 @@ class PostConvertPdfToFlattenRequest(StrictModel):
 
 # Operation: convert_pdf_to_html
 class PostConvertPdfToHtmlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output HTML file(s). The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.html, report_1.html) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 pages.")
@@ -2266,10 +2266,10 @@ class PostConvertPdfToHtmlRequest(StrictModel):
 
 # Operation: add_watermark_to_pdf
 class PostConvertPdfToImageWatermarkRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output image file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
-    image_file: str | None = Field(default=None, validation_alias="ImageFile", serialization_alias="ImageFile", description="Image file to use as the watermark. Accepts a file URL or binary image content.", json_schema_extra={'format': 'binary'})
+    image_file: str | None = Field(default=None, validation_alias="ImageFile", serialization_alias="ImageFile", description="Base64-encoded file content for upload. Image file to use as the watermark. Accepts a file URL or binary image content.", json_schema_extra={'format': 'byte'})
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to process. Use ranges (e.g., 1-10) or comma-separated page numbers (e.g., 1,2,5).")
     opacity: int | None = Field(default=None, validation_alias="Opacity", serialization_alias="Opacity", description="Controls the transparency of the watermark, where 0 is fully transparent and 100 is fully opaque.", ge=0, le=100)
     style: Literal["stamp", "watermark"] | None = Field(default=None, validation_alias="Style", serialization_alias="Style", description="Determines watermark placement: 'stamp' overlays the watermark on top of page content, while 'watermark' places it behind the content.")
@@ -2288,7 +2288,7 @@ class PostConvertPdfToImageWatermarkRequest(StrictModel):
 
 # Operation: convert_pdf_to_jpg
 class PostConvertPdfToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multi-page conversions.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a password-protected PDF document.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to first 2000 pages.")
@@ -2301,7 +2301,7 @@ class PostConvertPdfToJpgRequest(StrictModel):
 
 # Operation: merge_pdfs
 class PostConvertPdfToMergeRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Array of PDF files to merge. Each file can be provided as a URL or file content. Files are merged in the order provided.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. Array of PDF files to merge. Each file can be provided as a URL or file content. Files are merged in the order provided.")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output merged PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing if multiple output files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the source PDF files if they are password-protected.")
     remove_duplicate_fonts: bool | None = Field(default=None, validation_alias="RemoveDuplicateFonts", serialization_alias="RemoveDuplicateFonts", description="When enabled, prevents duplicate fonts from being included in the merged PDF, reducing file size.")
@@ -2313,7 +2313,7 @@ class PostConvertPdfToMergeRequest(StrictModel):
 
 # Operation: convert_pdf_to_metadata
 class PostConvertPdfToMetaRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., _0, _1) when multiple files are generated to ensure unique, safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="The password required to open the PDF if it is password-protected. Only needed for encrypted documents.")
 class PostConvertPdfToMetaRequest(StrictModel):
@@ -2322,7 +2322,7 @@ class PostConvertPdfToMetaRequest(StrictModel):
 
 # Operation: extract_text_from_pdf
 class PostConvertPdfToOcrRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to process. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the name, appends the appropriate file extension based on output format, and adds numeric suffixes for multiple files to ensure unique, safe filenames.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to process. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5).")
@@ -2336,7 +2336,7 @@ class PostConvertPdfToOcrRequest(StrictModel):
 
 # Operation: convert_pdf_to_pcl
 class PostConvertPdfToPclRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PCL file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pcl, output_1.pcl) for multiple output files.")
     color_mode: Literal["color", "monochrome"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="The color mode for the output document. Choose between full color or monochrome rendering.")
     resolution: int | None = Field(default=None, validation_alias="Resolution", serialization_alias="Resolution", description="The output resolution in dots per inch (DPI). Higher values improve image quality but increase file size. Valid range is 10 to 1000 DPI.", ge=10, le=1000)
@@ -2346,7 +2346,7 @@ class PostConvertPdfToPclRequest(StrictModel):
 
 # Operation: convert_pdf_to_pdf
 class PostConvertPdfToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.pdf`, `report_1.pdf`) for multiple output files.")
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(default=None, validation_alias="PdfVersion", serialization_alias="PdfVersion", description="The PDF specification version to use for the output document.")
     pdf_title: str | None = Field(default=None, validation_alias="PdfTitle", serialization_alias="PdfTitle", description="Custom title for the PDF document metadata. Use a single quote and space (' ') to remove the title entirely.")
@@ -2363,10 +2363,10 @@ class PostConvertPdfToPdfRequest(StrictModel):
 
 # Operation: add_watermark_to_pdf_document
 class PostConvertPdfToPdfWatermarkRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to be watermarked. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to be watermarked. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output watermarked PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input PDF if it is password-protected.")
-    overlay_file: str | None = Field(default=None, validation_alias="OverlayFile", serialization_alias="OverlayFile", description="PDF file to use as the watermark overlay. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    overlay_file: str | None = Field(default=None, validation_alias="OverlayFile", serialization_alias="OverlayFile", description="Base64-encoded file content for upload. PDF file to use as the watermark overlay. Can be provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     overlay_page: int | None = Field(default=None, validation_alias="OverlayPage", serialization_alias="OverlayPage", description="Page number from the overlay file to use as the watermark. Must be a valid page within the overlay document.", ge=1, le=2000)
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Pages to apply the watermark to, specified as a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to all pages.")
     opacity: int | None = Field(default=None, validation_alias="Opacity", serialization_alias="Opacity", description="Watermark transparency level as a percentage. Lower values make the watermark more transparent.", ge=0, le=100)
@@ -2386,12 +2386,12 @@ class PostConvertPdfToPdfWatermarkRequest(StrictModel):
 
 # Operation: convert_pdf_to_pdfa
 class PostConvertPdfToPdfaRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF/A file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a password-protected PDF document.")
     pdfa_version: Literal["pdfA1a", "pdfA1b", "pdfA2a", "pdfA2b", "pdfA2u", "pdfA3a", "pdfA3b", "pdfA3u", "pdfA4", "pdfA4e", "pdfA4f"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="The PDF/A compliance version to target for the output document.")
     invoice_format: Literal["none", "facturX", "zugferd1", "zugferd2"] | None = Field(default=None, validation_alias="InvoiceFormat", serialization_alias="InvoiceFormat", description="E-invoice format to embed in the PDF. When specified, overrides the PdfaVersion setting and outputs PDF/A-3 format. Requires a valid structured invoice XML file.")
-    invoice_file: str | None = Field(default=None, validation_alias="InvoiceFile", serialization_alias="InvoiceFile", description="Structured invoice XML file (ZUGFeRD or Factur-X format) to embed for hybrid-invoice compatibility. Required when InvoiceFormat is set to a value other than 'none'.", json_schema_extra={'format': 'binary'})
+    invoice_file: str | None = Field(default=None, validation_alias="InvoiceFile", serialization_alias="InvoiceFile", description="Base64-encoded file content for upload. Structured invoice XML file (ZUGFeRD or Factur-X format) to embed for hybrid-invoice compatibility. Required when InvoiceFormat is set to a value other than 'none'.", json_schema_extra={'format': 'byte'})
     linearize: bool | None = Field(default=None, validation_alias="Linearize", serialization_alias="Linearize", description="Linearize the PDF structure and optimize for fast web viewing and streaming.")
 class PostConvertPdfToPdfaRequest(StrictModel):
     """Converts a PDF document to PDF/A format for long-term archival compliance. Supports optional password-protected PDFs, e-invoice embedding (ZUGFeRD/Factur-X), and web optimization."""
@@ -2399,7 +2399,7 @@ class PostConvertPdfToPdfaRequest(StrictModel):
 
 # Operation: convert_pdf_to_pdfua
 class PostConvertPdfToPdfuaRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input PDF if it is password-protected.")
     linearize: bool | None = Field(default=None, validation_alias="Linearize", serialization_alias="Linearize", description="Enables linearization of the PDF file to optimize for fast web viewing and streaming.")
@@ -2409,7 +2409,7 @@ class PostConvertPdfToPdfuaRequest(StrictModel):
 
 # Operation: convert_pdf_to_png
 class PostConvertPdfToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds an index suffix for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a protected or encrypted PDF document.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range or comma-separated list format. Allows selective conversion of specific pages from the PDF.")
@@ -2422,7 +2422,7 @@ class PostConvertPdfToPngRequest(StrictModel):
 
 # Operation: convert_pdf_to_pptx
 class PostConvertPdfToPptxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PowerPoint file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., report_0.pptx, report_1.pptx) when generating multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2435,7 +2435,7 @@ class PostConvertPdfToPptxRequest(StrictModel):
 
 # Operation: convert_pdf_to_print
 class PostConvertPdfToPrintRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a protected or encrypted PDF document.")
     trim_size: Literal["default", "a2", "a3", "a4", "a5", "a6", "letter", "legal", "custom"] | None = Field(default=None, validation_alias="TrimSize", serialization_alias="TrimSize", description="Page size to apply to every page in the output. Select 'default' to preserve each page's current size, or 'custom' to specify exact dimensions via TrimWidth and TrimHeight.")
@@ -2447,7 +2447,7 @@ class PostConvertPdfToPrintRequestBody(StrictModel):
     tint_bars: bool | None = Field(default=None, validation_alias="TintBars", serialization_alias="TintBars", description="When enabled, adds grayscale and color control bars at the top of the page, positioned outside the trim box for quality verification.")
     color_space: Literal["default", "rgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Defines the color space for the output PDF. 'Default' preserves the original color space, or specify RGB, CMYK, or grayscale conversion.")
     output_intent: Literal["none", "fogra39", "fogra51", "gracol2013", "swop2013", "japancolor2011", "custom"] | None = Field(default=None, validation_alias="OutputIntent", serialization_alias="OutputIntent", description="Embeds an ICC color profile as the PDF's output intent for color management. Select 'custom' to provide a custom ICC profile file via OutputIntentIccFile.")
-    output_intent_icc_file: str | None = Field(default=None, validation_alias="OutputIntentIccFile", serialization_alias="OutputIntentIccFile", description="Custom ICC profile file to embed as the PDF output intent. Required when OutputIntent is set to 'custom'.", json_schema_extra={'format': 'binary'})
+    output_intent_icc_file: str | None = Field(default=None, validation_alias="OutputIntentIccFile", serialization_alias="OutputIntentIccFile", description="Base64-encoded file content for upload. Custom ICC profile file to embed as the PDF output intent. Required when OutputIntent is set to 'custom'.", json_schema_extra={'format': 'byte'})
     downsample_images: bool | None = Field(default=None, validation_alias="DownsampleImages", serialization_alias="DownsampleImages", description="When enabled, reduces resolution of images exceeding the target resolution to minimize file size while maintaining quality.")
     resolution: int | None = Field(default=None, validation_alias="Resolution", serialization_alias="Resolution", description="Target resolution in pixels per inch (PPI) used for rasterization tasks such as bleed fabrication and image downsampling. Valid range is 10 to 800 PPI.", ge=10, le=800)
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a comma-separated range (e.g., 1,2,5-last). Supports keywords 'even', 'odd', and 'last'. Maximum of 100 pages will be processed per conversion.")
@@ -2457,7 +2457,7 @@ class PostConvertPdfToPrintRequest(StrictModel):
 
 # Operation: protect_pdf
 class PostConvertPdfToProtectRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to protect. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to protect. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output protected PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.pdf, document_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the protected PDF document. Used when the document has existing protection that needs to be processed.")
     encryption_algorithm: Literal["Standard40Bit", "Standard128Bit", "Aes128Bit", "Aes256Bit"] | None = Field(default=None, validation_alias="EncryptionAlgorithm", serialization_alias="EncryptionAlgorithm", description="Algorithm used to encrypt the PDF document. Determines the strength and type of encryption applied.")
@@ -2478,7 +2478,7 @@ class PostConvertPdfToProtectRequest(StrictModel):
 
 # Operation: convert_pdf_to_rasterized_image
 class PostConvertPdfToRasterizeRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the appropriate image extension, and adds numeric indexing (e.g., filename_0.png, filename_1.png) when multiple output files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     resolution: int | None = Field(default=None, validation_alias="Resolution", serialization_alias="Resolution", description="Resolution for rasterized output measured in dots per inch (DPI). Higher values produce sharper images but increase file size. Valid range is 10 to 800 DPI.", ge=10, le=800)
@@ -2488,7 +2488,7 @@ class PostConvertPdfToRasterizeRequest(StrictModel):
 
 # Operation: redact_pdf
 class PostConvertPdfToRedactRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to redact. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to redact. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API sanitizes the filename, appends the correct extension, and adds indexing for multiple output files (e.g., report_0.pdf, report_1.pdf).")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password to open a protected PDF document.")
     preset: Literal["auto", "gdpr", "hipaa", "ferpa", "foia", "glba", "ccpa", "manual"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="Compliance preset that determines which categories of sensitive data the AI detects and redacts. Use 'manual' to rely exclusively on custom redaction parameters (PII, PHI, Financial).")
@@ -2507,7 +2507,7 @@ class PostConvertPdfToRedactRequest(StrictModel):
 
 # Operation: resize_pdf_pages
 class PostConvertPdfToResizeRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to resize. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to resize. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) for multiple files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a protected or encrypted PDF file.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using page numbers and keywords. Supports comma-separated values, ranges with hyphens, and keywords like 'even', 'odd', and 'last' to select specific pages.")
@@ -2518,7 +2518,7 @@ class PostConvertPdfToResizeRequest(StrictModel):
 
 # Operation: rotate_pdf_pages
 class PostConvertPdfToRotateRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to rotate. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to rotate. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.pdf, document_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a protected or encrypted PDF document.")
     auto_rotate: bool | None = Field(default=None, validation_alias="AutoRotate", serialization_alias="AutoRotate", description="Enable automatic detection and correction of page orientation to the optimal reading angle.")
@@ -2530,7 +2530,7 @@ class PostConvertPdfToRotateRequest(StrictModel):
 
 # Operation: convert_pdf_to_rtf
 class PostConvertPdfToRtfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output RTF file. The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., document_0.rtf, document_1.rtf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000.")
@@ -2543,7 +2543,7 @@ class PostConvertPdfToRtfRequest(StrictModel):
 
 # Operation: split_pdf
 class PostConvertPdfToSplitRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to be split. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to be split. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and adds numeric indices (e.g., `report_0.pdf`, `report_1.pdf`) when multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     split_by_pattern: str | None = Field(default=None, validation_alias="SplitByPattern", serialization_alias="SplitByPattern", description="A comma-separated sequence of positive integers that defines the page count for each split segment. The pattern repeats cyclically until all pages are consumed. For example, a pattern of `3,2` creates segments of 3 pages, then 2 pages, repeating as needed.")
@@ -2556,7 +2556,7 @@ class PostConvertPdfToSplitRequest(StrictModel):
 
 # Operation: convert_pdf_to_svg
 class PostConvertPdfToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output SVG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5).")
@@ -2569,7 +2569,7 @@ class PostConvertPdfToSvgRequest(StrictModel):
 
 # Operation: convert_pdf_to_text_with_watermark
 class PostConvertPdfToTextWatermarkRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.txt, report_1.txt) for multiple outputs.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     text: str | None = Field(default=None, validation_alias="Text", serialization_alias="Text", description="Text content for the watermark. Supports dynamic variables like %PAGE%, %FILENAME%, %DATE%, %TIME%, %DATETIME%, document metadata (%AUTHOR%, %TITLE%, %SUBJECT%, %KEYWORDS%), and %N% for line breaks.")
@@ -2602,7 +2602,7 @@ class PostConvertPdfToTextWatermarkRequest(StrictModel):
 
 # Operation: convert_pdf_to_tiff
 class PostConvertPdfToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open a password-protected PDF document.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2617,7 +2617,7 @@ class PostConvertPdfToTiffRequest(StrictModel):
 
 # Operation: convert_pdf_to_tiff_fax
 class PostConvertPdfToTiffFaxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     tiff_type: Literal["monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(default=None, validation_alias="TiffType", serialization_alias="TiffType", description="Compression type for the TIFF FAX output. Determines the encoding method used in the resulting file.")
@@ -2630,7 +2630,7 @@ class PostConvertPdfToTiffFaxRequest(StrictModel):
 
 # Operation: convert_pdf_to_text
 class PostConvertPdfToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output text file(s). The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) when multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specify which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2647,7 +2647,7 @@ class PostConvertPdfToTxtRequest(StrictModel):
 
 # Operation: unprotect_pdf
 class PostConvertPdfToUnprotectRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to unprotect. Provide either a publicly accessible URL or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to unprotect. Provide either a publicly accessible URL or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `document_0.pdf`, `document_1.pdf`) if multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="The password protecting the PDF. Provide the user password to remove user-level protection, or leave empty to remove owner-level protection.")
 class PostConvertPdfToUnprotectRequest(StrictModel):
@@ -2656,7 +2656,7 @@ class PostConvertPdfToUnprotectRequest(StrictModel):
 
 # Operation: convert_pdf_to_webp
 class PostConvertPdfToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple outputs.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specify which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2669,7 +2669,7 @@ class PostConvertPdfToWebpRequest(StrictModel):
 
 # Operation: convert_pdf_to_xlsx
 class PostConvertPdfToXlsxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated Excel output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.xlsx, report_1.xlsx) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PDF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to extract from the PDF. Use ranges (e.g., 1-10) or comma-separated page numbers (e.g., 1,2,5).")
@@ -2685,7 +2685,7 @@ class PostConvertPdfToXlsxRequest(StrictModel):
 
 # Operation: validate_pdfa_conformance
 class PostConvertPdfaToValidateRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PDF file to validate. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PDF file to validate. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output validation report file. The system sanitizes the filename, appends the appropriate extension, and adds indexing for multiple output files to ensure unique and safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the PDF if it is password-protected.")
     expected_conformance: Literal["auto", "pdfA1a", "pdfA1b", "pdfA2a", "pdfA2b", "pdfA2u", "pdfA3a", "pdfA3b", "pdfA3u", "pdfA4", "pdfA4e", "pdfA4f"] | None = Field(default=None, validation_alias="ExpectedConformance", serialization_alias="ExpectedConformance", description="The PDF/A conformance level to validate against. Use 'auto' to automatically detect the document's claimed conformance level, or specify a particular PDF/A version.")
@@ -2695,7 +2695,7 @@ class PostConvertPdfaToValidateRequest(StrictModel):
 
 # Operation: convert_png_to_gif
 class PostConvertPngToGifRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="PNG image files to convert to GIF format. Accepts file URLs or direct file content. When using query or multipart parameters, each file must be indexed (Files[0], Files[1], etc.).")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. PNG image files to convert to GIF format. Accepts file URLs or direct file content. When using query or multipart parameters, each file must be indexed (Files[0], Files[1], etc.).")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output GIF file(s). The system automatically sanitizes the filename, appends the .gif extension, and adds numeric suffixes for multiple outputs (e.g., animation_0.gif, animation_1.gif) to ensure unique, safe filenames.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -2707,7 +2707,7 @@ class PostConvertPngToGifRequest(StrictModel):
 
 # Operation: convert_image_png_to_jpg
 class PostConvertPngToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) for multiple outputs.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size.")
@@ -2719,7 +2719,7 @@ class PostConvertPngToJpgRequest(StrictModel):
 
 # Operation: convert_image_to_pdf_png
 class PostConvertPngToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) for multiple files.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees for the image. Leave empty to automatically detect and apply rotation from EXIF metadata in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output PDF. Defines how colors are represented in the document.")
@@ -2733,7 +2733,7 @@ class PostConvertPngToPdfRequest(StrictModel):
 
 # Operation: convert_image_png_to_pnm
 class PostConvertPngToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., image_0.pnm, image_1.pnm) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output size, leaving smaller images unchanged.")
@@ -2744,7 +2744,7 @@ class PostConvertPngToPnmRequest(StrictModel):
 
 # Operation: convert_image_to_svg
 class PostConvertPngToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple output files.")
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="A vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override all other converter options except ColorMode, ensuring consistent and balanced SVG output.")
     color_mode: Literal["color", "bw"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="Determines whether the image is traced in black-and-white or full color mode.")
@@ -2756,7 +2756,7 @@ class PostConvertPngToSvgRequest(StrictModel):
 
 # Operation: convert_png_to_tiff
 class PostConvertPngToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PNG image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PNG image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size.")
@@ -2767,7 +2767,7 @@ class PostConvertPngToTiffRequest(StrictModel):
 
 # Operation: convert_image_png_to_webp
 class PostConvertPngToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a file upload or a URL pointing to the PNG image.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a file upload or a URL pointing to the PNG image.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -2778,7 +2778,7 @@ class PostConvertPngToWebpRequest(StrictModel):
 
 # Operation: translate_po_file
 class PostConvertPoToTranslateRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PO file to be converted and translated. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PO file to be converted and translated. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The API sanitizes the filename, appends the appropriate extension, and adds indexing (e.g., output_0.po, output_1.po) for multiple files to ensure unique, safe naming.")
     overwrite_translations: bool | None = Field(default=None, validation_alias="OverwriteTranslations", serialization_alias="OverwriteTranslations", description="When enabled, re-translates strings that already have existing translations in the PO file. Useful for updating outdated or low-quality translations.")
     translation_context: str | None = Field(default=None, validation_alias="TranslationContext", serialization_alias="TranslationContext", description="Optional context to guide the translation engine. Provide a brief description of the product, audience, or domain to improve tone, terminology, and translation accuracy.")
@@ -2790,7 +2790,7 @@ class PostConvertPoToTranslateRequest(StrictModel):
 
 # Operation: convert_presentation_to_jpg_template
 class PostConvertPotxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., presentation_0.jpg, presentation_1.jpg).")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000.")
@@ -2801,7 +2801,7 @@ class PostConvertPotxToJpgRequest(StrictModel):
 
 # Operation: convert_presentation_template_to_pdf
 class PostConvertPotxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 pages.")
@@ -2815,7 +2815,7 @@ class PostConvertPotxToPdfRequest(StrictModel):
 
 # Operation: convert_presentation_to_png_template
 class PostConvertPotxToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which slides to convert using page numbers. Use ranges (e.g., 1-10) or comma-separated individual pages (e.g., 1,2,5).")
@@ -2829,7 +2829,7 @@ class PostConvertPotxToPngRequest(StrictModel):
 
 # Operation: convert_potx_to_pptx
 class PostConvertPotxToPptxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for the target format, and adds indexing (e.g., _0, _1) when multiple output files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="The password required to open the input file if it is password-protected.")
 class PostConvertPotxToPptxRequest(StrictModel):
@@ -2838,7 +2838,7 @@ class PostConvertPotxToPptxRequest(StrictModel):
 
 # Operation: convert_presentation_template_to_tiff
 class PostConvertPotxToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range or comma-separated list format.")
@@ -2854,7 +2854,7 @@ class PostConvertPotxToTiffRequest(StrictModel):
 
 # Operation: convert_presentation_to_webp_template
 class PostConvertPotxToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2867,7 +2867,7 @@ class PostConvertPotxToWebpRequest(StrictModel):
 
 # Operation: convert_presentation_to_jpg_slideshow
 class PostConvertPpsxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentation documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to pages 1-2000.")
@@ -2878,7 +2878,7 @@ class PostConvertPpsxToJpgRequest(StrictModel):
 
 # Operation: convert_presentation_slideshow_to_pdf
 class PostConvertPpsxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 pages.")
@@ -2892,7 +2892,7 @@ class PostConvertPpsxToPdfRequest(StrictModel):
 
 # Operation: convert_presentation_to_png_slideshow
 class PostConvertPpsxToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which slides to convert using a range or comma-separated list (e.g., 1-10 or 1,2,5).")
@@ -2906,7 +2906,7 @@ class PostConvertPpsxToPngRequest(StrictModel):
 
 # Operation: convert_presentation_ppsx_to_pptx
 class PostConvertPpsxToPptxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert, provided either as a URL reference or as direct binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert, provided either as a URL reference or as direct binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the converted output file. The system automatically sanitizes the filename, appends the correct PPTX extension, and adds numeric indexing (e.g., filename_0.pptx, filename_1.pptx) when multiple output files are generated from a single input.")
 class PostConvertPpsxToPptxRequest(StrictModel):
     """Converts a PowerPoint Show file (PPSX) to PowerPoint Presentation format (PPTX). Accepts file input via URL or direct file content and generates a properly named output file."""
@@ -2914,7 +2914,7 @@ class PostConvertPpsxToPptxRequest(StrictModel):
 
 # Operation: convert_presentation_slideshow_to_tiff
 class PostConvertPpsxToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2930,7 +2930,7 @@ class PostConvertPpsxToTiffRequest(StrictModel):
 
 # Operation: convert_presentation_to_webp_slideshow
 class PostConvertPpsxToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs (e.g., presentation_0.webp, presentation_1.webp).")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which slides to convert using page numbers or ranges. Separate multiple selections with commas.")
@@ -2943,7 +2943,7 @@ class PostConvertPpsxToWebpRequest(StrictModel):
 
 # Operation: convert_presentation_ppt_to_pptx
 class PostConvertPptToPptxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PPTX file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.pptx, presentation_1.pptx) if multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input presentation if it is password-protected.")
 class PostConvertPptToPptxRequest(StrictModel):
@@ -2952,7 +2952,7 @@ class PostConvertPptToPptxRequest(StrictModel):
 
 # Operation: convert_presentation_to_images
 class PostConvertPptxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PowerPoint file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indices for multiple output files to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PowerPoint documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to the first 2000 slides.")
@@ -2963,7 +2963,7 @@ class PostConvertPptxToJpgRequest(StrictModel):
 
 # Operation: convert_presentation_to_pdf
 class PostConvertPptxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 pages.")
@@ -2977,7 +2977,7 @@ class PostConvertPptxToPdfRequest(StrictModel):
 
 # Operation: convert_presentation_to_images_png
 class PostConvertPptxToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PowerPoint file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system sanitizes the filename, appends the correct extension automatically, and adds indexing (e.g., report_0.png, report_1.png) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open protected or encrypted presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -2991,7 +2991,7 @@ class PostConvertPptxToPngRequest(StrictModel):
 
 # Operation: convert_presentation
 class PostConvertPptxToPptxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The presentation file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The presentation file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output presentation file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.pptx, presentation_1.pptx) if multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input presentation if it is password-protected.")
 class PostConvertPptxToPptxRequest(StrictModel):
@@ -3000,7 +3000,7 @@ class PostConvertPptxToPptxRequest(StrictModel):
 
 # Operation: encrypt_presentation
 class PostConvertPptxToProtectRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PowerPoint file to encrypt. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PowerPoint file to encrypt. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output encrypted presentation file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing if multiple files are generated.")
     encrypt_password: str | None = Field(default=None, validation_alias="EncryptPassword", serialization_alias="EncryptPassword", description="Password to encrypt the presentation. Only users with this password can open and view the file.")
 class PostConvertPptxToProtectRequest(StrictModel):
@@ -3009,7 +3009,7 @@ class PostConvertPptxToProtectRequest(StrictModel):
 
 # Operation: convert_presentation_to_tiff
 class PostConvertPptxToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PowerPoint file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected presentations.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5).")
@@ -3025,7 +3025,7 @@ class PostConvertPptxToTiffRequest(StrictModel):
 
 # Operation: convert_presentation_to_webp
 class PostConvertPptxToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PowerPoint file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PowerPoint file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output WebP file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., presentation_0.webp, presentation_1.webp) when multiple slides are converted.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected PowerPoint documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specify which slides to convert using a range (e.g., 1-10) or comma-separated list (e.g., 1,2,5). Defaults to converting the first 2000 slides.")
@@ -3038,7 +3038,7 @@ class PostConvertPptxToWebpRequest(StrictModel):
 
 # Operation: convert_prn_to_jpg
 class PostConvertPrnToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PRN file to convert, provided as either a publicly accessible URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PRN file to convert, provided as either a publicly accessible URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The desired name for the output JPG file. The API automatically sanitizes the filename, appends the .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple files are generated from a single input.")
 class PostConvertPrnToJpgRequest(StrictModel):
     """Converts a PRN (printer) file to JPG image format. Accepts file input as either a URL or raw file content and generates a JPG output file with sanitized naming."""
@@ -3046,7 +3046,7 @@ class PostConvertPrnToJpgRequest(StrictModel):
 
 # Operation: convert_prn_to_pdf
 class PostConvertPrnToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PRN file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PRN file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when generating multiple files from a single input.")
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(default=None, validation_alias="PdfVersion", serialization_alias="PdfVersion", description="PDF specification version to use for the output document.")
     pdf_resolution: int | None = Field(default=None, validation_alias="PdfResolution", serialization_alias="PdfResolution", description="Output resolution in dots per inch (DPI). Higher values produce better quality but larger file sizes.", ge=10, le=2400)
@@ -3063,7 +3063,7 @@ class PostConvertPrnToPdfRequest(StrictModel):
 
 # Operation: convert_prn_to_png
 class PostConvertPrnToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PRN file to convert, provided as either a publicly accessible URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PRN file to convert, provided as either a publicly accessible URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) if multiple files are generated from a single input.")
 class PostConvertPrnToPngRequest(StrictModel):
     """Converts a PRN (printer) file to PNG image format. Accepts file input as either a URL or raw file content and generates a PNG output file with automatic naming."""
@@ -3071,7 +3071,7 @@ class PostConvertPrnToPngRequest(StrictModel):
 
 # Operation: convert_prn_to_tiff
 class PostConvertPrnToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PRN file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PRN file to convert, provided either as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file. The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric indexing (e.g., output_0.tiff, output_1.tiff) when multiple files are generated from a single input.")
 class PostConvertPrnToTiffRequest(StrictModel):
     """Converts a PRN (printer) file to TIFF image format. Accepts file input as a URL or binary content and generates a TIFF output file with automatic naming and extension handling."""
@@ -3079,7 +3079,7 @@ class PostConvertPrnToTiffRequest(StrictModel):
 
 # Operation: convert_postscript_to_jpg
 class PostConvertPsToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PostScript file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Can be provided as a URL or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file. The system automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) when multiple files are generated from a single input.")
 class PostConvertPsToJpgRequest(StrictModel):
     """Converts PostScript (PS) files to JPG image format. Accepts file input as a URL or binary content and generates a uniquely named output file."""
@@ -3087,7 +3087,7 @@ class PostConvertPsToJpgRequest(StrictModel):
 
 # Operation: convert_postscript_to_pdf
 class PostConvertPsToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PostScript file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple output files.")
     pdf_version: Literal["1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.0"] | None = Field(default=None, validation_alias="PdfVersion", serialization_alias="PdfVersion", description="PDF specification version to use for the output document.")
     pdf_resolution: int | None = Field(default=None, validation_alias="PdfResolution", serialization_alias="PdfResolution", description="Output resolution in dots per inch (DPI). Higher values produce better quality but larger file sizes.", ge=10, le=2400)
@@ -3104,7 +3104,7 @@ class PostConvertPsToPdfRequest(StrictModel):
 
 # Operation: convert_postscript_to_png
 class PostConvertPsToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PostScript file to convert. Can be provided as a URL reference or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Can be provided as a URL reference or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output PNG file. The system automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., output_0.png, output_1.png) when multiple files are generated from a single input.")
 class PostConvertPsToPngRequest(StrictModel):
     """Converts a PostScript file to PNG image format. Accepts file input as a URL or binary content and generates a PNG output file with optional custom naming."""
@@ -3112,7 +3112,7 @@ class PostConvertPsToPngRequest(StrictModel):
 
 # Operation: convert_postscript_to_tiff
 class PostConvertPsToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PostScript file to convert. Provide either a publicly accessible URL or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PostScript file to convert. Provide either a publicly accessible URL or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output TIFF file(s). The system automatically sanitizes the name, appends the .tiff extension, and adds numeric indexing (e.g., document_0.tiff, document_1.tiff) if multiple files are generated.")
 class PostConvertPsToTiffRequest(StrictModel):
     """Converts PostScript (PS) files to TIFF image format. Accepts file input via URL or direct file content and generates output with sanitized, uniquely-named TIFF file(s)."""
@@ -3120,7 +3120,7 @@ class PostConvertPsToTiffRequest(StrictModel):
 
 # Operation: convert_psd_to_jpg
 class PostConvertPsdToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PSD file to convert. Accepts either a file upload or a URL pointing to the source file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PSD file to convert. Accepts either a file upload or a URL pointing to the source file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -3132,7 +3132,7 @@ class PostConvertPsdToJpgRequest(StrictModel):
 
 # Operation: convert_image_psd_to_png
 class PostConvertPsdToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PSD image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PSD image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing for multiple output files to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output size, preserving quality for smaller source images.")
@@ -3143,7 +3143,7 @@ class PostConvertPsdToPngRequest(StrictModel):
 
 # Operation: convert_image_psd_to_pnm
 class PostConvertPsdToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension for the target format, and adds indexing (e.g., filename_0.pnm, filename_1.pnm) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the desired output dimensions.")
@@ -3154,7 +3154,7 @@ class PostConvertPsdToPnmRequest(StrictModel):
 
 # Operation: convert_psd_to_svg
 class PostConvertPsdToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PSD file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PSD file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only if the input image dimensions exceed the output dimensions.")
@@ -3165,7 +3165,7 @@ class PostConvertPsdToSvgRequest(StrictModel):
 
 # Operation: convert_psd_to_tiff
 class PostConvertPsdToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The PSD file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The PSD file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the name, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to fit the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -3176,7 +3176,7 @@ class PostConvertPsdToTiffRequest(StrictModel):
 
 # Operation: convert_image_psd_to_webp
 class PostConvertPsdToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The system automatically sanitizes the name, appends the correct .webp extension, and adds indexing (e.g., output_0.webp, output_1.webp) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -3187,7 +3187,7 @@ class PostConvertPsdToWebpRequest(StrictModel):
 
 # Operation: convert_publication_to_jpg
 class PostConvertPubToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The publication file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The publication file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.jpg, filename_1.jpg) when multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the publication file if it is password-protected.")
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(default=None, validation_alias="JpgType", serialization_alias="JpgType", description="The JPG color mode and encoding type for the output image.")
@@ -3199,7 +3199,7 @@ class PostConvertPubToJpgRequest(StrictModel):
 
 # Operation: convert_pub_to_pdf
 class PostConvertPubToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Publisher file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Publisher file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the source document if it is password-protected.")
     convert_metadata: bool | None = Field(default=None, validation_alias="ConvertMetadata", serialization_alias="ConvertMetadata", description="Whether to preserve document metadata (title, author, keywords) in the output PDF.")
@@ -3219,7 +3219,7 @@ class PostConvertPubToPdfRequest(StrictModel):
 
 # Operation: convert_pub_to_png
 class PostConvertPubToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Publisher file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Publisher file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the .png extension, and adds numeric suffixes (e.g., output_0.png, output_1.png) if multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the Publisher file if it is password-protected.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to the target dimensions.")
@@ -3230,7 +3230,7 @@ class PostConvertPubToPngRequest(StrictModel):
 
 # Operation: convert_pub_to_tiff
 class PostConvertPubToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct .tiff extension, and adds numeric suffixes (e.g., _0, _1) for multi-page outputs to ensure unique identification.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected Publisher documents.")
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(default=None, validation_alias="TiffType", serialization_alias="TiffType", description="Specifies the TIFF compression type and color depth. Options range from color formats (24/32-bit with various compression) to grayscale and monochrome variants.")
@@ -3244,7 +3244,7 @@ class PostConvertPubToTiffRequest(StrictModel):
 
 # Operation: convert_rtf_to_html
 class PostConvertRtfToHtmlRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The RTF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated HTML output file. The API automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `document_0.html`, `document_1.html`) when multiple files are produced from a single input.")
     inline_images: bool | None = Field(default=None, validation_alias="InlineImages", serialization_alias="InlineImages", description="Whether to embed images directly into the HTML output as base64-encoded data URIs, creating a single self-contained file without external image dependencies.")
 class PostConvertRtfToHtmlRequest(StrictModel):
@@ -3253,7 +3253,7 @@ class PostConvertRtfToHtmlRequest(StrictModel):
 
 # Operation: convert_rtf_to_jpg
 class PostConvertRtfToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The RTF file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the RTF document if it is password-protected.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format. Only pages within this range will be included in the output.")
@@ -3263,7 +3263,7 @@ class PostConvertRtfToJpgRequest(StrictModel):
 
 # Operation: convert_rtf_to_pdf
 class PostConvertRtfToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The RTF file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected RTF documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10).")
@@ -3279,7 +3279,7 @@ class PostConvertRtfToPdfRequest(StrictModel):
 
 # Operation: convert_rtf_to_text
 class PostConvertRtfToTxtRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The RTF file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The RTF file to convert. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output text file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.txt, output_1.txt) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected RTF documents.")
     substitutions: bool | None = Field(default=None, validation_alias="Substitutions", serialization_alias="Substitutions", description="When enabled, replaces special symbols with their text equivalents (e.g., © becomes (c)).")
@@ -3290,7 +3290,7 @@ class PostConvertRtfToTxtRequest(StrictModel):
 
 # Operation: convert_svg_to_jpg
 class PostConvertSvgToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -3302,7 +3302,7 @@ class PostConvertSvgToJpgRequest(StrictModel):
 
 # Operation: convert_svg_to_pdf
 class PostConvertSvgToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Can be provided as a file upload or as a URL pointing to the SVG resource.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Can be provided as a file upload or as a URL pointing to the SVG resource.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes if multiple files are generated.")
     horizontal_alignment: Literal["left", "center", "right"] | None = Field(default=None, validation_alias="HorizontalAlignment", serialization_alias="HorizontalAlignment", description="Controls how the SVG image is positioned horizontally within the PDF page.")
     vertical_alignment: Literal["top", "center", "bottom"] | None = Field(default=None, validation_alias="VerticalAlignment", serialization_alias="VerticalAlignment", description="Controls how the SVG image is positioned vertically within the PDF page.")
@@ -3314,7 +3314,7 @@ class PostConvertSvgToPdfRequest(StrictModel):
 
 # Operation: convert_svg_to_png
 class PostConvertSvgToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Accepts either a URL pointing to an SVG file or the raw SVG file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL pointing to an SVG file or the raw SVG file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple files from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -3325,7 +3325,7 @@ class PostConvertSvgToPngRequest(StrictModel):
 
 # Operation: convert_svg_to_pnm
 class PostConvertSvgToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct .pnm extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to prevent distortion.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Applies scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -3336,7 +3336,7 @@ class PostConvertSvgToPnmRequest(StrictModel):
 
 # Operation: convert_svg_image
 class PostConvertSvgToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL reference or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.svg, filename_1.svg) for multiple outputs to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling transformations only when the input image dimensions exceed the target output dimensions.")
@@ -3347,7 +3347,7 @@ class PostConvertSvgToSvgRequest(StrictModel):
 
 # Operation: convert_svg_to_tiff
 class PostConvertSvgToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to the target dimensions.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions, leaving smaller images unchanged.")
@@ -3358,7 +3358,7 @@ class PostConvertSvgToTiffRequest(StrictModel):
 
 # Operation: convert_svg_to_webp
 class PostConvertSvgToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The SVG file to convert. Accepts either a file upload or a URL pointing to the SVG resource.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The SVG file to convert. Accepts either a file upload or a URL pointing to the SVG resource.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output WebP file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -3369,7 +3369,7 @@ class PostConvertSvgToWebpRequest(StrictModel):
 
 # Operation: fill_template_to_docx
 class PostConvertTemplateToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Word template file to be converted. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Word template file to be converted. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple outputs.")
     binding_method: Literal["properties", "placeholders"] | None = Field(default=None, validation_alias="BindingMethod", serialization_alias="BindingMethod", description="Specifies how data values are bound to the template. Use 'properties' to fill Word document custom property fields, or 'placeholders' to search for and replace named placeholders within the document text.")
     json_payload: str | None = Field(default=None, validation_alias="JsonPayload", serialization_alias="JsonPayload", description="JSON array of key-value pairs to populate the template. Structure varies by binding method: for properties, include Name, Value, and Type fields; for placeholders, supports strings, integers, images, tables, HTML, and conditional values with optional dimensions and links.")
@@ -3379,7 +3379,7 @@ class PostConvertTemplateToDocxRequest(StrictModel):
 
 # Operation: convert_template_to_pdf
 class PostConvertTemplateToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The template document to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The template document to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the .pdf extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are generated.")
     json_payload: str | None = Field(default=None, validation_alias="JsonPayload", serialization_alias="JsonPayload", description="JSON array of data to populate into the template. Supports custom document properties (string, integer, datetime, boolean types) and placeholders (string, image, table, html, conditional types). Images should be provided as base64-encoded strings with optional dimensions and links.")
     binding_method: Literal["properties", "placeholders"] | None = Field(default=None, validation_alias="BindingMethod", serialization_alias="BindingMethod", description="Specifies how data is bound to the template. Use 'properties' to fill Word document custom properties fields, or 'placeholders' to search for and replace named placeholders within the document text.")
@@ -3389,7 +3389,7 @@ class PostConvertTemplateToPdfRequest(StrictModel):
 
 # Operation: convert_tiff_to_jpg
 class PostConvertTiffToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Can be provided as a file upload or as a URL pointing to a TIFF image.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Can be provided as a file upload or as a URL pointing to a TIFF image.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., image_0.jpg, image_1.jpg) for multiple outputs from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -3401,7 +3401,7 @@ class PostConvertTiffToJpgRequest(StrictModel):
 
 # Operation: convert_tiff_to_pdf
 class PostConvertTiffToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The TIFF image file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The TIFF image file to convert. Accepts either a file URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pdf, output_1.pdf) when multiple files are generated from a single input.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotation angle in degrees for the image. Specify a value between -360 and 360, or leave empty to automatically rotate based on EXIF data in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Color space for the output image. Choose from standard color spaces or use default for automatic detection.")
@@ -3416,7 +3416,7 @@ class PostConvertTiffToPdfRequest(StrictModel):
 
 # Operation: convert_tiff_to_png
 class PostConvertTiffToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., image_0.png, image_1.png) when multiple files are generated from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -3427,7 +3427,7 @@ class PostConvertTiffToPngRequest(StrictModel):
 
 # Operation: convert_tiff_to_pnm
 class PostConvertTiffToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The TIFF image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The TIFF image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNM file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.pnm, output_1.pnm) when multiple files are generated.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -3438,7 +3438,7 @@ class PostConvertTiffToPnmRequest(StrictModel):
 
 # Operation: convert_tiff_to_svg
 class PostConvertTiffToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The TIFF image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The TIFF image file to convert. Can be provided as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output SVG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     preset: Literal["none", "detailed", "crisp", "graphic", "illustration", "noisyScan"] | None = Field(default=None, validation_alias="Preset", serialization_alias="Preset", description="Vectorization preset that applies pre-configured tracing settings optimized for specific image types. When selected, presets override individual converter options except ColorMode, providing consistent and balanced SVG results.")
     color_mode: Literal["color", "bw"] | None = Field(default=None, validation_alias="ColorMode", serialization_alias="ColorMode", description="Color processing mode for tracing the image. Choose between full color vectorization or black-and-white conversion.")
@@ -3450,7 +3450,7 @@ class PostConvertTiffToSvgRequest(StrictModel):
 
 # Operation: convert_tiff_image
 class PostConvertTiffToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The system automatically sanitizes the name, appends the correct file extension, and adds indexing (e.g., filename_0.tiff, filename_1.tiff) for multiple output files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -3461,7 +3461,7 @@ class PostConvertTiffToTiffRequest(StrictModel):
 
 # Operation: convert_image_tiff_to_webp
 class PostConvertTiffToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to a TIFF file or raw binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a TIFF file or raw binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output WebP file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing for multiple output files to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image to a different size.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions are larger than the target output dimensions.")
@@ -3472,7 +3472,7 @@ class PostConvertTiffToWebpRequest(StrictModel):
 
 # Operation: convert_text_to_image
 class PostConvertTxtToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The text document to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The text document to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The API automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., document_0.jpg, document_1.jpg) when multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10 inclusive).")
@@ -3482,7 +3482,7 @@ class PostConvertTxtToJpgRequest(StrictModel):
 
 # Operation: convert_text_to_pdf
 class PostConvertTxtToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The text file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The text file to convert. Accepts either a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.pdf, filename_1.pdf) for multiple outputs.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to include in the output using a range format (e.g., 1-10 for pages 1 through 10).")
     font_name: Literal["Arial", "Bahnschrift", "Calibri", "Cambria", "Consolas", "Constantia", "CourierNew", "Georgia", "Tahoma", "TimesNewRoman", "Verdana"] | None = Field(default=None, validation_alias="FontName", serialization_alias="FontName", description="The font to use for text rendering in the PDF. Select from available system fonts.")
@@ -3498,7 +3498,7 @@ class PostConvertTxtToPdfRequest(StrictModel):
 
 # Operation: convert_vsdx_to_jpg
 class PostConvertVsdxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Visio file to convert, provided either as a publicly accessible URL or as binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Visio file to convert, provided either as a publicly accessible URL or as binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output JPEG file. The system automatically sanitizes the filename, appends the correct .jpg extension, and adds numeric indexing (e.g., output_0.jpg, output_1.jpg) if multiple files are generated from a single input.")
 class PostConvertVsdxToJpgRequest(StrictModel):
     """Converts a Visio diagram file (VSDX format) to JPEG image format. Accepts file input as a URL or binary content and generates optimized JPEG output with customizable naming."""
@@ -3506,7 +3506,7 @@ class PostConvertVsdxToJpgRequest(StrictModel):
 
 # Operation: convert_vsdx_to_pdf
 class PostConvertVsdxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Visio file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Visio file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `document_0.pdf`, `document_1.pdf`) when multiple files are produced.")
     pdfa_version: Literal["none", "pdfA1b", "pdfA2b", "pdfA3b"] | None = Field(default=None, validation_alias="PdfaVersion", serialization_alias="PdfaVersion", description="PDF/A compliance version for the output file. Use 'none' for standard PDF, or specify a PDF/A version for long-term archival compliance.")
 class PostConvertVsdxToPdfRequest(StrictModel):
@@ -3515,7 +3515,7 @@ class PostConvertVsdxToPdfRequest(StrictModel):
 
 # Operation: convert_vsdx_to_png
 class PostConvertVsdxToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Visio file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Visio file to convert. Provide either a URL pointing to the file or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PNG output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `diagram_0.png`, `diagram_1.png`) for multiple output files.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="Background color for the generated PNG image. Specify a color name, RGB values (comma-separated), or HEX code. Use `transparent` to preserve transparency.")
 class PostConvertVsdxToPngRequest(StrictModel):
@@ -3524,7 +3524,7 @@ class PostConvertVsdxToPngRequest(StrictModel):
 
 # Operation: convert_vsdx_to_tiff
 class PostConvertVsdxToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Visio file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Visio file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., `diagram_0.tiff`, `diagram_1.tiff`) for multi-page outputs to ensure unique, safe file naming.")
     background_color: str | None = Field(default=None, validation_alias="BackgroundColor", serialization_alias="BackgroundColor", description="Background color for the generated TIFF images. Specify a color name (e.g., `white`, `black`), RGB values (comma-separated), HEX code, or `transparent` to preserve transparency.")
     multi_page: bool | None = Field(default=None, validation_alias="MultiPage", serialization_alias="MultiPage", description="Whether to generate a single multi-page TIFF file or separate single-page files. When enabled, all pages are combined into one TIFF; when disabled, each page becomes a separate file.")
@@ -3619,7 +3619,7 @@ class PostConvertWebToTxtRequest(StrictModel):
 
 # Operation: convert_webp_to_gif
 class PostConvertWebpToGifRequestBody(StrictModel):
-    files: list[str] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="WebP image file(s) to convert. Accept file uploads or URLs pointing to WebP images. When providing multiple files, each is converted independently to GIF format.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, validation_alias="Files", serialization_alias="Files", description="Base64-encoded file content for upload. WebP image file(s) to convert. Accept file uploads or URLs pointing to WebP images. When providing multiple files, each is converted independently to GIF format.")
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output GIF file(s). The system automatically sanitizes the filename, appends the .gif extension, and adds numeric suffixes (e.g., image_0.gif, image_1.gif) when converting multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when resizing the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only resize the image if the input dimensions are larger than the target output size.")
@@ -3631,7 +3631,7 @@ class PostConvertWebpToGifRequest(StrictModel):
 
 # Operation: convert_webp_to_jpg
 class PostConvertWebpToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL pointing to a WebP image or the raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL pointing to a WebP image or the raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output JPG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple outputs to ensure unique, safe file naming.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -3643,7 +3643,7 @@ class PostConvertWebpToJpgRequest(StrictModel):
 
 # Operation: convert_webp_to_pdf
 class PostConvertWebpToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The WebP image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The WebP image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the output PDF file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing for multiple output files to ensure unique, safe file naming.")
     rotate: int | None = Field(default=None, validation_alias="Rotate", serialization_alias="Rotate", description="Rotate the output image by the specified degrees. Use a value between -360 and 360. Leave empty to apply automatic rotation based on EXIF data in TIFF and JPEG images.", ge=-360, le=360)
     color_space: Literal["default", "rgb", "srgb", "cmyk", "gray"] | None = Field(default=None, validation_alias="ColorSpace", serialization_alias="ColorSpace", description="Set the color space for the output PDF. Choose from standard color space options to control how colors are represented in the final document.")
@@ -3657,7 +3657,7 @@ class PostConvertWebpToPdfRequest(StrictModel):
 
 # Operation: convert_webp_to_png
 class PostConvertWebpToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided either as a URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The API automatically sanitizes the filename, appends the correct .png extension, and adds numeric indexing (e.g., image_0.png, image_1.png) when multiple files are generated from a single input.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Whether to maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Whether to apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -3668,7 +3668,7 @@ class PostConvertWebpToPngRequest(StrictModel):
 
 # Operation: convert_webp_to_pnm
 class PostConvertWebpToPnmRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.pnm, output_1.pnm) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Apply scaling only when the input image dimensions exceed the target output dimensions.")
@@ -3679,7 +3679,7 @@ class PostConvertWebpToPnmRequest(StrictModel):
 
 # Operation: convert_webp_to_svg
 class PostConvertWebpToSvgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The WebP image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The WebP image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output SVG file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.svg, output_1.svg) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the output dimensions.")
@@ -3690,7 +3690,7 @@ class PostConvertWebpToSvgRequest(StrictModel):
 
 # Operation: convert_webp_to_tiff
 class PostConvertWebpToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The WebP image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The WebP image file to convert. Provide either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multiple files.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -3701,7 +3701,7 @@ class PostConvertWebpToTiffRequest(StrictModel):
 
 # Operation: convert_webp_image
 class PostConvertWebpToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The image file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.webp, filename_1.webp) for multiple outputs to ensure unique identification.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintain the original aspect ratio when scaling the output image.")
     scale_if_larger: bool | None = Field(default=None, validation_alias="ScaleIfLarger", serialization_alias="ScaleIfLarger", description="Only apply scaling if the input image dimensions exceed the target output dimensions.")
@@ -3712,7 +3712,7 @@ class PostConvertWebpToWebpRequest(StrictModel):
 
 # Operation: convert_wpd_to_pdf
 class PostConvertWpdToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The document file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the generated output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected documents.")
     page_range: str | None = Field(default=None, validation_alias="PageRange", serialization_alias="PageRange", description="Specifies which pages to convert using a range format (e.g., 1-10 converts pages 1 through 10).")
@@ -3728,7 +3728,7 @@ class PostConvertWpdToPdfRequest(StrictModel):
 
 # Operation: convert_spreadsheet_format
 class PostConvertXlsToXlsRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file(s). The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., `report_0.xlsx`, `report_1.xlsx`) when multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input file if it is password-protected.")
 class PostConvertXlsToXlsRequest(StrictModel):
@@ -3737,7 +3737,7 @@ class PostConvertXlsToXlsRequest(StrictModel):
 
 # Operation: convert_spreadsheet_xls_to_xlsx
 class PostConvertXlsToXlsxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct XLSX extension, and adds numeric indexing (e.g., report_0.xlsx, report_1.xlsx) when multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="The password required to open the input file if it is password-protected.")
 class PostConvertXlsToXlsxRequest(StrictModel):
@@ -3746,7 +3746,7 @@ class PostConvertXlsToXlsxRequest(StrictModel):
 
 # Operation: convert_xlsb_to_csv
 class PostConvertXlsbToCsvRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The XLSB file to convert. Can be provided as a file upload or as a URL pointing to the source file.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The XLSB file to convert. Can be provided as a file upload or as a URL pointing to the source file.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output CSV file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., output_0.csv, output_1.csv) if multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the XLSB file if it is password-protected.")
 class PostConvertXlsbToCsvRequest(StrictModel):
@@ -3755,7 +3755,7 @@ class PostConvertXlsbToCsvRequest(StrictModel):
 
 # Operation: convert_xlsb_to_pdf
 class PostConvertXlsbToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The file to convert, provided as a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PDF file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected XLSB documents.")
     convert_metadata: bool | None = Field(default=None, validation_alias="ConvertMetadata", serialization_alias="ConvertMetadata", description="Preserves document metadata such as Title, Author, and Keywords in the PDF output.")
@@ -3771,7 +3771,7 @@ class PostConvertXlsbToPdfRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_csv
 class PostConvertXlsxToCsvRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output CSV file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., report_0.csv, report_1.csv) if multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the Excel file if it is password-protected.")
 class PostConvertXlsxToCsvRequest(StrictModel):
@@ -3780,7 +3780,7 @@ class PostConvertXlsxToCsvRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_image_xlsx
 class PostConvertXlsxToJpgRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output JPG file(s). The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.jpg, output_1.jpg) for multiple files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected Excel documents.")
     jpg_type: Literal["jpeg", "jpegcmyk", "jpeggray"] | None = Field(default=None, validation_alias="JpgType", serialization_alias="JpgType", description="The JPG color format to use for the output image.")
@@ -3792,7 +3792,7 @@ class PostConvertXlsxToJpgRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_pdf
 class PostConvertXlsxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric suffixes (e.g., report_0.pdf, report_1.pdf) when multiple files are produced from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected Excel documents.")
     convert_metadata: bool | None = Field(default=None, validation_alias="ConvertMetadata", serialization_alias="ConvertMetadata", description="Preserves document metadata such as title, author, and keywords in the PDF output.")
@@ -3808,7 +3808,7 @@ class PostConvertXlsxToPdfRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_image_png
 class PostConvertXlsxToPngRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to convert. Accepts either a URL pointing to the file or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL pointing to the file or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output PNG file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.png, output_1.png) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the Excel file if it is password-protected.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to fit the target dimensions.")
@@ -3819,7 +3819,7 @@ class PostConvertXlsxToPngRequest(StrictModel):
 
 # Operation: encrypt_xlsx_workbook
 class PostConvertXlsxToProtectRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to encrypt. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to encrypt. Accepts either a file URL or raw file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output encrypted file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., `report_0.xlsx`, `report_1.xlsx`) if multiple files are generated.")
     encrypt_password: str | None = Field(default=None, validation_alias="EncryptPassword", serialization_alias="EncryptPassword", description="The password required to open the encrypted Excel workbook. Users must enter this password to access the file.")
 class PostConvertXlsxToProtectRequest(StrictModel):
@@ -3828,7 +3828,7 @@ class PostConvertXlsxToProtectRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_tiff
 class PostConvertXlsxToTiffRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a file URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output TIFF file(s). The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., output_0.tiff, output_1.tiff) for multi-page conversions to ensure unique, safe file naming.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the Excel file if it is password-protected.")
     tiff_type: Literal["color24nc", "color32nc", "color24lzw", "color32lzw", "color24zip", "color32zip", "grayscale", "grayscalelzw", "grayscalezip", "monochromeg3", "monochromeg32d", "monochromeg4", "monochromelzw", "monochromepackbits"] | None = Field(default=None, validation_alias="TiffType", serialization_alias="TiffType", description="Specifies the TIFF compression type and color depth. Choose from color variants (24-bit or 32-bit with no compression, LZW, or ZIP), grayscale options, or monochrome formats with various compression algorithms.")
@@ -3842,7 +3842,7 @@ class PostConvertXlsxToTiffRequest(StrictModel):
 
 # Operation: convert_spreadsheet_to_image_webp
 class PostConvertXlsxToWebpRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The Excel file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The Excel file to convert. Accepts either a URL or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="Custom name for the output file. The system automatically sanitizes the filename, appends the .webp extension, and adds numeric indexing (e.g., output_0.webp, output_1.webp) if multiple files are generated.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected Excel documents.")
     scale_proportions: bool | None = Field(default=None, validation_alias="ScaleProportions", serialization_alias="ScaleProportions", description="Maintains the original aspect ratio when scaling the output image to fit the target dimensions.")
@@ -3853,7 +3853,7 @@ class PostConvertXlsxToWebpRequest(StrictModel):
 
 # Operation: convert_spreadsheet_format_modern
 class PostConvertXlsxToXlsxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL pointing to the file or the raw file content as binary data.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output file. The system automatically sanitizes the filename, appends the correct extension, and adds numeric indexing (e.g., filename_0, filename_1) when multiple files are generated from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="The password required to open password-protected spreadsheets. Only needed if the input file is encrypted.")
 class PostConvertXlsxToXlsxRequest(StrictModel):
@@ -3862,7 +3862,7 @@ class PostConvertXlsxToXlsxRequest(StrictModel):
 
 # Operation: convert_spreadsheet_template_to_pdf
 class PostConvertXltxToPdfRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The spreadsheet file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The spreadsheet file to convert. Accepts either a URL reference or binary file content.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the generated PDF output file. The system automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., report_0.pdf, report_1.pdf) when multiple files are produced from a single input.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open password-protected spreadsheet documents.")
     convert_metadata: bool | None = Field(default=None, validation_alias="ConvertMetadata", serialization_alias="ConvertMetadata", description="Preserves document metadata such as title, author, and keywords in the PDF output.")
@@ -3878,7 +3878,7 @@ class PostConvertXltxToPdfRequest(StrictModel):
 
 # Operation: convert_xml_to_docx
 class PostConvertXmlToDocxRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The XML file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The XML file to convert. Accepts either a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     file_name: str | None = Field(default=None, validation_alias="FileName", serialization_alias="FileName", description="The name for the output DOCX file. The API automatically sanitizes the filename, appends the correct extension, and adds indexing (e.g., filename_0.docx, filename_1.docx) for multiple output files.")
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password required to open the input XML file if it is password-protected.")
     update_toc: bool | None = Field(default=None, validation_alias="UpdateToc", serialization_alias="UpdateToc", description="Automatically updates all tables of content in the converted document.")
@@ -3889,7 +3889,7 @@ class PostConvertXmlToDocxRequest(StrictModel):
 
 # Operation: extract_archive
 class PostConvertZipToExtractRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="The ZIP archive file to extract. Can be provided as a URL or raw file content in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="File", serialization_alias="File", description="Base64-encoded file content for upload. The ZIP archive file to extract. Can be provided as a URL or raw file content in binary format.", json_schema_extra={'format': 'byte'})
     password: str | None = Field(default=None, validation_alias="Password", serialization_alias="Password", description="Password for opening password-protected ZIP archives. Required only if the archive is encrypted.")
 class PostConvertZipToExtractRequest(StrictModel):
     """Extracts contents from a ZIP archive file. Supports password-protected archives by providing the required password."""

@@ -5,7 +5,7 @@ Base URL: https://v2.convertapi.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 303 |
+| **Tools** | 302 |
 | **Auth** | Bearer Token |
 
 ## API Info
@@ -60,6 +60,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `SECRET_BEARER_TOKEN` — Bearer token
 - `TOKEN_BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ---
