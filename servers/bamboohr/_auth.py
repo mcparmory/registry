@@ -1,7 +1,7 @@
 """
 Authentication module for BambooHR MCP server.
 
-Generated: 2026-05-05 14:22:33 UTC
+Generated: 2026-05-11 19:30:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

@@ -5,7 +5,7 @@ Base URL: https://companySubDomain.bamboohr.com
 | | |
 |---|---|
 | **Category** | HR & Recruiting |
-| **Tools** | 147 |
+| **Tools** | 126 |
 | **Auth** | HTTP Basic, OAuth2 |
 
 ---
@@ -74,6 +74,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
 - `SERVER_COMPANYDOMAIN` — Company domain (default: `companySubDomain`)
+
 Do not commit credentials to version control.
 
 ### OAuth2

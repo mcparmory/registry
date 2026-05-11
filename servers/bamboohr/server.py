@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BambooHR MCP Server
-Generated: 2026-05-05 14:22:33 UTC
+Generated: 2026-05-11 19:30:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -38,6 +39,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -46,7 +48,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{companyDomain}.bamboohr.com".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "BambooHR"
-SERVER_VERSION = "1.0.5"
+SERVER_VERSION = "1.0.6"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1016,6 +1047,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1040,6 +1073,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1256,7 +1291,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("BambooHR", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Time Tracking Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     name: str = Field(..., description="Unique display name for the project, no more than 50 characters.", max_length=50),
     billable: bool | None = Field(None, description="Whether time logged to this project is billable. Defaults to true if omitted."),
@@ -1295,13 +1335,20 @@ async def create_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Break Assessments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_break_assessments(
     offset: int | None = Field(None, description="Number of records to skip before returning results, used for paginating through large result sets. Must be zero or greater; defaults to 0.", ge=0),
     limit: int | None = Field(None, description="Maximum number of break assessment records to return in a single response. Accepts values from 0 to 500; defaults to 100.", ge=0, le=500),
@@ -1343,7 +1390,13 @@ async def list_break_assessments(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Break",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_break(id_: str = Field(..., alias="id", description="The unique identifier of the time tracking break to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific time tracking break by its unique identifier, including its name, duration, paid status, and availability configuration."""
 
@@ -1379,7 +1432,13 @@ async def get_break(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Break",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_break(
     id_: str = Field(..., alias="id", description="The unique identifier of the break to update."),
     name: str | None = Field(None, description="Human-readable label for the break, used to identify it in schedules and reports."),
@@ -1423,13 +1482,20 @@ async def update_break(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Break",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_break(id_: str = Field(..., alias="id", description="The unique identifier of the break to delete, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Soft-deletes a time tracking break by its unique identifier, permanently removing it from any associated break policies."""
 
@@ -1465,7 +1531,13 @@ async def delete_break(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Break Policy Breaks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_break_policy_breaks(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy whose breaks you want to retrieve."),
     offset: int | None = Field(None, description="The number of records to skip before returning results, used for paginating through large result sets."),
@@ -1509,7 +1581,12 @@ async def list_break_policy_breaks(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Break",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_break(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy to associate the new break with."),
     name: str | None = Field(None, description="A descriptive label for the break, used to identify it within the policy."),
@@ -1552,13 +1629,20 @@ async def create_break(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Replace Break Policy Breaks",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_break_policy_breaks(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy whose breaks will be replaced."),
     body: list[_models.TimeTrackingCreateOrUpdateTimeTrackingBreakWithoutPolicyV1] | None = Field(None, description="The full desired collection of breaks for the policy. Each item with an ID will be updated, items without an ID will be created, and any existing breaks not included will be soft-deleted. Order is not significant."),
@@ -1595,13 +1679,19 @@ async def replace_break_policy_breaks(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Assign Employees to Break Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_employees_to_break_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy to which employees will be assigned."),
     employee_ids: list[int] = Field(..., alias="employeeIds", description="List of employee IDs to add to the break policy. Must contain at least one ID; order is not significant.", min_length=1),
@@ -1637,13 +1727,20 @@ async def assign_employees_to_break_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Assign Break Policy to Employees",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_break_policy_employees(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy whose employee assignments will be replaced."),
     employee_ids: list[int] = Field(..., alias="employeeIds", description="Complete list of employee IDs to assign to the break policy. This fully replaces all current assignments — any employee not included will be unassigned. Order is not significant."),
@@ -1679,13 +1776,20 @@ async def assign_break_policy_employees(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Unassign Employees from Break Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unassign_employees_from_break_policy(
     id_: str = Field(..., alias="id", description="Unique identifier of the break policy from which employees will be unassigned."),
     employee_ids: list[int] = Field(..., alias="employeeIds", description="List of one or more employee IDs to remove from the break policy; order is not significant and each entry should be a valid employee identifier.", min_length=1),
@@ -1721,13 +1825,20 @@ async def unassign_employees_from_break_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Break Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_break_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy to retrieve."),
     include_counts: bool | None = Field(None, alias="includeCounts", description="When set to true, the response includes the total number of employees and breaks associated with this policy."),
@@ -1769,7 +1880,13 @@ async def get_break_policy(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Break Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_break_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy to update."),
     name: str | None = Field(None, description="The display name for the break policy, typically reflecting a geographic region or compliance context."),
@@ -1807,13 +1924,20 @@ async def update_break_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Break Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_break_policy(id_: str = Field(..., alias="id", description="The unique identifier of the break policy to delete, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a break policy by its unique identifier. All associated breaks and employee assignments linked to the policy are also removed."""
 
@@ -1849,7 +1973,13 @@ async def delete_break_policy(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Break Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_break_policies(
     offset: int | None = Field(None, description="Number of records to skip before returning results, used for paginating through large result sets."),
     limit: int | None = Field(None, description="Maximum number of break policies to return in a single response, up to 500 per request.", le=500),
@@ -1892,7 +2022,12 @@ async def list_break_policies(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Break Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_break_policy(
     name: str = Field(..., description="Display name for the break policy, typically reflecting the jurisdiction or compliance context it applies to."),
     description: str | None = Field(None, description="Optional human-readable description providing additional context about the policy's purpose or compliance requirements."),
@@ -1930,13 +2065,20 @@ async def create_break_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Break Availabilities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_break_availabilities(
     id_: int = Field(..., alias="id", description="The unique identifier of the employee whose break availabilities are being retrieved."),
     effective: str | None = Field(None, description="The employee's local datetime used to calculate which breaks are currently available, defaulting to the current time if omitted. Must be provided in ISO 8601 local datetime format (no timezone offset).", pattern="^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}$"),
@@ -1978,7 +2120,13 @@ async def list_employee_break_availabilities(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Break Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_break_policies(
     id_: int = Field(..., alias="id", description="The unique identifier of the employee whose break policies are being retrieved."),
     offset: int | None = Field(None, description="The number of records to skip before returning results, used for paginating through large result sets. Must be 0 or greater.", ge=0),
@@ -2021,7 +2169,13 @@ async def list_employee_break_policies(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Break Policy Employees",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_break_policy_employees(
     id_: str = Field(..., alias="id", description="The unique identifier of the break policy whose assigned employees you want to retrieve."),
     offset: int | None = Field(None, description="The number of records to skip before returning results, used for paginating through large result sets."),
@@ -2064,7 +2218,13 @@ async def list_break_policy_employees(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Replace Break Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_break_policy(
     id_: str = Field(..., alias="id", description="Unique identifier of the break policy to fully replace."),
     name: str | None = Field(None, description="Display name for the break policy, typically reflecting the region or compliance context it applies to."),
@@ -2104,13 +2264,20 @@ async def replace_break_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Clock Entries",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_clock_entries(clock_entry_ids: list[int] = Field(..., alias="clockEntryIds", description="List of one or more clock entry IDs to delete. At least one ID must be provided; order does not matter.", min_length=1)) -> dict[str, Any] | ToolResult:
     """Permanently deletes one or more timesheet clock entries by their unique IDs. This operation is idempotent, so submitting IDs for already-deleted entries will not cause errors or require retries."""
 
@@ -2142,13 +2309,20 @@ async def delete_clock_entries(clock_entry_ids: list[int] = Field(..., alias="cl
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Hour Entries",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_hour_entries(hour_entry_ids: list[int] = Field(..., alias="hourEntryIds", description="List of one or more timesheet hour entry IDs to delete. At least one ID must be provided; order does not affect the outcome.", min_length=1)) -> dict[str, Any] | ToolResult:
     """Permanently deletes one or more timesheet hour entries by their unique IDs. This operation is idempotent, so submitting IDs for already-deleted entries will not cause errors or require retries."""
 
@@ -2180,13 +2354,20 @@ async def delete_hour_entries(hour_entry_ids: list[int] = Field(..., alias="hour
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Timesheet Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_timesheet_entries(
     start: str = Field(..., description="The start of the date range to filter timesheet entries, inclusive. Must be a date within the last 365 days, in ISO 8601 date format."),
     end: str = Field(..., description="The end of the date range to filter timesheet entries, inclusive. Must be a date within the last 365 days, in ISO 8601 date format."),
@@ -2228,7 +2409,12 @@ async def list_timesheet_entries(
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Clock In Employee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def clock_in_employee(
     employee_id: int = Field(..., alias="employeeId", description="Unique identifier of the employee to clock in."),
     project_id: int | None = Field(None, alias="projectId", description="Associates the timesheet entry with a specific time tracking project. Required when specifying a task."),
@@ -2271,13 +2457,19 @@ async def clock_in_employee(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Clock Out Employee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def clock_out_employee(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee to clock out."),
     date: str | None = Field(None, description="The calendar date of the clock-out entry, required when recording a historical entry rather than clocking out at the current server time. Must follow YYYY-MM-DD format."),
@@ -2315,13 +2507,20 @@ async def clock_out_employee(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Upsert Clock Entries",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_upsert_clock_entries(entries: list[_models.ClockEntrySchema] = Field(..., description="Array of one or more clock entry objects to create or update. Each entry without an ID will be created as a new record; each entry with an existing ID will update the matching record. Must contain at least one entry.", min_length=1)) -> dict[str, Any] | ToolResult:
     """Creates new timesheet clock entries or updates existing ones in a single bulk operation. Entries containing an existing ID are updated; entries without an ID are created as new records."""
 
@@ -2353,13 +2552,20 @@ async def bulk_upsert_clock_entries(entries: list[_models.ClockEntrySchema] = Fi
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Upsert Timesheet Entries",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_upsert_timesheet_entries(hours: list[_models.HourEntrySchema] = Field(..., description="Array of hour entry objects to create or update. Each entry without an ID will be created as a new record; each entry with an existing ID will update the matching record. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Creates new timesheet hour entries or updates existing ones in a single bulk operation. Entries containing an existing ID are updated; entries without an ID are created as new records."""
 
@@ -2391,13 +2597,20 @@ async def bulk_upsert_timesheet_entries(hours: list[_models.HourEntrySchema] = F
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks() -> dict[str, Any] | ToolResult:
     """Retrieves all webhooks associated with the authenticated API key, returning an empty array if none exist. Each result includes the webhook ID, name, URL, creation datetime, and last fired datetime; use get_webhook to fetch full configuration details for a specific webhook."""
 
@@ -2424,7 +2637,13 @@ async def list_webhooks() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Webhooks, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(id_: int = Field(..., alias="id", description="The unique numeric identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full configuration of a single webhook owned by the authenticated user, including its name, URL, format, monitored fields, events, and activity timestamps. Returns 403 if the webhook belongs to a different user and 404 if it does not exist."""
 
@@ -2460,7 +2679,13 @@ async def get_webhook(id_: int = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Webhooks, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(id_: int = Field(..., alias="id", description="The unique numeric identifier of the webhook to delete. Must correspond to a webhook owned by the authenticated API key.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook associated with the authenticated user's API key. Returns 403 if the webhook belongs to a different API key, or 404 if the webhook does not exist."""
 
@@ -2496,7 +2721,13 @@ async def delete_webhook(id_: int = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Webhooks, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_logs(id_: int = Field(..., alias="id", description="The unique numeric identifier of the webhook whose delivery logs should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves recent delivery log entries for a specific webhook, covering the last 14 days and up to 200 entries. Each entry includes the webhook URL, last attempt and success timestamps (UTC datetime or status string), HTTP response code, payload format, and employee IDs in the payload. Note: when the rate limit is exceeded the server returns HTTP 200 with an error object instead of the log array — callers must check for an `error.code` of 429 in the response body before processing results."""
 
@@ -2532,7 +2763,13 @@ async def list_webhook_logs(id_: int = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Webhooks, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Monitor Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_monitor_fields() -> dict[str, Any] | ToolResult:
     """Retrieves all employee fields available for webhook monitoring, including each field's numeric ID, human-readable name, and alias. Use the returned field IDs or aliases when specifying the `monitorFields` array during webhook creation or updates."""
 
@@ -2559,7 +2796,13 @@ async def list_webhook_monitor_fields() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Webhooks, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Post Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_post_fields() -> dict[str, Any] | ToolResult:
     """Retrieves all available employee fields that can be included in a webhook post body, along with their related table and page record references. Use the returned field IDs or aliases in the `postFields` map when creating or updating a webhook."""
 
@@ -2586,7 +2829,12 @@ async def list_webhook_post_fields() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Query Dataset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_dataset(
     dataset_name: str = Field(..., alias="datasetName", description="The unique name of the dataset to query. Use GET /api/v1/datasets to discover available dataset names."),
     fields: list[str] = Field(..., description="The list of field names to include in the response. Use GET /api/v1/datasets/{datasetName}/fields to discover valid field names for the target dataset."),
@@ -2634,13 +2882,20 @@ async def query_dataset(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Reports, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_report(
     report_id: int = Field(..., alias="reportId", description="The unique identifier of the saved custom report to retrieve data for."),
     page: int | None = Field(None, description="The page number to retrieve when paginating through results. Must be 1 or greater.", ge=1),
@@ -2683,7 +2938,13 @@ async def get_custom_report(
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Datasets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_datasets() -> dict[str, Any] | ToolResult:
     """Retrieves all available datasets, returning each dataset's machine-readable name and human-readable label. Use the returned names to query data via POST /api/v1/datasets/{datasetName} or discover fields via GET /api/v1/datasets/{datasetName}/fields. Note: this endpoint is deprecated — prefer GET /api/v1_2/datasets."""
 
@@ -2710,7 +2971,13 @@ async def list_datasets() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Dataset Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dataset_fields(
     dataset_name: str = Field(..., alias="datasetName", description="The unique machine-readable name of the dataset whose fields you want to retrieve."),
     page: int | None = Field(None, description="The page number to retrieve when navigating paginated results; must be 1 or greater.", ge=1),
@@ -2753,7 +3020,13 @@ async def list_dataset_fields(
     return _response_data
 
 # Tags: Custom Reports, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_reports(
     page: int | None = Field(None, description="The page number to retrieve when paginating through results, starting at page 1.", ge=1),
     page_size: int | None = Field(None, description="The number of records to return per page, between 1 and 1000. Defaults to 500 if not specified.", ge=1, le=1000),
@@ -2794,7 +3067,12 @@ async def list_custom_reports(
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Field Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_field_options(
     dataset_name: str = Field(..., alias="datasetName", description="The name of the dataset whose field options you want to retrieve."),
     fields: list[str] = Field(..., description="One or more field names whose possible values should be returned; order is not significant and each entry should be a valid field name within the dataset."),
@@ -2832,13 +3110,20 @@ async def get_field_options(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Datasets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_datasets_v1_2() -> dict[str, Any] | ToolResult:
     """Retrieves all available datasets, returning each dataset's machine-readable name and human-readable label. Use the returned name values to query dataset records or discover available fields via related endpoints."""
 
@@ -2865,7 +3150,13 @@ async def list_datasets_v1_2() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Dataset Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dataset_fields_v1_2(
     dataset_name: str = Field(..., alias="datasetName", description="The machine-readable name of the dataset whose fields you want to retrieve."),
     page: int | None = Field(None, description="The page number to retrieve for paginated results; must be 1 or greater.", ge=1),
@@ -2908,7 +3199,12 @@ async def list_dataset_fields_v1_2(
     return _response_data
 
 # Tags: Datasets, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Field Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_field_options_rfc7807(
     dataset_name: str = Field(..., alias="datasetName", description="The name of the dataset whose field options you want to retrieve."),
     fields: list[str] = Field(..., description="One or more field names whose possible values should be returned; order is not significant and each entry should be a valid field name within the dataset."),
@@ -2946,13 +3242,20 @@ async def get_field_options_rfc7807(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Applications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_applications(
     page: int | None = Field(None, description="The page number to retrieve for paginated results."),
     job_id: int | None = Field(None, alias="jobId", description="Filters results to only applications associated with the specified job ID."),
@@ -3000,7 +3303,13 @@ async def list_applications(
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Applicant Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_applicant_statuses() -> dict[str, Any] | ToolResult:
     """Retrieves all applicant tracking statuses configured for the company, including both system-defined and custom statuses. Requires the API key owner to have access to ATS settings."""
 
@@ -3027,7 +3336,13 @@ async def list_applicant_statuses() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Job Locations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_job_locations() -> dict[str, Any] | ToolResult:
     """Retrieves all company locations available for use when creating a job opening in the Applicant Tracking System. Requires ATS settings access; use the returned location IDs as the `jobLocation` field when creating a job opening."""
 
@@ -3054,7 +3369,13 @@ async def list_job_locations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Hiring Leads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hiring_leads() -> dict[str, Any] | ToolResult:
     """Retrieves the list of employees eligible to be assigned as a hiring lead on a job opening. Use the returned `employeeId` values as the `hiringLead` field when creating a new job opening via the Create Job Opening endpoint."""
 
@@ -3081,7 +3402,12 @@ async def list_hiring_leads() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Create Candidate",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_candidate(
     first_name: str = Field(..., alias="firstName", description="The candidate's first name."),
     last_name: str = Field(..., alias="lastName", description="The candidate's last name."),
@@ -3102,8 +3428,8 @@ async def create_candidate(
     highest_education: Literal["GED or Equivalent", "High School", "Some College", "College - Associates", "College - Bachelor of Arts", "College - Bachelor of Fine Arts", "College - Bachelor of Science", "College - Master of Arts", "College - Master of Fine Arts", "College - Master of Science", "College - Master of Business Administration", "College - Doctorate", "Medical Doctor", "Other"] | None = Field(None, alias="highestEducation", description="The highest level of education the candidate has completed; must match one of the predefined education level values."),
     college_name: str | None = Field(None, alias="collegeName", description="The name of the college or university the candidate attended."),
     references: str | None = Field(None, description="Professional or personal references provided by the candidate."),
-    resume: str | None = Field(None, description="The candidate's resume file; accepted formats include PDF, Word documents, plain text, RTF, and common image types."),
-    cover_letter: str | None = Field(None, alias="coverLetter", description="The candidate's cover letter file; accepted formats include PDF, Word documents, plain text, RTF, and common image types."),
+    resume: str | None = Field(None, description="Base64-encoded file content for upload. The candidate's resume file; accepted formats include PDF, Word documents, plain text, RTF, and common image types.", json_schema_extra={'format': 'byte'}),
+    cover_letter: str | None = Field(None, alias="coverLetter", description="Base64-encoded file content for upload. The candidate's cover letter file; accepted formats include PDF, Word documents, plain text, RTF, and common image types.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Submit a new candidate application for a specific job opening in the Applicant Tracking System. Requires ATS settings access; only fields mandated by the target job's standard questions need to be provided beyond the three required fields."""
 
@@ -3143,7 +3469,12 @@ async def create_candidate(
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Create Job Opening",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_job_opening(
     posting_title: str = Field(..., alias="postingTitle", description="The public-facing title of the job opening as it will appear in postings."),
     job_status: Literal["Draft", "Open", "On Hold", "Filled", "Canceled"] = Field(..., alias="jobStatus", description="The current workflow status of the job opening, controlling its visibility and availability in the hiring pipeline."),
@@ -3205,7 +3536,13 @@ async def create_job_opening(
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Company Benefits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_company_benefits() -> dict[str, Any] | ToolResult:
     """Retrieves all active (non-deleted) company benefit plans for the account, including summary-level details such as name, benefit category type, associated vendor and deduction IDs, effective date range, and catch-up eligibility flags. For full plan details including SSO URL, description, and ACA fields, use get_company_benefit with a specific plan ID."""
 
@@ -3232,7 +3569,13 @@ async def list_company_benefits() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Benefits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_benefits(
     employee_id: int | None = Field(None, alias="employeeId", description="Filters results to benefit enrollments belonging to a specific employee, identified by their unique numeric ID."),
     company_benefit_id: int | None = Field(None, alias="companyBenefitId", description="Filters results to enrollments associated with a specific company benefit plan, identified by its unique numeric ID."),
@@ -3268,13 +3611,20 @@ async def list_employee_benefits(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Member Benefit Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_member_benefit_events() -> dict[str, Any] | ToolResult:
     """Retrieves benefit enrollment events for all employees and their dependents over the past year, organized by member. Each entry identifies a member and lists their per-plan coverage events (eligibility granted, enrolled, or loss of coverage) in chronological order. Requires benefit settings access."""
 
@@ -3301,7 +3651,13 @@ async def list_member_benefit_events() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Member Benefits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_member_benefits(
     calendar_year: str = Field(..., alias="calendarYear", description="The four-digit calendar year for which to retrieve benefit enrollment data, in YYYY format.", pattern="^\\d{4}$"),
     page: str | None = Field(None, description="The 1-based page number to retrieve; values that resolve to zero or below are rejected with a 400. Defaults to 1."),
@@ -3343,7 +3699,13 @@ async def list_member_benefits(
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Benefit Deduction Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_benefit_deduction_types() -> dict[str, Any] | ToolResult:
     """Retrieves all benefit deduction types available in the system, including categories such as 401(k), HSA, and Section 125, along with their allowable plan types, default deduction codes, and any sub-types. Requires Benefits Administration permissions."""
 
@@ -3370,7 +3732,13 @@ async def list_benefit_deduction_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Employees, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Company Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_company_profile() -> dict[str, Any] | ToolResult:
     """Retrieves the company's basic profile information, including legal name, display name, primary address, and contact phone number. Data is sourced from active payroll client metadata for BambooHR Payroll companies, or from account settings for all others."""
 
@@ -3397,7 +3765,13 @@ async def get_company_profile() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Company Profile, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Enabled Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enabled_integrations() -> dict[str, Any] | ToolResult:
     """Retrieves the list of integration and feature identifiers currently enabled for the company. Each identifier is an uppercase string key representing an activated product feature or integration, reflecting the company's current subscription and configuration."""
 
@@ -3424,7 +3798,13 @@ async def list_enabled_integrations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Employees, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employees",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employees(
     filter_: _models.GetEmployeesFilterRequestObject | None = Field(None, alias="filter", description="Narrows results to employees matching the specified field criteria, encoded as a deepObject. Employees for which the caller lacks permission to view the filtered field are excluded entirely from results."),
     sort: str | None = Field(None, description="Comma-separated list of fields to sort by, where a leading hyphen indicates descending order; sortable fields are limited to the core default set. Employees for which the caller lacks permission to view the sort field are excluded from results, and nulls sort first ascending and last descending."),
@@ -3471,7 +3851,12 @@ async def list_employees(
     return _response_data
 
 # Tags: Employees, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee(
     first_name: str = Field(..., alias="firstName", description="Employee's legal first name as it should appear on official records and payroll documents."),
     last_name: str = Field(..., alias="lastName", description="Employee's legal last name as it should appear on official records and payroll documents."),
@@ -3510,13 +3895,19 @@ async def create_employee(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Employee Table Row",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_employee_table_row(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee whose table row will be updated."),
     table: str = Field(..., description="The name of the employee table containing the row to update, such as job information or compensation tables."),
@@ -3560,13 +3951,20 @@ async def update_employee_table_row(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Employee Table Row",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_employee_table_row(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee whose tabular data is being modified."),
     table: str = Field(..., description="The name of the tabular dataset from which the row will be deleted, such as job history, compensation records, or a custom tabular field."),
@@ -3606,7 +4004,13 @@ async def delete_employee_table_row(
     return _response_data
 
 # Tags: Company Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Download Company File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_company_file(file_id: int = Field(..., alias="fileId", description="The unique identifier of the company file to download.")) -> dict[str, Any] | ToolResult:
     """Downloads the raw content of a company file by its ID, with the response including the appropriate MIME type and original filename as an attachment. Access is granted if the file or its category is shared with employees, shared directly with the requesting user, or the user holds view permission on the file section."""
 
@@ -3642,7 +4046,12 @@ async def download_company_file(file_id: int = Field(..., alias="fileId", descri
     return _response_data
 
 # Tags: Company Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Company File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_company_file(
     file_id: int = Field(..., alias="fileId", description="The unique identifier of the company file to update."),
     name: str | None = Field(None, description="The new display name to assign to the file."),
@@ -3680,13 +4089,20 @@ async def update_company_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Company Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Company File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_company_file(file_id: int = Field(..., alias="fileId", description="The unique numeric identifier of the company file to delete. Must correspond to an existing file the caller has write access to.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a company file by its unique identifier. Requires write access to company files; returns 404 if the file is not found or 403 if the caller lacks sufficient permissions."""
 
@@ -3722,7 +4138,13 @@ async def delete_company_file(file_id: int = Field(..., alias="fileId", descript
     return _response_data
 
 # Tags: Employee Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Download Employee File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_employee_file(
     id_: int = Field(..., alias="id", description="The numeric ID of the employee whose file is being downloaded. Pass 0 to automatically resolve to the employee associated with the API key."),
     file_id: int = Field(..., alias="fileId", description="The numeric ID of the specific file to download from the employee's record."),
@@ -3761,7 +4183,12 @@ async def download_employee_file(
     return _response_data
 
 # Tags: Employee Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Employee File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_employee_file(
     id_: int = Field(..., alias="id", description="The unique identifier of the employee whose file is being updated."),
     file_id: int = Field(..., alias="fileId", description="The unique identifier of the employee file to update."),
@@ -3800,13 +4227,20 @@ async def update_employee_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Employee Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Employee File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_employee_file(
     id_: int = Field(..., alias="id", description="The numeric ID of the employee whose file will be deleted. Pass 0 to automatically resolve to the employee associated with the API key."),
     file_id: int = Field(..., alias="fileId", description="The numeric ID of the specific file to delete from the employee's record."),
@@ -3845,7 +4279,13 @@ async def delete_employee_file(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Goals",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_goals(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goals should be retrieved."),
     filter_: str | None = Field(None, alias="filter", description="Restricts results to goals matching the specified status. Accepted values are `status-inProgress`, `status-completed`, and `status-closed`; if omitted, all goals are returned regardless of status. Unrecognized values may be silently ignored."),
@@ -3887,7 +4327,12 @@ async def list_employee_goals(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee Goal",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee_goal(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee for whom the goal is being created."),
     title: str = Field(..., description="A short, descriptive title for the goal."),
@@ -3930,13 +4375,20 @@ async def create_employee_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Employee Goal",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_employee_goal(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal is being deleted."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal to permanently delete, which must belong to the specified employee."),
@@ -3975,7 +4427,13 @@ async def delete_employee_goal(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal Progress",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal_progress(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal progress is being updated."),
     goal_id: int = Field(..., alias="goalId", description="The unique identifier of the goal to update for the specified employee."),
@@ -4013,13 +4471,20 @@ async def update_goal_progress(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Milestone Progress",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_milestone_progress(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal milestone is being updated."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal that contains the milestone to be updated."),
@@ -4057,13 +4522,20 @@ async def update_milestone_progress(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Set Goal Sharing",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_goal_sharing(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee who owns the goal."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal whose sharing list will be replaced."),
@@ -4100,13 +4572,20 @@ async def set_goal_sharing(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Goal Share Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goal_share_options(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal sharing options are being retrieved."),
     search: str = Field(..., description="A search term to filter the returned employees by name, employee ID, or email address. Must be provided to return results."),
@@ -4149,7 +4628,13 @@ async def list_goal_share_options(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Goal Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goal_comments(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal comments are being retrieved."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal for which comments are being listed, scoped to the specified employee."),
@@ -4188,7 +4673,12 @@ async def list_goal_comments(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Add Goal Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_goal_comment(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee who owns the goal."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal on which the comment will be created."),
@@ -4225,13 +4715,20 @@ async def add_goal_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal_comment(
     employee_id: str = Field(..., alias="employeeId", description="Unique identifier of the employee whose goal contains the comment to be updated."),
     goal_id: str = Field(..., alias="goalId", description="Unique identifier of the goal associated with the specified employee that contains the comment."),
@@ -4269,13 +4766,20 @@ async def update_goal_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Goal Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_goal_comment(
     employee_id: str = Field(..., alias="employeeId", description="Unique identifier of the employee whose goal contains the comment to be deleted."),
     goal_id: str = Field(..., alias="goalId", description="Unique identifier of the goal associated with the specified employee that contains the target comment."),
@@ -4315,7 +4819,13 @@ async def delete_goal_comment(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Goal Aggregate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_goal_aggregate(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal is being retrieved."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal for which aggregate information is being fetched."),
@@ -4354,7 +4864,13 @@ async def get_goal_aggregate(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Goal Alignment Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goal_alignment_options(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose alignable goal options are being retrieved."),
     goal_id: int | None = Field(None, alias="goalId", description="The ID of the employee's existing goal for which alignment options are being explored. When provided, the goal currently aligned to this goal is included in the results; when omitted, alignment options are returned for the API user."),
@@ -4396,7 +4912,13 @@ async def list_goal_alignment_options(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Close Goal",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def close_goal(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal is being closed."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the goal to be closed, associated with the specified employee."),
@@ -4433,13 +4955,19 @@ async def close_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Reopen Goal",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reopen_goal(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal is being reopened."),
     goal_id: str = Field(..., alias="goalId", description="The unique identifier of the closed goal to be reopened for the specified employee."),
@@ -4478,7 +5006,13 @@ async def reopen_goal(
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal with Milestones",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal_with_milestones(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee who owns the goal being updated."),
     goal_id: int = Field(..., alias="goalId", description="The unique identifier of the goal to update, scoped to the specified employee."),
@@ -4524,13 +5058,20 @@ async def update_goal_with_milestones(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Goal Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_goal_filters(employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee whose goal filter counts should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the count of goals grouped by status for a specific employee, including goals that contain milestones. Use this to understand an employee's goal distribution across statuses before fetching detailed goal data."""
 
@@ -4566,7 +5107,13 @@ async def get_goal_filters(employee_id: int = Field(..., alias="employeeId", des
     return _response_data
 
 # Tags: Goals, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Employee Goals Aggregate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_employee_goals_aggregate(
     employee_id: int = Field(..., alias="employeeId", description="The unique numeric identifier of the employee whose goals aggregate data should be retrieved."),
     filter_: str | None = Field(None, alias="filter", description="Filters the returned goals by status using a filter ID from the filters endpoint. If omitted or an unrecognized value is provided, the API defaults to the first available filter."),
@@ -4608,7 +5155,13 @@ async def get_employee_goals_aggregate(
     return _response_data
 
 # Tags: Hours, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Time Tracking Record",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_time_tracking_record(id_: str = Field(..., alias="id", description="The unique identifier of the time tracking record to retrieve, as assigned when the record was originally created.")) -> dict[str, Any] | ToolResult:
     """Retrieves a single time tracking record by its unique ID, returning full details including hours, date, employee, project, task, and shift differential information. Note that project and shiftDifferential fields may be null when not applicable, and missing records may return an empty or null payload rather than a not-found error."""
 
@@ -4644,7 +5197,12 @@ async def get_time_tracking_record(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Public API, Hours
-@mcp.tool()
+@mcp.tool(
+    title="Create Time Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_time_entry(
     time_tracking_id: str = Field(..., alias="timeTrackingId", description="A caller-supplied unique identifier for this time entry, used to reference the record for future updates or deletions. Accepts any string up to 36 characters, such as a UUID."),
     employee_id: int = Field(..., alias="employeeId", description="The numeric ID of the employee for whom hours are being recorded."),
@@ -4689,13 +5247,20 @@ async def create_time_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Public API, Hours
-@mcp.tool()
+@mcp.tool(
+    title="Upsert Hour Records",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upsert_hour_records(body: list[_models.TimeTrackingRecord] | None = Field(None, description="Array of hour record objects to create or update; each item should include the relevant time tracking fields. Order is not significant, but each item's result is returned individually so partial failures can be identified per record.")) -> dict[str, Any] | ToolResult:
     """Bulk create or update time tracking hour records in a single request. Note that HTTP 201 may be returned even when individual records fail validation — always inspect each item's `success` flag and `response.message` for partial failures."""
 
@@ -4728,13 +5293,20 @@ async def upsert_hour_records(body: list[_models.TimeTrackingRecord] | None = Fi
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Public API, Hours
-@mcp.tool()
+@mcp.tool(
+    title="Update Time Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_time_entry(
     time_tracking_id: str = Field(..., alias="timeTrackingId", description="The unique identifier of the time tracking entry to update, up to 36 characters in length (e.g., a UUID)."),
     hours_worked: float = Field(..., alias="hoursWorked", description="The corrected total number of hours worked for this entry. Always provide the full intended value, not a delta — for example, if correcting from 8.0 to 6.0 hours, send 6.0."),
@@ -4773,13 +5345,20 @@ async def update_time_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Public API, Hours
-@mcp.tool()
+@mcp.tool(
+    title="Delete Time Tracking Record",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_time_tracking_record(id_: str = Field(..., alias="id", description="The unique identifier of the time tracking record to delete, up to 36 characters in length (e.g., a UUID). Both not-found and malformed ID values will return a 400 error.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a time tracking record and all of its associated revisions by ID. Note that both not-found and invalid ID cases return a 400 invalid-argument response for backward compatibility."""
 
@@ -4815,7 +5394,13 @@ async def delete_time_tracking_record(id_: str = Field(..., alias="id", descript
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Country States",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_country_states(country_id: int = Field(..., alias="countryId", description="The numeric ID of the country whose states or provinces to retrieve. Obtain valid country IDs from the list_countries operation.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of states or provinces for a given country, sorted alphabetically by abbreviation. Each result includes a numeric ID, abbreviation label, ISO 3166-2 code, and full name."""
 
@@ -4851,7 +5436,13 @@ async def list_country_states(country_id: int = Field(..., alias="countryId", de
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Countries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_countries() -> dict[str, Any] | ToolResult:
     """Retrieves the full list of countries supported by BambooHR, each including a numeric string ID, full name, and ISO 3166-1 alpha-2 code. The returned country IDs can be used with the Get States by Country ID endpoint to fetch corresponding states or provinces."""
 
@@ -4878,7 +5469,13 @@ async def list_countries() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Timezones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_timezones(
     page_size: int | None = Field(None, alias="pageSize", description="The number of timezone records to return per page. Controls the size of each paginated response."),
     page: int | None = Field(None, description="The page number to retrieve within the paginated result set, starting at page 1."),
@@ -4921,7 +5518,13 @@ async def list_timezones(
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_fields() -> dict[str, Any] | ToolResult:
     """Retrieves all available employee fields for the account, including field ID, display name, data type, and deprecation status. Use this to discover valid field names before querying employee data via the Get Employee, Datasets, or other field-based endpoints."""
 
@@ -4948,7 +5551,13 @@ async def list_employee_fields() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(status: str | None = Field(None, description="Comma-separated list of account statuses to filter results by; only users matching at least one of the provided statuses are returned. Omitting this parameter or providing no recognized values returns users of all statuses.")) -> dict[str, Any] | ToolResult:
     """Retrieves all users for the company, with each record including user ID, employee ID, name, email, account status, and last login time. Support admin accounts are always excluded; results can be filtered by status and returned as JSON or XML based on the Accept header."""
 
@@ -4986,7 +5595,13 @@ async def list_users(status: str | None = Field(None, description="Comma-separat
     return _response_data
 
 # Tags: Employees, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Employee",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_employee(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee to retrieve. Use the special value 0 to automatically resolve to the employee associated with the current API key."),
     fields: str | None = Field(None, description="Comma-separated list of field names specifying which employee fields to include in the response. Use the List Fields endpoint (list-fields) to discover all valid field names. Maximum of 400 fields per request."),
@@ -5029,7 +5644,12 @@ async def get_employee(
     return _response_data
 
 # Tags: Employees, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Employee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_employee(
     id_: str = Field(..., alias="id", description="Unique identifier of the employee record to update."),
     first_name: str | None = Field(None, alias="firstName", description="Employee's legal first name."),
@@ -5080,13 +5700,20 @@ async def update_employee(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Changed Employee Table Rows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_changed_employee_table_rows(
     table: str = Field(..., description="The name of the employee data table to retrieve changed rows for, such as job information or compensation details."),
     since: str = Field(..., description="An ISO 8601 datetime timestamp indicating the cutoff point; only rows belonging to employees whose records were modified after this timestamp will be returned. Must be URL-encoded when included in the request."),
@@ -5128,7 +5755,13 @@ async def list_changed_employee_table_rows(
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Table Rows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_table_rows(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee whose table data should be retrieved. Use the special value \"all\" to retrieve table data across all employees the API user has access to."),
     table: str = Field(..., description="The name of the table to retrieve rows from, such as job information, compensation, or employment status tables."),
@@ -5167,7 +5800,12 @@ async def list_employee_table_rows(
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee Table Row",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee_table_row(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee whose table will receive the new row."),
     table: str = Field(..., description="The name of the employee table to append a row to, such as job information or compensation history."),
@@ -5210,13 +5848,19 @@ async def create_employee_table_row(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Employee Table Row",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_employee_table_row_v1_1(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee whose table row is being updated."),
     table: str = Field(..., description="The name of the employee table containing the row to update, such as job information or compensation tables."),
@@ -5260,13 +5904,19 @@ async def update_employee_table_row_v1_1(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tabular Data, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee Table Row",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee_table_row_v1_1(
     id_: str = Field(..., alias="id", description="The unique identifier of the employee whose table will receive the new row."),
     table: str = Field(..., description="The name of the employee table to add a row to, such as job information or compensation tables."),
@@ -5309,13 +5959,20 @@ async def create_employee_table_row_v1_1(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Last Change Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Changed Employees",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_changed_employees(
     since: str = Field(..., description="The cutoff timestamp in ISO 8601 format; only employees whose records changed after this point will be returned. Must be URL-encoded when included in the request."),
     type_: Literal["inserted", "updated", "deleted", "all"] | None = Field(None, alias="type", description="Filters results to a specific type of change; when omitted, employees of all change types are returned. Accepted values are 'inserted', 'updated', 'deleted', or 'all'."),
@@ -5356,7 +6013,13 @@ async def list_changed_employees(
     return _response_data
 
 # Tags: Photos, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Employee Photo",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_employee_photo(
     employee_id: int = Field(..., alias="employeeId", description="The unique numeric identifier of the employee whose photo is being requested."),
     size: Literal["original", "large", "medium", "small", "xs", "tiny"] = Field(..., description="The predefined size tier for the returned photo. Available options are: original (full resolution), large (340×340), medium (170×170), small (150×150), xs (50×50), and tiny (20×20)."),
@@ -5400,7 +6063,12 @@ async def get_employee_photo(
     return _response_data
 
 # Tags: Employee Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee File Categories",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee_file_categories(body: list[str] | None = Field(None, description="A list of category name strings to create. Each name must be non-empty and must not already exist. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Creates one or more employee file categories by accepting a list of category names. An empty payload succeeds without creating anything; duplicate or empty names return an error."""
 
@@ -5433,13 +6101,19 @@ async def create_employee_file_categories(body: list[str] | None = Field(None, d
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Company Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create File Categories",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file_categories(body: list[str] | None = Field(None, description="An array of category name strings to create. Each entry must be a non-empty, unique name that is not reserved. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Creates one or more company file categories in a single request. Returns 400 if any name is empty or already exists, 403 if the caller lacks permission or a name is reserved, and 200 with no changes if the payload is empty."""
 
@@ -5472,18 +6146,24 @@ async def create_file_categories(body: list[str] | None = Field(None, descriptio
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Employee Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Upload Employee File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_employee_file(
     id_: str = Field(..., alias="id", description="The ID of the employee whose file folder will receive the upload. Pass 0 to target the employee associated with the API key."),
     file_name: str = Field(..., alias="fileName", description="The display name assigned to the uploaded file as it will appear in the employee's document folder."),
     category: int = Field(..., description="The numeric ID of the employee file section (category) into which the file will be uploaded."),
-    file_: str = Field(..., alias="file", description="The binary file content to upload, submitted as part of the multipart/form-data request body."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file content to upload, submitted as part of the multipart/form-data request body.", json_schema_extra={'format': 'byte'}),
     share: Literal["yes", "no"] | None = Field(None, description="Controls whether the uploaded file is shared with the employee and made visible to them. Defaults to no if omitted."),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a file to a specific section of an employee's document folder via multipart/form-data. Files must be under 20MB and use a supported extension; on success, the response includes a Location header pointing to the newly created file resource."""
@@ -5525,11 +6205,16 @@ async def upload_employee_file(
     return _response_data
 
 # Tags: Company Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(
     file_name: str = Field(..., alias="fileName", description="The display name for the file as it will appear in the company file system."),
     category: int = Field(..., description="The numeric ID of the file category (section) into which the file will be uploaded. Read-only categories and implementation categories (for completed implementations) are not permitted."),
-    file_: str = Field(..., alias="file", description="The binary file content to upload. Must be under 20MB and use a supported file extension."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file content to upload. Must be under 20MB and use a supported file extension.", json_schema_extra={'format': 'byte'}),
     share: Literal["yes", "no"] | None = Field(None, description="Controls whether the uploaded file is shared with all employees. Accepts 'yes' to share or 'no' to keep private; defaults to 'no' if omitted."),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a file to a specified company file category using a multipart/form-data request. Files must be under 20MB, use a supported extension, and cannot be uploaded to read-only categories or implementation categories on companies that have completed implementation."""
@@ -5570,7 +6255,13 @@ async def upload_file(
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Time Off Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_time_off_policies(employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee whose assigned time off policies should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all time off policies currently assigned to a specified employee, including each policy's ID, time off type, and accrual start date."""
 
@@ -5606,7 +6297,13 @@ async def list_employee_time_off_policies(employee_id: int = Field(..., alias="e
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Assign Employee Time Off Policies",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_employee_time_off_policies(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee to whom time off policies will be assigned."),
     body: list[_models.AssignTimeOffPoliciesBodyItem] | None = Field(None, description="List of policy assignment objects, each specifying a time off policy and the date on which accruals should begin for that policy. Order is not significant. Set accrualStartDate to null to remove an existing policy assignment rather than add or update one."),
@@ -5643,13 +6340,20 @@ async def assign_employee_time_off_policies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Time Off Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_time_off_policies_extended(employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee whose time off policies should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all time off policies currently assigned to a specified employee, including manual and unlimited policy types not available in the v1 endpoint."""
 
@@ -5685,7 +6389,13 @@ async def list_employee_time_off_policies_extended(employee_id: int = Field(...,
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Assign Time Off Policies",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_time_off_policies(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee to whom the time off policies will be assigned."),
     body: list[_models.AssignTimeOffPoliciesV11BodyItem] | None = Field(None, description="A list of policy assignment objects, each specifying a time off policy and the date on which accruals should begin for that policy. Order is not significant. Set accrual start date to null for policies that do not use accrual-based tracking."),
@@ -5722,13 +6432,20 @@ async def assign_time_off_policies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Application",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_application(application_id: int = Field(..., alias="applicationId", description="The unique identifier of the job application to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details for a single job application, including applicant information, job details, screening questions and answers, and status history. Requires the API key owner to have access to ATS settings."""
 
@@ -5764,7 +6481,12 @@ async def get_application(application_id: int = Field(..., alias="applicationId"
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Add Application Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_application_comment(
     application_id: int = Field(..., alias="applicationId", description="The unique identifier of the job application to which the comment will be added."),
     comment: str = Field(..., description="The text content of the comment to post on the application."),
@@ -5801,13 +6523,20 @@ async def add_application_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jobs(
     status_groups: str | None = Field(None, alias="statusGroups", description="One or more status group names to filter job openings by, provided as a comma-separated string. Defaults to all non-deleted positions when omitted."),
     status_ids: str | None = Field(None, description="One or more specific job opening status IDs to filter by, provided as a comma-separated string of integers. When combined with statusGroups, both filters are applied together."),
@@ -5850,7 +6579,12 @@ async def list_jobs(
     return _response_data
 
 # Tags: Public API, Applicant Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Application Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_application_status(
     application_id: int = Field(..., alias="applicationId", description="The unique identifier of the application whose status will be updated."),
     status: int = Field(..., description="The unique identifier of the status to assign to the application. Retrieve valid status IDs using the Get Applicant Statuses endpoint."),
@@ -5886,13 +6620,20 @@ async def update_application_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Benefit Coverages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_benefit_coverages() -> dict[str, Any] | ToolResult:
     """Retrieves all benefit coverage levels configured for the company, such as Employee Only, Employee + Spouse, or Employee + Family enrollment tiers. Returns each coverage level's ID, short name, description, sort order, and associated benefit plan ID (null for company-wide levels)."""
 
@@ -5919,7 +6660,13 @@ async def list_benefit_coverages() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Employee Dependent",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_employee_dependent(id_: int = Field(..., alias="id", description="The unique numeric identifier of the employee dependent record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a single employee dependent by their unique dependent ID, including masked SSN/SIN values and full state and country names. Requires Benefits Administration permissions and returns data as a JSON or XML object containing a single-element array under the 'Employee Dependents' key."""
 
@@ -5955,7 +6702,13 @@ async def get_employee_dependent(id_: int = Field(..., alias="id", description="
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Dependent",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dependent(
     id_: int = Field(..., alias="id", description="The numeric ID of the employee dependent record to update."),
     employee_id: str = Field(..., alias="employeeId", description="The ID of the employee this dependent is associated with. Must reference an existing, valid employee."),
@@ -6008,13 +6761,20 @@ async def update_dependent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Dependents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_dependents(employeeid: int | None = Field(None, description="Filters the results to dependents belonging to a specific employee. When omitted, dependents for all employees in the company are returned.")) -> dict[str, Any] | ToolResult:
     """Retrieves dependent records for one or all employees in the company, requiring Benefits Administration permissions. When an employee ID is provided the response is scoped to that employee; otherwise all dependents across the company are returned, with SSN/SIN values masked and state/country fields returned as full names."""
 
@@ -6052,7 +6812,12 @@ async def list_employee_dependents(employeeid: int | None = Field(None, descript
     return _response_data
 
 # Tags: Benefits, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee Dependent",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee_dependent(
     employee_id: str = Field(..., alias="employeeId", description="The unique identifier of the employee to whom this dependent belongs. Must reference an existing employee record."),
     first_name: str | None = Field(None, alias="firstName", description="The dependent's first name."),
@@ -6103,13 +6868,20 @@ async def create_employee_dependent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Employees, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Employee Directory",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_employee_directory(only_current: bool | None = Field(None, alias="onlyCurrent", description="Controls whether only active employees are returned. Set to false to include terminated employees alongside active ones.")) -> dict[str, Any] | ToolResult:
     """Retrieves the company employee directory, including a fieldset definition and employee records. Access level determines the returned fieldset; directory sharing or org-chart access must be enabled for the company."""
 
@@ -6147,7 +6919,13 @@ async def get_employee_directory(only_current: bool | None = Field(None, alias="
     return _response_data
 
 # Tags: Company Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Company Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_company_files() -> dict[str, Any] | ToolResult:
     """Retrieves all company file categories and the files within each category that the requesting user has permission to view. Response format is controlled via the Accept header: use application/json for JSON or application/xml (or omit) for XML."""
 
@@ -6174,7 +6952,13 @@ async def list_company_files() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Employee Files, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_files(id_: int = Field(..., alias="id", description="The unique identifier of the employee whose files are being listed. Only files and categories the caller is permitted to view will be returned.")) -> dict[str, Any] | ToolResult:
     """Retrieves the file categories and associated files visible to the caller for a specified employee. Results are permission-filtered; employees viewing their own profile also see files shared with them. Response format is determined by the Accept header (application/json for JSON, XML otherwise)."""
 
@@ -6210,7 +6994,13 @@ async def list_employee_files(id_: int = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List List Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_list_fields(format_: Literal["json"] | None = Field(None, alias="format", description="Specifies the response format as JSON, serving as an alternative to setting the Accept header on the request.")) -> dict[str, Any] | ToolResult:
     """Retrieves all list fields defined in the account, including each field's ID, alias, options, manageability, and multi-value support. Archived options are included in responses to support historical data references but should not be presented as active selections."""
 
@@ -6248,7 +7038,13 @@ async def list_list_fields(format_: Literal["json"] | None = Field(None, alias="
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update List Field Options",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_list_field_options(
     list_field_id: str = Field(..., alias="listFieldId", description="The unique identifier of the list field whose options are being managed."),
     options: list[_models.UpdateListFieldValuesBodyOptionsItem] | None = Field(None, description="Array of option objects to create, update, or archive on the list field. To create a new option omit its ID, to update an existing option include its ID, and to archive an option include its ID with the archived attribute set to yes. Order is not significant."),
@@ -6284,13 +7080,20 @@ async def update_list_field_options(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Account Information, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Tabular Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tabular_fields() -> dict[str, Any] | ToolResult:
     """Retrieves all tabular (table-based) fields available in the account, including each table's alias and its fields with their IDs, names, and types. Use this to discover valid table names and field metadata required for table row endpoints such as jobInfo, compensation, and employmentStatus."""
 
@@ -6317,7 +7120,13 @@ async def list_tabular_fields() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Get Employee Time Off Balance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_employee_time_off_balance(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee whose time off balances should be retrieved."),
     end: str | None = Field(None, description="The date through which time off balances are calculated, in YYYY-MM-DD format. Defaults to the company's current date if omitted; supply a future date to project balances."),
@@ -6360,7 +7169,12 @@ async def get_employee_time_off_balance(
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Time Off History Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_time_off_history_entry(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee for whom the time off history entry is being created."),
     date: str = Field(..., description="The calendar date the history entry applies to, provided in YYYY-MM-DD format."),
@@ -6401,13 +7215,19 @@ async def create_time_off_history_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Adjust Time Off Balance",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def adjust_time_off_balance(
     employee_id: int = Field(..., alias="employeeId", description="Unique identifier of the employee whose time off balance is being adjusted."),
     date: str = Field(..., description="The effective date of the balance adjustment as it will appear in history, in ISO 8601 format (YYYY-MM-DD)."),
@@ -6446,13 +7266,20 @@ async def adjust_time_off_balance(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Time Off Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_off_policies() -> dict[str, Any] | ToolResult:
     """Retrieves all active time off policies for the company, sorted alphabetically by name. Excludes deleted policies and any policies whose associated time off type has been deleted."""
 
@@ -6479,7 +7306,12 @@ async def list_time_off_policies() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Time Off Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_time_off_request(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee for whom the time off request is being created."),
     status: Literal["approved", "denied", "declined", "requested"] = Field(..., description="The initial status of the time off request. Use 'requested' to submit for approval; use 'approved' or 'denied' to record a decision directly without triggering approval notifications; 'declined' indicates the employee withdrew the request."),
@@ -6522,13 +7354,20 @@ async def create_time_off_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Time Off Request Status",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_time_off_request_status(
     request_id: int = Field(..., alias="requestId", description="The unique identifier of the time off request whose status is being updated."),
     status: Literal["approved", "denied", "declined", "canceled", "cancelled"] = Field(..., description="The new status to apply to the time off request. Use 'approved' to grant the request, 'denied' or 'declined' to reject it, and 'canceled' or 'cancelled' to withdraw it."),
@@ -6565,13 +7404,20 @@ async def update_time_off_request_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Time Off Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_off_requests(
     start: str = Field(..., description="The beginning of the query window in YYYY-MM-DD format; requests that end on or after this date are included. Must be provided alongside the end parameter."),
     end: str = Field(..., description="The end of the query window in YYYY-MM-DD format; requests that start on or before this date are included. Must be provided alongside the start parameter."),
@@ -6618,7 +7464,13 @@ async def list_time_off_requests(
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Time Off Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_off_types(mode: Literal["request"] | None = Field(None, description="Controls filtering of returned time off types. When set to 'request', results are limited to only the types the authenticated employee has permission to request.")) -> dict[str, Any] | ToolResult:
     """Retrieves all active time off types for the company, along with the company's default hours-per-day schedule. Optionally filter to only the types the authenticated employee has permission to request."""
 
@@ -6656,7 +7508,13 @@ async def list_time_off_types(mode: Literal["request"] | None = Field(None, desc
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Training Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_training_types() -> dict[str, Any] | ToolResult:
     """Retrieves all training types configured for the company, returned as an object keyed by training type ID. Each entry includes the training name, renewable status, renewal frequency, required status, new hire due-date window, category, link URL, description, and self-completion permission. Requires the API key owner to have access to training settings."""
 
@@ -6683,7 +7541,12 @@ async def list_training_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Training Type",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_training_type(
     name: str = Field(..., description="The display name for the new training type."),
     category_name: str | None = Field(None, alias="categoryName", description="The name of the category to associate with this training type, used to group related trainings together."),
@@ -6727,13 +7590,20 @@ async def create_training_type(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Training Type",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_training_type(
     training_type_id: int = Field(..., alias="trainingTypeId", description="The unique identifier of the training type to update."),
     name: str | None = Field(None, description="The display name of the training type."),
@@ -6779,13 +7649,20 @@ async def update_training_type(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Training Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_training_type(training_type_id: int = Field(..., alias="trainingTypeId", description="The unique numeric identifier of the training type to delete. All associated employee trainings must be removed before this operation can succeed.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing training type by its ID, requiring training settings access. All employee trainings associated with this type must be removed before this deletion will succeed."""
 
@@ -6821,7 +7698,13 @@ async def delete_training_type(training_type_id: int = Field(..., alias="trainin
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Training Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_training_categories() -> dict[str, Any] | ToolResult:
     """Retrieves all training categories defined for the company, returned as an object keyed by category ID with each entry containing the category ID and name. Requires the API key owner to have access to training settings."""
 
@@ -6848,7 +7731,12 @@ async def list_training_categories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Training Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_training_category(name: str = Field(..., description="The display name for the new training category, used to identify and organize training content.")) -> dict[str, Any] | ToolResult:
     """Creates a new training category to organize training content. Requires training settings access and returns the newly created TrainingCategory on success."""
 
@@ -6880,13 +7768,20 @@ async def create_training_category(name: str = Field(..., description="The displ
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Training Category",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_training_category(
     training_category_id: int = Field(..., alias="trainingCategoryId", description="The unique numeric identifier of the training category to update."),
     name: str = Field(..., description="The new name to assign to the training category; must be unique across all existing training categories."),
@@ -6922,13 +7817,20 @@ async def update_training_category(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Training Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_training_category(training_category_id: int = Field(..., alias="trainingCategoryId", description="The unique identifier of the training category to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing training category by its unique identifier. The API key owner must have access to training settings to perform this action."""
 
@@ -6964,7 +7866,13 @@ async def delete_training_category(training_category_id: int = Field(..., alias=
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Employee Training Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_employee_training_records(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee whose training records should be retrieved. The API key owner must have permission to view this employee."),
     type_: int | None = Field(None, alias="type", description="The unique identifier of a training type used to filter results to only records of that type. Omit this parameter to return all training records regardless of type."),
@@ -7006,7 +7914,12 @@ async def list_employee_training_records(
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Create Employee Training Record",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_employee_training_record(
     employee_id: int = Field(..., alias="employeeId", description="The unique identifier of the employee for whom the training record is being created."),
     completed: str = Field(..., description="The date the training was completed, formatted as ISO 8601 calendar date (yyyy-mm-dd)."),
@@ -7050,13 +7963,20 @@ async def create_employee_training_record(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Update Training Record",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_training_record(
     employee_training_record_id: int = Field(..., alias="employeeTrainingRecordId", description="The unique identifier of the employee training record to update."),
     completed: str = Field(..., description="The date the training was completed, required for every update. Must follow the yyyy-mm-dd format."),
@@ -7099,13 +8019,20 @@ async def update_training_record(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Training, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Training Record",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_training_record(employee_training_record_id: int = Field(..., alias="employeeTrainingRecordId", description="The unique identifier of the employee training record to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing employee training record by its unique ID. The API key owner must have view and edit permissions for both the associated employee and training type."""
 
@@ -7141,10 +8068,15 @@ async def delete_training_record(employee_training_record_id: int = Field(..., a
     return _response_data
 
 # Tags: Photos, Public API
-@mcp.tool()
+@mcp.tool(
+    title="Upload Employee Photo",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_employee_photo(
     employee_id: int = Field(..., alias="employeeId", description="The unique numeric identifier of the employee whose photo is being uploaded."),
-    file_: str = Field(..., alias="file", description="The image file to set as the employee's photo. Must be a square image (width and height within one pixel of each other), at least 150×150 pixels, no larger than 20MB, and in JPEG, PNG, or BMP format; other formats such as HEIC, SVG, AVIF, and TIFF are not reliably supported."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The image file to set as the employee's photo. Must be a square image (width and height within one pixel of each other), at least 150×150 pixels, no larger than 20MB, and in JPEG, PNG, or BMP format; other formats such as HEIC, SVG, AVIF, and TIFF are not reliably supported.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Uploads and replaces the photo for a specified employee, updating all size variants. The image must be a square JPEG, PNG, or BMP file of at least 150×150 pixels and no larger than 20MB; employees may upload their own photo if the company has self-photo uploads enabled."""
 
@@ -7185,7 +8117,13 @@ async def upload_employee_photo(
     return _response_data
 
 # Tags: Time Off, Public API
-@mcp.tool()
+@mcp.tool(
+    title="List Who's Out",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_whos_out(
     start: str | None = Field(None, description="The first day of the date range to query, in YYYY-MM-DD format. Defaults to today when omitted."),
     end: str | None = Field(None, description="The last day of the date range to query, in YYYY-MM-DD format. Defaults to 14 days after the start date when omitted."),

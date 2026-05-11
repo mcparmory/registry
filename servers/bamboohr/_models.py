@@ -1,7 +1,7 @@
 """
 Bamboohr MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:22:33 UTC
+Generated: 2026-05-11 19:30:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -592,8 +592,8 @@ class CreateCandidateRequestBody(StrictModel):
     highest_education: Literal["GED or Equivalent", "High School", "Some College", "College - Associates", "College - Bachelor of Arts", "College - Bachelor of Fine Arts", "College - Bachelor of Science", "College - Master of Arts", "College - Master of Fine Arts", "College - Master of Science", "College - Master of Business Administration", "College - Doctorate", "Medical Doctor", "Other"] | None = Field(default=None, validation_alias="highestEducation", serialization_alias="highestEducation", description="The highest level of education the candidate has completed; must match one of the predefined education level values.")
     college_name: str | None = Field(default=None, validation_alias="collegeName", serialization_alias="collegeName", description="The name of the college or university the candidate attended.")
     references: str | None = Field(default=None, description="Professional or personal references provided by the candidate.")
-    resume: str | None = Field(default=None, description="The candidate's resume file; accepted formats include PDF, Word documents, plain text, RTF, and common image types.", json_schema_extra={'format': 'binary'})
-    cover_letter: str | None = Field(default=None, validation_alias="coverLetter", serialization_alias="coverLetter", description="The candidate's cover letter file; accepted formats include PDF, Word documents, plain text, RTF, and common image types.", json_schema_extra={'format': 'binary'})
+    resume: str | None = Field(default=None, description="Base64-encoded file content for upload. The candidate's resume file; accepted formats include PDF, Word documents, plain text, RTF, and common image types.", json_schema_extra={'format': 'byte'})
+    cover_letter: str | None = Field(default=None, validation_alias="coverLetter", serialization_alias="coverLetter", description="Base64-encoded file content for upload. The candidate's cover letter file; accepted formats include PDF, Word documents, plain text, RTF, and common image types.", json_schema_extra={'format': 'byte'})
 class CreateCandidateRequest(StrictModel):
     """Submit a new candidate application for a specific job opening in the Applicant Tracking System. Requires ATS settings access; only fields mandated by the target job's standard questions need to be provided beyond the three required fields."""
     body: CreateCandidateRequestBody
@@ -1172,7 +1172,7 @@ class UploadEmployeeFileRequestBody(StrictModel):
     file_name: str = Field(default=..., validation_alias="fileName", serialization_alias="fileName", description="The display name assigned to the uploaded file as it will appear in the employee's document folder.")
     category: int = Field(default=..., description="The numeric ID of the employee file section (category) into which the file will be uploaded.")
     share: Literal["yes", "no"] | None = Field(default=None, description="Controls whether the uploaded file is shared with the employee and made visible to them. Defaults to no if omitted.")
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file content to upload, submitted as part of the multipart/form-data request body.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file content to upload, submitted as part of the multipart/form-data request body.", json_schema_extra={'format': 'byte'})
 class UploadEmployeeFileRequest(StrictModel):
     """Uploads a file to a specific section of an employee's document folder via multipart/form-data. Files must be under 20MB and use a supported extension; on success, the response includes a Location header pointing to the newly created file resource."""
     path: UploadEmployeeFileRequestPath
@@ -1183,7 +1183,7 @@ class UploadCompanyFileRequestBody(StrictModel):
     file_name: str = Field(default=..., validation_alias="fileName", serialization_alias="fileName", description="The display name for the file as it will appear in the company file system.")
     category: int = Field(default=..., description="The numeric ID of the file category (section) into which the file will be uploaded. Read-only categories and implementation categories (for completed implementations) are not permitted.")
     share: Literal["yes", "no"] | None = Field(default=None, description="Controls whether the uploaded file is shared with all employees. Accepts 'yes' to share or 'no' to keep private; defaults to 'no' if omitted.")
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file content to upload. Must be under 20MB and use a supported file extension.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file content to upload. Must be under 20MB and use a supported file extension.", json_schema_extra={'format': 'byte'})
 class UploadCompanyFileRequest(StrictModel):
     """Uploads a file to a specified company file category using a multipart/form-data request. Files must be under 20MB, use a supported extension, and cannot be uploaded to read-only categories or implementation categories on companies that have completed implementation."""
     body: UploadCompanyFileRequestBody
@@ -1580,7 +1580,7 @@ class DeleteEmployeeTrainingRecordRequest(StrictModel):
 class UploadEmployeePhotoRequestPath(StrictModel):
     employee_id: int = Field(default=..., validation_alias="employeeId", serialization_alias="employeeId", description="The unique numeric identifier of the employee whose photo is being uploaded.")
 class UploadEmployeePhotoRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The image file to set as the employee's photo. Must be a square image (width and height within one pixel of each other), at least 150×150 pixels, no larger than 20MB, and in JPEG, PNG, or BMP format; other formats such as HEIC, SVG, AVIF, and TIFF are not reliably supported.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The image file to set as the employee's photo. Must be a square image (width and height within one pixel of each other), at least 150×150 pixels, no larger than 20MB, and in JPEG, PNG, or BMP format; other formats such as HEIC, SVG, AVIF, and TIFF are not reliably supported.", json_schema_extra={'format': 'byte'})
 class UploadEmployeePhotoRequest(StrictModel):
     """Uploads and replaces the photo for a specified employee, updating all size variants. The image must be a square JPEG, PNG, or BMP file of at least 150×150 pixels and no larger than 20MB; employees may upload their own photo if the company has self-photo uploads enabled."""
     path: UploadEmployeePhotoRequestPath
