@@ -1,7 +1,7 @@
 """
 Authentication module for Notion MCP server.
 
-Generated: 2026-05-05 15:40:58 UTC
+Generated: 2026-05-11 19:56:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

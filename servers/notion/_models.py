@@ -1,7 +1,7 @@
 """
 Notion MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:40:58 UTC
+Generated: 2026-05-11 19:56:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -573,7 +573,7 @@ class UploadFileRequestPath(StrictModel):
 class UploadFileRequestHeader(StrictModel):
     notion_version: Literal["2026-03-11"] = Field(default=..., validation_alias="Notion-Version", serialization_alias="Notion-Version", description="The API version to use for this request. Must be `2026-03-11` or later.")
 class UploadFileRequestBody(StrictModel):
-    file_: dict[str, Any] = Field(default=..., validation_alias="file", serialization_alias="file", description="The raw binary file contents to upload.")
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The raw binary file contents to upload.", json_schema_extra={'format': 'byte'})
     part_number: str | None = Field(default=None, description="The current part number when uploading files in multiple parts (required for files larger than 20MB). Must be an integer between 1 and 1,000.")
 class UploadFileRequest(StrictModel):
     """Upload file contents to a file upload session, supporting multipart uploads for files larger than 20MB."""

@@ -5,7 +5,7 @@ Notion MCP Server
 API Info:
 - Terms of Service: https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac
 
-Generated: 2026-05-05 15:40:58 UTC
+Generated: 2026-05-11 19:56:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.notion.com")
 SERVER_NAME = "Notion"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -986,6 +1017,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1010,6 +1043,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1217,7 +1252,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Notion", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_self(notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11.")) -> dict[str, Any] | ToolResult:
     """Retrieve the bot user associated with your API token. This returns information about the authenticated user making the request."""
 
@@ -1253,7 +1294,13 @@ async def get_self(notion_version: Literal["2026-03-11"] = Field(..., alias="Not
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(
     user_id: str = Field(..., description="The unique identifier of the user to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -1293,7 +1340,13 @@ async def get_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="API version to use for this request. Must be set to the latest version 2026-03-11 to ensure compatibility with current API behavior."),
     page_size: float | None = Field(None, description="Number of users to return per page for pagination. Controls the batch size of results in the response."),
@@ -1335,7 +1388,12 @@ async def list_users(
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Page",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_page(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
     parent: _models.PostPageBodyParentV0 | _models.PostPageBodyParentV1 | _models.PostPageBodyParentV2 | _models.PostPageBodyParentV3 | None = Field(None, description="The parent location where the page will be created, typically a database or another page."),
@@ -1377,13 +1435,20 @@ async def create_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Page",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page(
     page_id: str = Field(..., description="The unique identifier of the page to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1427,7 +1492,13 @@ async def get_page(
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Page",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_page(
     page_id: str = Field(..., description="The unique identifier of the page to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1472,13 +1543,19 @@ async def update_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Move Page",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_page(
     page_id: str = Field(..., description="The unique identifier of the page to move."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -1516,13 +1593,20 @@ async def move_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Page Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_property(
     page_id: str = Field(..., description="The unique identifier of the Notion page containing the property."),
     property_id: str = Field(..., description="The unique identifier of the property to retrieve from the page."),
@@ -1567,7 +1651,13 @@ async def get_page_property(
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Page Markdown",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_markdown(
     page_id: str = Field(..., description="The unique identifier of the Notion page to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1611,7 +1701,12 @@ async def get_page_markdown(
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Page Markdown",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_page_markdown(
     page_id: str = Field(..., description="The unique identifier of the page to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1653,13 +1748,20 @@ async def update_page_markdown(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Blocks
-@mcp.tool()
+@mcp.tool(
+    title="Get Block",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_block(
     block_id: str = Field(..., description="The unique identifier of the block to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to 2026-03-11 (the latest version)."),
@@ -1699,7 +1801,13 @@ async def get_block(
     return _response_data
 
 # Tags: Blocks
-@mcp.tool()
+@mcp.tool(
+    title="Update Block",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_block(
     block_id: str = Field(..., description="The unique identifier of the block to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1738,13 +1846,20 @@ async def update_block(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Blocks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Block",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_block(
     block_id: str = Field(..., description="The unique identifier of the block to delete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1784,7 +1899,13 @@ async def delete_block(
     return _response_data
 
 # Tags: Blocks
-@mcp.tool()
+@mcp.tool(
+    title="List Block Children",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_block_children(
     block_id: str = Field(..., description="The unique identifier of the parent block whose children you want to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to 2026-03-11 or later for compatibility with current API features."),
@@ -1828,7 +1949,12 @@ async def list_block_children(
     return _response_data
 
 # Tags: Blocks
-@mcp.tool()
+@mcp.tool(
+    title="Append Block Children",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_block_children(
     block_id: str = Field(..., description="The unique identifier of the parent block to which children will be appended."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1867,13 +1993,20 @@ async def append_block_children(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Data sources
-@mcp.tool()
+@mcp.tool(
+    title="Get Data Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_data_source(
     data_source_id: str = Field(..., description="The unique identifier of the data source to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -1913,7 +2046,13 @@ async def get_data_source(
     return _response_data
 
 # Tags: Data sources
-@mcp.tool()
+@mcp.tool(
+    title="Update Data Source",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_data_source(
     data_source_id: str = Field(..., description="The unique identifier of the data source to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -1956,13 +2095,19 @@ async def update_data_source(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Data sources
-@mcp.tool()
+@mcp.tool(
+    title="Query Data Source",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_data_source(
     data_source_id: str = Field(..., description="The unique identifier of the data source to query."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -2008,13 +2153,19 @@ async def query_data_source(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Data sources
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Source",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_source(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
     database_id: str = Field(..., description="The unique identifier of the parent Notion database where the data source will be created. Accepts the ID with or without dashes (e.g., 195de9221179449fab8075a27c979105)."),
@@ -2054,13 +2205,20 @@ async def create_data_source(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Data sources
-@mcp.tool()
+@mcp.tool(
+    title="List Data Source Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_data_source_templates(
     data_source_id: str = Field(..., description="The unique identifier of the data source containing the templates to list."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Currently supports version 2026-03-11."),
@@ -2105,7 +2263,13 @@ async def list_data_source_templates(
     return _response_data
 
 # Tags: Databases
-@mcp.tool()
+@mcp.tool(
+    title="Get Database",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_database(
     database_id: str = Field(..., description="The unique identifier of the database to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -2145,7 +2309,13 @@ async def get_database(
     return _response_data
 
 # Tags: Databases
-@mcp.tool()
+@mcp.tool(
+    title="Update Database",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_database(
     database_id: str = Field(..., description="The unique identifier of the database to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -2190,13 +2360,19 @@ async def update_database(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Databases
-@mcp.tool()
+@mcp.tool(
+    title="Create Database",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_database(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version 2026-03-11."),
     parent: _models.CreateDatabaseBodyParent = Field(..., description="The parent page or workspace where the database will be created. This determines the location and context of the new database."),
@@ -2239,13 +2415,19 @@ async def create_database(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Pages by Property",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_pages_by_property(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     timestamp: Literal["last_edited_time"] = Field(..., description="The property to sort results by. Currently supports sorting by last_edited_time."),
@@ -2288,13 +2470,20 @@ async def search_pages_by_property(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comments(
     block_id: str = Field(..., description="The unique identifier of the block for which to retrieve comments."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -2337,7 +2526,12 @@ async def list_comments(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Create Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_comment(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11`, which is the latest supported version."),
     body: _models.CreateACommentBody = Field(..., description="The request body containing the comment data to be created, including content and any required metadata fields."),
@@ -2374,13 +2568,20 @@ async def create_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_comment(
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -2420,7 +2621,13 @@ async def get_comment(
     return _response_data
 
 # Tags: File uploads
-@mcp.tool()
+@mcp.tool(
+    title="List File Uploads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_uploads(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="API version to use for this request. Must be set to the latest version: 2026-03-11."),
     status: Literal["pending", "uploaded", "expired", "failed"] | None = Field(None, description="Filter results to only include file uploads with a specific status: pending (awaiting processing), uploaded (successfully completed), expired (no longer available), or failed (encountered an error)."),
@@ -2463,7 +2670,12 @@ async def list_file_uploads(
     return _response_data
 
 # Tags: File uploads
-@mcp.tool()
+@mcp.tool(
+    title="Create File Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file_upload(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11` or later."),
     mode: Literal["single_part", "multi_part", "external_url"] | None = Field(None, description="Upload mode: `single_part` for files under 20MB (default), `multi_part` for larger files, or `external_url` to import from a public HTTPS URL."),
@@ -2503,17 +2715,23 @@ async def create_file_upload(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: File uploads
-@mcp.tool()
+@mcp.tool(
+    title="Send File Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_file_upload(
     file_upload_id: str = Field(..., description="The unique identifier for the file upload session to which the file contents are being sent."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be `2026-03-11` or later."),
-    file_: dict[str, Any] = Field(..., alias="file", description="The raw binary file contents to upload."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The raw binary file contents to upload.", json_schema_extra={'format': 'byte'}),
     part_number: str | None = Field(None, description="The current part number when uploading files in multiple parts (required for files larger than 20MB). Must be an integer between 1 and 1,000."),
 ) -> dict[str, Any] | ToolResult:
     """Upload file contents to a file upload session, supporting multipart uploads for files larger than 20MB."""
@@ -2549,13 +2767,19 @@ async def send_file_upload(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: File uploads
-@mcp.tool()
+@mcp.tool(
+    title="Complete File Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def complete_file_upload(
     file_upload_id: str = Field(..., description="The unique identifier of the file upload session to complete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11` or later for compatibility with current API features."),
@@ -2595,7 +2819,13 @@ async def complete_file_upload(
     return _response_data
 
 # Tags: File uploads
-@mcp.tool()
+@mcp.tool(
+    title="Get File Upload",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_upload(
     file_upload_id: str = Field(..., description="The unique identifier of the file upload to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11` for the latest version."),
@@ -2635,7 +2865,13 @@ async def get_file_upload(
     return _response_data
 
 # Tags: Custom emojis
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Emojis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_emojis(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     page_size: int | None = Field(None, description="Maximum number of custom emojis to return in the response, between 1 and 100 items.", ge=1, le=100),
@@ -2678,7 +2914,13 @@ async def list_custom_emojis(
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_views(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="API version to use for this request. Must be set to the latest version (2026-03-11) to ensure compatibility with current features."),
     database_id: str | None = Field(None, description="Filter results to views belonging to a specific database. Omit to include views from all databases."),
@@ -2722,7 +2964,12 @@ async def list_views(
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_view(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be the latest version 2026-03-11."),
     data_source_id: str = Field(..., description="The ID of the data source (database or view) that this view should be scoped to."),
@@ -2776,13 +3023,20 @@ async def create_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Get View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_view(
     view_id: str = Field(..., description="The unique identifier of the view to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -2822,7 +3076,13 @@ async def get_view(
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Update View",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_view(
     view_id: str = Field(..., description="The unique identifier of the view to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version: 2026-03-11."),
@@ -2864,13 +3124,20 @@ async def update_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Delete View",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_view(
     view_id: str = Field(..., description="The unique identifier of the view to delete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version 2026-03-11."),
@@ -2910,7 +3177,12 @@ async def delete_view(
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create View Query",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_view_query(
     view_id: str = Field(..., description="The unique identifier of the view where the query will be created."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Currently supports version 2026-03-11."),
@@ -2948,13 +3220,20 @@ async def create_view_query(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Get View Query Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_view_query_results(
     view_id: str = Field(..., description="The unique identifier of the Notion view containing the query."),
     query_id: str = Field(..., description="The unique identifier of the query whose results should be retrieved."),
@@ -2999,7 +3278,13 @@ async def get_view_query_results(
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Delete View Query",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_view_query(
     view_id: str = Field(..., description="The unique identifier of the view containing the query to delete."),
     query_id: str = Field(..., description="The unique identifier of the query to delete."),
