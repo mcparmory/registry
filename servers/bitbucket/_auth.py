@@ -1,7 +1,7 @@
 """
 Authentication module for Bitbucket MCP server.
 
-Generated: 2026-05-05 14:24:36 UTC
+Generated: 2026-05-11 23:09:02 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

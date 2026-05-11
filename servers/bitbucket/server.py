@@ -6,7 +6,7 @@ API Info:
 - Contact: Bitbucket Support <support@bitbucket.org> (https://support.atlassian.com/bitbucket-cloud/)
 - Terms of Service: https://www.atlassian.com/legal/customer-agreement
 
-Generated: 2026-05-05 14:24:36 UTC
+Generated: 2026-05-11 23:09:02 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.bitbucket.org/2.0")
 SERVER_NAME = "Bitbucket"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1011,6 +1042,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1035,6 +1068,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1260,7 +1295,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Bitbucket", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Event Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_event_types() -> dict[str, Any] | ToolResult:
     """Retrieves all webhook resource and subject types on which webhooks can be registered. Each returned type includes an events link for browsing the paginated list of specific events that subject type can emit. No authentication required."""
 
@@ -1287,7 +1328,13 @@ async def list_webhook_event_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Event Types by Subject",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_event_types_by_subject(subject_type: Literal["repository", "workspace"] = Field(..., description="The entity type for which to retrieve subscribable webhook events. Note: team and user subject types are deprecated; use workspace instead.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all valid webhook event types available for subscription on a given subject type (repository or workspace). This is public data requiring no authentication or scopes."""
 
@@ -1323,7 +1370,13 @@ async def list_webhook_event_types_by_subject(subject_type: Literal["repository"
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_repositories(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     role: Literal["admin", "contributor", "member", "owner"] | None = Field(None, description="Filters repositories based on the authenticated user's access level: member (read access), contributor (write access), admin (administrator access), or owner (all repositories owned by the user)."),
@@ -1367,7 +1420,13 @@ async def list_workspace_repositories(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository(
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
@@ -1406,7 +1465,12 @@ async def get_repository(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository(
     repo_slug: str = Field(..., description="The slug or UUID of the repository to create. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID in which to create the repository. UUIDs must be surrounded by curly-braces."),
@@ -1444,13 +1508,20 @@ async def create_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository(
     repo_slug: str = Field(..., description="The slug or UUID of the repository to update. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID containing the repository. UUIDs must be surrounded by curly-braces."),
@@ -1488,13 +1559,20 @@ async def update_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository to delete. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
@@ -1537,7 +1615,13 @@ async def delete_repository(
     return _response_data
 
 # Tags: Branch restrictions
-@mcp.tool()
+@mcp.tool(
+    title="List Branch Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branch_restrictions(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -1581,7 +1665,12 @@ async def list_branch_restrictions(
     return _response_data
 
 # Tags: Branch restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Create Branch Restriction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_branch_restriction(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -1619,13 +1708,20 @@ async def create_branch_restriction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Branch restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch Restriction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch_restriction(
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the branch restriction rule to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -1665,7 +1761,13 @@ async def get_branch_restriction(
     return _response_data
 
 # Tags: Branch restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Update Branch Restriction",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_branch_restriction(
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the branch restriction rule to update."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -1704,13 +1806,20 @@ async def update_branch_restriction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Branch restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Branch Restriction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_branch_restriction(
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the branch restriction rule to delete."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
@@ -1750,7 +1859,13 @@ async def delete_branch_restriction(
     return _response_data
 
 # Tags: Branching model
-@mcp.tool()
+@mcp.tool(
+    title="Get Branching Model",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branching_model(
     repo_slug: str = Field(..., description="The repository identifier, either the URL-friendly slug or the repository UUID enclosed in curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID enclosed in curly-braces."),
@@ -1789,7 +1904,13 @@ async def get_branching_model(
     return _response_data
 
 # Tags: Branching model
-@mcp.tool()
+@mcp.tool(
+    title="Get Branching Model Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branching_model_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository whose branching model settings are being retrieved. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -1828,7 +1949,13 @@ async def get_branching_model_settings(
     return _response_data
 
 # Tags: Branching model
-@mcp.tool()
+@mcp.tool(
+    title="Update Branching Model Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_branching_model_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
@@ -1867,7 +1994,13 @@ async def update_branching_model_settings(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit(
     commit: str = Field(..., description="The full SHA1 hash of the commit to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -1907,7 +2040,12 @@ async def get_commit(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Approve Commit",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_commit(
     commit: str = Field(..., description="The full SHA1 hash identifying the specific commit to approve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository containing the commit. UUIDs must be surrounded by curly-braces."),
@@ -1947,7 +2085,13 @@ async def approve_commit(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Unapprove Commit",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unapprove_commit(
     commit: str = Field(..., description="The SHA1 hash uniquely identifying the commit to unapprove."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that contains the commit."),
@@ -1987,7 +2131,13 @@ async def unapprove_commit(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_comments(
     commit: str = Field(..., description="The full SHA1 hash identifying the specific commit whose comments should be retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID that uniquely identifies the repository within the workspace. UUIDs must be surrounded by curly-braces."),
@@ -2032,7 +2182,12 @@ async def list_commit_comments(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Create Commit Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_commit_comment(
     commit: str = Field(..., description="The full SHA1 hash of the commit to comment on."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that identifies the repository within the workspace."),
@@ -2071,13 +2226,20 @@ async def create_commit_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the commit comment to retrieve."),
     commit: str = Field(..., description="The full SHA1 hash of the commit whose comment is being retrieved."),
@@ -2120,7 +2282,13 @@ async def get_commit_comment(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Update Commit Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_commit_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to update."),
     commit: str = Field(..., description="The full SHA1 hash of the commit that the comment belongs to."),
@@ -2162,13 +2330,20 @@ async def update_commit_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Delete Commit Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_commit_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the commit comment to delete."),
     commit: str = Field(..., description="The full SHA1 hash of the commit whose comment is being deleted."),
@@ -2211,7 +2386,13 @@ async def delete_commit_comment(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_property(
     workspace: str = Field(..., description="The workspace containing the repository, identified by its slug or UUID (UUID must be wrapped in curly braces)."),
     repo_slug: str = Field(..., description="The slug of the repository where the commit resides."),
@@ -2253,7 +2434,13 @@ async def get_commit_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Update Commit Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_commit_property(
     workspace: str = Field(..., description="The workspace that contains the repository, identified by its slug or UUID (UUID must be wrapped in curly braces)."),
     repo_slug: str = Field(..., description="The slug of the repository where the commit resides."),
@@ -2295,7 +2482,13 @@ async def update_commit_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Commit Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_commit_property(
     workspace: str = Field(..., description="The workspace containing the repository, specified as either the workspace slug or the workspace UUID wrapped in curly braces."),
     repo_slug: str = Field(..., description="The slug identifier of the repository from which the commit property will be deleted."),
@@ -2337,7 +2530,13 @@ async def delete_commit_property(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Requests for Commit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_pull_requests(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the UUID enclosed in curly braces."),
     repo_slug: str = Field(..., description="The repository identifier, either the repository slug or the UUID enclosed in curly braces."),
@@ -2383,7 +2582,13 @@ async def list_commit_pull_requests(
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_reports(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -2423,7 +2628,13 @@ async def list_commit_reports(
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_report(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the commit and report."),
@@ -2464,7 +2675,13 @@ async def get_commit_report(
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Commit Report",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_commit_report(
     workspace: str = Field(..., description="The workspace identifier — either the slug (short name) or the UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the target commit."),
@@ -2504,13 +2721,20 @@ async def create_or_update_commit_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Delete Commit Report",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_commit_report(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the commit and its associated report."),
@@ -2551,7 +2775,13 @@ async def delete_commit_report(
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Report Annotations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_report_annotations(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -2592,7 +2822,12 @@ async def list_commit_report_annotations(
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Create Annotations",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def bulk_create_annotations(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g., my-team) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace."),
@@ -2632,13 +2867,20 @@ async def bulk_create_annotations(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Report Annotation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_report_annotation(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The URL-friendly slug of the repository within the specified workspace."),
@@ -2680,7 +2922,13 @@ async def get_commit_report_annotation(
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Upsert Commit Report Annotation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upsert_commit_report_annotation(
     workspace: str = Field(..., description="The workspace identifier, either the slug or the UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace."),
@@ -2721,13 +2969,20 @@ async def upsert_commit_report_annotation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Reports, Commits
-@mcp.tool()
+@mcp.tool(
+    title="Delete Commit Annotation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_commit_annotation(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace."),
@@ -2769,7 +3024,13 @@ async def delete_commit_annotation(
     return _response_data
 
 # Tags: Commit statuses
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_statuses(
     commit: str = Field(..., description="The full SHA1 hash of the commit whose statuses you want to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -2815,7 +3076,12 @@ async def list_commit_statuses(
     return _response_data
 
 # Tags: Commit statuses
-@mcp.tool()
+@mcp.tool(
+    title="Create Commit Build Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_commit_build_status(
     commit: str = Field(..., description="The full SHA1 hash of the commit to attach the build status to."),
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (e.g. my-repo) or as a UUID surrounded by curly braces."),
@@ -2854,13 +3120,20 @@ async def create_commit_build_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Commit statuses
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Build Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_build_status(
     commit: str = Field(..., description="The full SHA1 hash of the commit whose build status you want to retrieve."),
     key: str = Field(..., description="The unique key identifying the specific build status entry associated with the commit."),
@@ -2901,7 +3174,13 @@ async def get_commit_build_status(
     return _response_data
 
 # Tags: Commit statuses
-@mcp.tool()
+@mcp.tool(
+    title="Update Commit Build Status",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_commit_build_status(
     commit: str = Field(..., description="The full SHA1 hash of the commit whose build status you want to update."),
     key: str = Field(..., description="The unique key identifying the build status entry to update. This value cannot be changed via this operation."),
@@ -2941,13 +3220,20 @@ async def update_commit_build_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commits(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository."),
@@ -2986,7 +3272,12 @@ async def list_commits(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commits With Filters",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_commits_with_filters(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -3025,7 +3316,13 @@ async def list_commits_with_filters(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commits by Revision",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commits_by_revision(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository within the workspace. UUID values must be surrounded by curly-braces."),
     revision: str = Field(..., description="The starting point for the commit log; accepts a full or abbreviated commit SHA1 or a ref name such as a branch or tag."),
@@ -3065,7 +3362,12 @@ async def list_commits_by_revision(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="List Commits by Revision",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_commits_by_revision_post(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     revision: str = Field(..., description="The starting point for the commit history, specified as a full or abbreviated commit SHA1 hash or a ref name such as a branch or tag."),
@@ -3105,7 +3407,13 @@ async def list_commits_by_revision_post(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Default Reviewers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_default_reviewers(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (workspace short name) or as a UUID surrounded by curly-braces."),
@@ -3144,7 +3452,13 @@ async def list_default_reviewers(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Default Reviewer",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_default_reviewer(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     target_username: str = Field(..., description="The username or UUID of the default reviewer to look up. UUIDs must be surrounded by curly-braces."),
@@ -3184,7 +3498,13 @@ async def get_default_reviewer(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Add Default Reviewer",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_default_reviewer(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     target_username: str = Field(..., description="The username or UUID of the user to add as a default reviewer for the repository."),
@@ -3224,7 +3544,13 @@ async def add_default_reviewer(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Remove Default Reviewer",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_default_reviewer(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     target_username: str = Field(..., description="The username or UUID of the default reviewer to remove from the repository."),
@@ -3264,7 +3590,13 @@ async def remove_default_reviewer(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="List Deploy Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deploy_keys(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -3303,7 +3635,12 @@ async def list_deploy_keys(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Add Deploy Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_deploy_key(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -3342,7 +3679,13 @@ async def add_deploy_key(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Get Deploy Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID that owns the deploy key. UUIDs must be surrounded by curly-braces."),
@@ -3382,7 +3725,13 @@ async def get_deploy_key(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Update Deploy Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_deploy_key(
     key_id: str = Field(..., description="The numeric ID of the deploy key to update."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that contains the deploy key."),
@@ -3422,7 +3771,13 @@ async def update_deploy_key(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Deploy Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to delete."),
     repo_slug: str = Field(..., description="The repository slug or UUID that owns the deploy key. UUID values must be surrounded by curly-braces."),
@@ -3462,7 +3817,13 @@ async def delete_deploy_key(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="List Deployments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployments(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -3501,7 +3862,13 @@ async def list_deployments(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the deployment."),
@@ -3541,7 +3908,13 @@ async def get_deployment(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environment_variables(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -3581,7 +3954,12 @@ async def list_environment_variables(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -3620,13 +3998,20 @@ async def create_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace that owns the deployment environment."),
@@ -3666,13 +4051,20 @@ async def update_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment_variable(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace."),
@@ -3713,7 +4105,13 @@ async def delete_environment_variable(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Diff",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_diff(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository within the workspace."),
     spec: str = Field(..., description="A single commit SHA or a two-commit range using double-dot notation to define the diff scope. For two-commit ranges, the first commit contains the changes to preview and the second represents the comparison target (note: opposite order from git diff)."),
@@ -3762,7 +4160,13 @@ async def get_repository_diff(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Diffstat",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_diffstat(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository within the workspace."),
     spec: str = Field(..., description="A single commit SHA or a commit range using double-dot notation to compare two commits. For two-commit specs, the first commit represents the source (changes to preview) and the second represents the destination (state to compare against)."),
@@ -3809,7 +4213,13 @@ async def get_diffstat(
     return _response_data
 
 # Tags: Downloads
-@mcp.tool()
+@mcp.tool(
+    title="List Download Artifacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_download_artifacts(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -3848,7 +4258,12 @@ async def list_download_artifacts(
     return _response_data
 
 # Tags: Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Upload Download Artifact",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_download_artifact(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -3887,7 +4302,13 @@ async def upload_download_artifact(
     return _response_data
 
 # Tags: Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Get Download Artifact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_download_artifact(
     filename: str = Field(..., description="The exact filename of the download artifact to retrieve from the repository's downloads section."),
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID enclosed in curly braces."),
@@ -3927,7 +4348,13 @@ async def get_download_artifact(
     return _response_data
 
 # Tags: Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Delete Download Artifact",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_download_artifact(
     filename: str = Field(..., description="The exact name of the download artifact file to delete, including its file extension."),
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID surrounded by curly-braces."),
@@ -3967,7 +4394,13 @@ async def delete_download_artifact(
     return _response_data
 
 # Tags: Branching model
-@mcp.tool()
+@mcp.tool(
+    title="Get Effective Branching Model",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_effective_branching_model(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
@@ -4006,7 +4439,13 @@ async def get_effective_branching_model(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Effective Default Reviewers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_effective_default_reviewers(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
@@ -4045,7 +4484,13 @@ async def list_effective_default_reviewers(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="List Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace whose environments will be listed."),
@@ -4084,7 +4529,12 @@ async def list_environments(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace where the environment will be created."),
@@ -4122,13 +4572,20 @@ async def create_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the target environment."),
@@ -4168,7 +4625,13 @@ async def get_environment(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -4208,7 +4671,12 @@ async def delete_environment(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_environment(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -4248,7 +4716,13 @@ async def update_environment(
     return _response_data
 
 # Tags: Source, Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List File History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_history(
     commit: str = Field(..., description="The SHA1 hash of the commit to start the file history from."),
     path: str = Field(..., description="The path to the file within the repository whose commit history you want to retrieve."),
@@ -4295,7 +4769,13 @@ async def list_file_history(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Forks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_forks(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository whose forks should be listed. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
@@ -4340,7 +4820,12 @@ async def list_repository_forks(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Fork Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fork_repository(
     repo_slug: str = Field(..., description="The slug or UUID of the repository to fork. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The slug or UUID of the workspace that owns the source repository. UUIDs must be surrounded by curly-braces."),
@@ -4378,13 +4863,20 @@ async def fork_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Repositories, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_webhooks(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID enclosed in curly-braces, uniquely identifying the target repository within the workspace."),
     workspace: str = Field(..., description="The workspace slug (ID) or the workspace UUID enclosed in curly-braces, identifying the workspace that owns the repository."),
@@ -4423,7 +4915,13 @@ async def list_repository_webhooks(
     return _response_data
 
 # Tags: Repositories, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_webhook(
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or the repository UUID surrounded by curly-braces."),
     uid: str = Field(..., description="The unique identifier of the installed webhook to retrieve."),
@@ -4463,7 +4961,13 @@ async def get_repository_webhook(
     return _response_data
 
 # Tags: Repositories, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_webhook(
     repo_slug: str = Field(..., description="The repository identifier, either its slug (short name) or its UUID surrounded by curly-braces."),
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to update."),
@@ -4503,7 +5007,13 @@ async def update_repository_webhook(
     return _response_data
 
 # Tags: Repositories, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_webhook(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to delete."),
@@ -4543,7 +5053,13 @@ async def delete_repository_webhook(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Merge Base",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_merge_base(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     revspec: str = Field(..., description="A range of exactly two commits specified using double-dot notation, identifying the two commits whose common ancestor should be found."),
@@ -4583,7 +5099,13 @@ async def get_merge_base(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Override Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_override_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUIDs must be surrounded by curly-braces."),
@@ -4622,7 +5144,13 @@ async def get_repository_override_settings(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Set Repository Override Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_repository_override_settings(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that contains the repository. UUID values must be surrounded by curly-braces."),
@@ -4661,7 +5189,13 @@ async def set_repository_override_settings(
     return _response_data
 
 # Tags: Commits
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Patch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_patch(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     spec: str = Field(..., description="A single commit SHA or a two-commit range using double-dot notation to generate a patch series. For a range, the first commit is the source and the second is the destination."),
@@ -4701,7 +5235,13 @@ async def get_repository_patch(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Group Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_group_permissions(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -4740,7 +5280,13 @@ async def list_repository_group_permissions(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Group Permission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_group_permission(
     group_slug: str = Field(..., description="The slug identifier of the group whose repository permission is being retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that identifies the target repository."),
@@ -4780,7 +5326,13 @@ async def get_repository_group_permission(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List Repository User Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_user_permissions(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID values must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace slug or UUID identifying the workspace that owns the repository. UUID values must be surrounded by curly-braces."),
@@ -4819,7 +5371,13 @@ async def list_repository_user_permissions(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Get User Repository Permission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_repository_permission(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUID format must be surrounded by curly-braces."),
     selected_user_id: str = Field(..., description="The unique identifier of the user whose permission is being retrieved. Accepts either an Atlassian Account ID or a UUID surrounded by curly-braces."),
@@ -4859,7 +5417,13 @@ async def get_user_repository_permission(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Repository Permission",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_repository_permission(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository within the workspace."),
     selected_user_id: str = Field(..., description="The account identifier for the user whose repository permission will be deleted, provided as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
@@ -4899,7 +5463,13 @@ async def delete_user_repository_permission(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Pipelines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipelines(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -4957,7 +5527,12 @@ async def list_pipelines(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Pipeline",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_pipeline(
     workspace: str = Field(..., description="The workspace identifier — either the slug (short name) or the UUID surrounded by curly braces — that owns the repository."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) or identifier within the workspace where the pipeline will be triggered."),
@@ -4995,13 +5570,20 @@ async def trigger_pipeline(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Caches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_caches(
     workspace: str = Field(..., description="The slug or UUID of the workspace that owns the repository."),
     repo_slug: str = Field(..., description="The slug or UUID of the repository whose pipeline caches are being listed."),
@@ -5040,7 +5622,13 @@ async def list_pipeline_caches(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pipeline Caches",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pipeline_caches(
     workspace: str = Field(..., description="The workspace slug or UUID identifying the account that owns the repository."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository whose pipeline caches will be deleted."),
@@ -5083,7 +5671,13 @@ async def delete_pipeline_caches(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pipeline Cache",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pipeline_cache(
     workspace: str = Field(..., description="The workspace slug or UUID identifying the account that owns the repository."),
     repo_slug: str = Field(..., description="The repository slug identifying the repository whose pipeline cache will be deleted."),
@@ -5123,7 +5717,13 @@ async def delete_pipeline_cache(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Cache Content URI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_cache_content_uri(
     workspace: str = Field(..., description="The slug or UUID of the Bitbucket workspace that owns the repository."),
     repo_slug: str = Field(..., description="The slug or UUID of the repository containing the pipeline cache."),
@@ -5163,7 +5763,13 @@ async def get_pipeline_cache_content_uri(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Runners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_runners(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -5202,7 +5808,12 @@ async def list_repository_runners(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository Runner",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace where the runner will be created."),
@@ -5241,7 +5852,13 @@ async def create_repository_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Runner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -5281,7 +5898,13 @@ async def get_repository_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Runner",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -5321,7 +5944,13 @@ async def update_repository_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Runner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -5361,7 +5990,13 @@ async def delete_repository_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -5401,7 +6036,13 @@ async def get_pipeline(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Steps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_steps(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the pipeline."),
@@ -5441,7 +6082,13 @@ async def list_pipeline_steps(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Step",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_step(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug, which is the URL-friendly name of the repository within the specified workspace."),
@@ -5482,7 +6129,13 @@ async def get_pipeline_step(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Step Log",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_step_log(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug, which is the URL-friendly name of the repository within the workspace."),
@@ -5523,7 +6176,13 @@ async def get_pipeline_step_log(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Step Log Container",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_step_log_container(
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug identifying the target repository within the workspace."),
@@ -5565,7 +6224,13 @@ async def get_pipeline_step_log_container(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Step Test Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_step_test_report(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID enclosed in curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -5606,7 +6271,13 @@ async def get_pipeline_step_test_report(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Step Test Cases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_step_test_cases(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -5647,7 +6318,13 @@ async def list_pipeline_step_test_cases(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Test Case Reasons",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_test_case_reasons(
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug identifying the target repository within the workspace."),
@@ -5689,7 +6366,13 @@ async def list_test_case_reasons(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Stop Pipeline",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def stop_pipeline(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug (short name) or the workspace UUID enclosed in curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the pipeline to stop."),
@@ -5729,7 +6412,13 @@ async def stop_pipeline(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipelines Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipelines_config(
     workspace: str = Field(..., description="The slug or UUID of the workspace that owns the repository."),
     repo_slug: str = Field(..., description="The slug or UUID of the repository whose Pipelines configuration is being retrieved."),
@@ -5768,7 +6457,13 @@ async def get_pipelines_config(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Set Pipeline Next Build Number",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_pipeline_next_build_number(
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug identifying which repository's pipeline build number sequence to update."),
@@ -5806,13 +6501,20 @@ async def set_pipeline_next_build_number(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Schedules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_schedules(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -5851,7 +6553,12 @@ async def list_pipeline_schedules(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create Pipeline Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the workspace for which the pipeline schedule will be created."),
@@ -5889,13 +6596,20 @@ async def create_pipeline_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Schedule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -5935,7 +6649,13 @@ async def get_pipeline_schedule(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Pipeline Schedule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -5974,13 +6694,20 @@ async def update_pipeline_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pipeline Schedule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pipeline_schedule(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6020,7 +6747,13 @@ async def delete_pipeline_schedule(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Executions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_executions(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -6060,7 +6793,13 @@ async def list_schedule_executions(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository SSH Key Pair",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_ssh_key_pair(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6099,7 +6838,13 @@ async def get_repository_ssh_key_pair(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Set Repository SSH Key Pair",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_repository_ssh_key_pair(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6137,13 +6882,20 @@ async def set_repository_ssh_key_pair(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository SSH Key Pair",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_ssh_key_pair(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6182,7 +6934,13 @@ async def delete_repository_ssh_key_pair(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline SSH Known Hosts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_ssh_known_hosts(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6221,7 +6979,12 @@ async def list_pipeline_ssh_known_hosts(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create SSH Known Host",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_ssh_known_host(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6259,13 +7022,20 @@ async def create_ssh_known_host(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline SSH Known Host",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_ssh_known_host(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID enclosed in curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -6305,7 +7075,13 @@ async def get_pipeline_ssh_known_host(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Pipeline Known Host",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pipeline_known_host(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6344,13 +7120,20 @@ async def update_pipeline_known_host(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Known Host",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_known_host(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6390,7 +7173,13 @@ async def delete_known_host(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Pipeline Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_pipeline_variables(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6429,7 +7218,12 @@ async def list_repository_pipeline_variables(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository Pipeline Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6467,13 +7261,20 @@ async def create_repository_pipeline_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that uniquely identifies the repository within the workspace."),
@@ -6513,7 +7314,13 @@ async def get_pipeline_variable(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Pipeline Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     repo_slug: str = Field(..., description="The repository slug or identifier within the specified workspace."),
@@ -6552,13 +7359,20 @@ async def update_repository_pipeline_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Pipeline Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either the slug (short name) or the UUID surrounded by curly-braces."),
     repo_slug: str = Field(..., description="The repository slug (URL-friendly name) that contains the pipeline variable to delete."),
@@ -6598,7 +7412,13 @@ async def delete_repository_pipeline_variable(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_property(
     workspace: str = Field(..., description="The workspace containing the repository, identified by its slug or UUID wrapped in curly braces."),
     repo_slug: str = Field(..., description="The slug of the repository from which the property value will be retrieved."),
@@ -6639,7 +7459,13 @@ async def get_repository_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_property(
     workspace: str = Field(..., description="The repository container, identified by either the workspace slug or the workspace UUID wrapped in curly braces."),
     repo_slug: str = Field(..., description="The slug identifier of the repository within the specified workspace."),
@@ -6680,7 +7506,13 @@ async def update_repository_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_property(
     workspace: str = Field(..., description="The workspace containing the repository, specified as either the workspace slug or the workspace UUID wrapped in curly braces."),
     repo_slug: str = Field(..., description="The slug identifier of the repository from which the property will be deleted."),
@@ -6721,7 +7553,13 @@ async def delete_repository_property(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_requests(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
@@ -6764,7 +7602,12 @@ async def list_pull_requests(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Create Pull Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pull_request(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the target repository where the pull request will be created."),
     workspace: str = Field(..., description="The workspace slug or UUID (surrounded by curly-braces) that owns the repository."),
@@ -6802,13 +7645,20 @@ async def create_pull_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_activity(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -6847,7 +7697,13 @@ async def list_pull_request_activity(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
@@ -6887,7 +7743,13 @@ async def get_pull_request(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request to update."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that contains the pull request."),
@@ -6926,13 +7788,20 @@ async def update_pull_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_activity_by_id(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request whose activity log should be retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -6972,7 +7841,13 @@ async def list_pull_request_activity_by_id(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Approve Pull Request",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def approve_pull_request(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request to approve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -7012,7 +7887,13 @@ async def approve_pull_request(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Unapprove Pull Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unapprove_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request to unapprove."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -7052,7 +7933,13 @@ async def unapprove_pull_request(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_comments(
     pull_request_id: int = Field(..., description="The unique numeric ID of the pull request whose comments should be retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -7092,7 +7979,12 @@ async def list_pull_request_comments(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Create Pull Request Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pull_request_comment(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request on which the comment will be created."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -7131,13 +8023,20 @@ async def create_pull_request_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to retrieve."),
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment."),
@@ -7180,7 +8079,13 @@ async def get_pull_request_comment(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pull_request_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to update."),
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment."),
@@ -7222,13 +8127,20 @@ async def update_pull_request_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pull Request Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pull_request_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to delete."),
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment."),
@@ -7271,7 +8183,12 @@ async def delete_pull_request_comment(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Pull Request Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resolve_pull_request_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment thread to resolve."),
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment thread."),
@@ -7314,7 +8231,13 @@ async def resolve_pull_request_comment(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Reopen Pull Request Comment Thread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reopen_pull_request_comment_thread(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment whose resolved status should be removed."),
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request containing the comment thread."),
@@ -7357,7 +8280,13 @@ async def reopen_pull_request_comment_thread(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_commits(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose commits are being retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
@@ -7397,7 +8326,13 @@ async def list_pull_request_commits(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Decline Pull Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def decline_pull_request(
     pull_request_id: int = Field(..., description="The unique numeric ID of the pull request to decline."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -7437,7 +8372,13 @@ async def decline_pull_request(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Diff",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_diff(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose diff you want to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository containing the pull request. UUID values must be surrounded by curly-braces."),
@@ -7477,7 +8418,13 @@ async def get_pull_request_diff(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Diffstat",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_diffstat(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose diff stat you want to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -7517,7 +8464,13 @@ async def get_pull_request_diffstat(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Merge Pull Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_pull_request(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request to merge."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the target repository."),
@@ -7561,13 +8514,20 @@ async def merge_pull_request(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Merge Task Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_merge_task_status(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request whose merge task status is being checked."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the repository containing the pull request."),
@@ -7608,7 +8568,13 @@ async def get_pull_request_merge_task_status(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Patch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_patch(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request within the repository."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
@@ -7648,7 +8614,12 @@ async def get_pull_request_patch(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Request Pull Request Changes",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_pull_request_changes(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request on which changes are being requested."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository containing the pull request. UUID values must be surrounded by curly-braces."),
@@ -7688,7 +8659,13 @@ async def request_pull_request_changes(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Remove Pull Request Change Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_pull_request_change_request(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request from which the change request will be removed."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the repository containing the pull request."),
@@ -7728,7 +8705,13 @@ async def remove_pull_request_change_request(
     return _response_data
 
 # Tags: Pullrequests, Commit statuses
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_statuses(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose statuses should be retrieved."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUID values must be surrounded by curly-braces."),
@@ -7773,7 +8756,13 @@ async def list_pull_request_statuses(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_tasks(
     pull_request_id: int = Field(..., description="The unique numeric identifier of the pull request whose tasks should be listed."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -7819,7 +8808,12 @@ async def list_pull_request_tasks(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Create Pull Request Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pull_request_task(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request on which the task will be created."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that uniquely identifies the repository within the workspace."),
@@ -7860,13 +8854,20 @@ async def create_pull_request_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_task(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request containing the task."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -7909,7 +8910,13 @@ async def get_pull_request_task(
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pull_request_task(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request that contains the task to update."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the repository containing the pull request."),
@@ -7952,13 +8959,20 @@ async def update_pull_request_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pull Request Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pull_request_task(
     pull_request_id: int = Field(..., description="The numeric ID of the pull request from which the task will be deleted."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -8001,7 +9015,13 @@ async def delete_pull_request_task(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_property(
     workspace: str = Field(..., description="The workspace containing the repository, identified by its slug or UUID (UUID must be wrapped in curly braces)."),
     repo_slug: str = Field(..., description="The slug of the repository containing the pull request."),
@@ -8043,7 +9063,13 @@ async def get_pull_request_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pull_request_property(
     workspace: str = Field(..., description="The workspace containing the repository, identified by its slug or UUID (UUID must be wrapped in curly braces)."),
     repo_slug: str = Field(..., description="The slug of the repository that contains the pull request."),
@@ -8085,7 +9111,13 @@ async def update_pull_request_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pull Request Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pull_request_property(
     workspace: str = Field(..., description="The workspace containing the repository, identified by its slug or UUID (UUID must be wrapped in curly braces)."),
     repo_slug: str = Field(..., description="The slug of the repository containing the pull request."),
@@ -8127,7 +9159,13 @@ async def delete_pull_request_property(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Refs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_refs(
     repo_slug: str = Field(..., description="The repository identifier, either the URL-friendly slug or the repository UUID enclosed in curly braces."),
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID enclosed in curly braces."),
@@ -8171,7 +9209,13 @@ async def list_repository_refs(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="List Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branches(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace that owns the repository. UUIDs must be surrounded by curly-braces."),
@@ -8215,7 +9259,12 @@ async def list_branches(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="Create Branch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_branch(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (workspace ID) or as a UUID surrounded by curly-braces."),
@@ -8254,7 +9303,13 @@ async def create_branch(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch(
     name: str = Field(..., description="The name of the branch to retrieve. For Git repositories, omit any prefix such as 'refs/heads' and provide only the bare branch name."),
     repo_slug: str = Field(..., description="The repository identifier, either as a human-readable slug or as a UUID surrounded by curly-braces."),
@@ -8294,7 +9349,13 @@ async def get_branch(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Branch",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_branch(
     name: str = Field(..., description="The name of the branch to delete, provided without any prefix such as refs/heads."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository; UUIDs must be surrounded by curly-braces."),
@@ -8334,7 +9395,13 @@ async def delete_branch(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_tags(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
@@ -8378,7 +9445,12 @@ async def list_repository_tags(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(
     repo_slug: str = Field(..., description="The repository identifier, either the repository slug or the repository UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID surrounded by curly-braces."),
@@ -8416,13 +9488,20 @@ async def create_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_tag(
     name: str = Field(..., description="The name of the tag to retrieve."),
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) that uniquely identifies the repository within the workspace."),
@@ -8462,7 +9541,13 @@ async def get_repository_tag(
     return _response_data
 
 # Tags: Refs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag(
     name: str = Field(..., description="The name of the tag to delete, without any ref prefixes."),
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the repository. UUIDs must be surrounded by curly-braces."),
@@ -8502,7 +9587,13 @@ async def delete_tag(
     return _response_data
 
 # Tags: Source, Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Root Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_root_src(
     repo_slug: str = Field(..., description="The repository identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a URL-friendly slug or as a UUID wrapped in curly-braces."),
@@ -8541,7 +9632,12 @@ async def get_repository_root_src(
     return _response_data
 
 # Tags: Source, Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Create Commit with Files",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_commit_with_files(
     repo_slug: str = Field(..., description="The repository slug or UUID (surrounded by curly-braces) identifying the target repository."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID (surrounded by curly-braces) that owns the repository."),
@@ -8587,7 +9683,13 @@ async def create_commit_with_files(
     return _response_data
 
 # Tags: Source, Repositories
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_src(
     commit: str = Field(..., description="The full SHA1 hash of the commit to retrieve file or directory contents from."),
     path: str = Field(..., description="The path to the target file or directory within the repository, relative to the repository root. Append a trailing slash when targeting the root directory."),
@@ -8635,7 +9737,13 @@ async def get_repository_src(
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Watchers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_watchers(
     repo_slug: str = Field(..., description="The repository identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (URL-friendly name) or as a UUID surrounded by curly-braces."),
@@ -8674,7 +9782,12 @@ async def list_repository_watchers(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Create Snippet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_snippet() -> dict[str, Any] | ToolResult:
     """Creates a new snippet under the authenticated user's account, supporting multiple text and binary files via multipart/form-data or multipart/related requests. Snippets can be public or private and optionally organized under a specific workspace."""
 
@@ -8701,7 +9814,13 @@ async def create_snippet() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Snippets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_snippets(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
     role: Literal["owner", "contributor", "member"] | None = Field(None, description="Filters results to snippets where the authenticated user holds the specified role: owner (created the snippet), contributor (has edit access), or member (has view access)."),
@@ -8743,7 +9862,12 @@ async def list_workspace_snippets(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Create Workspace Snippet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workspace_snippet(workspace: str = Field(..., description="The workspace in which to create the snippet, identified by either its slug (human-readable ID) or its UUID surrounded by curly-braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new snippet scoped to the specified workspace. Behaves identically to the global snippet creation endpoint, but associates the snippet with the given workspace."""
 
@@ -8779,7 +9903,13 @@ async def create_workspace_snippet(workspace: str = Field(..., description="The 
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. a short name) or as a UUID surrounded by curly braces."),
@@ -8818,7 +9948,13 @@ async def get_snippet(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Update Snippet",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to update."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. a short name) or as a UUID surrounded by curly braces."),
@@ -8857,7 +9993,13 @@ async def update_snippet(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Snippet",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. my-team) or as a UUID surrounded by curly-braces."),
@@ -8896,7 +10038,13 @@ async def delete_snippet(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="List Snippet Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_snippet_comments(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose comments are being retrieved."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -8935,7 +10083,12 @@ async def list_snippet_comments(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Create Snippet Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_snippet_comment(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to comment on."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (e.g. my-team) or as a UUID surrounded by curly-braces."),
@@ -8973,13 +10126,20 @@ async def create_snippet_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to retrieve."),
     encoded_id: str = Field(..., description="The unique identifier of the snippet, as assigned by Bitbucket."),
@@ -9021,7 +10181,13 @@ async def get_snippet_comment(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Update Snippet Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_snippet_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to update."),
     encoded_id: str = Field(..., description="The unique identifier of the snippet to which the comment belongs."),
@@ -9062,13 +10228,20 @@ async def update_snippet_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Snippet Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_snippet_comment(
     comment_id: str = Field(..., description="The unique numeric identifier of the comment to delete."),
     encoded_id: str = Field(..., description="The unique identifier of the snippet, as assigned by Bitbucket."),
@@ -9110,7 +10283,13 @@ async def delete_snippet_comment(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="List Snippet Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_snippet_commits(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose commit history is being retrieved."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
@@ -9149,7 +10328,13 @@ async def list_snippet_commits(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet Commit Changes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_commit_changes(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose commit changes you want to retrieve."),
     revision: str = Field(..., description="The SHA1 hash of the commit whose changes you want to inspect."),
@@ -9189,7 +10374,13 @@ async def get_snippet_commit_changes(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet File Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_file_content(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve the file from."),
     path: str = Field(..., description="The relative path to the target file within the snippet."),
@@ -9229,7 +10420,13 @@ async def get_snippet_file_content(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Check Snippet Watch Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_snippet_watch_status(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to check watch status for."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
@@ -9268,7 +10465,13 @@ async def check_snippet_watch_status(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Watch Snippet",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def watch_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to watch."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -9307,7 +10510,13 @@ async def watch_snippet(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Unwatch Snippet",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unwatch_snippet(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to stop watching."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug or as a UUID surrounded by curly-braces."),
@@ -9346,7 +10555,13 @@ async def unwatch_snippet(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet Revision",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_revision(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve."),
     node_id: str = Field(..., description="The commit revision SHA1 hash identifying the specific historical version of the snippet to retrieve."),
@@ -9386,7 +10601,13 @@ async def get_snippet_revision(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Update Snippet at Revision",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_snippet_at_revision(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to update."),
     node_id: str = Field(..., description="The SHA1 commit revision that must match the snippet's current HEAD; the update is rejected if this is not the most recent revision."),
@@ -9426,7 +10647,13 @@ async def update_snippet_at_revision(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Snippet Revision",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_snippet_revision(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to delete."),
     node_id: str = Field(..., description="The SHA1 commit hash identifying the specific revision of the snippet; must point to the latest commit or the request will fail."),
@@ -9466,7 +10693,13 @@ async def delete_snippet_revision(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet File Contents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_file_contents(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve the file from."),
     node_id: str = Field(..., description="The commit revision SHA1 hash identifying the specific version of the snippet to retrieve the file from."),
@@ -9507,7 +10740,13 @@ async def get_snippet_file_contents(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet Diff",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_diff(
     encoded_id: str = Field(..., description="The unique identifier of the snippet whose diff is being retrieved."),
     revision: str = Field(..., description="A revspec expression identifying the commit or range to diff, such as a commit SHA1, a branch/tag ref name, or a two-dot compare expression to diff between two refs."),
@@ -9551,7 +10790,13 @@ async def get_snippet_diff(
     return _response_data
 
 # Tags: Snippets
-@mcp.tool()
+@mcp.tool(
+    title="Get Snippet Patch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snippet_patch(
     encoded_id: str = Field(..., description="The unique identifier of the snippet to retrieve the patch for."),
     revision: str = Field(..., description="A revspec expression identifying the commit or range to patch against its first parent, such as a commit SHA1, a ref name, or a range expression using double-dot notation."),
@@ -9591,7 +10836,13 @@ async def get_snippet_patch(
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Team Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_team_code(
     username: str = Field(..., description="The team account to search within, specified as either the team's username or its UUID wrapped in curly braces."),
     search_query: str = Field(..., description="The search query string used to find matching code; supports advanced syntax such as scoping to a specific repository using the `repo:` qualifier, and combining multiple terms."),
@@ -9638,7 +10889,13 @@ async def search_team_code(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and details of the currently authenticated user. Useful for confirming identity or accessing user-specific information tied to the active session."""
 
@@ -9665,7 +10922,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Emails",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_emails() -> dict[str, Any] | ToolResult:
     """Retrieves all email addresses associated with the currently authenticated user. Includes both confirmed and unconfirmed addresses."""
 
@@ -9692,7 +10955,13 @@ async def list_user_emails() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Email",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_email(email: str = Field(..., description="The full email address to look up among the authenticated user's registered email addresses.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific email address belonging to the authenticated user. The response includes whether the address has been confirmed and whether it is the user's primary email."""
 
@@ -9728,7 +10997,13 @@ async def get_email(email: str = Field(..., description="The full email address 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspaces(
     sort: str | None = Field(None, description="Property name to sort the returned workspaces by; only sorting by slug is supported."),
     administrator: bool | None = Field(None, description="When set to true, returns only workspaces where the caller has admin permissions; when set to false, returns only workspaces where the caller does not have admin permissions. Omit to return all accessible workspaces regardless of admin status."),
@@ -9769,7 +11044,13 @@ async def list_workspaces(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Permission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_permission(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves the calling user's effective (highest) permission role for a specified workspace. If the user belongs to multiple groups with different roles, only the highest privilege level is returned."""
 
@@ -9805,7 +11086,13 @@ async def get_workspace_permission(workspace: str = Field(..., description="The 
     return _response_data
 
 # Tags: Repositories
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Repository Permissions for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_repository_permissions_for_user(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces."),
     q: str | None = Field(None, description="A filter expression to narrow results by repository or permission level, using Bitbucket's filtering and sorting syntax. Values must be URL-encoded (e.g., encode `=` as `%3D`)."),
@@ -9848,7 +11135,13 @@ async def list_workspace_repository_permissions_for_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(selected_user: str = Field(..., description="The identifier of the user to retrieve, accepted as either an Atlassian Account ID or a UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves public profile information for a specified Bitbucket user account. Private profiles omit location, website, and account creation date fields."""
 
@@ -9884,7 +11177,13 @@ async def get_user(selected_user: str = Field(..., description="The identifier o
     return _response_data
 
 # Tags: GPG
-@mcp.tool()
+@mcp.tool(
+    title="List User GPG Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_gpg_keys(selected_user: str = Field(..., description="The identifier of the user whose GPG keys will be listed, accepted as either an Atlassian Account ID or an account UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of GPG public keys associated with a specified Bitbucket user. The key and subkeys fields can be included in the response using partial response syntax."""
 
@@ -9920,7 +11219,12 @@ async def list_user_gpg_keys(selected_user: str = Field(..., description="The id
     return _response_data
 
 # Tags: GPG
-@mcp.tool()
+@mcp.tool(
+    title="Add GPG Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_gpg_key(
     selected_user: str = Field(..., description="The account identifier for the target user, accepted as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
     body: _models.GpgAccountKey | None = Field(None, description="The request body containing the GPG public key to be added to the user account."),
@@ -9957,13 +11261,20 @@ async def add_gpg_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: GPG
-@mcp.tool()
+@mcp.tool(
+    title="Get User GPG Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_gpg_key(
     fingerprint: str = Field(..., description="The fingerprint uniquely identifying the GPG key to retrieve."),
     selected_user: str = Field(..., description="The user whose GPG key is being retrieved, specified as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
@@ -10002,7 +11313,13 @@ async def get_user_gpg_key(
     return _response_data
 
 # Tags: GPG
-@mcp.tool()
+@mcp.tool(
+    title="Delete User GPG Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_gpg_key(
     fingerprint: str = Field(..., description="The unique fingerprint identifying the GPG key to delete, used to locate the specific key within the user's account."),
     selected_user: str = Field(..., description="The account identifier for the target user, accepted as either an Atlassian Account ID or a UUID surrounded by curly-braces."),
@@ -10041,7 +11358,13 @@ async def delete_user_gpg_key(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Get User App Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_app_property(
     selected_user: str = Field(..., description="The identifier of the target user account, either as an Atlassian Account ID or a UUID wrapped in curly braces."),
     app_key: str = Field(..., description="The unique key identifying the Connect app whose property is being retrieved."),
@@ -10081,7 +11404,13 @@ async def get_user_app_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Update User App Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_app_property(
     selected_user: str = Field(..., description="The unique identifier of the target user account, either as an Atlassian Account ID or a UUID wrapped in curly braces."),
     app_key: str = Field(..., description="The key identifying the Connect app whose property is being updated. This must correspond to a registered Connect app key."),
@@ -10121,7 +11450,13 @@ async def update_user_app_property(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete User App Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_app_property(
     selected_user: str = Field(..., description="The identifier of the target user account, either as an Atlassian Account ID or a UUID wrapped in curly braces."),
     app_key: str = Field(..., description="The unique key identifying the Bitbucket Connect app whose property is being deleted."),
@@ -10161,7 +11496,13 @@ async def delete_user_app_property(
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search User Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_user_code(
     selected_user: str = Field(..., description="The unique identifier of the user whose repositories will be searched — either an Atlassian Account ID or a UUID wrapped in curly braces."),
     search_query: str = Field(..., description="The search query string used to find matching code; supports advanced syntax such as scoping results to a specific repository using the `repo:` qualifier and combining multiple terms."),
@@ -10208,7 +11549,13 @@ async def search_user_code(
     return _response_data
 
 # Tags: SSH
-@mcp.tool()
+@mcp.tool(
+    title="List User SSH Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_ssh_keys(selected_user: str = Field(..., description="The identifier of the user whose SSH keys will be listed — either an Atlassian Account ID or an account UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of SSH public keys associated with the specified user account. Useful for auditing or managing a user's SSH authentication credentials."""
 
@@ -10244,7 +11591,12 @@ async def list_user_ssh_keys(selected_user: str = Field(..., description="The id
     return _response_data
 
 # Tags: SSH
-@mcp.tool()
+@mcp.tool(
+    title="Add SSH Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_ssh_key(
     selected_user: str = Field(..., description="The account identifier for the target user, either as an Atlassian Account ID or as an account UUID surrounded by curly braces."),
     body: _models.SshAccountKey | None = Field(None, description="The SSH public key payload to add to the user account, including the key type, public key string, and optional label."),
@@ -10281,13 +11633,20 @@ async def add_ssh_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: SSH
-@mcp.tool()
+@mcp.tool(
+    title="Get User SSH Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_ssh_key(
     key_id: str = Field(..., description="The unique identifier (UUID) of the SSH key to retrieve."),
     selected_user: str = Field(..., description="The user account to retrieve the SSH key from, specified as either an Atlassian Account ID or an account UUID wrapped in curly braces."),
@@ -10326,7 +11685,13 @@ async def get_user_ssh_key(
     return _response_data
 
 # Tags: SSH
-@mcp.tool()
+@mcp.tool(
+    title="Update SSH Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_ssh_key(
     key_id: str = Field(..., description="The unique UUID identifier of the SSH key to update."),
     selected_user: str = Field(..., description="The account identifier for the target user, either as an Atlassian Account ID or as an account UUID surrounded by curly braces."),
@@ -10364,13 +11729,20 @@ async def update_ssh_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: SSH
-@mcp.tool()
+@mcp.tool(
+    title="Delete User SSH Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_ssh_key(
     key_id: str = Field(..., description="The unique UUID identifier of the SSH key to delete."),
     selected_user: str = Field(..., description="The account identifier for the target user, accepted as either an Atlassian Account ID or an account UUID wrapped in curly-braces."),
@@ -10409,7 +11781,13 @@ async def delete_user_ssh_key(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific Bitbucket workspace. Returns workspace metadata including settings, links, and membership information."""
 
@@ -10445,7 +11823,13 @@ async def get_workspace(workspace: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Workspaces, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_webhooks(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID surrounded by curly-braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all webhooks installed on the specified workspace. Useful for auditing or managing webhook integrations configured at the workspace level."""
 
@@ -10481,7 +11865,13 @@ async def list_workspace_webhooks(workspace: str = Field(..., description="The u
     return _response_data
 
 # Tags: Workspaces, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_webhook(
     uid: str = Field(..., description="The unique identifier of the installed webhook to retrieve."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or a UUID surrounded by curly-braces."),
@@ -10520,7 +11910,13 @@ async def get_workspace_webhook(
     return _response_data
 
 # Tags: Workspaces, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace_webhook(
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to update."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
@@ -10559,7 +11955,13 @@ async def update_workspace_webhook(
     return _response_data
 
 # Tags: Workspaces, Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workspace Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workspace_webhook(
     uid: str = Field(..., description="The unique identifier of the installed webhook subscription to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -10598,7 +12000,13 @@ async def delete_workspace_webhook(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_members(workspace: str = Field(..., description="The unique identifier of the workspace, either as a slug (e.g., a short name/alias) or as a UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves all members belonging to the specified workspace. Supports filtering by email address (up to 90 at a time) when called by a workspace administrator, integration, or workspace access token."""
 
@@ -10634,7 +12042,13 @@ async def list_workspace_members(workspace: str = Field(..., description="The un
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_member(
     member: str = Field(..., description="The unique identifier of the member to look up, either their UUID or Atlassian account ID."),
     workspace: str = Field(..., description="The unique identifier of the workspace, either its slug (human-readable ID) or its UUID wrapped in curly braces."),
@@ -10673,7 +12087,13 @@ async def get_workspace_member(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_permissions(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug (short name) or the workspace UUID enclosed in curly braces."),
     q: str | None = Field(None, description="A filter expression to narrow results by permission level, using Bitbucket's filtering and sorting syntax."),
@@ -10715,7 +12135,13 @@ async def list_workspace_permissions(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Repository Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_repository_permissions(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug or the workspace UUID enclosed in curly braces."),
     q: str | None = Field(None, description="A query string to filter results by repository, user, or permission level using Bitbucket's filtering syntax; values must be URL-encoded."),
@@ -10758,7 +12184,13 @@ async def list_workspace_repository_permissions(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Repository User Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_user_permissions_workspace(
     repo_slug: str = Field(..., description="The repository slug or UUID identifying the target repository. UUIDs must be surrounded by curly-braces."),
     workspace: str = Field(..., description="The workspace ID (slug) or UUID identifying the workspace. UUIDs must be surrounded by curly-braces."),
@@ -10802,7 +12234,13 @@ async def list_repository_user_permissions_workspace(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Runners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_runners(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (short name) or a UUID enclosed in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieve all pipeline runners configured for a specific workspace. Runners are used to execute Bitbucket Pipelines builds within the workspace."""
 
@@ -10838,7 +12276,12 @@ async def list_workspace_runners(workspace: str = Field(..., description="The un
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create Workspace Runner",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workspace_runner(workspace: str = Field(..., description="The workspace identifier, either the workspace slug (human-readable short name) or the workspace UUID enclosed in curly braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new runner for the specified workspace, enabling custom build infrastructure to execute Bitbucket Pipelines jobs."""
 
@@ -10874,7 +12317,13 @@ async def create_workspace_runner(workspace: str = Field(..., description="The w
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Runner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
     runner_uuid: str = Field(..., description="The unique UUID identifying the runner to retrieve within the specified workspace."),
@@ -10913,7 +12362,13 @@ async def get_workspace_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace Runner",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace_runner(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
     runner_uuid: str = Field(..., description="The unique identifier (UUID) of the runner to update within the specified workspace."),
@@ -10952,7 +12407,13 @@ async def update_workspace_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workspace Runner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workspace_runner(
     workspace: str = Field(..., description="The workspace identifier, either the workspace slug (short name) or the workspace UUID enclosed in curly braces."),
     runner_uuid: str = Field(..., description="The unique identifier (UUID) of the runner to delete."),
@@ -10991,7 +12452,13 @@ async def delete_workspace_runner(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Pipeline Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_pipeline_variables(workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID wrapped in curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves all pipeline configuration variables defined at the workspace level. These variables are available across all pipelines within the specified workspace."""
 
@@ -11027,7 +12494,12 @@ async def list_workspace_pipeline_variables(workspace: str = Field(..., descript
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Create Pipeline Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pipeline_variable(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID enclosed in curly braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new variable at the workspace level for use across Bitbucket Pipelines. Workspace-level variables are available to all pipelines within the specified workspace."""
 
@@ -11063,7 +12535,13 @@ async def create_pipeline_variable(workspace: str = Field(..., description="The 
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Pipeline Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_pipeline_variable(
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
     variable_uuid: str = Field(..., description="The unique identifier (UUID) of the workspace pipeline configuration variable to retrieve."),
@@ -11102,7 +12580,13 @@ async def get_workspace_pipeline_variable(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace Pipeline Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace_pipeline_variable(
     workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID surrounded by curly-braces."),
     variable_uuid: str = Field(..., description="The UUID of the pipeline configuration variable to update, uniquely identifying the variable within the workspace."),
@@ -11141,7 +12625,13 @@ async def update_workspace_pipeline_variable(
     return _response_data
 
 # Tags: Pipelines
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workspace Pipeline Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workspace_pipeline_variable(
     workspace: str = Field(..., description="The unique identifier for the workspace, accepted as either a slug (human-readable short name) or a UUID surrounded by curly-braces."),
     variable_uuid: str = Field(..., description="The UUID of the workspace pipeline variable to delete. This uniquely identifies the specific variable to be permanently removed."),
@@ -11180,7 +12670,13 @@ async def delete_workspace_pipeline_variable(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_projects(workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Retrieves all projects belonging to a specified workspace. Returns a list of project resources associated with the given workspace identifier."""
 
@@ -11216,7 +12712,12 @@ async def list_workspace_projects(workspace: str = Field(..., description="The w
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(workspace: str = Field(..., description="The workspace in which to create the project, specified as either the workspace slug (human-readable ID) or the workspace UUID surrounded by curly braces.")) -> dict[str, Any] | ToolResult:
     """Creates a new project within the specified workspace, supporting optional avatar images via data-URL or external URL, privacy settings, and a unique project key."""
 
@@ -11252,7 +12753,13 @@ async def create_project(workspace: str = Field(..., description="The workspace 
     return _response_data
 
 # Tags: Projects, Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(
     project_key: str = Field(..., description="The unique key assigned to the project, used to identify it within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or a UUID surrounded by curly-braces."),
@@ -11291,7 +12798,13 @@ async def get_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     project_key: str = Field(..., description="The unique key identifying the project within the workspace. This is the short alphanumeric identifier assigned to the project, not its name or UUID."),
     workspace: str = Field(..., description="The workspace in which the project resides, specified as either the workspace slug or the workspace UUID enclosed in curly braces."),
@@ -11330,7 +12843,13 @@ async def update_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(
     project_key: str = Field(..., description="The unique key assigned to the project, identifying which project to delete."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or a UUID surrounded by curly-braces."),
@@ -11369,7 +12888,13 @@ async def delete_project(
     return _response_data
 
 # Tags: Branching model
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Branching Model",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_branching_model(
     project_key: str = Field(..., description="The unique key assigned to the project within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or as a UUID surrounded by curly-braces."),
@@ -11408,7 +12933,13 @@ async def get_project_branching_model(
     return _response_data
 
 # Tags: Branching model
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Branching Model Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_branching_model_settings(
     project_key: str = Field(..., description="The unique key assigned to the project within the workspace, used to identify which project's branching model settings to retrieve."),
     workspace: str = Field(..., description="The workspace identifier, accepted as either the workspace slug or the workspace UUID enclosed in curly braces."),
@@ -11447,7 +12978,13 @@ async def get_project_branching_model_settings(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Default Reviewers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_default_reviewers(
     project_key: str = Field(..., description="The unique key assigned to the project, used to identify the project within the workspace."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
@@ -11486,7 +13023,13 @@ async def list_project_default_reviewers(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Default Reviewer",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_default_reviewer(
     project_key: str = Field(..., description="The unique identifier of the project, either its short key or its UUID surrounded by curly-braces."),
     selected_user: str = Field(..., description="The unique identifier of the default reviewer to retrieve, either their username or their account UUID surrounded by curly-braces."),
@@ -11526,7 +13069,13 @@ async def get_project_default_reviewer(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Default Reviewer",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_project_default_reviewer(
     project_key: str = Field(..., description="The unique identifier for the project, either its short key or its UUID surrounded by curly-braces."),
     selected_user: str = Field(..., description="The unique identifier for the user to add as a default reviewer, either their username or their account UUID surrounded by curly-braces."),
@@ -11566,7 +13115,13 @@ async def add_project_default_reviewer(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Remove Project Default Reviewer",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_project_default_reviewer(
     project_key: str = Field(..., description="The unique identifier of the project, either its short key or its UUID surrounded by curly-braces."),
     selected_user: str = Field(..., description="The unique identifier of the user to remove as a default reviewer, either their username or their account UUID surrounded by curly-braces."),
@@ -11606,7 +13161,13 @@ async def remove_project_default_reviewer(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="List Project Deploy Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_deploy_keys(
     project_key: str = Field(..., description="The unique key identifier assigned to the project, used to target the specific project whose deploy keys will be listed."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable short name) or as a UUID surrounded by curly-braces."),
@@ -11645,7 +13206,12 @@ async def list_project_deploy_keys(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Create Project Deploy Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_deploy_key(
     project_key: str = Field(..., description="The unique key identifier assigned to the project (e.g., 'TEST_PROJECT'). This is the short key label, not the project name or UUID."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (human-readable ID) or as a UUID surrounded by curly-braces."),
@@ -11684,7 +13250,13 @@ async def create_project_deploy_key(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Deploy Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to retrieve."),
     project_key: str = Field(..., description="The unique key assigned to the project, used to identify it within the workspace."),
@@ -11724,7 +13296,13 @@ async def get_project_deploy_key(
     return _response_data
 
 # Tags: Deployments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Deploy Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_deploy_key(
     key_id: str = Field(..., description="The unique numeric identifier of the deploy key to be deleted from the project."),
     project_key: str = Field(..., description="The unique key identifier assigned to the project, used to reference the project within the workspace."),
@@ -11764,7 +13342,13 @@ async def delete_project_deploy_key(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Group Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_group_permissions(
     project_key: str = Field(..., description="The unique key identifying the project within the workspace, as assigned when the project was created."),
     workspace: str = Field(..., description="The workspace identifier, accepted as either the workspace slug or the workspace UUID surrounded by curly-braces."),
@@ -11803,7 +13387,13 @@ async def list_project_group_permissions(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project User Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_user_permissions(
     project_key: str = Field(..., description="The unique key identifying the project within the workspace, as assigned when the project was created."),
     workspace: str = Field(..., description="The workspace identifier, either as a slug (short name) or as a UUID surrounded by curly-braces."),
@@ -11842,7 +13432,13 @@ async def list_project_user_permissions(
     return _response_data
 
 # Tags: Workspaces, Pullrequests
-@mcp.tool()
+@mcp.tool(
+    title="List User Pull Requests in Workspace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_pull_requests_in_workspace(
     selected_user: str = Field(..., description="The identifier of the pull request author — accepts a username, an Atlassian ID, or a UUID wrapped in curly braces."),
     workspace: str = Field(..., description="The identifier of the workspace — accepts a workspace slug or a UUID wrapped in curly braces."),
@@ -11885,7 +13481,13 @@ async def list_user_pull_requests_in_workspace(
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Workspace Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_workspace_code(
     workspace: str = Field(..., description="The workspace to search within, specified as either the workspace slug or its UUID wrapped in curly braces."),
     search_query: str = Field(..., description="The search query string used to match code content or file paths, supporting the same syntax as the Bitbucket UI including repository-scoped filters."),

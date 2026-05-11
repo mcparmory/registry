@@ -5,7 +5,7 @@ Base URL: https://api.bitbucket.org/2.0
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 261 |
+| **Tools** | 257 |
 | **Auth** | OAuth2, HTTP Basic, API Key |
 
 ## API Info
@@ -78,6 +78,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
 - `API_KEY` — API Key Authentication (Authorization)
+
 Do not commit credentials to version control.
 
 ### OAuth2
