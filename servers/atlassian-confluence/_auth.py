@@ -1,7 +1,7 @@
 """
 Authentication module for Atlassian Confluence MCP server.
 
-Generated: 2026-05-05 14:18:16 UTC
+Generated: 2026-05-11 23:06:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

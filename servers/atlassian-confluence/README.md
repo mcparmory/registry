@@ -5,7 +5,7 @@ Base URL: https://.atlassian.net/wiki
 | | |
 |---|---|
 | **Category** | Communication |
-| **Tools** | 104 |
+| **Tools** | 101 |
 | **Auth** | HTTP Basic, OAuth2 |
 
 ## API Info
@@ -77,6 +77,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
 - `SERVER_YOUR_DOMAIN` — User-specific value for your-domain
+
 Do not commit credentials to version control.
 
 ### OAuth2

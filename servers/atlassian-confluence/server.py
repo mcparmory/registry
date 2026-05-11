@@ -5,7 +5,7 @@ Atlassian Confluence MCP Server
 API Info:
 - Terms of Service: https://atlassian.com/terms/
 
-Generated: 2026-05-05 14:18:16 UTC
+Generated: 2026-05-11 23:06:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -42,6 +43,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -50,7 +52,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{your_domain}.atlassian.net/wiki".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Atlassian Confluence"
-SERVER_VERSION = "1.0.7"
+SERVER_VERSION = "1.0.8"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -541,6 +543,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -548,6 +572,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -633,6 +659,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -642,18 +669,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -664,24 +689,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1100,6 +1131,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1124,6 +1157,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1340,7 +1375,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Atlassian Confluence", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Audit
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_records(
     start_date: str | None = Field(None, alias="startDate", description="Filter results to records on or after this date. Specify as epoch time in milliseconds."),
     end_date: str | None = Field(None, alias="endDate", description="Filter results to records on or before this date. Specify as epoch time in milliseconds."),
@@ -1385,7 +1426,13 @@ async def list_audit_records(
     return _response_data
 
 # Tags: Content
-@mcp.tool()
+@mcp.tool(
+    title="Archive Pages",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_pages(pages: list[_models.ArchivePagesBodyPagesItem] | None = Field(None, description="List of content IDs identifying the pages to archive. Each ID must resolve to a page object that is not already archived. Pages can belong to different spaces. Requires 'Archive' permission in each page's corresponding space.")) -> dict[str, Any] | ToolResult:
     """Archives a list of pages by their content IDs. The archival process is asynchronous; use the /longtask/<taskId> endpoint to monitor progress."""
 
@@ -1417,13 +1464,19 @@ async def archive_pages(pages: list[_models.ArchivePagesBodyPagesItem] | None = 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content
-@mcp.tool()
+@mcp.tool(
+    title="Publish Blueprint Draft",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_blueprint_draft(
     draft_id: str = Field(..., alias="draftId", description="The unique identifier of the draft page created from a blueprint. This ID can be found in the page URL when viewing the draft in Confluence."),
     number: str = Field(..., description="The version number of the content being published. Set this to 1 for new drafts."),
@@ -1471,13 +1524,20 @@ async def publish_blueprint_draft(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content
-@mcp.tool()
+@mcp.tool(
+    title="Publish Blueprint Draft Shared",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def publish_blueprint_draft_shared(
     draft_id: str = Field(..., alias="draftId", description="The unique identifier of the draft page created from a blueprint. This ID can be found in the Confluence application by opening the draft page and checking its URL."),
     number: str = Field(..., description="The version number of the content being published. Set this to 1 for new draft publications."),
@@ -1525,13 +1585,20 @@ async def publish_blueprint_draft_shared(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content
-@mcp.tool()
+@mcp.tool(
+    title="Search Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_content(
     cql: str = Field(..., description="A CQL query string that specifies the search criteria. CQL supports filtering by content type, space, author, date, and other properties. Refer to Advanced searching using CQL documentation for syntax and available operators."),
     limit: str | None = Field(None, description="The maximum number of content items to return in a single response page. When using expand with body.export_view or body.styled_view, this is restricted to a maximum of 25."),
@@ -1580,7 +1647,13 @@ async def search_content(
     return _response_data
 
 # Tags: Experimental
-@mcp.tool()
+@mcp.tool(
+    title="Delete Page Tree",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_page_tree(id_: str = Field(..., alias="id", description="The content ID of the root page whose entire tree (including all descendant pages) should be deleted.")) -> dict[str, Any] | ToolResult:
     """Asynchronously delete a page and all its descendants by moving them to the space's trash. Only supported for pages with current status. Returns a task ID to track the deletion progress."""
 
@@ -1616,7 +1689,13 @@ async def delete_page_tree(id_: str = Field(..., alias="id", description="The co
     return _response_data
 
 # Tags: Content - children and descendants
-@mcp.tool()
+@mcp.tool(
+    title="Move Page",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def move_page(
     page_id: str = Field(..., alias="pageId", description="The ID of the page to be moved."),
     position: Literal["before", "after", "append"] = Field(..., description="The position to move the page relative to the target page. Use 'before' or 'after' to place the page as a sibling, or 'append' to make it a child of the target."),
@@ -1656,11 +1735,16 @@ async def move_page(
     return _response_data
 
 # Tags: Content - attachments
-@mcp.tool()
+@mcp.tool(
+    title="Add Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_attachment(
     id_: str = Field(..., alias="id", description="The ID of the content to which the attachment will be added."),
-    file_: str = Field(..., alias="file", description="The file to attach. The file will be uploaded as binary data."),
-    minor_edit: str = Field(..., alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is added. Set to 'false' or omit to generate notifications."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file to attach. The file will be uploaded as binary data.", json_schema_extra={'format': 'byte'}),
+    minor_edit: str = Field(..., alias="minorEdit", description="Base64-encoded file content for upload. Set to 'true' to suppress notification emails and activity stream updates when the attachment is added. Set to 'false' or omit to generate notifications.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Adds a new attachment to a piece of content. To update an existing attachment instead, use the create or update attachments operation. Requires X-Atlassian-Token: nocheck header to prevent XSRF attacks."""
 
@@ -1701,11 +1785,17 @@ async def add_attachment(
     return _response_data
 
 # Tags: Content - attachments
-@mcp.tool()
+@mcp.tool(
+    title="Upload Attachment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upload_attachment(
     id_: str = Field(..., alias="id", description="The ID of the content to attach the file to."),
-    file_: str = Field(..., alias="file", description="The file to upload as an attachment. The file will be sent as binary data in the multipart request."),
-    minor_edit: str = Field(..., alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is added or updated."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file to upload as an attachment. The file will be sent as binary data in the multipart request.", json_schema_extra={'format': 'byte'}),
+    minor_edit: str = Field(..., alias="minorEdit", description="Base64-encoded file content for upload. Set to 'true' to suppress notification emails and activity stream updates when the attachment is added or updated.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a new attachment to content or creates a new version of an existing attachment. Supports optional minor edit mode to suppress notifications."""
 
@@ -1746,12 +1836,18 @@ async def upload_attachment(
     return _response_data
 
 # Tags: Content - attachments
-@mcp.tool()
+@mcp.tool(
+    title="Replace Attachment Data",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_attachment_data(
     id_: str = Field(..., alias="id", description="The ID of the content that contains the attachment to be updated."),
     attachment_id: str = Field(..., alias="attachmentId", description="The ID of the attachment whose data will be replaced."),
-    file_: str = Field(..., alias="file", description="The binary file data to upload as the new attachment content."),
-    minor_edit: str = Field(..., alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is updated."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file data to upload as the new attachment content.", json_schema_extra={'format': 'byte'}),
+    minor_edit: str = Field(..., alias="minorEdit", description="Base64-encoded file content for upload. Set to 'true' to suppress notification emails and activity stream updates when the attachment is updated.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Replace the binary data of an attachment by its ID. Optionally include a comment and mark as a minor edit to suppress notifications."""
 
@@ -1792,7 +1888,13 @@ async def replace_attachment_data(
     return _response_data
 
 # Tags: Content - attachments
-@mcp.tool()
+@mcp.tool(
+    title="Download Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_attachment(
     id_: str = Field(..., alias="id", description="The unique identifier of the content object to which the attachment is associated."),
     attachment_id: str = Field(..., alias="attachmentId", description="The unique identifier of the attachment to download."),
@@ -1831,7 +1933,13 @@ async def download_attachment(
     return _response_data
 
 # Tags: Content - macro body
-@mcp.tool()
+@mcp.tool(
+    title="Get Macro Body by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_macro_body(
     id_: str = Field(..., alias="id", description="The ID of the content that contains the macro."),
     version: str = Field(..., description="The version of the content containing the macro. Use 0 to retrieve the macro body from the latest content version."),
@@ -1873,7 +1981,13 @@ async def get_macro_body(
     return _response_data
 
 # Tags: Content - macro body
-@mcp.tool()
+@mcp.tool(
+    title="Get and Convert Macro Body by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_macro_body_converted(
     id_: str = Field(..., alias="id", description="The ID of the content that contains the macro."),
     version: str = Field(..., description="The version of the content containing the macro. Use 0 to retrieve the macro body from the latest content version."),
@@ -1920,7 +2034,13 @@ async def get_macro_body_converted(
     return _response_data
 
 # Tags: Content - macro body
-@mcp.tool()
+@mcp.tool(
+    title="Convert Macro Body Asynchronously",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def convert_macro_body_async(
     id_: str = Field(..., alias="id", description="The ID of the content that contains the macro to be converted."),
     version: str = Field(..., description="The version of the content containing the macro. Use 0 to retrieve the macro from the latest content version."),
@@ -1968,7 +2088,12 @@ async def convert_macro_body_async(
     return _response_data
 
 # Tags: Content labels
-@mcp.tool()
+@mcp.tool(
+    title="Add Labels to Content",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_labels_to_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to which labels will be added."),
     body: _models.LabelCreateArray | _models.LabelCreate = Field(..., description="A collection of labels to add to the content. Each label is a key-value pair where the key identifies the label namespace and the value specifies the label name."),
@@ -2005,13 +2130,20 @@ async def add_labels_to_content(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content labels
-@mcp.tool()
+@mcp.tool(
+    title="Remove Label from Content",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_label_from_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the content from which the label will be removed."),
     name: str = Field(..., description="The name of the label to remove from the content. This parameter supports label names containing forward slashes."),
@@ -2053,7 +2185,13 @@ async def remove_label_from_content(
     return _response_data
 
 # Tags: Content labels
-@mcp.tool()
+@mcp.tool(
+    title="Remove Label from Content",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_label_from_content_by_path(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item from which the label will be removed."),
     label: str = Field(..., description="The name of the label to remove from the content. This method does not support label names containing forward slashes due to path parameter security restrictions."),
@@ -2092,7 +2230,13 @@ async def remove_label_from_content_by_path(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="List Page Watches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_page_watches(
     id_: str = Field(..., alias="id", description="The unique identifier of the page whose watches you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of watch records to return in a single response. The system may apply additional limits regardless of this value."),
@@ -2136,7 +2280,13 @@ async def list_page_watches(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="List Space Watches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_watches(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose parent space watches should be retrieved."),
     limit: str | None = Field(None, description="The maximum number of watch records to return in a single response page. The system may enforce additional limits on this value."),
@@ -2180,7 +2330,12 @@ async def list_space_watches(
     return _response_data
 
 # Tags: Content - children and descendants
-@mcp.tool()
+@mcp.tool(
+    title="Copy Page Hierarchy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_page_hierarchy(
     id_: str = Field(..., alias="id", description="The content ID of the source page whose hierarchy will be copied."),
     destination_page_id: str = Field(..., alias="destinationPageId", description="The content ID of the destination page under which the copied page hierarchy will be placed as a child."),
@@ -2222,13 +2377,19 @@ async def copy_page_hierarchy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content - children and descendants
-@mcp.tool()
+@mcp.tool(
+    title="Copy Page",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_page(
     id_: str = Field(..., alias="id", description="The content ID of the page to copy."),
     type_: Literal["space", "existing_page", "parent_page", "parent_content"] = Field(..., alias="type", description="The destination type for the copied page: 'space' copies as a root page, 'parent_page' or 'parent_content' copies as a child, 'existing_page' replaces the target page."),
@@ -2280,13 +2441,19 @@ async def copy_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content permissions
-@mcp.tool()
+@mcp.tool(
+    title="Verify Content Permission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def verify_content_permission(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to check permissions against."),
     type_: Literal["user", "group"] = Field(..., alias="type", description="The subject type being checked: either a user or group."),
@@ -2325,13 +2492,20 @@ async def verify_content_permission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="List Content Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value."),
@@ -2375,7 +2549,12 @@ async def list_content_restrictions(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Add Content Restrictions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to which restrictions will be added."),
     body: _models.AddRestrictionsBodyV0 | list[_models.ContentRestrictionUpdate] = Field(..., description="The restriction configuration object specifying the users or groups to restrict and the restriction type to apply."),
@@ -2412,13 +2591,20 @@ async def add_content_restrictions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Replace Content Restrictions",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions should be updated."),
     body: _models.UpdateRestrictionsBodyV0 | list[_models.ContentRestrictionUpdate] = Field(..., description="The restriction configuration object containing the new restrictions to apply. This replaces all existing restrictions for the content."),
@@ -2455,13 +2641,20 @@ async def replace_content_restrictions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Content Restrictions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_content_restrictions(id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions should be removed.")) -> dict[str, Any] | ToolResult:
     """Removes all read and update restrictions from a piece of content, making it accessible according to default permissions. Requires permission to edit the content."""
 
@@ -2497,7 +2690,13 @@ async def remove_content_restrictions(id_: str = Field(..., alias="id", descript
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="List Content Restrictions by Operation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_restrictions_by_operation(id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions are being queried.")) -> dict[str, Any] | ToolResult:
     """Retrieves restrictions on content organized by operation type. Returns restriction details with operations as properties rather than array items, requiring permission to view the specified content."""
 
@@ -2533,7 +2732,13 @@ async def list_content_restrictions_by_operation(id_: str = Field(..., alias="id
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Restriction for Operation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_restriction_for_operation(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to query for restrictions."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation for which to retrieve restrictions."),
@@ -2578,7 +2783,13 @@ async def get_content_restriction_for_operation(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Check Group Content Restriction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_group_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to check restrictions for."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation the restriction applies to."),
@@ -2618,7 +2829,13 @@ async def check_group_content_restriction(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Grant Group Content Restriction",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def grant_group_content_restriction(
     id_: str = Field(..., alias="id", description="The ID of the content to which the restriction applies."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The operation type that the restriction applies to, determining whether the group gains read or update access."),
@@ -2658,7 +2875,13 @@ async def grant_group_content_restriction(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Group Content Restriction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_group_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to which the restriction applies."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation for which the group restriction is being removed."),
@@ -2698,7 +2921,13 @@ async def revoke_group_content_restriction(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Check Content Restriction for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_content_restriction_for_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the content (page, blog post, etc.) to check restrictions for."),
     operation_key: str = Field(..., alias="operationKey", description="The type of operation being restricted (e.g., 'read', 'update', 'delete'). Determines which restriction rule to evaluate."),
@@ -2741,7 +2970,12 @@ async def check_content_restriction_for_user(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Grant User Content Restriction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_user_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to which the restriction applies."),
     operation_key: str = Field(..., alias="operationKey", description="The operation type that the restriction applies to (e.g., read, update)."),
@@ -2784,7 +3018,13 @@ async def grant_user_content_restriction(
     return _response_data
 
 # Tags: Content restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Revoke User Content Restriction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_user_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item from which the user restriction will be removed."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of permission restriction to remove from the user."),
@@ -2827,7 +3067,13 @@ async def revoke_user_content_restriction(
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="Get Content State",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_state(id_: str = Field(..., alias="id", description="The unique identifier of the content item whose state you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current state of a content item, supporting draft, current, or archived versions. Requires permission to view the specified content."""
 
@@ -2863,7 +3109,13 @@ async def get_content_state(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="Publish Content with State",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def publish_content_with_state(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose state will be updated."),
     status: Literal["current", "draft"] = Field(..., description="Whether the state should be applied to the draft version or published as a new current version. Draft applies the state to unpublished changes; current publishes a new version with the same body as the previous version."),
@@ -2907,13 +3159,20 @@ async def publish_content_with_state(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="Publish Content Without State",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def publish_content_without_state(id_: str = Field(..., alias="id", description="The unique identifier of the content whose state should be removed and republished.")) -> dict[str, Any] | ToolResult:
     """Removes the content state and publishes a new version of the content without modifying its body. This operation creates a new version with an updated status while preserving the existing content."""
 
@@ -2949,7 +3208,13 @@ async def publish_content_without_state(id_: str = Field(..., alias="id", descri
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="List Available Content States",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_available_content_states(id_: str = Field(..., alias="id", description="The unique identifier of the content for which to retrieve available state transitions. Requires permission to edit the content.")) -> dict[str, Any] | ToolResult:
     """Retrieves the content states available for a specific piece of content to transition to. Returns all enabled space content states plus up to 3 most recently published custom content states; use the content-states endpoint to retrieve all custom states."""
 
@@ -2985,7 +3250,12 @@ async def list_available_content_states(id_: str = Field(..., alias="id", descri
     return _response_data
 
 # Tags: Content versions
-@mcp.tool()
+@mcp.tool(
+    title="Restore Content Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_content_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose version will be restored."),
     operation_key: Literal["restore"] = Field(..., alias="operationKey", description="Operation type identifier that must be set to 'restore' to indicate a version restoration action."),
@@ -3027,13 +3297,20 @@ async def restore_content_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content versions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Content Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_content_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the content from which the version will be deleted."),
     version_number: str = Field(..., alias="versionNumber", description="The version number to delete, starting from 1 up to the current version number."),
@@ -3074,7 +3351,13 @@ async def delete_content_version(
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Content States",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_content_states() -> dict[str, Any] | ToolResult:
     """Retrieve all custom content states that have been created by the authenticated user. This operation requires user authentication to access personalized content state configurations."""
 
@@ -3101,7 +3384,12 @@ async def list_custom_content_states() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Content body
-@mcp.tool()
+@mcp.tool(
+    title="Convert Content Body Asynchronously",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_content_body_async(
     to: Literal["export_view"] = Field(..., description="Target format for the converted content body."),
     value: str = Field(..., description="The content body in the source format specified by the representation parameter."),
@@ -3144,13 +3432,20 @@ async def convert_content_body_async(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content body
-@mcp.tool()
+@mcp.tool(
+    title="Get Async Content Conversion",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_async_content_conversion(id_: str = Field(..., alias="id", description="The unique identifier of the asynchronous conversion task whose result or status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the converted content body for a completed asynchronous conversion task, or check the current status if the task is still processing. Completed results are available for up to 5 minutes or until a new conversion request is made with caching disabled."""
 
@@ -3186,7 +3481,13 @@ async def get_async_content_conversion(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: Content body
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Content Conversion Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_content_conversion_results(ids: list[str] = Field(..., description="List of asyncIds from conversion tasks to retrieve results for. Maximum 50 task IDs per request. Order is preserved in the response.")) -> dict[str, Any] | ToolResult:
     """Retrieve completed content body conversion results for multiple asynchronous tasks. Results are available for up to 5 minutes after task completion or until a new conversion request is made with caching disabled."""
 
@@ -3224,7 +3525,12 @@ async def get_bulk_content_conversion_results(ids: list[str] = Field(..., descri
     return _response_data
 
 # Tags: Content body
-@mcp.tool()
+@mcp.tool(
+    title="Convert Content Bodies Asynchronously in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_content_bodies_async_bulk(conversion_inputs: list[_models.ContentBodyConversionInput] | None = Field(None, alias="conversionInputs", description="Array of content body conversion specifications. Each item defines a source content body and target format. Order is preserved in the response. Maximum 10 items per request.")) -> dict[str, Any] | ToolResult:
     """Asynchronously converts multiple content bodies between supported formats in bulk, with a maximum of 10 conversions per request. Conversion tasks remain available for polling for up to 5 minutes after completion."""
 
@@ -3256,13 +3562,20 @@ async def convert_content_bodies_async_bulk(conversion_inputs: list[_models.Cont
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Label info
-@mcp.tool()
+@mcp.tool(
+    title="List Label Contents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_label_contents(
     name: str = Field(..., description="The name of the label to query for associated contents."),
     type_: Literal["page", "blogpost", "attachment", "page_template"] | None = Field(None, alias="type", description="Filter results to only include specific content types."),
@@ -3306,7 +3619,13 @@ async def list_label_contents(
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(
     limit: str | None = Field(None, description="Maximum number of groups to return per page. The system may enforce fixed limits below the requested value."),
     access_type: Literal["user", "admin", "site-admin"] | None = Field(None, alias="accessType", description="Filter results by group permission level within the Confluence site."),
@@ -3349,7 +3668,12 @@ async def list_groups(
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(name: str = Field(..., description="The name of the user group to create. Must be unique within the Confluence instance.")) -> dict[str, Any] | ToolResult:
     """Creates a new user group in Confluence. Requires site administrator permissions."""
 
@@ -3381,13 +3705,20 @@ async def create_group(name: str = Field(..., description="The name of the user 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Get Group by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a user group by its unique identifier. Requires permission to access the Confluence site."""
 
@@ -3425,7 +3756,13 @@ async def get_group(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a user group from the Confluence instance. Requires site administrator permissions."""
 
@@ -3463,7 +3800,13 @@ async def delete_group(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Search Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_groups(
     query: str = Field(..., description="The search term used to find matching groups. Supports partial matching against group names and identifiers."),
     limit: str | None = Field(None, description="The maximum number of groups to return in the results. Limited to a maximum of 200 groups per request."),
@@ -3506,7 +3849,13 @@ async def search_groups(
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="List Group Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_members(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of users to return per page of results. The system may apply fixed limits that restrict this value."),
@@ -3550,7 +3899,12 @@ async def list_group_members(
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_group(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group to which the user will be added."),
     account_id: str = Field(..., alias="accountId", description="The account ID of the user to be added to the group."),
@@ -3588,13 +3942,20 @@ async def add_user_to_group(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Remove User from Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_group(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group from which the user will be removed."),
     account_id: str = Field(..., alias="accountId", description="The account ID of the user to remove from the group. This uniquely identifies the user across all Atlassian products."),
@@ -3635,7 +3996,13 @@ async def remove_user_from_group(
     return _response_data
 
 # Tags: Long-running task
-@mcp.tool()
+@mcp.tool(
+    title="Get Long Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_longtask(id_: str = Field(..., alias="id", description="The unique identifier of the long-running task to retrieve status information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the status of an active long-running task such as a space export, including elapsed time and completion percentage. Requires 'Can use' global permission to access the Confluence site."""
 
@@ -3671,7 +4038,13 @@ async def get_longtask(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Relation
-@mcp.tool()
+@mcp.tool(
+    title="List Related Entities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_related_entities(
     relation_name: str = Field(..., alias="relationName", description="The name of the relationship type to query. Custom relationship types are supported, but 'like' and 'favourite' relationships are not available through this operation."),
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The type of the source entity in the relationship."),
@@ -3718,7 +4091,13 @@ async def list_related_entities(
     return _response_data
 
 # Tags: Relation
-@mcp.tool()
+@mcp.tool(
+    title="Check Relationship",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_relationship(
     relation_name: str = Field(..., alias="relationName", description="The name of the relationship type to check (e.g., 'favourite' for save-for-later, or custom relationship types)."),
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The type of the source entity in the relationship. Must be 'user' if checking a 'favourite' relationship."),
@@ -3760,7 +4139,13 @@ async def check_relationship(
     return _response_data
 
 # Tags: Relation
-@mcp.tool()
+@mcp.tool(
+    title="Create Relationship",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_relationship(
     relation_name: str = Field(..., alias="relationName", description="The name of the relationship to create. Use 'favourite' for the built-in save-for-later relationship, or specify any custom relationship type name."),
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The type of the source entity in the relationship. Must be 'user' when creating a 'favourite' relationship."),
@@ -3802,7 +4187,13 @@ async def create_relationship(
     return _response_data
 
 # Tags: Relation
-@mcp.tool()
+@mcp.tool(
+    title="Delete Relationship",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_relationship(
     relation_name: str = Field(..., alias="relationName", description="The name of the relationship to delete (e.g., 'favourite', 'relates_to')."),
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The type of the source entity in the relationship. Must be 'user' for favourite relationships."),
@@ -3844,7 +4235,13 @@ async def delete_relationship(
     return _response_data
 
 # Tags: Relation
-@mcp.tool()
+@mcp.tool(
+    title="List Related Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_related_sources(
     relation_name: str = Field(..., alias="relationName", description="The name of the relationship type to query. Custom relationship types are supported, but 'like' and 'favourite' relationships are not available through this operation."),
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The entity type of the sources to retrieve."),
@@ -3891,7 +4288,13 @@ async def list_related_sources(
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Content Globally",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_content_global(
     cqlcontext: str | None = Field(None, description="CQL query string to filter search results. Specify the space key, content ID, and/or content statuses to narrow the search scope. Note: User-specific fields (user, user.fullname, user.accountid, user.userkey) are no longer supported."),
     limit: str | None = Field(None, description="Maximum number of content objects to return per page. System limits may further restrict this value. When using body.export_view or body.styled_view expansion, the maximum is 25."),
@@ -3951,7 +4354,13 @@ async def search_content_global(
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users(
     cql: str = Field(..., description="CQL query string to filter users. Supports user-specific fields including user, user.fullname, user.accountid, and user.userkey. Use operators like IN, NOT IN, and != for advanced filtering."),
     limit: str | None = Field(None, description="Maximum number of user objects to return per page. System limits may restrict the actual number returned."),
@@ -3995,7 +4404,12 @@ async def search_users(
     return _response_data
 
 # Tags: Space
-@mcp.tool()
+@mcp.tool(
+    title="Create Space",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_space(
     name: str = Field(..., description="The name of the new space. Must be unique and descriptive for identifying the space.", max_length=200),
     key: str | None = Field(None, description="The key for the new space. Format: See [Space\nkeys](https://confluence.atlassian.com/x/lqNMMQ). If `alias` is not provided, this is required."),
@@ -4034,13 +4448,19 @@ async def create_space(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Space
-@mcp.tool()
+@mcp.tool(
+    title="Create Private Space",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_private_space(
     name: str = Field(..., description="The name for the new private space. Must not exceed 200 characters.", max_length=200),
     key: str | None = Field(None, description="The key for the new space. Format: See [Space\nkeys](https://confluence.atlassian.com/x/lqNMMQ). If `alias` is not provided, this is required."),
@@ -4079,13 +4499,20 @@ async def create_private_space(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Space
-@mcp.tool()
+@mcp.tool(
+    title="Update Space",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_space(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space to update."),
     name: str | None = Field(None, description="The new name for the space.", max_length=200),
@@ -4122,13 +4549,20 @@ async def update_space(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Space
-@mcp.tool()
+@mcp.tool(
+    title="Delete Space",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_space(space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space to delete. This is the space's short name used in URLs and references.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a space without sending it to trash. The deletion occurs as a long-running task, so the space may not be immediately deleted when the response is returned. Poll the status link in the response to monitor task completion."""
 
@@ -4164,7 +4598,12 @@ async def delete_space(space_key: str = Field(..., alias="spaceKey", description
     return _response_data
 
 # Tags: Space permissions
-@mcp.tool()
+@mcp.tool(
+    title="Grant Custom Content Permission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_custom_content_permission(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the Confluence space where the permission will be granted."),
     type_: Literal["user", "group"] = Field(..., alias="type", description="The type of principal receiving the permission: either a user account or a group."),
@@ -4203,13 +4642,20 @@ async def grant_custom_content_permission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Space permissions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Space Permission",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_space_permission(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space from which the permission will be removed."),
     id_: int = Field(..., alias="id", description="The unique identifier of the permission record to be deleted."),
@@ -4248,7 +4694,13 @@ async def delete_space_permission(
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="List Space Content States",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_content_states(space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space whose suggested content states should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the content states that are suggested for use within a specific Confluence space. Requires 'View' permission for the space."""
 
@@ -4284,7 +4736,13 @@ async def list_space_content_states(space_key: str = Field(..., alias="spaceKey"
     return _response_data
 
 # Tags: Content states
-@mcp.tool()
+@mcp.tool(
+    title="List Space Content by State",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_content_by_state(
     space_key: str = Field(..., alias="spaceKey", description="The key identifier of the space to query for content with the specified state."),
     state_id: str = Field(..., alias="state-id", description="The numeric identifier of the content state to filter results by."),
@@ -4330,7 +4788,13 @@ async def list_space_content_by_state(
     return _response_data
 
 # Tags: Themes
-@mcp.tool()
+@mcp.tool(
+    title="Get Space Theme",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_space_theme(space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space whose theme should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the theme configuration for a space. If no custom theme is set, the space inherits the global look and feel settings."""
 
@@ -4366,7 +4830,13 @@ async def get_space_theme(space_key: str = Field(..., alias="spaceKey", descript
     return _response_data
 
 # Tags: Themes
-@mcp.tool()
+@mcp.tool(
+    title="Apply Space Theme",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def apply_space_theme(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space where the theme will be applied."),
     theme_key: str = Field(..., alias="themeKey", description="The unique identifier key of the theme to apply to the space."),
@@ -4402,13 +4872,20 @@ async def apply_space_theme(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="List Space Watchers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_watchers(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space for which to retrieve watchers."),
     limit: str | None = Field(None, description="The maximum number of watchers to return in the response. The actual limit may be restricted by system configuration."),
@@ -4450,7 +4927,13 @@ async def list_space_watchers(
     return _response_data
 
 # Tags: Experimental
-@mcp.tool()
+@mcp.tool(
+    title="List Space Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_labels(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space from which to retrieve labels."),
     limit: str | None = Field(None, description="The maximum number of labels to return in a single page of results. The system may enforce additional limits on this value."),
@@ -4494,7 +4977,12 @@ async def list_space_labels(
     return _response_data
 
 # Tags: Experimental
-@mcp.tool()
+@mcp.tool(
+    title="Add Space Labels",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_space_labels(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space where labels will be added."),
     body: list[_models.LabelCreate] = Field(..., description="An array of label objects to add to the space. Each label in the array will be appended to the space's existing labels."),
@@ -4531,13 +5019,20 @@ async def add_space_labels(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Experimental
-@mcp.tool()
+@mcp.tool(
+    title="Remove Label from Space",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_label_from_space(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier (key) of the space from which the label should be removed."),
     name: str = Field(..., description="The name of the label to remove from the space."),
@@ -4579,7 +5074,12 @@ async def remove_label_from_space(
     return _response_data
 
 # Tags: Template
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     name: str = Field(..., description="The name of the template to create."),
     template_type: str = Field(..., alias="templateType", description="The type of template being created."),
@@ -4645,13 +5145,20 @@ async def create_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Template
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     template_id: str = Field(..., alias="templateId", description="The unique identifier of the template to update."),
     name: str = Field(..., description="The display name of the template. Retain the current name if not being changed."),
@@ -4718,13 +5225,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Template
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_templates(
     space_key: str | None = Field(None, alias="spaceKey", description="The space key to query for templates. Omit this parameter to retrieve global blueprint templates instead of space-specific ones."),
     limit: str | None = Field(None, description="The maximum number of templates to return in a single response. The system may enforce additional limits on this value."),
@@ -4767,7 +5281,13 @@ async def list_blueprint_templates(
     return _response_data
 
 # Tags: Template
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(
     space_key: str | None = Field(None, alias="spaceKey", description="The space key to retrieve templates from. Omit this parameter to retrieve global templates instead of space-specific templates."),
     limit: str | None = Field(None, description="The maximum number of templates to return per page. The system may enforce lower limits than requested."),
@@ -4810,7 +5330,13 @@ async def list_templates(
     return _response_data
 
 # Tags: Template
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template(content_template_id: str = Field(..., alias="contentTemplateId", description="The unique identifier of the content template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a content template with its metadata, including name, space or blueprint location, and template body. Requires 'View' permission for space templates or 'Can use' global permission for global templates."""
 
@@ -4846,7 +5372,13 @@ async def get_template(content_template_id: str = Field(..., alias="contentTempl
     return _response_data
 
 # Tags: Template
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(content_template_id: str = Field(..., alias="contentTemplateId", description="The unique identifier of the template to be deleted.")) -> dict[str, Any] | ToolResult:
     """Deletes a template, with behavior varying by template type: content templates are removed, modified space-level or global-level blueprint templates revert to their parent templates, and unmodified blueprint templates cannot be deleted. Requires 'Admin' permission for space templates or 'Confluence Administrator' global permission for global templates."""
 
@@ -4882,7 +5414,13 @@ async def delete_template(content_template_id: str = Field(..., alias="contentTe
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(account_id: str = Field(..., alias="accountId", description="The unique account ID that identifies the user across all Atlassian products. This is a required identifier to retrieve the specific user's information.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific user, including display name, account ID, profile picture, and other profile data. Information returned may be restricted based on the user's profile visibility settings."""
 
@@ -4920,7 +5458,13 @@ async def get_user(account_id: str = Field(..., alias="accountId", description="
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Anonymous User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_anonymous_user() -> dict[str, Any] | ToolResult:
     """Retrieves information about how anonymous users are represented in Confluence, including their profile picture and display name. Requires 'Can use' global permission to access the Confluence site."""
 
@@ -4947,7 +5491,13 @@ async def get_anonymous_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the currently authenticated user's profile information, including display name, user key, account ID, and profile picture. Requires 'Can use' global permission to access the Confluence site."""
 
@@ -4974,7 +5524,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_groups(
     account_id: str = Field(..., alias="accountId", description="The account ID that uniquely identifies the user across all Atlassian products."),
     limit: str | None = Field(None, description="The maximum number of groups to return per page. This value may be restricted by system limits."),
@@ -5017,7 +5573,13 @@ async def list_user_groups(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(account_id: str = Field(..., alias="accountId", description="Comma-separated list of account IDs identifying the users to retrieve. Maximum of 100 IDs per request; excess IDs are ignored.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for multiple users by their account IDs. Returns up to 100 user records per request; additional IDs beyond the limit are ignored."""
 
@@ -5055,7 +5617,13 @@ async def list_users(account_id: str = Field(..., alias="accountId", description
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Check Content Watch Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_content_watch_status(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content to check watch status for."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user whose watch status should be checked. If not provided, the currently authenticated user's status is returned. The accountId uniquely identifies the user across all Atlassian products."),
@@ -5097,7 +5665,12 @@ async def check_content_watch_status(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Watch Content",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def watch_content(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content to add the watcher to."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to add as a watcher. If not provided, the currently logged-in user will be used. Requires 'Confluence Administrator' global permission when specified."),
@@ -5139,7 +5712,13 @@ async def watch_content(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Unwatch Content",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unwatch_content(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content from which to remove the watcher."),
     x_atlassian_token: str = Field(..., alias="X-Atlassian-Token", description="XSRF protection token required for this DELETE operation."),
@@ -5183,7 +5762,13 @@ async def unwatch_content(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Check Label Watch Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_label_watch_status(
     label_name: str = Field(..., alias="labelName", description="The name of the label to check watch status for."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to check. If not provided, the currently logged-in user is used. Required if checking another user's watch status."),
@@ -5225,7 +5810,12 @@ async def check_label_watch_status(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Watch Label",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def watch_label(
     label_name: str = Field(..., alias="labelName", description="The name of the label to watch."),
     x_atlassian_token: str = Field(..., alias="X-Atlassian-Token", description="XSRF protection token. Must be set to 'no-check' for this operation."),
@@ -5269,7 +5859,13 @@ async def watch_label(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Unwatch Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unwatch_label(
     label_name: str = Field(..., alias="labelName", description="The name of the label from which to remove the watcher."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to remove as a watcher. If not specified, the currently logged-in user will be used. Required only if removing a different user (requires Confluence Administrator permission)."),
@@ -5311,7 +5907,13 @@ async def unwatch_label(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Check Space Watch Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_space_watch_status(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space to check watch status for."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to check watch status for. If not provided, the currently logged-in user is used. Requires 'Confluence Administrator' permission when specified."),
@@ -5353,7 +5955,12 @@ async def check_space_watch_status(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Watch Space",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def watch_space(
     space_key: str = Field(..., alias="spaceKey", description="The key identifier of the space to add the watcher to."),
     x_atlassian_token: str = Field(..., alias="X-Atlassian-Token", description="XSRF protection token. Must be set to 'no-check' for this operation."),
@@ -5397,7 +6004,13 @@ async def watch_space(
     return _response_data
 
 # Tags: Content watches
-@mcp.tool()
+@mcp.tool(
+    title="Unwatch Space",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unwatch_space(
     space_key: str = Field(..., alias="spaceKey", description="The key that uniquely identifies the space from which to remove the watcher."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to remove as a watcher. If not provided, the currently logged-in user will be removed. The accountId uniquely identifies the user across all Atlassian products."),
@@ -5439,7 +6052,13 @@ async def unwatch_space(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Fetch User Emails in Bulk",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def fetch_user_emails_bulk(account_id: list[str] = Field(..., alias="accountId", description="An array of account IDs identifying the users whose email addresses should be retrieved. Users with unavailable accounts will be excluded from the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve email addresses for multiple users in a single batch request, bypassing profile visibility restrictions. This operation requires appropriate permissions and is subject to app approval guidelines for Connect apps or asApp() context for Forge apps."""
 
@@ -5480,7 +6099,13 @@ async def fetch_user_emails_bulk(account_id: list[str] = Field(..., alias="accou
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_views(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content whose view count should be retrieved."),
     from_date: str | None = Field(None, alias="fromDate", description="Filter results to include only views from this date forward. Specify in ISO 8601 format."),
@@ -5522,7 +6147,13 @@ async def get_content_views(
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Viewers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_viewers(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content to retrieve viewer analytics for."),
     from_date: str | None = Field(None, alias="fromDate", description="Filter results to include only views from this date forward. Use ISO 8601 format for the timestamp."),
@@ -5564,7 +6195,13 @@ async def get_content_viewers(
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="List User Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_properties(
     user_id: str = Field(..., alias="userId", description="The account ID of the user whose properties you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of properties to return in a single page of results. The system may enforce stricter limits than the specified maximum."),
@@ -5608,7 +6245,13 @@ async def list_user_properties(
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="Get User Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_property(
     user_id: str = Field(..., alias="userId", description="The account ID of the user whose property you want to retrieve."),
     key: str = Field(..., description="The key identifying which user property to retrieve. Keys must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
@@ -5647,7 +6290,13 @@ async def get_user_property(
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="Set User Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_user_property(
     user_id: str = Field(..., alias="userId", description="The account ID of the user. This uniquely identifies the user across all Atlassian products."),
     key: str = Field(..., description="The key identifying this user property. Keys must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
@@ -5684,13 +6333,20 @@ async def set_user_property(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="Set User Property Value",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_user_property_value(
     user_id: str = Field(..., alias="userId", description="The account ID of the user. This uniquely identifies the user across all Atlassian products."),
     key: str = Field(..., description="The key identifier for the user property. Must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
@@ -5727,13 +6383,20 @@ async def set_user_property_value(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="Remove User Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_property(
     user_id: str = Field(..., alias="userId", description="The account ID that uniquely identifies the user across all Atlassian products."),
     key: str = Field(..., description="The key identifying which user property to delete. Must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),

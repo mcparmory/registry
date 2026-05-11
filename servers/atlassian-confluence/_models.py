@@ -1,7 +1,7 @@
 """
 Atlassian Confluence MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:18:16 UTC
+Generated: 2026-05-11 23:06:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -225,8 +225,8 @@ class MovePageRequest(StrictModel):
 class CreateAttachmentRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The ID of the content to which the attachment will be added.")
 class CreateAttachmentRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The file to attach. The file will be uploaded as binary data.", json_schema_extra={'format': 'binary'})
-    minor_edit: str = Field(default=..., validation_alias="minorEdit", serialization_alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is added. Set to 'false' or omit to generate notifications.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file to attach. The file will be uploaded as binary data.", json_schema_extra={'format': 'byte'})
+    minor_edit: str = Field(default=..., validation_alias="minorEdit", serialization_alias="minorEdit", description="Base64-encoded file content for upload. Set to 'true' to suppress notification emails and activity stream updates when the attachment is added. Set to 'false' or omit to generate notifications.", json_schema_extra={'format': 'byte'})
 class CreateAttachmentRequest(StrictModel):
     """Adds a new attachment to a piece of content. To update an existing attachment instead, use the create or update attachments operation. Requires X-Atlassian-Token: nocheck header to prevent XSRF attacks."""
     path: CreateAttachmentRequestPath
@@ -236,8 +236,8 @@ class CreateAttachmentRequest(StrictModel):
 class CreateOrUpdateAttachmentsRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The ID of the content to attach the file to.")
 class CreateOrUpdateAttachmentsRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The file to upload as an attachment. The file will be sent as binary data in the multipart request.", json_schema_extra={'format': 'binary'})
-    minor_edit: str = Field(default=..., validation_alias="minorEdit", serialization_alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is added or updated.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file to upload as an attachment. The file will be sent as binary data in the multipart request.", json_schema_extra={'format': 'byte'})
+    minor_edit: str = Field(default=..., validation_alias="minorEdit", serialization_alias="minorEdit", description="Base64-encoded file content for upload. Set to 'true' to suppress notification emails and activity stream updates when the attachment is added or updated.", json_schema_extra={'format': 'byte'})
 class CreateOrUpdateAttachmentsRequest(StrictModel):
     """Uploads a new attachment to content or creates a new version of an existing attachment. Supports optional minor edit mode to suppress notifications."""
     path: CreateOrUpdateAttachmentsRequestPath
@@ -248,8 +248,8 @@ class UpdateAttachmentDataRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The ID of the content that contains the attachment to be updated.")
     attachment_id: str = Field(default=..., validation_alias="attachmentId", serialization_alias="attachmentId", description="The ID of the attachment whose data will be replaced.")
 class UpdateAttachmentDataRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file data to upload as the new attachment content.", json_schema_extra={'format': 'binary'})
-    minor_edit: str = Field(default=..., validation_alias="minorEdit", serialization_alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is updated.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file data to upload as the new attachment content.", json_schema_extra={'format': 'byte'})
+    minor_edit: str = Field(default=..., validation_alias="minorEdit", serialization_alias="minorEdit", description="Base64-encoded file content for upload. Set to 'true' to suppress notification emails and activity stream updates when the attachment is updated.", json_schema_extra={'format': 'byte'})
 class UpdateAttachmentDataRequest(StrictModel):
     """Replace the binary data of an attachment by its ID. Optionally include a comment and mark as a minor edit to suppress notifications."""
     path: UpdateAttachmentDataRequestPath
