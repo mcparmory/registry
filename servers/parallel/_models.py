@@ -1,7 +1,7 @@
 """
-Parallel Api MCP Server - Pydantic Models
+Parallel MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:47:50 UTC
+Generated: 2026-05-11 20:04:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -306,7 +306,7 @@ class SimulateEventV1alphaMonitorsMonitorIdSimulateEventPostRequestPath(StrictMo
 class SimulateEventV1alphaMonitorsMonitorIdSimulateEventPostRequestQuery(StrictModel):
     event_type: Literal["monitor.event.detected", "monitor.execution.completed", "monitor.execution.failed"] | None = Field(default=None, description="The type of event to simulate. Defaults to `monitor.event.detected` if not specified. Valid options are: `monitor.event.detected` (standard event detection), `monitor.execution.completed` (successful execution), or `monitor.execution.failed` (execution failure).", examples=['monitor.event.detected', 'monitor.execution.completed', 'monitor.execution.failed'])
 class SimulateEventV1alphaMonitorsMonitorIdSimulateEventPostRequestBody(StrictModel):
-    body: str | None = Field(default=None, description="Optional binary payload data to include with the simulated event.", json_schema_extra={'format': 'binary'})
+    body: str | None = Field(default=None, description="Optional binary payload data to include with the simulated event.")
 class SimulateEventV1alphaMonitorsMonitorIdSimulateEventPostRequest(StrictModel):
     """Simulate sending an event to a monitor to test its event handling and triggering behavior. Useful for validating monitor configurations without waiting for real events."""
     path: SimulateEventV1alphaMonitorsMonitorIdSimulateEventPostRequestPath

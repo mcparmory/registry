@@ -1,4 +1,4 @@
-# Parallel API MCP Server
+# Parallel MCP Server
 <!-- mcp-name: com.mcparmory/parallel -->
 
 Base URL: https://api.parallel.ai
@@ -55,6 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (x-api-key)
+
 Do not commit credentials to version control.
 
 ---

@@ -1,7 +1,7 @@
 """
-Authentication module for Parallel API MCP server.
+Authentication module for Parallel MCP server.
 
-Generated: 2026-05-05 15:47:50 UTC
+Generated: 2026-05-11 20:04:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Parallel API MCP Server
+Parallel MCP Server
 
 API Info:
 - Contact: Parallel Support <support@parallel.ai> (https://parallel.ai)
 
-Generated: 2026-05-05 15:47:50 UTC
+Generated: 2026-05-11 20:04:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.parallel.ai")
-SERVER_NAME = "Parallel API"
-SERVER_VERSION = "1.0.1"
+SERVER_NAME = "Parallel"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -986,6 +1017,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1010,6 +1043,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1214,10 +1249,15 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Parallel API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Parallel", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Search (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Search Web",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_web(
     mode: Literal["one-shot", "agentic", "fast"] | None = Field(None, description="Execution mode that presets parameter defaults for different use cases: 'one-shot' for comprehensive single-response answers, 'agentic' for token-efficient results in multi-step workflows, or 'fast' for lower-latency results with concise queries. Defaults to 'one-shot'."),
     objective: str | None = Field(None, description="Natural language description of the search objective, including any preferences about source types or content freshness. Either this or search_queries must be provided."),
@@ -1261,13 +1301,19 @@ async def search_web(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extract (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Extract Content from URLs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_content_from_urls(
     urls: list[str] = Field(..., description="List of web URLs to extract content from. Each URL should be a valid HTTP or HTTPS address."),
     objective: str | None = Field(None, description="Optional search objective to focus extraction on specific topics or themes. When provided, helps filter extracted content to relevant sections."),
@@ -1305,13 +1351,19 @@ async def extract_content_from_urls(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks v1
-@mcp.tool()
+@mcp.tool(
+    title="Create Task Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task_run(
     processor: str = Field(..., description="The processor type to execute the task. Use 'base' for standard processing."),
     output_schema: Any | _models.TextSchema | _models.AutoSchema | str = Field(..., description="JSON schema or text description defining the desired output structure and content. Field descriptions determine the form and content of the response. A plain string is treated as a text schema."),
@@ -1360,13 +1412,20 @@ async def create_task_run(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks v1
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run(run_id: str = Field(..., description="The unique identifier of the task run to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a specific task run by its ID. Use the `/result` endpoint to access the run's output results."""
 
@@ -1402,7 +1461,13 @@ async def get_task_run(run_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: Tasks v1
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run Input",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run_input(run_id: str = Field(..., description="The unique identifier of the task run whose input you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the input data that was provided to a specific task run. Use this to inspect what parameters or data were passed when the task run was executed."""
 
@@ -1438,7 +1503,13 @@ async def get_task_run_input(run_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Tasks v1
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run Result",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run_result(run_id: str = Field(..., description="The unique identifier of the task run whose result you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the result of a completed task run by its ID. This operation blocks until the task run finishes executing, then returns the final result."""
 
@@ -1474,7 +1545,13 @@ async def get_task_run_result(run_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Tasks v1
-@mcp.tool()
+@mcp.tool(
+    title="Stream Task Run Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def stream_task_run_events(run_id: str = Field(..., description="The unique identifier of the task run for which to retrieve events.")) -> dict[str, Any] | ToolResult:
     """Stream events for a specific task run, including progress updates and state changes. Event frequency is reduced for task runs created without event streaming enabled."""
 
@@ -1510,7 +1587,12 @@ async def stream_task_run_events(run_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Tasks (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create Task Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task_group(metadata: dict[str, str | int | float | bool] | None = Field(None, description="Optional custom metadata to attach to the task group for organizational or tracking purposes. This metadata is stored with the group and can be used to add context or labels relevant to your use case.")) -> dict[str, Any] | ToolResult:
     """Creates a new TaskGroup to organize and monitor multiple task runs together. Use this to establish a logical grouping for related tasks that should be tracked as a unit."""
 
@@ -1542,13 +1624,20 @@ async def create_task_group(metadata: dict[str, str | int | float | bool] | None
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_taskgroup(taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a TaskGroup and its aggregated status across all runs, providing a summary view of the group's execution state."""
 
@@ -1584,7 +1673,13 @@ async def get_taskgroup(taskgroup_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Tasks (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Stream Task Group Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def stream_task_group_events(
     taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup whose events should be streamed."),
     last_event_id: str | None = Field(None, description="Optional event ID to resume streaming from a specific point, useful for recovering from connection interruptions without missing events."),
@@ -1626,7 +1721,13 @@ async def stream_task_group_events(
     return _response_data
 
 # Tags: Tasks (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Task Group Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_group_runs(
     taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup whose runs should be retrieved."),
     last_event_id: str | None = Field(None, description="Resume a stream from a specific point by providing the event_id of the last received event. The stream will continue from the next event after this cursor."),
@@ -1671,7 +1772,12 @@ async def list_task_group_runs(
     return _response_data
 
 # Tags: Tasks (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Add Runs to Task Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_runs_to_task_group(
     taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup to which runs will be added."),
     output_schema: Any | _models.TextSchema | _models.AutoSchema | str = Field(..., description="JSON schema or text description defining the desired output structure from each task. Field descriptions in the schema will determine the form and content of task responses. A plain string is treated as a text schema with that description."),
@@ -1710,13 +1816,20 @@ async def add_runs_to_task_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Group Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_group_run(
     taskgroup_id: str = Field(..., description="The unique identifier of the task group containing the run."),
     run_id: str = Field(..., description="The unique identifier of the run whose status and details should be retrieved."),
@@ -1755,7 +1868,12 @@ async def get_task_group_run(
     return _response_data
 
 # Tags: FindAll API (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create FindAll Spec From Objective",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_findall_spec_from_objective(objective: str = Field(..., description="A natural language description of what you want to find. Describe your search goal in plain English, such as company characteristics, funding criteria, or other business attributes you're looking for.")) -> dict[str, Any] | ToolResult:
     """Converts a natural language search objective into a structured FindAll specification that can be used to execute targeted searches. The generated spec serves as a customizable starting point and can be further refined by the user."""
 
@@ -1789,13 +1907,19 @@ async def create_findall_spec_from_objective(objective: str = Field(..., descrip
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: FindAll API (Beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create FindAll Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_findall_run(
     objective: str = Field(..., description="The goal or search objective described in natural language for the FindAll run."),
     entity_type: str = Field(..., description="The category or type of entity to search for (e.g., company, person, product)."),
@@ -1837,13 +1961,20 @@ async def create_findall_run(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="List Monitors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_monitors(
     monitor_id: str | None = Field(None, description="Cursor for pagination—specify a monitor ID to start listing after that point in lexicographic order. Useful for fetching subsequent pages of results."),
     limit: int | None = Field(None, description="Maximum number of monitors to return per request, between 1 and 10,000. Omit to retrieve all monitors at once.", ge=1, le=10000),
@@ -1884,7 +2015,12 @@ async def list_monitors(
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="Create Monitor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_monitor(
     query: str = Field(..., description="The search query to monitor for material changes. This query will be executed periodically according to the monitor's frequency."),
     webhook: _models.MonitorWebhook | None = Field(None, description="Optional webhook URL that will receive notifications whenever the monitor executes, including execution results and any detected changes."),
@@ -1923,13 +2059,20 @@ async def create_monitor(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="List Monitors Paginated",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_monitors_paginated(
     cursor: str | None = Field(None, description="Opaque token for cursor-based pagination. Omit this parameter to start from the most recently created monitor, or provide the `next_cursor` value from a previous response to fetch the next page of results."),
     limit: int | None = Field(None, description="Maximum number of monitors to return per page. Must be between 1 and 10,000, defaults to 100 if not specified.", ge=1, le=10000),
@@ -1970,7 +2113,13 @@ async def list_monitors_paginated(
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="Get Monitor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monitor(monitor_id: str = Field(..., description="The unique identifier of the monitor to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific monitor by its ID. Returns the complete monitor configuration including status, cadence, input settings, and webhook configuration."""
 
@@ -2006,7 +2155,13 @@ async def get_monitor(monitor_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="Update Monitor",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_monitor(
     monitor_id: str = Field(..., description="The unique identifier of the monitor to update."),
     url: str = Field(..., description="The webhook URL where monitor notifications will be sent. Must be a valid HTTPS or HTTP endpoint."),
@@ -2047,13 +2202,20 @@ async def update_monitor(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="Delete Monitor",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_monitor(monitor_id: str = Field(..., description="The unique identifier of the monitor to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a monitor and stop all its future executions. Deleted monitors cannot be updated or retrieved."""
 
@@ -2089,7 +2251,13 @@ async def delete_monitor(monitor_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_group(
     monitor_id: str = Field(..., description="The unique identifier of the monitor that contains the event group."),
     event_group_id: str = Field(..., description="The unique identifier of the event group to retrieve."),
@@ -2128,7 +2296,13 @@ async def get_event_group(
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="List Monitor Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_monitor_events(
     monitor_id: str = Field(..., description="The unique identifier of the monitor for which to retrieve events."),
     lookback_period: str | None = Field(None, description="The time window to search for events, specified as a duration (e.g., '10d' for 10 days, '1w' for 1 week). Supports day and week increments with a minimum of 1 day. Defaults to 10 days if not specified."),
@@ -2170,7 +2344,12 @@ async def list_monitor_events(
     return _response_data
 
 # Tags: Monitor
-@mcp.tool()
+@mcp.tool(
+    title="Simulate Monitor Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def simulate_monitor_event(
     monitor_id: str = Field(..., description="The unique identifier of the monitor to simulate an event for."),
     event_type: Literal["monitor.event.detected", "monitor.execution.completed", "monitor.execution.failed"] | None = Field(None, description="The type of event to simulate. Defaults to `monitor.event.detected` if not specified. Valid options are: `monitor.event.detected` (standard event detection), `monitor.execution.completed` (successful execution), or `monitor.execution.failed` (execution failure)."),
@@ -2211,6 +2390,7 @@ async def simulate_monitor_event(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
@@ -2300,7 +2480,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python parallel_api_server.py", file=sys.stderr)
+        print("  python parallel_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -2402,7 +2582,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Parallel API MCP Server")
+    parser = argparse.ArgumentParser(description="Parallel MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2503,7 +2683,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Parallel API MCP Server")
+    logger.info("Starting Parallel MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
