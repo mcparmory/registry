@@ -1,7 +1,7 @@
 """
 Gitlab MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:04:31 UTC
+Generated: 2026-05-11 19:54:25 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -355,7 +355,7 @@ class PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestPath(St
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The project identifier, either as a numeric ID or URL-encoded path.")
     alert_iid: int = Field(default=..., description="The internal ID of the alert to attach the metric image to.", json_schema_extra={'format': 'int32'})
 class PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The image file to upload. Supported formats are typically PNG, JPG, and GIF.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The image file to upload. Supported formats are typically PNG, JPG, and GIF.", json_schema_extra={'format': 'byte'})
     url: str | None = Field(default=None, description="Optional URL to view additional metric information or the source of the metric data.")
     url_text: str | None = Field(default=None, description="Optional descriptive text explaining the metric image content or the linked URL.")
 class PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequest(StrictModel):

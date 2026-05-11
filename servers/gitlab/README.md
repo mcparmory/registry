@@ -5,7 +5,7 @@ Base URL: https:///api/v4
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 53 |
+| **Tools** | 52 |
 | **Auth** | API Key, OAuth2 |
 
 ## API Info
@@ -74,6 +74,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `API_KEY` — API Key Authentication (Private-Token)
 - `SERVER_GITLAB_HOST` — The hostname of your GitLab instance, visible in your browser URL bar.
+
 Do not commit credentials to version control.
 
 ### OAuth2

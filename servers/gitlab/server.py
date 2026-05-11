@@ -6,7 +6,7 @@ API Info:
 - API License: CC BY-SA 4.0 (https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE)
 - Terms of Service: https://about.gitlab.com/terms/
 
-Generated: 2026-05-05 15:04:31 UTC
+Generated: 2026-05-11 19:54:25 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -43,6 +44,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -51,7 +53,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{gitlab_host}/api/v4".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "GitLab"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -542,6 +544,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -549,6 +573,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -634,6 +660,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -643,18 +670,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -665,24 +690,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1016,6 +1047,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1040,6 +1073,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1256,7 +1291,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("GitLab", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Badge",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group owns the badge you want to retrieve."),
     badge_id: str = Field(..., description="The unique identifier of the badge within the group."),
@@ -1297,7 +1338,13 @@ async def get_group_badge(
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Badge",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group owned by the authenticated user."),
     badge_id: str = Field(..., description="The unique identifier of the badge to update."),
@@ -1338,13 +1385,20 @@ async def update_group_badge(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group Badge",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group the badge should be removed from."),
     badge_id: str = Field(..., description="The unique identifier of the badge to remove from the group."),
@@ -1385,7 +1439,13 @@ async def remove_group_badge(
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="List Group Badges",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_badges(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's badges to retrieve."),
     per_page: str | None = Field(None, description="Number of badges to return per page for pagination."),
@@ -1430,7 +1490,12 @@ async def list_group_badges(
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Add Group Badge",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. You can use either the numeric group ID or the full URL-encoded group path (e.g., 'my-group' or 'parent-group%2Fchild-group')."),
     link_url: str = Field(..., description="The URL where the badge image links to when clicked. This should be a valid HTTP or HTTPS URL."),
@@ -1468,13 +1533,20 @@ async def add_group_badge(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="Deny Group Access Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def deny_group_access_request(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's access request should be denied."),
     user_id: str = Field(..., description="The user ID of the person whose access request is being denied."),
@@ -1515,7 +1587,12 @@ async def deny_group_access_request(
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="Approve Group Access Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_group_access_request(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. Use the numeric group ID or the full URL-encoded path (e.g., 'my-group' or 'parent-group%2Fmy-group')."),
     user_id: str = Field(..., description="The numeric ID of the user whose access request is being approved."),
@@ -1555,13 +1632,20 @@ async def approve_group_access_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="List Group Access Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_access_requests(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's access requests to retrieve."),
     per_page: str | None = Field(None, description="Number of access requests to return per page for pagination."),
@@ -1605,7 +1689,12 @@ async def list_group_access_requests(
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="Request Group Access",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_group_access(id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group to request access for.")) -> dict[str, Any] | ToolResult:
     """Submit an access request for the authenticated user to join a group. The group owner can then review and approve or deny the request."""
 
@@ -1641,7 +1730,13 @@ async def request_group_access(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Delete Merged Branches",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_merged_branches(id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group%2Fproject-name).")) -> dict[str, Any] | ToolResult:
     """Delete all branches that have been merged into the project's default branch. This operation permanently removes merged branches to clean up the repository."""
 
@@ -1677,7 +1772,13 @@ async def delete_merged_branches(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
     branch: str = Field(..., description="The name of the branch to retrieve."),
@@ -1718,7 +1819,13 @@ async def get_branch(
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Delete Branch",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path."),
     branch: str = Field(..., description="The name of the branch to delete."),
@@ -1757,7 +1864,13 @@ async def delete_branch(
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Check Branch Exists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_branch_exists(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded path of the project."),
     branch: str = Field(..., description="The name of the branch to check for existence in the repository."),
@@ -1796,7 +1909,13 @@ async def check_branch_exists(
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_branches(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., 'group%2Fproject')."),
     per_page: str | None = Field(None, description="Number of branches to return per page for pagination."),
@@ -1841,7 +1960,12 @@ async def list_repository_branches(
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Create Branch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_branch(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     branch: str = Field(..., description="The name for the new branch to be created."),
@@ -1884,7 +2008,13 @@ async def create_branch(
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Unprotect Branch",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unprotect_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group/subgroup/project)."),
     branch: str = Field(..., description="The name of the branch to unprotect."),
@@ -1923,7 +2053,13 @@ async def unprotect_branch(
     return _response_data
 
 # Tags: branches
-@mcp.tool()
+@mcp.tool(
+    title="Protect Branch",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def protect_branch(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     branch: str = Field(..., description="The name of the branch to protect."),
@@ -1961,13 +2097,20 @@ async def protect_branch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Badge",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_badge(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group/subgroup/project)."),
     badge_id: str = Field(..., description="The unique identifier of the badge to retrieve."),
@@ -2008,7 +2151,13 @@ async def get_project_badge(
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Badge",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_badge(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     badge_id: str = Field(..., description="The unique identifier of the badge to update."),
@@ -2049,13 +2198,20 @@ async def update_project_badge(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Delete Badge",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_badge(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     badge_id: str = Field(..., description="The unique identifier of the badge to remove from the project."),
@@ -2096,7 +2252,13 @@ async def delete_badge(
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="List Project Badges",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_badges(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     per_page: str | None = Field(None, description="Number of badges to return per page for pagination."),
@@ -2141,7 +2303,12 @@ async def list_project_badges(
     return _response_data
 
 # Tags: badges
-@mcp.tool()
+@mcp.tool(
+    title="Create Project Badge",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the project. Accepts both integer IDs and string paths."),
     link_url: str = Field(..., description="The URL that the badge links to when clicked."),
@@ -2179,13 +2346,20 @@ async def create_project_badge(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="Deny Access Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def deny_access_request(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     user_id: str = Field(..., description="The numeric ID of the user whose access request should be denied."),
@@ -2226,7 +2400,12 @@ async def deny_access_request(
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="Approve Access Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_access_request(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     user_id: str = Field(..., description="The user ID of the person whose access request is being approved."),
@@ -2266,13 +2445,20 @@ async def approve_access_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="List Access Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_access_requests(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject)."),
     per_page: str | None = Field(None, description="Number of access requests to return per page for pagination."),
@@ -2316,7 +2502,12 @@ async def list_access_requests(
     return _response_data
 
 # Tags: access_requests
-@mcp.tool()
+@mcp.tool(
+    title="Request Project Access",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_project_access(id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project).")) -> dict[str, Any] | ToolResult:
     """Request access to a project as the authenticated user. This allows users to formally request membership or elevated permissions for a project they don't currently have access to."""
 
@@ -2352,7 +2543,13 @@ async def request_project_access(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: alert_management
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert Metric Image",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     alert_iid: str = Field(..., description="The internal ID of the alert containing the metric image."),
@@ -2401,7 +2598,13 @@ async def update_alert_metric_image(
     return _response_data
 
 # Tags: alert_management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert Metric Image",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     alert_iid: str = Field(..., description="The internal ID (IID) of the alert from which to remove the metric image."),
@@ -2444,7 +2647,13 @@ async def delete_alert_metric_image(
     return _response_data
 
 # Tags: alert_management
-@mcp.tool()
+@mcp.tool(
+    title="List Alert Metric Images",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alert_metric_images(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     alert_iid: str = Field(..., description="The internal ID of the alert for which to retrieve associated metric images."),
@@ -2485,11 +2694,16 @@ async def list_alert_metric_images(
     return _response_data
 
 # Tags: alert_management
-@mcp.tool()
+@mcp.tool(
+    title="Upload Alert Metric Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     alert_iid: str = Field(..., description="The internal ID of the alert to attach the metric image to."),
-    file_: str = Field(..., alias="file", description="The image file to upload. Supported formats are typically PNG, JPG, and GIF."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The image file to upload. Supported formats are typically PNG, JPG, and GIF.", json_schema_extra={'format': 'byte'}),
     url: str | None = Field(None, description="Optional URL to view additional metric information or the source of the metric data."),
     url_text: str | None = Field(None, description="Optional descriptive text explaining the metric image content or the linked URL."),
 ) -> dict[str, Any] | ToolResult:
@@ -2534,7 +2748,12 @@ async def upload_alert_metric_image(
     return _response_data
 
 # Tags: batched_background_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Pause Batched Background Migration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def pause_batched_background_migration(
     id_: str = Field(..., alias="id", description="The unique identifier of the batched background migration to pause."),
     database: Literal["main", "ci", "embedding", "geo"] | None = Field(None, description="The database instance where the batched background migration is running. Defaults to 'main' if not specified."),
@@ -2572,13 +2791,20 @@ async def pause_batched_background_migration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pipeline_composition
-@mcp.tool()
+@mcp.tool(
+    title="Get Admin CI Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_admin_ci_variable(key: str = Field(..., description="The unique identifier key of the instance-level CI/CD variable to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific instance-level CI/CD variable by its key. This operation returns the variable's configuration and metadata."""
 
@@ -2614,7 +2840,13 @@ async def get_admin_ci_variable(key: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: pipeline_composition
-@mcp.tool()
+@mcp.tool(
+    title="Delete Instance Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_instance_variable(key: str = Field(..., description="The unique identifier key of the instance-level variable to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an instance-level CI/CD variable by its key. This removes the variable from the GitLab instance configuration."""
 
@@ -2650,7 +2882,13 @@ async def delete_instance_variable(key: str = Field(..., description="The unique
     return _response_data
 
 # Tags: pipeline_composition
-@mcp.tool()
+@mcp.tool(
+    title="List Instance Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_instance_variables(per_page: str | None = Field(None, description="Maximum number of variables to return per page. Use this to control pagination when retrieving large result sets.")) -> dict[str, Any] | ToolResult:
     """Retrieve all instance-level CI/CD variables available across the GitLab instance. These variables are accessible to all projects and groups."""
 
@@ -2690,7 +2928,12 @@ async def list_instance_variables(per_page: str | None = Field(None, description
     return _response_data
 
 # Tags: pipeline_composition
-@mcp.tool()
+@mcp.tool(
+    title="Create Instance Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_instance_variable(
     key: str = Field(..., description="The unique identifier for the variable. Maximum 255 characters."),
     value: str = Field(..., description="The value assigned to the variable."),
@@ -2729,13 +2972,20 @@ async def create_instance_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: clusters
-@mcp.tool()
+@mcp.tool(
+    title="Get Cluster",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a single instance cluster by its ID. This operation requires GitLab 13.2 or later."""
 
@@ -2773,7 +3023,13 @@ async def get_cluster(cluster_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: clusters
-@mcp.tool()
+@mcp.tool(
+    title="Update Cluster",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cluster(
     cluster_id: str = Field(..., description="The unique identifier of the cluster to update."),
     name: str | None = Field(None, description="The display name for the cluster."),
@@ -2818,13 +3074,20 @@ async def update_cluster(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: clusters
-@mcp.tool()
+@mcp.tool(
+    title="Delete Cluster",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an instance cluster from GitLab. This removes the cluster configuration but does not delete any resources within the connected Kubernetes cluster itself."""
 
@@ -2862,7 +3125,12 @@ async def delete_cluster(cluster_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: clusters
-@mcp.tool()
+@mcp.tool(
+    title="Add Kubernetes Cluster",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_kubernetes_cluster(
     name: str = Field(..., description="The display name for the Kubernetes cluster."),
     platform_kubernetes_attributes_api_url: str = Field(..., description="The URL endpoint to access the Kubernetes API server."),
@@ -2907,13 +3175,20 @@ async def add_kubernetes_cluster(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: clusters
-@mcp.tool()
+@mcp.tool(
+    title="List Clusters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_clusters() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all instance clusters configured in GitLab. This operation provides an overview of cluster infrastructure available at the instance level."""
 
@@ -2940,7 +3215,13 @@ async def list_clusters() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: applications
-@mcp.tool()
+@mcp.tool(
+    title="Delete Application",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_application(id_: str = Field(..., alias="id", description="The unique identifier of the application to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific application by its ID. This action cannot be undone."""
 
@@ -2978,7 +3259,13 @@ async def delete_application(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: avatar
-@mcp.tool()
+@mcp.tool(
+    title="Get User Avatar",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_avatar(
     email: str = Field(..., description="The public email address of the user whose avatar should be retrieved."),
     size: str | None = Field(None, description="The width and height in pixels for the returned avatar image. Larger sizes provide higher resolution avatars."),
@@ -3021,7 +3308,13 @@ async def get_user_avatar(
     return _response_data
 
 # Tags: broadcast_messages
-@mcp.tool()
+@mcp.tool(
+    title="Get Broadcast Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific broadcast message by its ID. Broadcast messages are system-wide announcements visible to all users."""
 
@@ -3059,7 +3352,13 @@ async def get_broadcast_message(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: broadcast_messages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Broadcast Message",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a broadcast message by its ID. This operation permanently removes the specified broadcast message from the system."""
 
@@ -3097,7 +3396,13 @@ async def delete_broadcast_message(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: bulk_imports
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Entity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_entity(
     import_id: str = Field(..., description="The unique identifier of the GitLab Migration batch containing the entity you want to retrieve."),
     entity_id: str = Field(..., description="The unique identifier of the specific entity within the migration whose details you want to retrieve."),
@@ -3139,7 +3444,13 @@ async def get_migration_entity(
     return _response_data
 
 # Tags: bulk_imports
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Entities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_entities(
     import_id: str = Field(..., description="The unique identifier of the GitLab Migration import job to retrieve entities from."),
     status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter entities by their current processing status in the migration workflow."),
@@ -3185,7 +3496,13 @@ async def list_migration_entities(
     return _response_data
 
 # Tags: bulk_imports
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Import",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_import(import_id: str = Field(..., description="The unique identifier of the bulk import migration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details about a GitLab Migration bulk import job, including its status and progress information."""
 
@@ -3223,7 +3540,13 @@ async def get_bulk_import(import_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: bulk_imports
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Entities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_entities_all(
     per_page: str | None = Field(None, description="Maximum number of entities to return per page for pagination purposes."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Order in which to sort the returned entities by creation date."),
@@ -3267,7 +3590,13 @@ async def list_migration_entities_all(
     return _response_data
 
 # Tags: bulk_imports
-@mcp.tool()
+@mcp.tool(
+    title="List Migrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migrations(
     per_page: str | None = Field(None, description="Number of migration records to return per page for pagination."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort migrations by creation date in ascending or descending order."),
@@ -3311,7 +3640,12 @@ async def list_migrations(
     return _response_data
 
 # Tags: bulk_imports
-@mcp.tool()
+@mcp.tool(
+    title="Start Bulk Migration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_bulk_migration(
     configuration_url: str = Field(..., description="URL of the source GitLab instance to migrate from (e.g., https://source.gitlab.com)"),
     configuration_access_token: str = Field(..., description="Personal access token or project access token from the source GitLab instance with sufficient permissions to read the entities being migrated"),
@@ -3358,7 +3692,13 @@ async def start_bulk_migration(
     return _response_data
 
 # Tags: jobs
-@mcp.tool()
+@mcp.tool(
+    title="List Project Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jobs(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
     scope: list[str] | None = Field(None, description="Filter results to include only jobs with the specified statuses. Provide as an array of status values; order is not significant."),
@@ -3400,7 +3740,13 @@ async def list_jobs(
     return _response_data
 
 # Tags: jobs
-@mcp.tool()
+@mcp.tool(
+    title="Get Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_job(
     id_: str = Field(..., alias="id", description="The project identifier, which can be a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
     job_id: int = Field(..., description="The numeric identifier of the job to retrieve."),
@@ -3439,7 +3785,12 @@ async def get_job(
     return _response_data
 
 # Tags: jobs
-@mcp.tool()
+@mcp.tool(
+    title="Execute Manual Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def execute_manual_job(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     job_id: int = Field(..., description="The numeric ID of the manual job to execute."),

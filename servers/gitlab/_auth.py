@@ -1,7 +1,7 @@
 """
 Authentication module for GitLab MCP server.
 
-Generated: 2026-05-05 15:04:31 UTC
+Generated: 2026-05-11 19:54:25 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
