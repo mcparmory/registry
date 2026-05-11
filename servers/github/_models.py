@@ -1,7 +1,7 @@
 """
 Github MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:02:43 UTC
+Generated: 2026-05-11 19:50:43 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -8317,7 +8317,7 @@ class ReposUploadReleaseAssetRequestQuery(StrictModel):
     name: str = Field(default=..., description="The filename for the asset. GitHub will rename files with special characters, non-alphanumeric characters, or leading/trailing periods. Duplicate filenames will cause an error and require deletion of the existing asset before re-upload.")
     label: str | None = Field(default=None, description="An optional display label for the asset that describes its purpose or contents.")
 class ReposUploadReleaseAssetRequestBody(StrictModel):
-    body: str | None = Field(default=None, description="The raw binary file data to upload. Set the Content-Type header to the appropriate media type (e.g., application/zip).", json_schema_extra={'format': 'binary'})
+    body: str | None = Field(default=None, description="Base64-encoded binary request body. The raw binary file data to upload. Set the Content-Type header to the appropriate media type (e.g., application/zip).", json_schema_extra={'format': 'byte'})
 class ReposUploadReleaseAssetRequest(StrictModel):
     """Upload a binary asset file to a release. The asset data must be sent as raw binary content in the request body with the appropriate Content-Type header."""
     path: ReposUploadReleaseAssetRequestPath

@@ -7,7 +7,7 @@ API Info:
 - Contact: Support (https://support.github.com/contact?tags=dotcom-rest-api)
 - Terms of Service: https://docs.github.com/articles/github-terms-of-service
 
-Generated: 2026-05-05 15:02:43 UTC
+Generated: 2026-05-11 19:50:43 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -50,6 +50,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.github.com")
@@ -57,7 +58,7 @@ OPERATION_URL_MAP: dict[str, str] = {
     "upload_release_asset": os.getenv("SERVER_URL_UPLOAD_RELEASE_ASSET", "https://uploads.github.com"),
 }
 SERVER_NAME = "GitHub"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -548,6 +549,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -555,6 +578,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -644,6 +669,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -653,18 +679,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -675,24 +699,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1141,6 +1171,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1165,6 +1197,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1381,7 +1415,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("GitHub", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="List Global Advisories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_advisories(
     ghsa_id: str | None = Field(None, description="Filter results to a specific GitHub Security Advisory (GHSA) identifier."),
     type_: Literal["reviewed", "malware", "unreviewed"] | None = Field(None, alias="type", description="Filter results by advisory type. Reviewed advisories are returned by default; use 'malware' to include malware advisories or 'unreviewed' for community-contributed advisories."),
@@ -1431,7 +1471,13 @@ async def list_advisories(
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get Authenticated App",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_authenticated_app() -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub App associated with the current authentication credentials. Requires JWT authentication and returns app details including the count of associated installations."""
 
@@ -1458,7 +1504,13 @@ async def get_authenticated_app() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_config() -> dict[str, Any] | ToolResult:
     """Retrieve the webhook configuration for a GitHub App. Requires JWT authentication as the GitHub App to access this endpoint."""
 
@@ -1485,7 +1537,13 @@ async def get_webhook_config() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Deliveries for App",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_deliveries_app() -> dict[str, Any] | ToolResult:
     """Retrieve a list of webhook deliveries for a GitHub App's configured webhook. Requires JWT authentication as a GitHub App."""
 
@@ -1512,7 +1570,13 @@ async def list_webhook_deliveries_app() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Delivery",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_delivery_app(delivery_id: str = Field(..., description="The unique identifier of the webhook delivery to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook delivery record for a GitHub App. Requires JWT authentication as the GitHub App."""
 
@@ -1548,7 +1612,12 @@ async def get_webhook_delivery_app(delivery_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Redeliver Webhook Delivery",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def redeliver_webhook_delivery_app(delivery_id: str = Field(..., description="The unique identifier of the webhook delivery attempt to redeliver.")) -> dict[str, Any] | ToolResult:
     """Redeliver a previously failed webhook delivery for a GitHub App. Requires JWT authentication as a GitHub App."""
 
@@ -1584,7 +1653,13 @@ async def redeliver_webhook_delivery_app(delivery_id: str = Field(..., descripti
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Installation Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_installation_requests() -> dict[str, Any] | ToolResult:
     """Retrieves all pending installation requests for the authenticated GitHub App. This allows you to see which organizations or users have requested to install your app but haven't completed the installation yet."""
 
@@ -1611,7 +1686,13 @@ async def list_installation_requests() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List App Installations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_installations(since: str | None = Field(None, description="Filter results to show only installations updated after the specified timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve all installations of the authenticated GitHub App, including their assigned permissions. Requires JWT authentication as the GitHub App."""
 
@@ -1649,7 +1730,13 @@ async def list_app_installations(since: str | None = Field(None, description="Fi
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get App Installation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_installation(installation_id: int = Field(..., description="The unique identifier of the GitHub App installation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve installation details for an authenticated GitHub App using the installation ID. Requires JWT authentication."""
 
@@ -1685,7 +1772,13 @@ async def get_app_installation(installation_id: int = Field(..., description="Th
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Uninstall App",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def uninstall_app(installation_id: int = Field(..., description="The unique identifier of the app installation to uninstall.")) -> dict[str, Any] | ToolResult:
     """Uninstall a GitHub App from a user, organization, or enterprise account. Requires JWT authentication as the GitHub App."""
 
@@ -1721,7 +1814,13 @@ async def uninstall_app(installation_id: int = Field(..., description="The uniqu
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Suspend App Installation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def suspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the app installation to suspend.")) -> dict[str, Any] | ToolResult:
     """Suspend a GitHub App installation on a user, organization, or enterprise account, blocking the app from accessing that account's resources and API/webhook events. Requires JWT authentication as the GitHub App."""
 
@@ -1757,7 +1856,13 @@ async def suspend_app_installation(installation_id: int = Field(..., description
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Unsuspend App Installation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unsuspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the GitHub App installation to unsuspend.")) -> dict[str, Any] | ToolResult:
     """Removes a suspension on a GitHub App installation, allowing it to resume normal operation. Requires JWT authentication as a GitHub App."""
 
@@ -1793,7 +1898,13 @@ async def unsuspend_app_installation(installation_id: int = Field(..., descripti
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Revoke App Authorization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_app_authorization(
     client_id: str = Field(..., description="The client ID of the GitHub application whose authorization should be revoked."),
     access_token: str = Field(..., description="The OAuth access token for the user whose authorization is being revoked. The grant associated with this token's owner will be deleted."),
@@ -1829,13 +1940,20 @@ async def revoke_app_authorization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Application Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_application_token(
     client_id: str = Field(..., description="The client ID of the GitHub application whose token should be revoked."),
     access_token: str = Field(..., description="The OAuth access token to be revoked. This token must be valid and associated with the specified application."),
@@ -1871,13 +1989,19 @@ async def revoke_application_token(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Create Scoped Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_scoped_token(
     client_id: str = Field(..., description="The client ID of the GitHub App requesting the scoped token."),
     access_token: str = Field(..., description="The non-scoped user access token to exchange for a scoped token."),
@@ -1915,13 +2039,20 @@ async def create_scoped_token(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: classroom
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific GitHub Classroom assignment by its ID. Only administrators of the classroom containing the assignment can access this operation."""
 
@@ -1957,7 +2088,13 @@ async def get_assignment(assignment_id: int = Field(..., description="The unique
     return _response_data
 
 # Tags: classroom
-@mcp.tool()
+@mcp.tool(
+    title="List Accepted Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_accepted_assignments(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment for which to list accepted student repositories.")) -> dict[str, Any] | ToolResult:
     """Retrieves all student assignment repositories created by accepting a GitHub Classroom assignment. Only accessible to administrators of the GitHub Classroom."""
 
@@ -1993,7 +2130,13 @@ async def list_accepted_assignments(assignment_id: int = Field(..., description=
     return _response_data
 
 # Tags: classroom
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Grades",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_grades(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment for which to retrieve grades.")) -> dict[str, Any] | ToolResult:
     """Retrieve all grades for a GitHub Classroom assignment. Only accessible to administrators of the GitHub Classroom that owns the assignment."""
 
@@ -2029,7 +2172,13 @@ async def list_assignment_grades(assignment_id: int = Field(..., description="Th
     return _response_data
 
 # Tags: classroom
-@mcp.tool()
+@mcp.tool(
+    title="List Classrooms",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_classrooms() -> dict[str, Any] | ToolResult:
     """Retrieve all GitHub Classroom classrooms where the current user is an administrator. Only classrooms for which the user has admin privileges will be returned."""
 
@@ -2056,7 +2205,13 @@ async def list_classrooms() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: classroom
-@mcp.tool()
+@mcp.tool(
+    title="Get Classroom",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_classroom(classroom_id: int = Field(..., description="The unique identifier of the classroom to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific GitHub Classroom by ID. Only returns the classroom if the authenticated user is an administrator of that classroom."""
 
@@ -2092,7 +2247,13 @@ async def get_classroom(classroom_id: int = Field(..., description="The unique i
     return _response_data
 
 # Tags: classroom
-@mcp.tool()
+@mcp.tool(
+    title="List Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignments(classroom_id: int = Field(..., description="The unique identifier of the classroom for which to retrieve assignments.")) -> dict[str, Any] | ToolResult:
     """Retrieve all GitHub Classroom assignments for a specified classroom. Only administrators of the classroom can access this list."""
 
@@ -2128,7 +2289,13 @@ async def list_assignments(classroom_id: int = Field(..., description="The uniqu
     return _response_data
 
 # Tags: codes-of-conduct
-@mcp.tool()
+@mcp.tool(
+    title="List Codes of Conduct",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codes_of_conduct() -> dict[str, Any] | ToolResult:
     """Retrieve all available GitHub codes of conduct. Returns a comprehensive array of conduct guidelines that can be applied to repositories."""
 
@@ -2155,7 +2322,13 @@ async def list_codes_of_conduct() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: codes-of-conduct
-@mcp.tool()
+@mcp.tool(
+    title="Get Conduct Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conduct_code(key: str = Field(..., description="The unique identifier or key of the code of conduct to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific GitHub code of conduct. Use this to fetch the full content and metadata for a code of conduct by its unique identifier."""
 
@@ -2191,7 +2364,13 @@ async def get_conduct_code(key: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise Actions Cache Storage Limit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier used to reference the enterprise in API requests.")) -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub Actions cache storage limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache storage configurations."""
 
@@ -2227,7 +2406,13 @@ async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(...
     return _response_data
 
 # Tags: oidc
-@mcp.tool()
+@mcp.tool(
+    title="List OIDC Custom Property Inclusions for Enterprise",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_oidc_custom_property_inclusions(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any] | ToolResult:
     """Lists the repository custom properties that are included in OIDC tokens for repository actions within an enterprise. Requires admin:enterprise scope for authentication."""
 
@@ -2263,7 +2448,12 @@ async def list_oidc_custom_property_inclusions(enterprise: str = Field(..., desc
     return _response_data
 
 # Tags: oidc
-@mcp.tool()
+@mcp.tool(
+    title="Add OIDC Custom Property",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_oidc_custom_property(
     enterprise: str = Field(..., description="The enterprise slug identifier (URL-friendly name) for which to configure the OIDC custom property inclusion."),
     custom_property_name: str = Field(..., description="The name of the repository custom property to include in the OIDC token for repository actions."),
@@ -2305,7 +2495,13 @@ async def add_oidc_custom_property(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="List Code Security Configurations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_security_configurations(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any] | ToolResult:
     """Lists all code security configurations available in an enterprise. The authenticated user must be an administrator of the enterprise to access this endpoint."""
 
@@ -2341,7 +2537,13 @@ async def list_code_security_configurations(enterprise: str = Field(..., descrip
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Code Security Default Configurations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_code_security_default_configurations(enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens). This is the URL-friendly version of the enterprise name.")) -> dict[str, Any] | ToolResult:
     """Retrieves the default code security configurations for an enterprise. The authenticated user must be an administrator of the enterprise to access this endpoint."""
 
@@ -2377,7 +2579,13 @@ async def list_enterprise_code_security_default_configurations(enterprise: str =
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Get Code Security Configuration for Enterprise",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_security_configuration_enterprise(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens)."),
     configuration_id: int = Field(..., description="The unique numeric identifier of the code security configuration to retrieve."),
@@ -2416,7 +2624,13 @@ async def get_code_security_configuration_enterprise(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Delete Code Security Configuration for Enterprise",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_code_security_configuration_enterprise(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to delete."),
@@ -2455,7 +2669,12 @@ async def delete_code_security_configuration_enterprise(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Attach Code Security Configuration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def attach_code_security_configuration(
     enterprise: str = Field(..., description="The slug version of the enterprise name."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to attach."),
@@ -2492,13 +2711,20 @@ async def attach_code_security_configuration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="List Code Security Configuration Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_security_configuration_repositories(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration. This ID specifies which configuration's associated repositories to retrieve."),
@@ -2537,7 +2763,13 @@ async def list_code_security_configuration_repositories(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Dependabot Alerts for Enterprise",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependabot_alerts(
     enterprise: str = Field(..., description="The enterprise slug identifier."),
     state: str | None = Field(None, description="Filter alerts by state. Specify one or more comma-separated states to return only matching alerts."),
@@ -2585,7 +2817,13 @@ async def list_dependabot_alerts(
     return _response_data
 
 # Tags: enterprise-teams
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_enterprise(enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated). This uniquely identifies the enterprise whose teams should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve all teams within an enterprise that the authenticated user has access to. This operation returns a complete list of teams for the specified enterprise."""
 
@@ -2621,7 +2859,12 @@ async def list_teams_enterprise(enterprise: str = Field(..., description="The en
     return _response_data
 
 # Tags: enterprise-teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Enterprise Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_enterprise_team(
     enterprise: str = Field(..., description="The slug version of the enterprise name that will contain the new team."),
     name: str = Field(..., description="The name of the team to be created."),
@@ -2660,13 +2903,20 @@ async def create_enterprise_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: enterprise-team-memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Team Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_team_members(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly lowercase name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format (URL-friendly lowercase name) or the numeric team ID."),
@@ -2705,7 +2955,12 @@ async def list_enterprise_team_members(
     return _response_data
 
 # Tags: enterprise-team-memberships
-@mcp.tool()
+@mcp.tool(
+    title="Add Team Members",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_team_members(
     enterprise: str = Field(..., description="The enterprise identifier as a slug (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier as a slug or numeric ID."),
@@ -2742,13 +2997,20 @@ async def add_team_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: enterprise-team-memberships
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team Members",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_members(
     enterprise: str = Field(..., description="The enterprise identifier as a URL-friendly slug (lowercase, hyphens allowed)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier as a URL-friendly slug or numeric team ID."),
@@ -2785,13 +3047,20 @@ async def remove_team_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: enterprise-team-memberships
-@mcp.tool()
+@mcp.tool(
+    title="Check Enterprise Team Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_enterprise_team_membership(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The slug version of the enterprise team name, or alternatively the enterprise team ID. This uniquely identifies the team within the enterprise."),
@@ -2831,7 +3100,13 @@ async def check_enterprise_team_membership(
     return _response_data
 
 # Tags: enterprise-team-memberships
-@mcp.tool()
+@mcp.tool(
+    title="Add Team Member",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_team_member(
     enterprise: str = Field(..., description="The slug identifier for the enterprise organization."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The slug identifier or numeric ID for the enterprise team."),
@@ -2871,7 +3146,13 @@ async def add_team_member(
     return _response_data
 
 # Tags: enterprise-team-memberships
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_member(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or numeric team ID."),
@@ -2911,7 +3192,13 @@ async def remove_team_member(
     return _response_data
 
 # Tags: enterprise-team-organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_assignments(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
@@ -2950,7 +3237,13 @@ async def list_organization_assignments(
     return _response_data
 
 # Tags: enterprise-team-organizations
-@mcp.tool()
+@mcp.tool(
+    title="Assign Team to Organizations",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_team_to_organizations(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
@@ -2993,7 +3286,13 @@ async def assign_team_to_organizations(
     return _response_data
 
 # Tags: enterprise-team-organizations
-@mcp.tool()
+@mcp.tool(
+    title="Unassign Team From Organizations",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unassign_team_from_organizations(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
@@ -3036,7 +3335,13 @@ async def unassign_team_from_organizations(
     return _response_data
 
 # Tags: enterprise-team-organizations
-@mcp.tool()
+@mcp.tool(
+    title="Verify Team Organization Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def verify_team_organization_assignment(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated). This identifies the parent enterprise context."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or UUID. Can be provided as either the team's slug name or its unique identifier."),
@@ -3076,7 +3381,13 @@ async def verify_team_organization_assignment(
     return _response_data
 
 # Tags: enterprise-team-organizations
-@mcp.tool()
+@mcp.tool(
+    title="Assign Team to Organization",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_team_to_organization(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or numeric ID. The slug is the lowercase, hyphen-separated team name."),
@@ -3116,7 +3427,13 @@ async def assign_team_to_organization(
     return _response_data
 
 # Tags: enterprise-team-organizations
-@mcp.tool()
+@mcp.tool(
+    title="Unassign Team From Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unassign_team_from_organization(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
@@ -3156,7 +3473,13 @@ async def unassign_team_from_organization(
     return _response_data
 
 # Tags: enterprise-teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_enterprise_team(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the normalized identifier used in the enterprise URL."),
     team_slug: str = Field(..., description="The slug of the team name. GitHub generates this by normalizing the team name: converting to lowercase, replacing spaces with hyphens, removing special characters, and prefixing with 'ent:'."),
@@ -3195,7 +3518,13 @@ async def get_enterprise_team(
     return _response_data
 
 # Tags: enterprise-teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Enterprise Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_enterprise_team(
     enterprise: str = Field(..., description="The slug version of the enterprise name."),
     team_slug: str = Field(..., description="The slug of the team name."),
@@ -3234,13 +3563,20 @@ async def update_enterprise_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: enterprise-teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Enterprise Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_enterprise_team(
     enterprise: str = Field(..., description="The slug identifier for the enterprise containing the team to be deleted."),
     team_slug: str = Field(..., description="The slug identifier for the team to be deleted."),
@@ -3279,7 +3615,13 @@ async def delete_enterprise_team(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Public Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_events() -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events. Note: This API is not optimized for real-time use cases; event data latency can range from 30 seconds to 6 hours depending on the time of day."""
 
@@ -3306,7 +3648,13 @@ async def list_events() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Feeds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feeds() -> dict[str, Any] | ToolResult:
     """Retrieve all available feeds for the authenticated user, including timeline feeds (global, user, organization) and security advisories. Each feed includes a URL that can be used to fetch its contents in JSON or Atom format."""
 
@@ -3333,7 +3681,13 @@ async def list_feeds() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List Gists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gists(since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve gists for the authenticated user, or all public gists if called anonymously. Results can be filtered by last update time."""
 
@@ -3371,7 +3725,12 @@ async def list_gists(since: str | None = Field(None, description="Filter results
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Create Gist",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_gist(
     files: dict[str, _models.GistsCreateBodyFilesValue] = Field(..., description="An object mapping file names to their content. Each file must have a unique name and contain the file content as a string."),
     description: str | None = Field(None, description="A brief description of the gist's purpose or content."),
@@ -3407,13 +3766,20 @@ async def create_gist(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List Public Gists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_gists(since: str | None = Field(None, description="Filter results to show only gists updated after the specified timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public gists sorted by most recently updated first. Supports pagination to fetch up to 3000 gists total."""
 
@@ -3451,7 +3817,13 @@ async def list_public_gists(since: str | None = Field(None, description="Filter 
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List Starred Gists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_starred_gists(since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve all gists starred by the authenticated user. Results can be filtered to show only gists updated after a specified timestamp."""
 
@@ -3489,7 +3861,13 @@ async def list_starred_gists(since: str | None = Field(None, description="Filter
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Get Gist",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gist(gist_id: str = Field(..., description="The unique identifier of the gist to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific gist by its unique identifier. Supports multiple response formats including raw markdown and base64-encoded content."""
 
@@ -3525,7 +3903,13 @@ async def get_gist(gist_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Update Gist",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gist(
     gist_id: str = Field(..., description="The unique identifier of the gist to update."),
     description: str | None = Field(None, description="A new description for the gist."),
@@ -3562,13 +3946,20 @@ async def update_gist(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Delete Gist",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_gist(gist_id: str = Field(..., description="The unique identifier of the gist to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a gist by its unique identifier. This action cannot be undone."""
 
@@ -3604,7 +3995,13 @@ async def delete_gist(gist_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List Gist Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gist_comments(gist_id: str = Field(..., description="The unique identifier of the gist for which to retrieve comments.")) -> dict[str, Any] | ToolResult:
     """Retrieves all comments posted on a specific gist. Supports multiple response formats including raw markdown and base64-encoded content."""
 
@@ -3640,7 +4037,12 @@ async def list_gist_comments(gist_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Create Gist Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist to comment on."),
     body: str = Field(..., description="The comment text content. Supports markdown formatting.", max_length=65535),
@@ -3676,13 +4078,20 @@ async def create_gist_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Get Gist Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist containing the comment."),
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve."),
@@ -3723,7 +4132,13 @@ async def get_gist_comment(
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Update Gist Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist containing the comment to update."),
     comment_id: str = Field(..., description="The unique identifier of the comment to update."),
@@ -3762,13 +4177,20 @@ async def update_gist_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Delete Gist Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist containing the comment to delete."),
     comment_id: str = Field(..., description="The unique identifier of the comment to delete."),
@@ -3809,7 +4231,13 @@ async def delete_gist_comment(
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List Gist Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gist_commits(gist_id: str = Field(..., description="The unique identifier of the gist whose commit history you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the commit history for a specific gist, showing all revisions and changes made to the gist over time."""
 
@@ -3845,7 +4273,13 @@ async def list_gist_commits(gist_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List Gist Forks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gist_forks(gist_id: str = Field(..., description="The unique identifier of the gist for which to retrieve forks.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all forks created from a specific gist. This allows you to discover derivative versions and track how a gist has been adapted by other users."""
 
@@ -3881,7 +4315,12 @@ async def list_gist_forks(gist_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Fork Gist",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fork_gist(gist_id: str = Field(..., description="The unique identifier of the gist to fork.")) -> dict[str, Any] | ToolResult:
     """Create a fork of an existing gist under your account. The forked gist will be an independent copy that you can modify without affecting the original."""
 
@@ -3917,7 +4356,13 @@ async def fork_gist(gist_id: str = Field(..., description="The unique identifier
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Check Gist Starred",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_gist_starred(gist_id: str = Field(..., description="The unique identifier of the gist to check for starred status.")) -> dict[str, Any] | ToolResult:
     """Check whether a specific gist has been starred by the authenticated user. Returns a 204 status if starred, or 404 if not starred."""
 
@@ -3953,7 +4398,13 @@ async def check_gist_starred(gist_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Star Gist",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def star_gist(gist_id: str = Field(..., description="The unique identifier of the gist to star.")) -> dict[str, Any] | ToolResult:
     """Star a gist to save it for quick access. Requires setting the Content-Length header to zero."""
 
@@ -3989,7 +4440,13 @@ async def star_gist(gist_id: str = Field(..., description="The unique identifier
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Remove Gist Star",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_gist_star(gist_id: str = Field(..., description="The unique identifier of the gist to unstar.")) -> dict[str, Any] | ToolResult:
     """Remove a star from a gist, indicating you no longer want to mark it as a favorite. This action is only available for gists you have previously starred."""
 
@@ -4025,7 +4482,13 @@ async def remove_gist_star(gist_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="Get Gist Revision",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gist_revision(
     gist_id: str = Field(..., description="The unique identifier of the gist to retrieve a revision from."),
     sha: str = Field(..., description="The commit SHA that identifies the specific revision of the gist to retrieve."),
@@ -4064,7 +4527,13 @@ async def get_gist_revision(
     return _response_data
 
 # Tags: gitignore
-@mcp.tool()
+@mcp.tool(
+    title="List Gitignore Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gitignore_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available gitignore templates that can be used when creating a new repository. These templates provide pre-configured ignore patterns for common development environments and frameworks."""
 
@@ -4091,7 +4560,13 @@ async def list_gitignore_templates() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: gitignore
-@mcp.tool()
+@mcp.tool(
+    title="Get Gitignore Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gitignore_template(name: str = Field(..., description="The name of the gitignore template to retrieve (e.g., 'Python', 'Node', 'Java'). Template names are case-sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the content of a gitignore template by name. Supports raw content retrieval via custom media type."""
 
@@ -4127,7 +4602,13 @@ async def get_gitignore_template(name: str = Field(..., description="The name of
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Installation Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_installation_repositories() -> dict[str, Any] | ToolResult:
     """List all repositories that this app installation has access to. Returns repositories the authenticated app can interact with based on its installation permissions."""
 
@@ -4154,7 +4635,13 @@ async def list_installation_repositories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issues(
     filter_: Literal["assigned", "created", "mentioned", "subscribed", "repos", "all"] | None = Field(None, alias="filter", description="Specifies which category of issues to return. Use 'assigned' for issues assigned to you, 'created' for issues you created, 'mentioned' for issues mentioning you, 'subscribed' for issues you're subscribed to, or 'all'/'repos' for all visible issues."),
     state: Literal["open", "closed", "all"] | None = Field(None, description="Filters issues by their current state. Use 'open' for active issues, 'closed' for resolved issues, or 'all' to include both."),
@@ -4202,7 +4689,13 @@ async def list_issues(
     return _response_data
 
 # Tags: licenses
-@mcp.tool()
+@mcp.tool(
+    title="List Licenses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_licenses(featured: bool | None = Field(None, description="Filter results to show only featured licenses. When enabled, returns a curated subset of the most popular licenses.")) -> dict[str, Any] | ToolResult:
     """Retrieve the most commonly used open source licenses on GitHub. This helps developers quickly find and apply standard licenses to their repositories."""
 
@@ -4240,7 +4733,13 @@ async def list_licenses(featured: bool | None = Field(None, description="Filter 
     return _response_data
 
 # Tags: licenses
-@mcp.tool()
+@mcp.tool(
+    title="Get License",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_license(license_: str = Field(..., alias="license", description="The license identifier or SPDX license identifier to retrieve information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific open source license. This is useful for understanding license terms and requirements when licensing a repository."""
 
@@ -4276,7 +4775,13 @@ async def get_license(license_: str = Field(..., alias="license", description="T
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get Subscription Plan for Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_subscription_plan(account_id: int = Field(..., description="The unique identifier of the user or organization account to retrieve subscription information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the active subscription plan for a user or organization account on a GitHub App marketplace listing. Returns current subscription status and any pending plan changes scheduled for the next billing cycle."""
 
@@ -4312,7 +4817,13 @@ async def get_subscription_plan(account_id: int = Field(..., description="The un
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Marketplace Plans",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_marketplace_plans() -> dict[str, Any] | ToolResult:
     """Retrieve all plans associated with your GitHub Marketplace listing. Requires JWT authentication for GitHub Apps or basic authentication for OAuth apps."""
 
@@ -4339,7 +4850,13 @@ async def list_marketplace_plans() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get Subscription Plan for Account (Stubbed)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_subscription_plan_stubbed(account_id: int = Field(..., description="The unique identifier of the account (user or organization) to check subscription status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the active subscription plan for a GitHub account. Returns the current subscription status and any pending plan changes scheduled for the next billing cycle."""
 
@@ -4375,7 +4892,13 @@ async def get_subscription_plan_stubbed(account_id: int = Field(..., description
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Marketplace Plans (Stubbed)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_marketplace_plans_stubbed() -> dict[str, Any] | ToolResult:
     """Retrieve all plans associated with your GitHub Marketplace listing. Requires JWT authentication for GitHub Apps or basic authentication with client credentials for OAuth apps."""
 
@@ -4402,7 +4925,13 @@ async def list_marketplace_plans_stubbed() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Network Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_network_events(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -4441,7 +4970,13 @@ async def list_network_events(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notifications(
     all_: bool | None = Field(None, alias="all", description="Include notifications marked as read in the results. By default, only unread notifications are returned."),
     participating: bool | None = Field(None, description="Show only notifications where you are directly participating or mentioned, excluding notifications you're merely watching."),
@@ -4483,7 +5018,13 @@ async def list_notifications(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Mark Notifications as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_notifications_as_read(last_read_at: str | None = Field(None, description="Timestamp marking the last point notifications were checked. Notifications updated after this time will not be marked as read. Omit to mark all notifications as read. Use ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Mark all notifications as read for the authenticated user. For large notification volumes, returns a 202 status and processes asynchronously; use the list notifications endpoint with `all=false` to verify completion."""
 
@@ -4515,13 +5056,20 @@ async def mark_notifications_as_read(last_read_at: str | None = Field(None, desc
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Get Notification Thread",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notification_thread(thread_id: int = Field(..., description="The unique identifier of the notification thread to retrieve. This ID is returned in the `id` field when listing notifications.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific notification thread. Use the thread ID from notification list operations to fetch thread-specific data."""
 
@@ -4557,7 +5105,13 @@ async def get_notification_thread(thread_id: int = Field(..., description="The u
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Mark Notification Thread as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_notification_thread_as_read(thread_id: int = Field(..., description="The unique identifier of the notification thread to mark as read. This ID corresponds to the `id` field returned when retrieving notifications.")) -> dict[str, Any] | ToolResult:
     """Mark a notification thread as read, equivalent to dismissing a notification in your GitHub notification inbox. This updates the thread's read status without deleting it."""
 
@@ -4593,7 +5147,13 @@ async def mark_notification_thread_as_read(thread_id: int = Field(..., descripti
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Mark Notification Thread as Done",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_notification_thread_as_done(thread_id: int = Field(..., description="The unique identifier of the notification thread to mark as done. This ID corresponds to the `id` field returned when retrieving notifications.")) -> dict[str, Any] | ToolResult:
     """Mark a notification thread as done, equivalent to archiving a notification in your GitHub notification inbox. This removes the thread from your active notifications."""
 
@@ -4629,7 +5189,13 @@ async def mark_notification_thread_as_done(thread_id: int = Field(..., descripti
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Get Thread Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_thread_subscription(thread_id: int = Field(..., description="The unique identifier of the notification thread to check subscription status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the subscription status of the authenticated user for a specific notification thread. Returns subscription details if the user is subscribed (e.g., through participation, mentions, or manual subscription)."""
 
@@ -4665,7 +5231,13 @@ async def get_thread_subscription(thread_id: int = Field(..., description="The u
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Configure Thread Notification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_thread_notification(
     thread_id: int = Field(..., description="The unique identifier of the notification thread returned in the `id` field from notification list operations."),
     ignored: bool | None = Field(None, description="Set to true to block all notifications from this thread, or false to receive notifications normally."),
@@ -4701,13 +5273,20 @@ async def configure_thread_notification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Mute Thread Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mute_thread_subscription(thread_id: int = Field(..., description="The unique identifier of the notification thread, obtained from the `id` field when retrieving notifications.")) -> dict[str, Any] | ToolResult:
     """Mute all future notifications for a thread until you comment or receive an @mention. Repository watching settings remain unaffected by this operation."""
 
@@ -4743,7 +5322,13 @@ async def mute_thread_subscription(thread_id: int = Field(..., description="The 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations(since: int | None = Field(None, description="Organization ID cursor for pagination. Returns only organizations with an ID greater than this value to fetch the next page of results.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organizations ordered by creation date. Pagination is cursor-based using the `since` parameter to fetch subsequent pages via Link headers."""
 
@@ -4781,7 +5366,13 @@ async def list_organizations(since: int | None = Field(None, description="Organi
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Actions Cache Storage Limit for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actions_cache_storage_limit(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub Actions cache storage limit for an organization. This limit applies to all repositories within the organization and cannot be exceeded by individual repository settings."""
 
@@ -4817,7 +5408,13 @@ async def get_actions_cache_storage_limit(org: str = Field(..., description="The
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Dependabot Repository Access",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependabot_repository_access(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists repositories that Dependabot has been granted access to within an organization. This allows organization admins to view which repositories Dependabot can access when updating dependencies."""
 
@@ -4853,7 +5450,13 @@ async def list_dependabot_repository_access(org: str = Field(..., description="T
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Update Dependabot Repository Access",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dependabot_repository_access(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     repository_ids_to_add: list[int] | None = Field(None, description="List of repository IDs to grant Dependabot access to. Each ID should be a valid repository identifier for the organization."),
@@ -4890,13 +5493,20 @@ async def update_dependabot_repository_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Budgets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_budgets(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     scope: Literal["enterprise", "organization", "repository", "cost_center"] | None = Field(None, description="Filter budgets by their scope type to narrow results to a specific budget category."),
@@ -4938,7 +5548,13 @@ async def list_organization_budgets(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Budget",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_budget(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     budget_id: str = Field(..., description="The unique identifier of the budget to retrieve."),
@@ -4977,7 +5593,13 @@ async def get_budget(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Update Budget",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_budget(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     budget_id: str = Field(..., description="The unique identifier for the budget to update."),
@@ -5025,7 +5647,13 @@ async def update_budget(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Delete Budget",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_budget(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     budget_id: str = Field(..., description="The unique identifier of the budget to delete."),
@@ -5064,7 +5692,13 @@ async def delete_budget(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Premium Request Usage Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_premium_request_usage_report(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     year: int | None = Field(None, description="Filter results to a specific year. Provide a four-digit year value. Defaults to the current year if not specified."),
@@ -5111,7 +5745,13 @@ async def get_premium_request_usage_report(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Billing Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_billing_usage(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     year: int | None = Field(None, description="Filter results to a specific year. Specify as a four-digit integer representing the year. Defaults to the current year if not provided."),
@@ -5155,7 +5795,13 @@ async def get_organization_billing_usage(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Billing Usage Summary Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_billing_usage_summary(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     year: int | None = Field(None, description="Filter results to a specific year. Specify as a four-digit integer representing the year."),
@@ -5201,7 +5847,13 @@ async def get_billing_usage_summary(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization(org: str = Field(..., description="The organization name to retrieve. The name is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about an organization, including its plan and security settings. Full details require organization owner privileges or appropriate OAuth/PAT scopes."""
 
@@ -5237,7 +5889,13 @@ async def get_organization(org: str = Field(..., description="The organization n
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     billing_email: str | None = Field(None, description="Billing email address for the organization. This address is not publicly displayed."),
@@ -5289,13 +5947,20 @@ async def update_organization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization(org: str = Field(..., description="The organization name to delete. The name is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an organization and all its associated repositories. The organization name will be unavailable for 90 days following deletion."""
 
@@ -5331,7 +5996,13 @@ async def delete_organization(org: str = Field(..., description="The organizatio
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Actions Cache Usage for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actions_cache_usage_for_org(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the total GitHub Actions cache usage for an organization. Cache usage data is refreshed approximately every 5 minutes, so values may take at least 5 minutes to reflect recent changes."""
 
@@ -5367,7 +6038,13 @@ async def get_actions_cache_usage_for_org(org: str = Field(..., description="The
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Actions Cache Usage by Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actions_cache_usage_by_repository(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve GitHub Actions cache usage statistics for all repositories within an organization. Cache usage data is refreshed approximately every 5 minutes."""
 
@@ -5403,7 +6080,13 @@ async def list_actions_cache_usage_by_repository(org: str = Field(..., descripti
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Hosted Runners for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hosted_runners(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all GitHub-hosted runners configured in an organization. Requires `manage_runner:org` scope for authentication."""
 
@@ -5439,7 +6122,12 @@ async def list_hosted_runners(org: str = Field(..., description="The organizatio
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Hosted Runner for Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_hosted_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="Name of the runner. Must be 1-64 characters containing only letters (a-z, A-Z), numbers (0-9), periods, hyphens, and underscores."),
@@ -5480,13 +6168,20 @@ async def create_hosted_runner(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Runner Images for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_runner_images(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom images to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom images available for GitHub Actions hosted runners in an organization. Requires `manage_runners:org` OAuth scope or personal access token (classic)."""
 
@@ -5522,7 +6217,13 @@ async def list_custom_runner_images(org: str = Field(..., description="The organ
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Runner Image",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_runner_image(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition to retrieve."),
@@ -5561,7 +6262,13 @@ async def get_custom_runner_image(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Runner Image",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_runner_image(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition to delete."),
@@ -5600,7 +6307,13 @@ async def delete_custom_runner_image(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Image Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_image_versions(
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition whose versions you want to list."),
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
@@ -5639,7 +6352,13 @@ async def list_custom_image_versions(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Runner Image Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_runner_image_version(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition."),
@@ -5679,7 +6398,13 @@ async def get_custom_runner_image_version(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Image Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_image_version(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition."),
@@ -5719,7 +6444,13 @@ async def delete_custom_image_version(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List GitHub-Owned Runner Images",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_github_owned_runner_images(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of GitHub-owned images available for GitHub-hosted runners in an organization. Use this to see which runner images can be used for workflows in the organization."""
 
@@ -5755,7 +6486,13 @@ async def list_github_owned_runner_images(org: str = Field(..., description="The
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Partner Runner Images",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_partner_runner_images(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of partner images available for GitHub-hosted runners in an organization. This allows you to see which pre-configured runner images are available for use."""
 
@@ -5791,7 +6528,13 @@ async def list_partner_runner_images(org: str = Field(..., description="The orga
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Hosted Runners Limits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hosted_runners_limits(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the usage limits and quotas for GitHub-hosted runners available to an organization. This includes information about concurrent runner usage and other resource constraints."""
 
@@ -5827,7 +6570,13 @@ async def get_hosted_runners_limits(org: str = Field(..., description="The organ
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Hosted Runner Machine Specs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hosted_runner_machine_specs(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the available machine specifications for GitHub-hosted runners in an organization. This includes details about CPU, memory, and other hardware configurations supported for workflow runs."""
 
@@ -5863,7 +6612,13 @@ async def list_hosted_runner_machine_specs(org: str = Field(..., description="Th
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Hosted Runner Platforms",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hosted_runner_platforms(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of available platforms for GitHub-hosted runners in an organization. Use this to determine which runner platforms can be used for workflows."""
 
@@ -5899,7 +6654,13 @@ async def list_hosted_runner_platforms(org: str = Field(..., description="The or
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Hosted Runner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hosted_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     hosted_runner_id: int = Field(..., description="The unique identifier of the GitHub-hosted runner to retrieve."),
@@ -5938,7 +6699,13 @@ async def get_hosted_runner(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Hosted Runner",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_hosted_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     hosted_runner_id: int = Field(..., description="The unique identifier of the GitHub-hosted runner to update."),
@@ -5980,13 +6747,20 @@ async def update_hosted_runner(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Hosted Runner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_hosted_runner(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     hosted_runner_id: int = Field(..., description="The unique identifier of the GitHub-hosted runner to delete."),
@@ -6025,7 +6799,13 @@ async def delete_hosted_runner(
     return _response_data
 
 # Tags: oidc
-@mcp.tool()
+@mcp.tool(
+    title="List OIDC Custom Property Inclusions for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_oidc_custom_property_inclusions_for_org(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the OIDC custom property inclusions.")) -> dict[str, Any] | ToolResult:
     """Lists the repository custom properties that are included in the OIDC token issued for repository actions within an organization. Requires `read:org` scope for authentication."""
 
@@ -6061,7 +6841,12 @@ async def list_oidc_custom_property_inclusions_for_org(org: str = Field(..., des
     return _response_data
 
 # Tags: oidc
-@mcp.tool()
+@mcp.tool(
+    title="Add OIDC Custom Property for Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_oidc_custom_property_org(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     custom_property_name: str = Field(..., description="The name of the custom property to include in the OIDC token for repository actions."),
@@ -6103,7 +6888,13 @@ async def add_oidc_custom_property_org(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization GitHub Actions Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_github_actions_repositories(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists the selected repositories that are enabled for GitHub Actions within an organization. This endpoint requires the organization's GitHub Actions permission policy to be configured for selected repositories."""
 
@@ -6139,7 +6930,13 @@ async def list_organization_github_actions_repositories(org: str = Field(..., de
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Self-Hosted Runner Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_self_hosted_runner_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any] | ToolResult:
     """Lists all repositories within an organization that are permitted to use self-hosted runners. Requires admin:org scope or Actions policies fine-grained permission."""
 
@@ -6175,7 +6972,13 @@ async def list_organization_self_hosted_runner_repositories(org: str = Field(...
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository From Self-Hosted Runners",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_self_hosted_runners(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     repository_id: int = Field(..., description="The unique numeric identifier of the repository to remove from self-hosted runner access."),
@@ -6214,7 +7017,13 @@ async def remove_repository_from_self_hosted_runners(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_groups(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     visible_to_repository: str | None = Field(None, description="Filter to return only runner groups that are allowed to be used by a specific repository."),
@@ -6256,7 +7065,12 @@ async def list_runner_groups(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Runner Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_runner_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the runner group to create."),
@@ -6297,13 +7111,20 @@ async def create_runner_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Runner Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_runner_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to retrieve."),
@@ -6342,7 +7163,13 @@ async def get_runner_group(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Runner Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_runner_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to update."),
@@ -6382,13 +7209,20 @@ async def update_runner_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Runner Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_runner_group(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the runner group."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to delete."),
@@ -6427,7 +7261,13 @@ async def delete_runner_group(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List GitHub Hosted Runners in Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_github_hosted_runners_in_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the runner group to retrieve hosted runners from."),
@@ -6466,7 +7306,13 @@ async def list_github_hosted_runners_in_group(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Group Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_group_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
@@ -6505,7 +7351,13 @@ async def list_runner_group_repositories(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Runner Group Repository Access",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_runner_group_repository_access(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to update."),
@@ -6542,13 +7394,20 @@ async def update_runner_group_repository_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Grant Runner Group Repository Access",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def grant_runner_group_repository_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
@@ -6588,7 +7447,13 @@ async def grant_runner_group_repository_access(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Runner Group Repository Access",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_runner_group_repository_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
@@ -6628,7 +7493,13 @@ async def revoke_runner_group_repository_access(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runners in Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runners_in_group(
     org: str = Field(..., description="The organization name. This value is case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
@@ -6667,7 +7538,13 @@ async def list_runners_in_group(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Runner Group Runners",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_runner_group_runners(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to update."),
@@ -6704,13 +7581,19 @@ async def update_runner_group_runners(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Add Runner to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_runner_to_group(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to which the runner will be added."),
@@ -6750,7 +7633,13 @@ async def add_runner_to_group(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Runner from Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_runner_from_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
@@ -6790,7 +7679,13 @@ async def remove_runner_from_group(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Runners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_runners(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the runner list to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all self-hosted runners configured for an organization. Requires admin access to the organization and appropriate OAuth or personal access token scopes."""
 
@@ -6826,7 +7721,13 @@ async def list_organization_runners(org: str = Field(..., description="The organ
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Applications for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_applications(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the runner applications to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Lists available runner application binaries that can be downloaded and executed for an organization. Requires admin access to the organization."""
 
@@ -6862,7 +7763,12 @@ async def list_runner_applications(org: str = Field(..., description="The organi
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Generate Runner Registration Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_runner_registration_token(org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization.")) -> dict[str, Any] | ToolResult:
     """Generate a registration token for self-hosted runners in an organization. The token expires after one hour and is used to configure new runners via the config script."""
 
@@ -6898,7 +7804,13 @@ async def generate_runner_registration_token(org: str = Field(..., description="
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Generate Runner Removal Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def generate_runner_removal_token(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization where the runner will be removed.")) -> dict[str, Any] | ToolResult:
     """Generate a short-lived token for removing a self-hosted runner from an organization. The token expires after one hour and is used with the config script to deregister the runner."""
 
@@ -6934,7 +7846,13 @@ async def generate_runner_removal_token(org: str = Field(..., description="The o
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Runner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to retrieve."),
@@ -6973,7 +7891,13 @@ async def get_runner(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Runner from Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_runner_from_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the runner."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to remove from the organization."),
@@ -7012,7 +7936,13 @@ async def remove_runner_from_organization(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_labels(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
@@ -7051,7 +7981,12 @@ async def list_runner_labels(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Add Labels to Self-Hosted Runner",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_labels_to_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to label."),
@@ -7088,13 +8023,20 @@ async def add_labels_to_runner(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Runner Labels",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_runner_labels(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to update."),
@@ -7131,13 +8073,20 @@ async def update_runner_labels(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove All Custom Labels From Runner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_all_custom_labels_from_runner(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the runner."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner from which to remove all custom labels."),
@@ -7176,7 +8125,13 @@ async def remove_all_custom_labels_from_runner(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Custom Label from Runner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_custom_label_from_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
@@ -7216,7 +8171,13 @@ async def remove_custom_label_from_runner(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Secrets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secrets(org: str = Field(..., description="The organization name. This value is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve all secrets configured at the organization level without exposing their encrypted values. Requires appropriate authentication scopes and collaborator access to the repository."""
 
@@ -7252,7 +8213,13 @@ async def list_organization_secrets(org: str = Field(..., description="The organ
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for an organization, which is required to encrypt secrets before creating or updating them. The authenticated user must have the appropriate permissions (admin:org scope for OAuth/PAT, or repo scope for private repositories)."""
 
@@ -7288,7 +8255,13 @@ async def get_organization_public_key(org: str = Field(..., description="The org
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
@@ -7327,7 +8300,13 @@ async def get_organization_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Organization Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_organization_secret(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     secret_name: str = Field(..., description="The name of the secret to create or update."),
@@ -7371,13 +8350,20 @@ async def create_or_update_organization_secret(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to delete."),
@@ -7416,7 +8402,13 @@ async def delete_organization_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Secret Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secret_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve repository access for."),
@@ -7455,7 +8447,13 @@ async def list_organization_secret_repositories(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Secret Repositories",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_secret_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to update repository access for."),
@@ -7492,13 +8490,20 @@ async def update_organization_secret_repositories(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Grant Repository Access to Organization Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def grant_repository_access_to_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to grant access to."),
@@ -7538,7 +8543,13 @@ async def grant_repository_access_to_organization_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Organization Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to modify."),
@@ -7578,7 +8589,13 @@ async def remove_repository_from_organization_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_variables(org: str = Field(..., description="The organization name. The name is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve all variables defined at the organization level. Authenticated users need collaborator access to manage variables, and the request requires appropriate OAuth or personal access token scopes."""
 
@@ -7614,7 +8631,12 @@ async def list_organization_variables(org: str = Field(..., description="The org
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization_variable(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The name of the variable. This identifier is used to reference the variable in workflows."),
@@ -7653,13 +8675,20 @@ async def create_organization_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_variable(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the variable to retrieve."),
@@ -7698,7 +8727,13 @@ async def get_organization_variable(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_variable(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The name of the variable to update."),
@@ -7737,13 +8772,20 @@ async def update_organization_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_variable(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the organization variable to delete."),
@@ -7782,7 +8824,13 @@ async def delete_organization_variable(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Variable Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_variable_repositories(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the organization variable. Variable names are case-sensitive."),
@@ -7821,7 +8869,13 @@ async def list_organization_variable_repositories(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Variable Repositories",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_org_variable_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the organization variable to update."),
@@ -7858,13 +8912,20 @@ async def update_org_variable_repositories(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Add Repository to Organization Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_repository_to_org_variable(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the organization variable to which the repository will be added."),
@@ -7904,7 +8965,13 @@ async def add_repository_to_org_variable(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Organization Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_org_variable(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the organization variable from which to remove the repository."),
@@ -7944,7 +9011,12 @@ async def remove_repository_from_org_variable(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Record Artifact Deployment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def record_artifact_deployment(
     org: str = Field(..., description="The organization name that owns the artifact."),
     name: str = Field(..., description="The name of the artifact being deployed.", min_length=1, max_length=256),
@@ -7995,7 +9067,13 @@ async def record_artifact_deployment(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Record Cluster Deployments",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def record_cluster_deployments(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     cluster: str = Field(..., description="The cluster identifier.", min_length=1, max_length=128, pattern="^[a-zA-Z0-9._-]+$"),
@@ -8040,7 +9118,12 @@ async def record_cluster_deployments(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Register Artifact Storage",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def register_artifact_storage(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The name of the artifact.", min_length=1, max_length=256),
@@ -8079,13 +9162,20 @@ async def register_artifact_storage(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Artifact Deployment Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_artifact_deployment_records(
     org: str = Field(..., description="The organization name (case-insensitive). This identifies which organization's artifact metadata to query."),
     subject_digest: str = Field(..., description="The SHA256 digest of the artifact in the format `sha256:HEX_DIGEST`, where HEX_DIGEST is a 64-character hexadecimal string.", min_length=71, max_length=71, pattern="^sha256:[a-f0-9]{64}$"),
@@ -8124,7 +9214,13 @@ async def list_artifact_deployment_records(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Artifact Storage Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_artifact_storage_records(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     subject_digest: str = Field(..., description="The SHA256 digest of the artifact's subject in the format sha256:HEX_DIGEST, where HEX_DIGEST is a 64-character hexadecimal string.", min_length=71, max_length=71, pattern="^sha256:[a-f0-9]{64}$"),
@@ -8163,7 +9259,12 @@ async def list_artifact_storage_records(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Attestations by Digests",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_attestations_by_digests(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     subject_digests: list[str] = Field(..., description="List of subject digests to fetch attestations for. Each digest identifies an artifact for which attestations will be retrieved.", min_length=1, max_length=1024),
@@ -8200,13 +9301,20 @@ async def list_attestations_by_digests(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attestations",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attestations(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the attestations."),
     body: _models.OrgsDeleteAttestationsBulkBodyV0 | _models.OrgsDeleteAttestationsBulkBodyV1 = Field(..., description="Request payload containing deletion criteria. Provide either subject_digests (array of digest strings in algorithm:hash format) or attestation_ids (array of numeric identifiers), but not both."),
@@ -8243,13 +9351,20 @@ async def delete_attestations(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attestation by Subject Digest",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attestation_by_subject_digest(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     subject_digest: str = Field(..., description="The subject digest that uniquely identifies the artifact attestation to delete."),
@@ -8288,7 +9403,13 @@ async def delete_attestation_by_subject_digest(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Attestation Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_attestation_repositories(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     predicate_type: str | None = Field(None, description="Filter repositories by attestation predicate type. Accepts standard types (provenance, sbom, release) or custom freeform text for specialized predicate types."),
@@ -8330,7 +9451,13 @@ async def list_attestation_repositories(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attestation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attestation(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     attestation_id: int = Field(..., description="The unique identifier of the attestation to delete."),
@@ -8369,7 +9496,13 @@ async def delete_attestation(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Attestations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_attestations_organization(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     subject_digest: str = Field(..., description="The attestation subject's SHA256 digest in the format `sha256:HEX_DIGEST`."),
@@ -8412,7 +9545,13 @@ async def list_attestations_organization(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Blocked Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blocked_users(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all users blocked by an organization. This helps manage organization security and access control policies."""
 
@@ -8448,7 +9587,13 @@ async def list_blocked_users(org: str = Field(..., description="The organization
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Check Blocked User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_blocked_user(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle to check for blocking status."),
@@ -8487,7 +9632,13 @@ async def check_blocked_user(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Unblock User from Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unblock_user_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     username: str = Field(..., description="The GitHub username handle to unblock from the organization."),
@@ -8526,7 +9677,13 @@ async def unblock_user_organization(
     return _response_data
 
 # Tags: campaigns
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Campaigns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_campaigns(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort direction for the returned campaigns."),
@@ -8569,7 +9726,12 @@ async def list_campaigns(
     return _response_data
 
 # Tags: campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Create Campaign",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_campaign(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The name of the campaign.", min_length=1, max_length=50),
@@ -8610,13 +9772,20 @@ async def create_campaign(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     campaign_number: int = Field(..., description="The numeric identifier for the campaign to retrieve."),
@@ -8655,7 +9824,12 @@ async def get_campaign(
     return _response_data
 
 # Tags: campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Update Campaign",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_campaign(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     campaign_number: int = Field(..., description="The numeric identifier of the campaign to update."),
@@ -8695,13 +9869,20 @@ async def update_campaign(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Delete Campaign",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_campaign(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the campaign."),
     campaign_number: int = Field(..., description="The numeric identifier of the campaign to delete."),
@@ -8740,7 +9921,13 @@ async def delete_campaign(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Code Scanning Alerts for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_scanning_alerts(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort results by."),
@@ -8784,7 +9971,13 @@ async def list_code_scanning_alerts(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="List Code Security Configurations for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_security_configurations_for_org(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     target_type: Literal["global", "all"] | None = Field(None, description="Filter configurations by target type. Use 'global' for organization-wide configurations or 'all' to include all configuration types."),
@@ -8826,7 +10019,13 @@ async def list_code_security_configurations_for_org(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="List Default Code Security Configurations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_default_code_security_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the request to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieves the default code security configurations for an organization. The authenticated user must be an administrator or security manager to access this endpoint."""
 
@@ -8862,7 +10061,13 @@ async def list_default_code_security_configurations(org: str = Field(..., descri
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Detach Security Configurations",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def detach_security_configurations(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_repository_ids: list[int] | None = Field(None, description="Repository IDs to detach from configurations. Provide an array of up to 250 repository IDs.", min_length=1, max_length=250),
@@ -8898,13 +10103,20 @@ async def detach_security_configurations(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Get Code Security Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_security_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the code security configuration."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to retrieve."),
@@ -8943,7 +10155,13 @@ async def get_code_security_configuration(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Update Code Security Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_code_security_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to update."),
@@ -9000,13 +10218,20 @@ async def update_code_security_configuration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Delete Code Security Configuration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_code_security_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the configuration."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to delete."),
@@ -9045,7 +10270,12 @@ async def delete_code_security_configuration(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Attach Security Configuration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def attach_security_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to attach."),
@@ -9083,13 +10313,20 @@ async def attach_security_configuration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="List Security Configuration Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_security_configuration_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to retrieve associated repositories for."),
@@ -9128,7 +10365,13 @@ async def list_security_configuration_repositories(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Codespaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_codespaces(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all codespaces associated with a specified organization. Requires admin:org scope for OAuth apps and personal access tokens (classic)."""
 
@@ -9164,7 +10407,13 @@ async def list_organization_codespaces(org: str = Field(..., description="The or
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Codespaces Secrets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secrets_codespaces(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all Codespaces development environment secrets available at the organization level without revealing their encrypted values. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -9200,7 +10449,13 @@ async def list_organization_secrets_codespaces(org: str = Field(..., description
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Codespace Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_secret_codespace(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
@@ -9239,7 +10494,13 @@ async def get_organization_secret_codespace(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Organization Codespaces Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_organization_secret_codespaces(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     secret_name: str = Field(..., description="The name of the secret to create or update."),
@@ -9279,13 +10540,20 @@ async def create_or_update_organization_secret_codespaces(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Codespace Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_secret_codespace(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to delete."),
@@ -9324,7 +10592,13 @@ async def delete_organization_secret_codespace(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Secret Repositories for Codespaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secret_repositories_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret for which to list authorized repositories."),
@@ -9363,7 +10637,13 @@ async def list_organization_secret_repositories_codespaces(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Secret Repositories for Codespaces",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_secret_repositories_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to configure repository access for."),
@@ -9400,13 +10680,20 @@ async def update_organization_secret_repositories_codespaces(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Add Repository to Organization Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_repository_to_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to which the repository will be granted access."),
@@ -9446,7 +10733,13 @@ async def add_repository_to_organization_secret(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Organization Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_organization_secret_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to modify."),
@@ -9486,7 +10779,13 @@ async def remove_repository_from_organization_secret_codespaces(
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Get Copilot Billing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_copilot_billing(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve Copilot subscription details for an organization, including seat allocation and feature policies. Only organization owners can access this information."""
 
@@ -9522,7 +10821,13 @@ async def get_copilot_billing(org: str = Field(..., description="The organizatio
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="List Copilot Seats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_copilot_seats(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the seat billing query to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Copilot seat assignments currently being billed for an organization with a Copilot Business or Copilot Enterprise subscription. Only organization owners can access this information, which includes each user's most recent Copilot activity data."""
 
@@ -9558,7 +10863,12 @@ async def list_copilot_seats(org: str = Field(..., description="The organization
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Grant Copilot Seats to Teams",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_copilot_seats_to_teams(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     selected_teams: list[str] = Field(..., description="List of team names within the organization to grant Copilot access to. Teams are processed in the order provided.", min_length=1),
@@ -9594,13 +10904,20 @@ async def grant_copilot_seats_to_teams(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Copilot Access From Teams",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_copilot_access_from_teams(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_teams: list[str] = Field(..., description="The names of teams to revoke Copilot access from. Provide at least one team name.", min_length=1),
@@ -9636,13 +10953,19 @@ async def revoke_copilot_access_from_teams(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Grant Copilot Seats to Users",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_copilot_seats_to_users(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_usernames: list[str] = Field(..., description="The usernames of organization members to grant Copilot access to. Provide at least one username.", min_length=1),
@@ -9678,13 +11001,20 @@ async def grant_copilot_seats_to_users(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Copilot Seat Assignments",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_copilot_seat_assignments(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_usernames: list[str] = Field(..., description="The usernames of organization members whose Copilot access should be revoked. Provide at least one username.", min_length=1),
@@ -9720,13 +11050,20 @@ async def revoke_copilot_seat_assignments(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="List Copilot Coding Agent Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_copilot_coding_agent_permissions(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the Copilot coding agent permission settings for an organization, showing which repositories have the agent enabled or disabled. Organization owners use this to view their current Copilot coding agent configuration across repositories."""
 
@@ -9762,7 +11099,13 @@ async def list_copilot_coding_agent_permissions(org: str = Field(..., descriptio
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="List Copilot Coding Agent Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_copilot_coding_agent_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any] | ToolResult:
     """Lists repositories enabled for Copilot coding agent in an organization when the repository policy is set to selected. Organization owners can use this endpoint to view which repositories have Copilot coding agent access enabled."""
 
@@ -9798,7 +11141,13 @@ async def list_copilot_coding_agent_repositories(org: str = Field(..., descripti
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Enable Copilot Coding Agent for Repository",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enable_copilot_coding_agent_for_repository(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     repository_id: int = Field(..., description="The unique identifier of the repository to enable for Copilot coding agent."),
@@ -9837,7 +11186,13 @@ async def enable_copilot_coding_agent_for_repository(
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="List Copilot Content Exclusions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_copilot_content_exclusions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the content exclusion rules to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve Copilot content exclusion path rules configured for an organization. This endpoint allows organization owners to view which paths are excluded from GitHub Copilot."""
 
@@ -9873,7 +11228,13 @@ async def list_copilot_content_exclusions(org: str = Field(..., description="The
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Get Copilot Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_copilot_metrics(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     since: str | None = Field(None, description="Start date for the metrics query in ISO 8601 format. Maximum lookback is 100 days ago."),
@@ -9916,7 +11277,13 @@ async def get_copilot_metrics(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Dependabot Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_dependabot_alerts(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     state: str | None = Field(None, description="Filter alerts by their current state. Specify as comma-separated values to return alerts matching any of the provided states."),
@@ -9965,7 +11332,13 @@ async def list_organization_dependabot_alerts(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Secrets for Dependabot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secrets_dependabot(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all secrets available in an organization without revealing their encrypted values. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -10001,7 +11374,13 @@ async def list_organization_secrets_dependabot(org: str = Field(..., description
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Dependabot Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_dependabot_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for an organization's Dependabot secrets. This key is required to encrypt secrets before creating or updating them in Dependabot configuration."""
 
@@ -10037,7 +11416,13 @@ async def get_organization_dependabot_public_key(org: str = Field(..., descripti
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Secret (Dependabot)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
@@ -10076,7 +11461,13 @@ async def get_organization_secret_dependabot(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Organization Dependabot Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to create or update."),
@@ -10116,13 +11507,20 @@ async def create_or_update_organization_secret_dependabot(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Secret (Dependabot)",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to delete."),
@@ -10161,7 +11559,13 @@ async def delete_organization_secret_dependabot(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Secret Repositories for Dependabot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secret_repositories_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret for which to list authorized repositories."),
@@ -10200,7 +11604,13 @@ async def list_organization_secret_repositories_dependabot(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Secret Repositories for Dependabot",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_secret_repositories_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to configure repository access for."),
@@ -10237,13 +11647,20 @@ async def update_organization_secret_repositories_dependabot(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Add Repository to Organization Secret for Dependabot",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_repository_to_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to grant repository access to."),
@@ -10283,7 +11700,13 @@ async def add_repository_to_organization_secret_dependabot(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Organization Secret (Dependabot)",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to modify."),
@@ -10323,7 +11746,13 @@ async def remove_repository_from_organization_secret_dependabot(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List Docker Migration Conflicts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_docker_migration_conflicts(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization whose conflicting packages should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves all packages in an organization that encountered conflicts during Docker migration and are readable by the requesting user. Requires `read:packages` OAuth scope."""
 
@@ -10359,7 +11788,13 @@ async def list_docker_migration_conflicts(org: str = Field(..., description="The
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_events(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events for an organization. Note: This API is not optimized for real-time use cases and may have latency ranging from 30 seconds to 6 hours depending on the time of day."""
 
@@ -10395,7 +11830,13 @@ async def list_organization_events(org: str = Field(..., description="The organi
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Failed Invitations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_failed_invitations(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of failed organization invitations with details about when and why each invitation failed. Each result includes the failure timestamp and reason."""
 
@@ -10431,7 +11872,13 @@ async def list_failed_invitations(org: str = Field(..., description="The organiz
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook list to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhooks configured for an organization. The authenticated user must be an organization owner, and OAuth tokens require the `admin:org_hook` scope."""
 
@@ -10467,7 +11914,12 @@ async def list_webhooks(org: str = Field(..., description="The organization name
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The webhook type. Must be set to 'web' for standard webhook delivery."),
@@ -10508,13 +11960,20 @@ async def create_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_webhook(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook lookup."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of webhook delivery payloads."),
@@ -10553,7 +12012,13 @@ async def get_organization_webhook(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     hook_id: int = Field(..., description="The unique identifier of the webhook, found in the X-GitHub-Hook-ID header of webhook deliveries."),
@@ -10594,13 +12059,20 @@ async def update_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the webhook."),
     hook_id: int = Field(..., description="The unique identifier of the webhook to delete. This value can be found in the `X-GitHub-Hook-ID` header of webhook delivery events."),
@@ -10639,7 +12111,13 @@ async def delete_webhook(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Configuration for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_config_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook configuration lookup."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of webhook delivery payloads."),
@@ -10678,7 +12156,13 @@ async def get_webhook_config_organization(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook_config(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     hook_id: int = Field(..., description="The unique identifier of the webhook, found in the X-GitHub-Hook-ID header of webhook deliveries."),
@@ -10717,13 +12201,20 @@ async def update_webhook_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Deliveries for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_deliveries_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook to a specific organization."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of any webhook delivery from this hook."),
@@ -10762,7 +12253,13 @@ async def list_webhook_deliveries_organization(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Webhook Delivery",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_delivery_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the webhook."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of any webhook delivery from this hook."),
@@ -10802,7 +12299,13 @@ async def get_webhook_delivery_organization(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Redeliver Organization Webhook Delivery",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def redeliver_webhook_delivery_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the webhook."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of any webhook delivery from this hook."),
@@ -10842,7 +12345,13 @@ async def redeliver_webhook_delivery_organization(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List API Request Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_request_stats(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     min_timestamp: str = Field(..., description="The start of the time range for statistics. Specify as an ISO 8601 timestamp."),
@@ -10887,7 +12396,13 @@ async def list_api_request_stats(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get API Summary Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api_summary_stats(
     org: str = Field(..., description="The organization identifier. Organization names are case-insensitive."),
     min_timestamp: str = Field(..., description="The start of the time range for statistics retrieval. Specify as an ISO 8601 formatted timestamp."),
@@ -10930,7 +12445,13 @@ async def get_api_summary_stats(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get API Stats by Actor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api_stats_by_actor(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     actor_type: Literal["installation", "classic_pat", "fine_grained_pat", "oauth_app", "github_app_user_to_server"] = Field(..., description="The type of actor making the API requests."),
@@ -10975,7 +12496,13 @@ async def get_api_stats_by_actor(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get API Request Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api_request_stats(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     min_timestamp: str = Field(..., description="The start of the time range for statistics retrieval in ISO 8601 format."),
@@ -11019,7 +12546,13 @@ async def get_api_request_stats(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get User API Time Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_api_time_stats(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     user_id: str = Field(..., description="The unique identifier of the user for which to retrieve API statistics."),
@@ -11064,7 +12597,13 @@ async def get_user_api_time_stats(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get API Request Stats by Actor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api_request_stats_by_actor(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     actor_type: Literal["installation", "classic_pat", "fine_grained_pat", "oauth_app", "github_app_user_to_server"] = Field(..., description="The type of actor making the API requests."),
@@ -11110,7 +12649,13 @@ async def get_api_request_stats_by_actor(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get User API Stats by Access Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_api_stats_by_access_type(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     user_id: str = Field(..., description="The unique identifier of the user whose API statistics should be retrieved."),
@@ -11156,7 +12701,13 @@ async def get_user_api_stats_by_access_type(
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get App Organization Installation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_organization_installation(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the installation details of an authenticated GitHub App within a specific organization. Requires JWT authentication as a GitHub App."""
 
@@ -11192,7 +12743,13 @@ async def get_app_organization_installation(org: str = Field(..., description="T
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List App Installations for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_installations_organization(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all GitHub Apps installed in an organization, including those installed on repositories within the organization. The authenticated user must be an organization owner, and requires admin:read scope for OAuth or classic personal access tokens."""
 
@@ -11228,7 +12785,13 @@ async def list_app_installations_organization(org: str = Field(..., description=
     return _response_data
 
 # Tags: interactions
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Interaction Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_interaction_restrictions(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current interaction restrictions for an organization, including which types of GitHub users can interact and when the restriction expires. Returns an empty response if no restrictions are active."""
 
@@ -11264,7 +12827,13 @@ async def get_organization_interaction_restrictions(org: str = Field(..., descri
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Pending Invitations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pending_invitations(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role: Literal["all", "admin", "direct_member", "billing_manager", "hiring_manager"] | None = Field(None, description="Filter invitations by the member role they were invited as."),
@@ -11307,7 +12876,12 @@ async def list_pending_invitations(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Invite Organization Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invite_organization_member(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     role: Literal["admin", "direct_member", "billing_manager", "reinstate"] | None = Field(None, description="The role to assign to the invited member. Use 'admin' for full administrative access, 'direct_member' for standard membership, 'billing_manager' for billing-only access, or 'reinstate' to restore a previously held role."),
@@ -11344,13 +12918,20 @@ async def invite_organization_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Invitation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_invitation(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     invitation_id: int = Field(..., description="The unique identifier of the invitation to cancel."),
@@ -11389,7 +12970,13 @@ async def cancel_invitation(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Invitation Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_invitation_teams(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     invitation_id: int = Field(..., description="The unique identifier of the invitation to retrieve associated teams for."),
@@ -11428,7 +13015,13 @@ async def list_invitation_teams(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_fields(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves all issue fields configured for an organization. Requires read:org scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -11464,7 +13057,12 @@ async def list_issue_fields(org: str = Field(..., description="The organization 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Create Issue Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_issue_field(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The name of the issue field."),
@@ -11510,7 +13108,13 @@ async def create_issue_field(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_field(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     issue_field_id: int = Field(..., description="The unique identifier of the issue field to delete."),
@@ -11549,7 +13153,13 @@ async def delete_issue_field(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_types(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves all issue types configured for a specified organization. Requires read:org scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -11585,7 +13195,12 @@ async def list_issue_types(org: str = Field(..., description="The organization n
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Create Issue Type",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_issue_type(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the issue type to create."),
@@ -11624,13 +13239,20 @@ async def create_issue_type(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_type(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     issue_type_id: int = Field(..., description="The unique identifier of the issue type to delete."),
@@ -11669,7 +13291,13 @@ async def delete_issue_type(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_issues(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     filter_: Literal["assigned", "created", "mentioned", "subscribed", "repos", "all"] | None = Field(None, alias="filter", description="Filter issues by type of involvement: assigned to you, created by you, mentioning you, subscribed to, or all visible issues."),
@@ -11716,7 +13344,13 @@ async def list_organization_issues(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_members(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     filter_: Literal["2fa_disabled", "2fa_insecure", "all"] | None = Field(None, alias="filter", description="Filter members by two-factor authentication status. Use '2fa_disabled' to show members without 2FA enabled, '2fa_insecure' to show members with insecure 2FA methods, or 'all' for no filtering. Only available to organization owners."),
@@ -11759,7 +13393,13 @@ async def list_organization_members(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Check Organization Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_organization_membership(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub username handle to check for membership."),
@@ -11798,7 +13438,13 @@ async def check_organization_membership(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Member Codespaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_member_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle for the organization member."),
@@ -11837,7 +13483,13 @@ async def list_organization_member_codespaces(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Codespace from Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_codespace_from_organization(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle whose codespace will be deleted."),
@@ -11877,7 +13529,12 @@ async def delete_codespace_from_organization(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Stop Codespace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def stop_codespace(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle."),
@@ -11917,7 +13574,13 @@ async def stop_codespace(
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Get Copilot Seat Details for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_copilot_seat_details(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     username: str = Field(..., description="The GitHub user account handle. Identifies the organization member whose Copilot seat details should be retrieved."),
@@ -11956,7 +13619,13 @@ async def get_copilot_seat_details(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username (handle) of the user whose membership to retrieve."),
@@ -11995,7 +13664,13 @@ async def get_organization_membership(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Set Organization Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_organization_membership(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     username: str = Field(..., description="The GitHub user account handle to add or update in the organization."),
@@ -12032,13 +13707,20 @@ async def set_organization_membership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Organization Membership",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_organization_membership(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     username: str = Field(..., description="The GitHub username handle for the user whose membership will be removed."),
@@ -12077,7 +13759,13 @@ async def remove_organization_membership(
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Migrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_migrations(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent migrations for an organization, including both exports (startable via REST API) and imports (read-only). Repository details are only included for export migrations."""
 
@@ -12113,7 +13801,13 @@ async def list_organization_migrations(org: str = Field(..., description="The or
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_status(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     migration_id: int = Field(..., description="The unique identifier of the migration to check status for."),
@@ -12152,7 +13846,13 @@ async def get_migration_status(
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Download Migration Archive",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_migration_archive(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     migration_id: int = Field(..., description="The unique identifier of the migration. Used to specify which migration archive to download."),
@@ -12191,7 +13891,13 @@ async def download_migration_archive(
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Migration Archive",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_migration_archive(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     migration_id: int = Field(..., description="The unique identifier of the migration whose archive should be deleted."),
@@ -12230,7 +13936,13 @@ async def delete_migration_archive(
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Unlock Migration Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlock_migration_repository(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     migration_id: int = Field(..., description="The unique identifier of the migration."),
@@ -12270,7 +13982,13 @@ async def unlock_migration_repository(
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     migration_id: int = Field(..., description="The unique identifier of the migration. Used to specify which organization migration to retrieve repositories for."),
@@ -12309,7 +14027,13 @@ async def list_migration_repositories(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_roles(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all organization roles available in the specified organization. Requires administrator access or fine-grained `read_organization_custom_org_role` permission."""
 
@@ -12345,7 +14069,13 @@ async def list_organization_roles(org: str = Field(..., description="The organiz
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Team Organization Roles",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_team_organization_roles(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team from which to remove all organization roles."),
@@ -12384,7 +14114,13 @@ async def revoke_team_organization_roles(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Assign Organization Role to Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_organization_role_to_team(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier of the team to assign the role to."),
@@ -12424,7 +14160,13 @@ async def assign_organization_role_to_team(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Organization Role from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_organization_role_from_team(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     team_slug: str = Field(..., description="The slug of the team name."),
@@ -12464,7 +14206,13 @@ async def remove_organization_role_from_team(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Revoke All Organization Roles From User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_all_organization_roles_from_user(
     org: str = Field(..., description="The GitHub organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub username handle for the user whose organization roles will be revoked."),
@@ -12503,7 +14251,13 @@ async def revoke_all_organization_roles_from_user(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Assign Organization Role to User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_organization_role_to_user(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username of the user to assign the role to."),
@@ -12543,7 +14297,13 @@ async def assign_organization_role_to_user(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Organization Role from User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_organization_role_from_user(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle from which to remove the organization role."),
@@ -12583,7 +14343,13 @@ async def revoke_organization_role_from_user(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_role(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role_id: int = Field(..., description="The unique identifier of the organization role to retrieve."),
@@ -12622,7 +14388,13 @@ async def get_organization_role(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Role Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_role_teams(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role_id: int = Field(..., description="The unique identifier of the organization role."),
@@ -12661,7 +14433,13 @@ async def list_organization_role_teams(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Role Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_role_users(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role_id: int = Field(..., description="The unique identifier of the organization role."),
@@ -12700,7 +14478,13 @@ async def list_organization_role_users(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Outside Collaborators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outside_collaborators(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     filter_: Literal["2fa_disabled", "2fa_insecure", "all"] | None = Field(None, alias="filter", description="Filter outside collaborators by two-factor authentication status. Use '2fa_disabled' to show only those without 2FA enabled, '2fa_insecure' to show only those with insecure 2FA methods, or 'all' to show all outside collaborators."),
@@ -12742,7 +14526,13 @@ async def list_outside_collaborators(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Convert Member to Outside Collaborator",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def convert_member_to_outside_collaborator(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle to convert."),
@@ -12779,13 +14569,20 @@ async def convert_member_to_outside_collaborator(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Outside Collaborator",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_outside_collaborator(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     username: str = Field(..., description="The GitHub username handle for the outside collaborator to remove."),
@@ -12824,7 +14621,13 @@ async def remove_outside_collaborator(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Packages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_packages(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type to filter by. Gradle packages use `maven`, Docker images in the Container registry use `container`, and `docker` finds images in the legacy Docker registry."),
@@ -12867,7 +14670,13 @@ async def list_organization_packages(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Package",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, container images pushed to ghcr.io use `container`, and `docker` finds images in the legacy Docker registry (docker.pkg.github.com)."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
@@ -12907,7 +14716,13 @@ async def get_organization_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Package",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete."),
@@ -12947,7 +14762,12 @@ async def delete_organization_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Restore Organization Package",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_organization_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type to restore. Different registries support different types: npm, maven, and rubygems are language-specific registries; docker and container are image registries; nuget is for .NET packages."),
     package_name: str = Field(..., description="The name of the package to restore."),
@@ -12987,7 +14807,13 @@ async def restore_organization_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Package Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_package_versions(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type (e.g., npm, maven, docker, container). Docker images in GitHub's Container registry use 'container'; use 'docker' to find images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve versions for."),
@@ -13031,7 +14857,13 @@ async def list_organization_package_versions(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Package Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_package_version(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type determines which registry to query. Maven packages are used in Gradle registries, while container images can be pushed to GitHub's Container registry (ghcr.io) or Docker registry (docker.pkg.github.com)."),
     package_name: str = Field(..., description="The name of the package to retrieve. Package names are case-sensitive identifiers within the registry."),
@@ -13072,7 +14904,13 @@ async def get_organization_package_version(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Package Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_package_version(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete a version from."),
@@ -13113,7 +14951,12 @@ async def delete_package_version(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Restore Package Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_package_version(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The type of package registry. Gradle packages use 'maven', container images use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to restore."),
@@ -13154,7 +14997,13 @@ async def restore_package_version(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List PAT Grant Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pat_grant_requests(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort results by."),
@@ -13198,7 +15047,13 @@ async def list_pat_grant_requests(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Review Personal Access Token Grant Requests",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def review_pat_grant_requests(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     action: Literal["approve", "deny"] = Field(..., description="The action to apply to all specified requests: approve to grant access or deny to reject access."),
@@ -13236,13 +15091,20 @@ async def review_pat_grant_requests(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Review Personal Access Token Grant Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def review_pat_grant_request(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_request_id: int = Field(..., description="The unique identifier of the personal access token request to review."),
@@ -13280,13 +15142,20 @@ async def review_pat_grant_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List PAT Request Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pat_request_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_request_id: int = Field(..., description="The unique identifier of the fine-grained personal access token request."),
@@ -13325,7 +15194,13 @@ async def list_pat_request_repositories(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Personal Access Token Grants",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_pat_grants(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort the results by."),
@@ -13369,7 +15244,13 @@ async def list_organization_pat_grants(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Organization PAT Access",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_organization_pat_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     action: Literal["revoke"] = Field(..., description="The action to apply to the fine-grained personal access tokens."),
@@ -13406,13 +15287,20 @@ async def revoke_organization_pat_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Organization Personal Access Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_org_pat_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_id: int = Field(..., description="The unique identifier of the fine-grained personal access token to revoke."),
@@ -13449,13 +15337,20 @@ async def revoke_org_pat_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List PAT Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pat_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_id: int = Field(..., description="The unique identifier of the fine-grained personal access token."),
@@ -13494,7 +15389,13 @@ async def list_pat_repositories(
     return _response_data
 
 # Tags: private-registries
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Private Registries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_private_registries(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the private registries query.")) -> dict[str, Any] | ToolResult:
     """Retrieve all private registry configurations for an organization. Encrypted credential values are not included in the response. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -13530,7 +15431,12 @@ async def list_organization_private_registries(org: str = Field(..., description
     return _response_data
 
 # Tags: private-registries
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization Private Registry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization_private_registry(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     registry_type: Literal["maven_repository", "nuget_feed", "goproxy_server", "npm_registry", "rubygems_server", "cargo_registry", "composer_repository", "docker_registry", "git_source", "helm_registry", "hex_organization", "hex_repository", "pub_repository", "python_index", "terraform_registry"] = Field(..., description="The type of package registry being configured."),
@@ -13572,13 +15478,20 @@ async def create_organization_private_registry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: private-registries
-@mcp.tool()
+@mcp.tool(
+    title="Get Private Registry Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_private_registry_public_key(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for an organization's private registries, which is required to encrypt secrets before creating or updating them. Requires `admin:org` OAuth scope or personal access token (classic)."""
 
@@ -13614,7 +15527,13 @@ async def get_private_registry_public_key(org: str = Field(..., description="The
     return _response_data
 
 # Tags: private-registries
-@mcp.tool()
+@mcp.tool(
+    title="Get Private Registry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_private_registry(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the private registry secret to retrieve."),
@@ -13653,7 +15572,13 @@ async def get_private_registry(
     return _response_data
 
 # Tags: private-registries
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Private Registry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_private_registry(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     secret_name: str = Field(..., description="The name of the private registry secret to update."),
@@ -13700,13 +15625,20 @@ async def update_organization_private_registry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: private-registries
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Private Registry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_org_private_registry(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the private registry secret to delete."),
@@ -13745,7 +15677,13 @@ async def delete_org_private_registry(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_projects(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     q: str | None = Field(None, description="Filter results to projects of a specified type."),
@@ -13787,7 +15725,13 @@ async def list_organization_projects(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_project(
     project_number: int = Field(..., description="The unique numeric identifier for the project within the organization."),
     org: str = Field(..., description="The name of the organization that owns the project. Organization names are case-insensitive."),
@@ -13826,7 +15770,12 @@ async def get_organization_project(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Draft Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_draft_item(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     project_number: int = Field(..., description="The project number that uniquely identifies the project within the organization."),
@@ -13870,7 +15819,13 @@ async def create_draft_item(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_fields(
     project_number: int = Field(..., description="The numeric identifier of the project. This uniquely identifies the project within the organization."),
     org: str = Field(..., description="The name of the organization that owns the project. Organization names are case-insensitive."),
@@ -13909,7 +15864,12 @@ async def list_project_fields(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_project_field(
     project_number: int = Field(..., description="The project number that uniquely identifies the project within the organization."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
@@ -13953,7 +15913,13 @@ async def add_project_field(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_field(
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
     field_id: int = Field(..., description="The unique identifier of the field to retrieve."),
@@ -13993,7 +15959,13 @@ async def get_project_field(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_items(
     project_number: int = Field(..., description="The project's unique number identifier."),
     org: str = Field(..., description="The organization name. Case-insensitive."),
@@ -14037,7 +16009,12 @@ async def list_project_items(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Item to Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_item_to_project(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
@@ -14074,13 +16051,20 @@ async def add_item_to_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_item(
     project_number: int = Field(..., description="The project's unique number identifier."),
     org: str = Field(..., description="The organization name. Case-insensitive."),
@@ -14124,7 +16108,13 @@ async def get_project_item(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_item(
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
@@ -14162,13 +16152,20 @@ async def update_project_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_item(
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
@@ -14208,7 +16205,12 @@ async def delete_project_item(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_view(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     project_number: int = Field(..., description="The project's number identifier."),
@@ -14254,7 +16256,13 @@ async def create_project_view(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project View Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_view_items(
     project_number: int = Field(..., description="The project's number that identifies which project to query."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
@@ -14298,7 +16306,13 @@ async def list_project_view_items(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Custom Property Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_custom_property_definitions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom property definitions.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom property definitions configured for an organization. Organization members can access these property schemas to understand available custom properties."""
 
@@ -14334,7 +16348,13 @@ async def list_organization_custom_property_definitions(org: str = Field(..., de
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Custom Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_custom_property(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom property lookup."),
     custom_property_name: str = Field(..., description="The name of the custom property to retrieve. Must match an existing custom property defined for the organization."),
@@ -14373,7 +16393,13 @@ async def get_organization_custom_property(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Repository Custom Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_repository_custom_properties(
     org: str = Field(..., description="The organization name. The lookup is case-insensitive."),
     repository_query: str | None = Field(None, description="Search query to filter repositories by keywords and qualifiers. Supports the same search syntax as the GitHub web interface for repository discovery and filtering."),
@@ -14415,7 +16441,13 @@ async def list_organization_repository_custom_properties(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Batch Update Repository Custom Properties",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def batch_update_repository_custom_properties(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the repositories."),
     repository_names: list[str] = Field(..., description="The names of repositories to update. Each repository must belong to the organization. Order is not significant.", min_length=1, max_length=30),
@@ -14452,13 +16484,20 @@ async def batch_update_repository_custom_properties(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Public Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_public_members(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """List all members of an organization whose membership is publicly visible. Organization members can choose whether their membership is public or private."""
 
@@ -14494,7 +16533,13 @@ async def list_organization_public_members(org: str = Field(..., description="Th
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Check Public Organization Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_public_organization_membership(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username handle to check for public membership in the organization."),
@@ -14533,7 +16578,13 @@ async def check_public_organization_membership(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Publicize Organization Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def publicize_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username of the authenticated user whose membership will be publicized."),
@@ -14572,7 +16623,13 @@ async def publicize_organization_membership(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Public Organization Membership",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_public_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username of the account whose public membership should be removed."),
@@ -14611,7 +16668,13 @@ async def remove_public_organization_membership(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_repositories(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     type_: Literal["all", "public", "private", "forks", "sources", "member"] | None = Field(None, alias="type", description="Filters repositories by type. Use 'all' to include all repository types, 'public' for publicly accessible repositories, 'private' for private repositories, 'forks' for forked repositories, 'sources' for original repositories, or 'member' for repositories the authenticated user is a member of."),
@@ -14654,7 +16717,12 @@ async def list_organization_repositories(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization_repository(
     org: str = Field(..., description="The organization name where the repository will be created. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the new repository."),
@@ -14711,13 +16779,20 @@ async def create_organization_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Rulesets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_rulesets(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     targets: str | None = Field(None, description="Filter rulesets by target types using a comma-separated list. Only rulesets applying to the specified targets will be returned."),
@@ -14759,7 +16834,13 @@ async def list_organization_rulesets(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Rule Suites",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_rule_suites(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     repository_name: str | None = Field(None, description="Filter results to a specific repository by name."),
@@ -14804,7 +16885,13 @@ async def list_organization_rule_suites(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Rule Suite",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_rule_suite(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     rule_suite_id: int = Field(..., description="The unique identifier of the rule suite result. Retrieve this ID from the organization or repository rule suites list endpoints."),
@@ -14843,7 +16930,13 @@ async def get_organization_rule_suite(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Ruleset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_ruleset(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset to retrieve."),
@@ -14882,7 +16975,13 @@ async def get_organization_ruleset(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Ruleset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_ruleset(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset to delete."),
@@ -14921,7 +17020,13 @@ async def delete_organization_ruleset(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Ruleset History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ruleset_history(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset."),
@@ -14960,7 +17065,13 @@ async def list_ruleset_history(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Ruleset Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ruleset_version(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset."),
@@ -15000,7 +17111,13 @@ async def get_ruleset_version(
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Secret Scanning Alerts for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_secret_scanning_alerts(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     state: Literal["open", "resolved"] | None = Field(None, description="Filter alerts by their current state."),
@@ -15049,7 +17166,13 @@ async def list_secret_scanning_alerts(
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Secret Scanning Patterns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_secret_scanning_patterns(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the pattern configurations to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Lists all secret scanning pattern configurations for an organization. These patterns define custom rules used to detect secrets during scanning."""
 
@@ -15085,7 +17208,13 @@ async def list_secret_scanning_patterns(org: str = Field(..., description="The o
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Security Advisories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_security_advisories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results."),
@@ -15128,7 +17257,13 @@ async def list_organization_security_advisories(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Immutable Release Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_immutable_release_repositories(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """List all repositories in an organization that have been selected for immutable releases enforcement. Requires admin:org scope."""
 
@@ -15164,7 +17299,13 @@ async def list_immutable_release_repositories(org: str = Field(..., description=
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Enable Repository Immutable Releases",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enable_repository_immutable_releases(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     repository_id: int = Field(..., description="The unique identifier of the repository to enable for immutable releases."),
@@ -15203,7 +17344,13 @@ async def enable_repository_immutable_releases(
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Immutable Releases",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_immutable_releases(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from immutable releases enforcement."),
@@ -15242,7 +17389,13 @@ async def remove_repository_from_immutable_releases(
     return _response_data
 
 # Tags: hosted-compute
-@mcp.tool()
+@mcp.tool(
+    title="List Network Configurations for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_network_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all hosted compute network configurations for an organization. Requires `read:network_configurations` scope."""
 
@@ -15278,7 +17431,13 @@ async def list_network_configurations(org: str = Field(..., description="The org
     return _response_data
 
 # Tags: hosted-compute
-@mcp.tool()
+@mcp.tool(
+    title="Get Network Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_network_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     network_configuration_id: str = Field(..., description="The unique identifier of the hosted compute network configuration to retrieve."),
@@ -15317,7 +17476,13 @@ async def get_network_configuration(
     return _response_data
 
 # Tags: hosted-compute
-@mcp.tool()
+@mcp.tool(
+    title="Update Network Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_network_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     network_configuration_id: str = Field(..., description="The unique identifier of the hosted compute network configuration to update."),
@@ -15355,13 +17520,20 @@ async def update_network_configuration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: hosted-compute
-@mcp.tool()
+@mcp.tool(
+    title="Delete Network Configuration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_network_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the network configuration."),
     network_configuration_id: str = Field(..., description="The unique identifier of the hosted compute network configuration to delete."),
@@ -15400,7 +17572,13 @@ async def delete_network_configuration(
     return _response_data
 
 # Tags: hosted-compute
-@mcp.tool()
+@mcp.tool(
+    title="Get Network Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_network_settings(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the network settings."),
     network_settings_id: str = Field(..., description="The unique identifier of the hosted compute network settings resource to retrieve."),
@@ -15439,7 +17617,13 @@ async def get_network_settings(
     return _response_data
 
 # Tags: copilot
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Copilot Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_copilot_metrics(
     org: str = Field(..., description="The organization name (case-insensitive). Used to identify which organization's Copilot metrics to retrieve."),
     team_slug: str = Field(..., description="The team slug (URL-friendly identifier). Used to specify which team within the organization to retrieve metrics for."),
@@ -15483,7 +17667,13 @@ async def get_team_copilot_metrics(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     team_type: Literal["all", "enterprise", "organization"] | None = Field(None, description="Filter team results by their type. Use 'all' to include all teams, 'enterprise' for enterprise-managed teams, or 'organization' for organization-managed teams."),
@@ -15525,7 +17715,12 @@ async def list_teams(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     name: str = Field(..., description="The name of the team."),
@@ -15568,13 +17763,20 @@ async def create_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(
     org: str = Field(..., description="The organization name. This parameter is case-insensitive."),
     team_slug: str = Field(..., description="The slug of the team name. This is a URL-friendly identifier created by converting the team name to lowercase and replacing spaces with hyphens."),
@@ -15613,7 +17815,13 @@ async def get_team(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team name."),
@@ -15654,13 +17862,20 @@ async def update_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the team."),
     team_slug: str = Field(..., description="The slug of the team name. A URL-friendly identifier for the team within the organization."),
@@ -15699,7 +17914,13 @@ async def delete_team(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Invitations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_invitations(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team name."),
@@ -15738,7 +17959,13 @@ async def list_team_invitations(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_members(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team name."),
@@ -15781,7 +18008,13 @@ async def list_team_members(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_membership(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     team_slug: str = Field(..., description="The URL-friendly slug identifier for the team within the organization."),
@@ -15821,7 +18054,13 @@ async def get_team_membership(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Add or Update Team Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_or_update_team_membership(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     team_slug: str = Field(..., description="The slug identifier for the team."),
@@ -15859,13 +18098,20 @@ async def add_or_update_team_membership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team Member from Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_member_org(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     team_slug: str = Field(..., description="The slug of the team name. This is the URL-friendly identifier for the team within the organization."),
@@ -15905,7 +18151,13 @@ async def remove_team_member_org(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_repositories(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     team_slug: str = Field(..., description="The URL-friendly slug identifier for the team name within the organization."),
@@ -15944,7 +18196,13 @@ async def list_team_repositories(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Verify Team Repository Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def verify_team_repository_permissions(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug of the team name. Case-insensitive."),
@@ -15985,7 +18243,13 @@ async def verify_team_repository_permissions(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Set Team Repository Permission",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_team_repository_permission(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team within the organization."),
@@ -16024,13 +18288,20 @@ async def set_team_repository_permission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_team(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team name. Case-insensitive."),
@@ -16071,7 +18342,13 @@ async def remove_repository_from_team(
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="List Child Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_child_teams(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     team_slug: str = Field(..., description="The slug of the team name, used to identify the parent team whose child teams should be listed."),
@@ -16110,7 +18387,13 @@ async def list_child_teams(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -16149,7 +18432,13 @@ async def get_repository(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -16208,13 +18497,20 @@ async def update_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16253,7 +18549,13 @@ async def delete_repository(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Artifacts for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_artifacts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16292,7 +18594,13 @@ async def list_artifacts(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Artifact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_artifact(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16332,7 +18640,13 @@ async def get_artifact(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Artifact",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_artifact(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16372,7 +18686,13 @@ async def delete_artifact(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Download Artifact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_artifact(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16413,7 +18733,13 @@ async def download_artifact(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Cache Retention Limit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cache_retention_limit(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16452,7 +18778,13 @@ async def get_cache_retention_limit(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Actions Cache Storage Limit for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actions_cache_storage_limit_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
@@ -16491,7 +18823,13 @@ async def get_actions_cache_storage_limit_repository(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Actions Cache Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actions_cache_usage(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16530,7 +18868,13 @@ async def get_actions_cache_usage(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Actions Caches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_caches(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16574,7 +18918,13 @@ async def list_caches(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Actions Cache by Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_actions_cache_by_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16617,7 +18967,13 @@ async def delete_actions_cache_by_key(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Actions Cache",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_actions_cache(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16657,7 +19013,13 @@ async def delete_actions_cache(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_job(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16697,7 +19059,13 @@ async def get_workflow_job(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Job Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_job_logs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16737,7 +19105,13 @@ async def get_workflow_job_logs(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Rerun Workflow Job",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rerun_workflow_job(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16775,13 +19149,20 @@ async def rerun_workflow_job(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get OIDC Subject Claim Customization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_oidc_subject_claim_customization(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16820,7 +19201,13 @@ async def get_oidc_subject_claim_customization(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Secrets Available to Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_secrets_available_to_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16859,7 +19246,13 @@ async def list_organization_secrets_available_to_repository(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Variables Shared",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_variables_shared(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -16898,7 +19291,13 @@ async def list_organization_variables_shared(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runners(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -16937,7 +19336,13 @@ async def list_runners(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Downloads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_downloads(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -16976,7 +19381,13 @@ async def list_runner_downloads(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Generate Runner Removal Token for Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def generate_runner_removal_token_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17015,7 +19426,13 @@ async def generate_runner_removal_token_repository(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Runner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_runner_repo(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17055,7 +19472,13 @@ async def get_runner_repo(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Runner From Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_runner_from_repository(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -17095,7 +19518,13 @@ async def remove_runner_from_repository(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Labels for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_labels_for_repo(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -17135,7 +19564,12 @@ async def list_runner_labels_for_repo(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Add Labels to Runner for Repo",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_labels_to_runner_for_repo(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17173,13 +19607,20 @@ async def add_labels_to_runner_for_repo(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Runner Labels for Repository",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_runner_labels_repo(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17217,13 +19658,20 @@ async def update_runner_labels_repo(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove All Custom Labels From Runner for Repo",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_all_custom_labels_from_runner_for_repo(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -17263,7 +19711,13 @@ async def remove_all_custom_labels_from_runner_for_repo(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Runner Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_runner_label(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -17304,7 +19758,13 @@ async def remove_runner_label(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_runs(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -17352,7 +19812,13 @@ async def list_workflow_runs(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17396,7 +19862,13 @@ async def get_workflow_run(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow Run",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17436,7 +19908,13 @@ async def delete_workflow_run(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Run Approvals",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_run_approvals(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -17476,7 +19954,12 @@ async def list_workflow_run_approvals(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Approve Workflow Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -17516,7 +19999,13 @@ async def approve_workflow_run(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Run Artifacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_run_artifacts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17560,7 +20049,13 @@ async def list_workflow_run_artifacts(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Run Attempt",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_run_attempt(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17605,7 +20100,13 @@ async def get_workflow_run_attempt(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Run Attempt Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_run_attempt_jobs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17646,7 +20147,13 @@ async def list_workflow_run_attempt_jobs(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Download Workflow Run Attempt Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_workflow_run_attempt_logs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17687,7 +20194,13 @@ async def download_workflow_run_attempt_logs(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Workflow Run",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17727,7 +20240,12 @@ async def cancel_workflow_run(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Review Deployment Protection Rule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def review_deployment_protection_rule(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17767,13 +20285,20 @@ async def review_deployment_protection_rule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Force Cancel Workflow Run",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def force_cancel_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17813,7 +20338,13 @@ async def force_cancel_workflow_run(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Run Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_run_jobs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -17857,7 +20388,13 @@ async def list_workflow_run_jobs(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Run Logs Download URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_run_logs_download_url(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
@@ -17897,7 +20434,13 @@ async def get_workflow_run_logs_download_url(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow Run Logs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow_run_logs(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -17937,7 +20480,13 @@ async def delete_workflow_run_logs(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Pending Deployments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pending_deployments(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -17977,7 +20526,13 @@ async def list_pending_deployments(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Review Pending Deployments",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def review_pending_deployments(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18017,13 +20572,20 @@ async def review_pending_deployments(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Rerun Workflow",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rerun_workflow(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -18061,13 +20623,19 @@ async def rerun_workflow(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Rerun Workflow Failed Jobs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rerun_workflow_failed_jobs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18105,13 +20673,20 @@ async def rerun_workflow_failed_jobs(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Run Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_run_usage(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18151,7 +20726,13 @@ async def get_workflow_run_usage(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Secrets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_secrets(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -18190,7 +20771,13 @@ async def list_repository_secrets(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18229,7 +20816,13 @@ async def get_repository_public_key(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_secret(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -18269,7 +20862,13 @@ async def get_repository_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_secret(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository, excluding the `.git` extension. Case-insensitive."),
@@ -18309,7 +20908,13 @@ async def delete_repository_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_variables(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -18348,7 +20953,12 @@ async def list_repository_variables(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository_variable(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -18386,13 +20996,20 @@ async def create_repository_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18432,7 +21049,13 @@ async def get_repository_variable(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18470,13 +21093,20 @@ async def update_repository_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -18516,7 +21146,13 @@ async def delete_repository_variable(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflows(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18555,7 +21191,13 @@ async def list_workflows(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18595,7 +21237,13 @@ async def get_workflow(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Disable Workflow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_workflow(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -18635,7 +21283,12 @@ async def disable_workflow(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Workflow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_workflow(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18675,13 +21328,20 @@ async def trigger_workflow(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Enable Workflow",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enable_workflow(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. The name is case-insensitive."),
@@ -18721,7 +21381,13 @@ async def enable_workflow(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_runs_for_workflow(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18770,7 +21436,13 @@ async def list_workflow_runs_for_workflow(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Activities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_activities(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -18816,7 +21488,13 @@ async def list_repository_activities(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Assignees",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignees(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18855,7 +21533,13 @@ async def list_assignees(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Verify Assignee Permission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def verify_assignee_permission(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -18895,7 +21579,12 @@ async def verify_assignee_permission(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Attestation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_attestation(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18934,13 +21623,20 @@ async def create_attestation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Attestations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_attestations(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -18984,7 +21680,13 @@ async def list_attestations(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Autolinks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_autolinks(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -19023,7 +21725,12 @@ async def list_autolinks(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Autolink",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_autolink(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19062,13 +21769,20 @@ async def create_autolink(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Autolink",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_autolink(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19108,7 +21822,13 @@ async def get_autolink(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Autolink",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_autolink(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -19148,7 +21868,13 @@ async def delete_autolink(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Automated Security Fixes Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automated_security_fixes_status(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -19187,7 +21913,13 @@ async def get_automated_security_fixes_status(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Enable Automated Security Fixes",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enable_automated_security_fixes(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19226,7 +21958,13 @@ async def enable_automated_security_fixes(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Disable Automated Security Fixes",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_automated_security_fixes(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19265,7 +22003,13 @@ async def disable_automated_security_fixes(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branches(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19308,7 +22052,13 @@ async def list_branches(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -19348,7 +22098,13 @@ async def get_branch(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch Protection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19388,7 +22144,13 @@ async def get_branch_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Configure Branch Protection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -19453,13 +22215,20 @@ async def configure_branch_protection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Remove Branch Protection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19499,7 +22268,13 @@ async def remove_branch_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch Admin Protection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch_admin_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19539,7 +22314,13 @@ async def get_branch_admin_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Enforce Admin Branch Protection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enforce_admin_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19579,7 +22360,13 @@ async def enforce_admin_branch_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Disable Admin Branch Protection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_admin_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -19619,7 +22406,13 @@ async def disable_admin_branch_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Check Branch Signature Protection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_branch_signature_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -19659,7 +22452,13 @@ async def check_branch_signature_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Disable Branch Signature Protection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_branch_signature_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -19699,7 +22498,13 @@ async def disable_branch_signature_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch Status Checks Protection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch_status_checks_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19739,7 +22544,13 @@ async def get_branch_status_checks_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Disable Branch Status Check Protection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_branch_status_check_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19779,7 +22590,13 @@ async def disable_branch_status_check_protection(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Status Check Contexts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_check_contexts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19819,7 +22636,13 @@ async def list_status_check_contexts(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Remove Branch Protection Status Check Contexts",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_branch_protection_status_check_contexts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19858,13 +22681,20 @@ async def remove_branch_protection_status_check_contexts(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Branch Access Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branch_access_restrictions(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -19904,7 +22734,13 @@ async def list_branch_access_restrictions(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Remove Branch Protection Restrictions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_branch_protection_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19944,7 +22780,13 @@ async def remove_branch_protection_restrictions(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Apps with Protected Branch Access",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_apps_with_protected_branch_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -19984,7 +22826,13 @@ async def list_apps_with_protected_branch_access(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Branch Protection App Restrictions",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_branch_protection_app_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20022,13 +22870,20 @@ async def update_branch_protection_app_restrictions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Revoke App Branch Push Access",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_app_branch_push_access(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -20066,13 +22921,20 @@ async def revoke_app_branch_push_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Teams with Branch Access",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_with_branch_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20112,7 +22974,12 @@ async def list_teams_with_branch_access(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Grant Team Branch Push Access",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_team_branch_push_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20151,13 +23018,20 @@ async def grant_team_branch_push_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Replace Branch Protection Team Restrictions",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_branch_protection_team_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20196,13 +23070,20 @@ async def replace_branch_protection_team_restrictions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Team Branch Push Access",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_team_branch_push_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20241,13 +23122,20 @@ async def revoke_team_branch_push_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Branch Protection Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branch_protection_users(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20287,7 +23175,12 @@ async def list_branch_protection_users(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Grant User Push Access",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_user_push_access(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -20325,13 +23218,20 @@ async def grant_user_push_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Revoke User Branch Access",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_user_branch_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20369,13 +23269,19 @@ async def revoke_user_branch_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Rename Branch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rename_branch(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -20413,13 +23319,19 @@ async def rename_branch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Create Check Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_check_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20457,13 +23369,20 @@ async def create_check_run(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Get Check Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_check_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20503,7 +23422,13 @@ async def get_check_run(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Update Check Run",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_check_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20542,13 +23467,20 @@ async def update_check_run(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="List Check Run Annotations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_check_run_annotations(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20588,7 +23520,13 @@ async def list_check_run_annotations(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Check Run Recheck",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def trigger_check_run_recheck(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20628,7 +23566,12 @@ async def trigger_check_run_recheck(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Create Check Suite",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_check_suite(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20665,13 +23608,20 @@ async def create_check_suite(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Get Check Suite",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_check_suite(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20711,7 +23661,13 @@ async def get_check_suite(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="List Check Runs for Suite",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_check_runs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20756,7 +23712,13 @@ async def list_check_runs(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="Rerun Check Suite",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rerun_check_suite(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20796,7 +23758,13 @@ async def rerun_check_suite(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Code Scanning Alerts for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_scanning_alerts_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20841,7 +23809,13 @@ async def list_code_scanning_alerts_repository(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Code Scanning Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_scanning_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20881,7 +23855,12 @@ async def get_code_scanning_alert(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Update Code Scanning Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_code_scanning_alert(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -20923,13 +23902,20 @@ async def update_code_scanning_alert(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Autofix Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_autofix_status(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -20969,7 +23955,12 @@ async def get_autofix_status(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Create Code Scanning Autofix",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_code_scanning_autofix(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21009,7 +24000,12 @@ async def create_code_scanning_autofix(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Commit Code Scanning Autofix",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def commit_code_scanning_autofix(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21048,13 +24044,20 @@ async def commit_code_scanning_autofix(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Code Scanning Alert Instances",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_scanning_alert_instances(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21094,7 +24097,13 @@ async def list_code_scanning_alert_instances(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Code Scanning Analyses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_scanning_analyses(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -21138,7 +24147,13 @@ async def list_code_scanning_analyses(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Code Scanning Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_scanning_analysis(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21178,7 +24193,13 @@ async def get_code_scanning_analysis(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Delete Code Scanning Analysis",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_code_scanning_analysis(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21222,7 +24243,13 @@ async def delete_code_scanning_analysis(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List CodeQL Databases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codeql_databases(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21261,7 +24288,13 @@ async def list_codeql_databases(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get CodeQL Database",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codeql_database(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. Case-insensitive."),
@@ -21301,7 +24334,13 @@ async def get_codeql_database(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Delete CodeQL Database",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_codeql_database(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -21341,7 +24380,12 @@ async def delete_codeql_database(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Create Variant Analysis",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_variant_analysis(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21379,13 +24423,20 @@ async def create_variant_analysis(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Variant Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_variant_analysis(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21425,7 +24476,13 @@ async def get_variant_analysis(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Variant Analysis Repository Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_variant_analysis_repository_status(
     owner: str = Field(..., description="The account owner of the controller repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the controller repository."),
@@ -21467,7 +24524,13 @@ async def get_variant_analysis_repository_status(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Code Scanning Default Setup",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_scanning_default_setup(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -21506,7 +24569,12 @@ async def get_code_scanning_default_setup(
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Upload SARIF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_sarif(
     owner: str = Field(..., description="The account owner of the repository."),
     repo: str = Field(..., description="The name of the repository (without the .git extension)."),
@@ -21547,13 +24615,20 @@ async def upload_sarif(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: code-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get SARIF Upload",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sarif_upload(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21593,7 +24668,13 @@ async def get_sarif_upload(
     return _response_data
 
 # Tags: code-security
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Code Security Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_code_security_configuration(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -21632,7 +24713,13 @@ async def get_repository_code_security_configuration(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Codeowners Errors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codeowners_errors(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21671,7 +24758,13 @@ async def list_codeowners_errors(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Codespaces in Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codespaces_in_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -21710,7 +24803,12 @@ async def list_codespaces_in_repository(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Create Codespace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_codespace(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -21754,13 +24852,20 @@ async def create_codespace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Dev Containers in Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_devcontainers(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. The name is case-insensitive."),
@@ -21799,7 +24904,13 @@ async def list_devcontainers(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Codespace Machines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codespace_machines(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21838,7 +24949,13 @@ async def list_codespace_machines(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespace Defaults",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespace_defaults(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -21877,7 +24994,13 @@ async def get_codespace_defaults(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Codespace Secrets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codespace_secrets(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -21916,7 +25039,13 @@ async def list_codespace_secrets(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespace Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespace_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -21955,7 +25084,13 @@ async def get_codespace_public_key(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespace Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespace_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -21995,7 +25130,13 @@ async def get_codespace_secret(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Codespace Repository Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_codespace_secret_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22034,13 +25175,20 @@ async def create_or_update_codespace_secret_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Codespace Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_codespace_secret(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -22080,7 +25228,13 @@ async def delete_codespace_secret(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Collaborators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collaborators(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22124,7 +25278,13 @@ async def list_collaborators(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Verify Repository Collaborator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def verify_repository_collaborator(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22164,7 +25324,13 @@ async def verify_repository_collaborator(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Add Collaborator",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_collaborator(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -22202,13 +25368,20 @@ async def add_collaborator(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Remove Collaborator",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_collaborator(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22248,7 +25421,13 @@ async def remove_collaborator(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Collaborator Permission Level",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collaborator_permission(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22288,7 +25467,13 @@ async def get_collaborator_permission(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_comments(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22327,7 +25512,13 @@ async def list_commit_comments(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22369,7 +25560,13 @@ async def get_commit_comment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Commit Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_commit_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22409,13 +25606,20 @@ async def update_commit_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Commit Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_commit_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22457,7 +25661,13 @@ async def delete_commit_comment(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Comment Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_comment_reactions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22503,7 +25713,12 @@ async def list_commit_comment_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Commit Comment Reaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_commit_comment_reaction(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -22543,13 +25758,20 @@ async def add_commit_comment_reaction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Commit Comment Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_commit_comment_reaction(
     owner: str = Field(..., description="The owner of the repository. This is case-insensitive."),
     repo: str = Field(..., description="The name of the repository, without the `.git` extension. This is case-insensitive."),
@@ -22592,7 +25814,13 @@ async def remove_commit_comment_reaction(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commits(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -22639,7 +25867,13 @@ async def list_commits(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Branches for Commit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branches_for_commit(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22679,7 +25913,13 @@ async def list_branches_for_commit(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Comments by SHA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_comments_by_sha(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -22719,7 +25959,12 @@ async def list_commit_comments_by_sha(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Commit Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_commit_comment(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -22758,13 +26003,20 @@ async def create_commit_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Requests for Commit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_requests_for_commit(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22804,7 +26056,13 @@ async def list_pull_requests_for_commit(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22844,7 +26102,13 @@ async def get_commit(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="List Check Runs for Ref",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_check_runs_for_ref(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -22889,7 +26153,13 @@ async def list_check_runs_for_ref(
     return _response_data
 
 # Tags: checks
-@mcp.tool()
+@mcp.tool(
+    title="List Check Suites for Ref",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_check_suites(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -22933,7 +26203,13 @@ async def list_check_suites(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_status(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -22973,7 +26249,13 @@ async def get_commit_status(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_statuses(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -23013,7 +26295,13 @@ async def list_commit_statuses(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Community Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_community_profile(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23052,7 +26340,13 @@ async def get_repository_community_profile(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Compare Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def compare_commits(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23092,7 +26386,13 @@ async def compare_commits(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_content(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -23132,7 +26432,13 @@ async def get_repository_content(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_file(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -23179,13 +26485,20 @@ async def create_or_update_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -23228,13 +26541,20 @@ async def delete_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Contributors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contributors(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23277,7 +26597,13 @@ async def list_contributors(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Dependabot Alerts for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependabot_alerts_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -23327,7 +26653,13 @@ async def list_dependabot_alerts_repository(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Get Dependabot Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dependabot_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23367,7 +26699,12 @@ async def get_dependabot_alert(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Update Dependabot Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_dependabot_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23408,13 +26745,20 @@ async def update_dependabot_alert(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="List Dependabot Secrets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependabot_secrets(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -23453,7 +26797,13 @@ async def list_dependabot_secrets(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Get Dependabot Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dependabot_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -23492,7 +26842,13 @@ async def get_dependabot_public_key(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Get Dependabot Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dependabot_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -23532,7 +26888,13 @@ async def get_dependabot_secret(
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Dependabot Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_dependabot_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23575,13 +26937,20 @@ async def create_or_update_dependabot_secret(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dependabot
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dependabot Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dependabot_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -23621,7 +26990,13 @@ async def delete_dependabot_secret(
     return _response_data
 
 # Tags: dependency-graph
-@mcp.tool()
+@mcp.tool(
+    title="Compare Dependency Changes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def compare_dependency_changes(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -23661,7 +27036,13 @@ async def compare_dependency_changes(
     return _response_data
 
 # Tags: dependency-graph
-@mcp.tool()
+@mcp.tool(
+    title="Export SBOM",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_sbom(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23700,7 +27081,12 @@ async def export_sbom(
     return _response_data
 
 # Tags: dependency-graph
-@mcp.tool()
+@mcp.tool(
+    title="Submit Dependency Snapshot",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_dependency_snapshot(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -23749,13 +27135,20 @@ async def submit_dependency_snapshot(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Deployments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployments(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -23800,7 +27193,12 @@ async def list_deployments(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Deployment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deployment(
     owner: str = Field(..., description="The account owner of the repository."),
     repo: str = Field(..., description="The name of the repository (without the .git extension)."),
@@ -23845,13 +27243,20 @@ async def create_deployment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23891,7 +27296,13 @@ async def get_deployment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Deployment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23931,7 +27342,13 @@ async def delete_deployment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Deployment Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployment_statuses(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -23971,7 +27388,12 @@ async def list_deployment_statuses(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Deployment Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deployment_status(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24014,13 +27436,20 @@ async def create_deployment_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment_status(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24061,7 +27490,13 @@ async def get_deployment_status(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -24100,7 +27535,13 @@ async def list_environments(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -24140,7 +27581,13 @@ async def get_environment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Configure Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_environment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24183,13 +27630,20 @@ async def configure_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -24229,7 +27683,13 @@ async def delete_environment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Deployment Branch Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployment_branch_policies(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -24269,7 +27729,12 @@ async def list_deployment_branch_policies(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Deployment Branch Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deployment_branch_policy(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24308,13 +27773,20 @@ async def create_deployment_branch_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment Branch Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment_branch_policy(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -24355,7 +27827,13 @@ async def get_deployment_branch_policy(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Deployment Branch Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_deployment_branch_policy(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24394,13 +27872,20 @@ async def update_deployment_branch_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Deployment Branch Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_deployment_branch_policy(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24441,7 +27926,13 @@ async def delete_deployment_branch_policy(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Deployment Protection Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployment_protection_rules(
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by %2F."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is case-insensitive."),
@@ -24481,7 +27972,13 @@ async def list_deployment_protection_rules(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Deployment Rule Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployment_rule_integrations(
     environment_name: str = Field(..., description="The name of the environment. URL encode special characters, such as replacing forward slashes with `%2F`."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -24521,7 +28018,13 @@ async def list_deployment_rule_integrations(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment Protection Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment_protection_rule(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24562,7 +28065,13 @@ async def get_deployment_protection_rule(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Disable Deployment Protection Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_deployment_protection_rule(
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by %2F."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24603,7 +28112,13 @@ async def disable_deployment_protection_rule(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Secrets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environment_secrets(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -24643,7 +28158,13 @@ async def list_environment_secrets(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24683,7 +28204,13 @@ async def get_environment_public_key(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24724,7 +28251,13 @@ async def get_environment_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24765,7 +28298,13 @@ async def delete_environment_secret(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environment_variables(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24805,7 +28344,12 @@ async def list_environment_variables(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24844,13 +28388,20 @@ async def create_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24891,7 +28442,13 @@ async def get_environment_variable(
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24930,13 +28487,20 @@ async def update_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24977,7 +28541,13 @@ async def delete_environment_variable(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_events(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -25016,7 +28586,13 @@ async def list_repository_events(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Forks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_forks(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -25055,7 +28631,12 @@ async def list_repository_forks(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Fork Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fork_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -25093,13 +28674,19 @@ async def fork_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Create Blob",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_blob(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25137,13 +28724,20 @@ async def create_blob(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Get Blob",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_blob(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25183,7 +28777,12 @@ async def get_blob(
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Create Commit",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_commit(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -25228,13 +28827,20 @@ async def create_commit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Object",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_object(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25274,7 +28880,13 @@ async def get_commit_object(
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="List Matching Git Refs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_git_refs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25314,7 +28926,13 @@ async def list_git_refs(
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Get Git Reference",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_git_reference(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -25354,7 +28972,12 @@ async def get_git_reference(
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Create Git Ref",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_git_ref(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -25392,13 +29015,20 @@ async def create_git_ref(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Update Git Ref",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_git_ref(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25437,13 +29067,20 @@ async def update_git_ref(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Delete Git Ref",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_git_ref(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25483,7 +29120,12 @@ async def delete_git_ref(
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25526,13 +29168,20 @@ async def create_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25572,7 +29221,12 @@ async def get_tag(
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Create Tree",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tree(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -25610,13 +29264,20 @@ async def create_tree(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: git
-@mcp.tool()
+@mcp.tool(
+    title="Fetch Tree",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def fetch_tree(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -25660,7 +29321,13 @@ async def fetch_tree(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks_repository(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -25699,7 +29366,12 @@ async def list_webhooks_repository(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -25740,13 +29412,20 @@ async def create_webhook_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25786,7 +29465,13 @@ async def get_webhook(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25828,13 +29513,20 @@ async def update_webhook_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25874,7 +29566,13 @@ async def delete_webhook_repository(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_config_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25914,7 +29612,13 @@ async def get_webhook_config_repository(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook_config_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -25954,13 +29658,20 @@ async def update_webhook_config_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Deliveries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_deliveries(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -26000,7 +29711,13 @@ async def list_webhook_deliveries(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Delivery",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_delivery(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -26041,7 +29758,13 @@ async def get_webhook_delivery(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Redeliver Webhook Delivery",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def redeliver_webhook_delivery(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -26082,7 +29805,12 @@ async def redeliver_webhook_delivery(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Webhook Ping",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_webhook_ping(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26122,7 +29850,12 @@ async def trigger_webhook_ping(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Webhook Test",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_webhook_test(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26162,7 +29895,13 @@ async def trigger_webhook_test(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Immutable Releases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_immutable_releases(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -26201,7 +29940,13 @@ async def get_immutable_releases(
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get App Installation for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_installation_repository(
     owner: str = Field(..., description="The owner of the repository account. This is case-insensitive and can be either a user or organization name."),
     repo: str = Field(..., description="The repository name without the `.git` extension. This is case-insensitive."),
@@ -26240,7 +29985,13 @@ async def get_app_installation_repository(
     return _response_data
 
 # Tags: interactions
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Interaction Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_interaction_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -26279,7 +30030,13 @@ async def get_repository_interaction_restrictions(
     return _response_data
 
 # Tags: interactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Interaction Restrictions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_interaction_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26318,7 +30075,13 @@ async def remove_interaction_restrictions(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Invitations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_invitations(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -26357,7 +30120,13 @@ async def list_repository_invitations(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Invitation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_invitation(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26395,13 +30164,20 @@ async def update_repository_invitation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Invitation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_invitation(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26441,7 +30217,13 @@ async def delete_repository_invitation(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issues_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -26491,7 +30273,12 @@ async def list_issues_repository(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Create Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_issue(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -26533,13 +30320,20 @@ async def create_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Comments for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_comments_for_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26583,7 +30377,13 @@ async def list_issue_comments_for_repository(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_comment(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -26625,7 +30425,12 @@ async def get_issue_comment(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Update Issue Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26665,13 +30470,20 @@ async def update_issue_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26713,7 +30525,12 @@ async def delete_issue_comment(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Pin Issue Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def pin_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26755,7 +30572,13 @@ async def pin_issue_comment(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Unpin Issue Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unpin_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26797,7 +30620,13 @@ async def unpin_issue_comment(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Comment Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comment_reactions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -26843,7 +30672,12 @@ async def list_comment_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Issue Comment Reaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_issue_comment_reaction(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -26883,13 +30717,20 @@ async def add_issue_comment_reaction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Comment Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_comment_reaction(
     owner: str = Field(..., description="The owner of the repository. This is case-insensitive."),
     repo: str = Field(..., description="The name of the repository, without the `.git` extension. This is case-insensitive."),
@@ -26932,7 +30773,13 @@ async def remove_issue_comment_reaction(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_events(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -26971,7 +30818,13 @@ async def list_issue_events(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_event(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27011,7 +30864,13 @@ async def get_issue_event(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27051,7 +30910,12 @@ async def get_issue(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Update Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27096,13 +30960,19 @@ async def update_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Assign Issue Users",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_issue_users(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27140,13 +31010,20 @@ async def assign_issue_users(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Assignees",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_assignees(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27184,13 +31061,20 @@ async def remove_issue_assignees(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Verify Issue Assignee",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def verify_issue_assignee(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -27231,7 +31115,13 @@ async def verify_issue_assignee(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_comments(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27275,7 +31165,12 @@ async def list_issue_comments(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Add Issue Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27313,13 +31208,20 @@ async def add_issue_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Blocking Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blocking_issues(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -27359,7 +31261,12 @@ async def list_blocking_issues(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Mark Issue Blocked By",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def mark_issue_blocked_by(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27397,13 +31304,20 @@ async def mark_issue_blocked_by(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Blocking Dependency",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_blocking_dependency(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -27444,7 +31358,13 @@ async def remove_issue_blocking_dependency(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Blocking Dependencies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blocking_dependencies(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -27484,7 +31404,13 @@ async def list_blocking_dependencies(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_events_for_issue(
     owner: str = Field(..., description="The owner account of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -27524,7 +31450,13 @@ async def list_issue_events_for_issue(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27564,7 +31496,12 @@ async def list_issue_labels(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Add Issue Labels",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_issue_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27603,13 +31540,20 @@ async def add_issue_labels(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Replace Issue Labels",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_issue_labels(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -27648,13 +31592,20 @@ async def replace_issue_labels(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Remove All Issue Labels",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_all_issue_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27694,7 +31645,13 @@ async def remove_all_issue_labels(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_label(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -27735,7 +31692,12 @@ async def remove_issue_label(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Lock Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def lock_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27773,13 +31735,20 @@ async def lock_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Unlock Issue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlock_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27819,7 +31788,13 @@ async def unlock_issue(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Parent Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_parent_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -27859,7 +31834,13 @@ async def get_parent_issue(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_reactions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27903,7 +31884,12 @@ async def list_issue_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Issue Reaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_issue_reaction(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -27941,13 +31927,20 @@ async def add_issue_reaction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_reaction(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -27988,7 +31981,13 @@ async def delete_issue_reaction(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Unlink Sub Issue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlink_sub_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28026,13 +32025,20 @@ async def unlink_sub_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Sub Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sub_issues(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28072,7 +32078,12 @@ async def list_sub_issues(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Link Sub Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_sub_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28111,13 +32122,19 @@ async def link_sub_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Sub Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_sub_issue(
     owner: str = Field(..., description="The owner account of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -28157,13 +32174,20 @@ async def reorder_sub_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Timeline Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_timeline_events(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -28203,7 +32227,13 @@ async def list_issue_timeline_events(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Deploy Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deploy_keys(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -28242,7 +32272,12 @@ async def list_deploy_keys(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Deploy Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deploy_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28280,13 +32315,20 @@ async def create_deploy_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Deploy Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deploy_key(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -28326,7 +32368,13 @@ async def get_deploy_key(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Deploy Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_deploy_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28366,7 +32414,13 @@ async def delete_deploy_key(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28405,7 +32459,12 @@ async def list_labels(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Create Label",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_label(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28444,13 +32503,20 @@ async def create_label(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Label",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_label(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28490,7 +32556,13 @@ async def get_label(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Update Label",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_label(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -28530,13 +32602,20 @@ async def update_label(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Delete Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_label(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28576,7 +32655,13 @@ async def delete_label(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Languages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_languages(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28615,7 +32700,13 @@ async def list_repository_languages(
     return _response_data
 
 # Tags: licenses
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository License",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_license(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -28654,7 +32745,12 @@ async def get_repository_license(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Sync Fork with Upstream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def sync_fork_with_upstream(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28691,13 +32787,19 @@ async def sync_fork_with_upstream(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Merge Branch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_branch(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -28736,13 +32838,20 @@ async def merge_branch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Milestones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_milestones(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28786,7 +32895,12 @@ async def list_milestones(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Create Milestone",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_milestone(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28826,13 +32940,20 @@ async def create_milestone(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Milestone",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_milestone(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28872,7 +32993,13 @@ async def get_milestone(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Update Milestone",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_milestone(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28912,13 +33039,20 @@ async def update_milestone(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Delete Milestone",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_milestone(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -28958,7 +33092,13 @@ async def delete_milestone(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Milestone Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_milestone_labels(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -28998,7 +33138,13 @@ async def list_milestone_labels(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notifications_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29043,7 +33189,13 @@ async def list_notifications_repository(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Mark Repository Notifications as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_repository_notifications_as_read(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29080,13 +33232,20 @@ async def mark_repository_notifications_as_read(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Pages Site",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pages_site(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29125,7 +33284,12 @@ async def get_pages_site(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Enable Pages Site",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_pages_site(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -29164,13 +33328,20 @@ async def enable_pages_site(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Configure Pages Site",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_pages_site(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -29209,13 +33380,20 @@ async def configure_pages_site(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pages Site",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pages_site(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -29254,7 +33432,13 @@ async def delete_pages_site(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Pages Builds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pages_builds(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29293,7 +33477,12 @@ async def list_pages_builds(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Pages Build",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_pages_build(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29332,7 +33521,13 @@ async def trigger_pages_build(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Pages Build",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_latest_pages_build(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -29371,7 +33566,13 @@ async def get_latest_pages_build(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Pages Build",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pages_build(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29411,7 +33612,12 @@ async def get_pages_build(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Deploy Pages",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def deploy_pages(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29451,13 +33657,20 @@ async def deploy_pages(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Pages Deployment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pages_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29497,7 +33710,13 @@ async def get_pages_deployment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Pages Deployment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_pages_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29537,7 +33756,13 @@ async def cancel_pages_deployment(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Check Private Vulnerability Reporting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_private_vulnerability_reporting(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -29576,7 +33801,13 @@ async def check_private_vulnerability_reporting(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Custom Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_custom_properties(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -29615,7 +33846,13 @@ async def list_repository_custom_properties(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Set Repository Custom Properties",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_repository_custom_properties(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. Case-insensitive."),
@@ -29652,13 +33889,20 @@ async def set_repository_custom_properties(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_requests(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -29704,7 +33948,12 @@ async def list_pull_requests(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Create Pull Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pull_request(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -29747,13 +33996,20 @@ async def create_pull_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Review Comments for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_review_comments_for_repo(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29797,7 +34053,13 @@ async def list_pull_request_review_comments_for_repo(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Review Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_review_comment(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -29839,7 +34101,13 @@ async def get_pull_request_review_comment(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request Review Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pull_request_review_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29879,13 +34147,20 @@ async def update_pull_request_review_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pull Request Review Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pull_request_review_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29927,7 +34202,13 @@ async def delete_pull_request_review_comment(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Review Comment Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_review_comment_reactions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -29973,7 +34254,12 @@ async def list_pull_request_review_comment_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Reaction to Pull Request Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_reaction_to_pull_request_comment(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -30013,13 +34299,20 @@ async def add_reaction_to_pull_request_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Pull Request Comment Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_pull_request_comment_reaction(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -30062,7 +34355,13 @@ async def remove_pull_request_comment_reaction(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30102,7 +34401,12 @@ async def get_pull_request(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_pull_request(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30143,13 +34447,19 @@ async def update_pull_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Create Codespace from Pull Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_codespace_from_pull_request(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -30194,13 +34504,20 @@ async def create_codespace_from_pull_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Review Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_review_comments(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -30245,7 +34562,12 @@ async def list_pull_request_review_comments(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Create Pull Request Review Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pull_request_review_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30291,13 +34613,19 @@ async def create_pull_request_review_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Reply to Review Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reply_to_review_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30338,13 +34666,20 @@ async def reply_to_review_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_commits(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -30384,7 +34719,13 @@ async def list_pull_request_commits(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_files(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30424,7 +34765,13 @@ async def list_pull_request_files(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Check Pull Request Merged",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_pull_request_merged(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -30464,7 +34811,13 @@ async def check_pull_request_merged(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Merge Pull Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_pull_request(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -30505,13 +34858,20 @@ async def merge_pull_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Requested Reviewers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_requested_reviewers(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -30551,7 +34911,12 @@ async def list_pull_request_requested_reviewers(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Request Pull Request Reviewers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_pull_request_reviewers(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30590,13 +34955,20 @@ async def request_pull_request_reviewers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Remove Pull Request Reviewers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_pull_request_reviewers(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -30635,13 +35007,20 @@ async def remove_pull_request_reviewers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Reviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_reviews(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -30681,7 +35060,12 @@ async def list_pull_request_reviews(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Create Pull Request Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pull_request_review(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30728,13 +35112,20 @@ async def create_pull_request_review(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Review",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_review(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30775,7 +35166,13 @@ async def get_pull_request_review(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Update Pull Request Review",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pull_request_review(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30814,13 +35211,20 @@ async def update_pull_request_review(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pending Review",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pending_review(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30861,7 +35265,13 @@ async def delete_pending_review(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="List Review Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_review_comments(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -30902,7 +35312,13 @@ async def list_review_comments(
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Dismiss Pull Request Review",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def dismiss_pull_request_review(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30941,13 +35357,19 @@ async def dismiss_pull_request_review(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Submit Pull Request Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_pull_request_review(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -30987,13 +35409,20 @@ async def submit_pull_request_review(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pulls
-@mcp.tool()
+@mcp.tool(
+    title="Sync Pull Request Branch",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def sync_pull_request_branch(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -31033,7 +35462,13 @@ async def sync_pull_request_branch(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository README",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_readme(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -31072,7 +35507,13 @@ async def get_repository_readme(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get README in Directory",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_readme(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -31112,7 +35553,13 @@ async def get_readme(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Releases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_releases(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31151,7 +35598,12 @@ async def list_releases(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_release(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -31196,13 +35648,20 @@ async def create_release(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Download Release Asset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_release_asset(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
@@ -31242,7 +35701,13 @@ async def download_release_asset(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Release Asset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_release_asset(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31281,13 +35746,20 @@ async def update_release_asset(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release Asset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_asset(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31327,7 +35799,12 @@ async def delete_release_asset(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Generate Release Notes",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_release_notes(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31367,13 +35844,20 @@ async def generate_release_notes(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Release",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_latest_release(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31412,7 +35896,13 @@ async def get_latest_release(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Release by Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_by_tag(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -31452,7 +35942,13 @@ async def get_release_by_tag(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Release",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -31492,7 +35988,13 @@ async def get_release(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_release(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31536,13 +36038,20 @@ async def update_release(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31582,7 +36091,13 @@ async def delete_release(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Release Assets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_assets(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -31622,14 +36137,19 @@ async def list_release_assets(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Upload Release Asset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_release_asset(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     release_id: int = Field(..., description="The unique identifier of the release to which the asset will be uploaded."),
     name: str = Field(..., description="The filename for the asset. GitHub will rename files with special characters, non-alphanumeric characters, or leading/trailing periods. Duplicate filenames will cause an error and require deletion of the existing asset before re-upload."),
     label: str | None = Field(None, description="An optional display label for the asset that describes its purpose or contents."),
-    body: str | None = Field(None, description="The raw binary file data to upload. Set the Content-Type header to the appropriate media type (e.g., application/zip)."),
+    body: str | None = Field(None, description="Base64-encoded binary request body. The raw binary file data to upload. Set the Content-Type header to the appropriate media type (e.g., application/zip).", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload a binary asset file to a release. The asset data must be sent as raw binary content in the request body with the appropriate Content-Type header."""
 
@@ -31650,6 +36170,7 @@ async def upload_release_asset(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/octet-stream"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_release_asset")
@@ -31666,13 +36187,21 @@ async def upload_release_asset(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/octet-stream",
+        whole_body_base64=True,
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Release Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_reactions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31716,7 +36245,12 @@ async def list_release_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Release Reaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_release_reaction(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31754,13 +36288,20 @@ async def add_release_reaction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_reaction(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository, without the `.git` extension. The name is case-insensitive."),
@@ -31801,7 +36342,13 @@ async def delete_release_reaction(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Branch Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branch_rules(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -31841,7 +36388,13 @@ async def list_branch_rules(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Rule Suites",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rule_suites(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -31886,7 +36439,13 @@ async def list_rule_suites(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Rule Suite",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rule_suite(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -31926,7 +36485,13 @@ async def get_rule_suite(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Ruleset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ruleset(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. Case-insensitive."),
@@ -31970,7 +36535,13 @@ async def get_ruleset(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Ruleset History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ruleset_history_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32010,7 +36581,13 @@ async def list_ruleset_history_repository(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Ruleset Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ruleset_version_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32051,7 +36628,13 @@ async def get_ruleset_version_repository(
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Secret Scanning Alerts for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_secret_scanning_alerts_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -32101,7 +36684,13 @@ async def list_secret_scanning_alerts_repository(
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Get Secret Scanning Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_secret_scanning_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32145,7 +36734,12 @@ async def get_secret_scanning_alert(
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Update Secret Scanning Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_secret_scanning_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32185,13 +36779,20 @@ async def update_secret_scanning_alert(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Secret Alert Locations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_secret_alert_locations(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32231,7 +36832,13 @@ async def list_secret_alert_locations(
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="Bypass Push Protection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def bypass_push_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32269,13 +36876,20 @@ async def bypass_push_protection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: secret-scanning
-@mcp.tool()
+@mcp.tool(
+    title="List Secret Scan History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_secret_scan_history(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32314,7 +36928,13 @@ async def list_secret_scan_history(
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="List Security Advisories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_security_advisories(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32358,7 +36978,13 @@ async def list_security_advisories(
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="Create Security Advisory",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_security_advisory(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32402,13 +37028,20 @@ async def create_security_advisory(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="Report Security Vulnerability",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def report_security_vulnerability(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -32449,13 +37082,20 @@ async def report_security_vulnerability(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="Get Security Advisory for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_security_advisory_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32495,7 +37135,12 @@ async def get_security_advisory_repository(
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="Update Security Advisory",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_security_advisory(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -32541,13 +37186,19 @@ async def update_security_advisory(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="Request CVE for Advisory",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_cve_for_advisory(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32587,7 +37238,12 @@ async def request_cve_for_advisory(
     return _response_data
 
 # Tags: security-advisories
-@mcp.tool()
+@mcp.tool(
+    title="Create Security Advisory Fork",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_security_advisory_fork(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32627,7 +37283,13 @@ async def create_security_advisory_fork(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Stargazers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stargazers(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
@@ -32666,7 +37328,13 @@ async def list_stargazers(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Code Frequency Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_frequency_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -32705,7 +37373,13 @@ async def get_code_frequency_stats(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Activity Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_activity_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -32744,7 +37418,13 @@ async def list_commit_activity_stats(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Contributor Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contributor_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -32783,7 +37463,13 @@ async def list_contributor_stats(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Participation Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_participation_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32822,7 +37508,13 @@ async def get_repository_participation_stats(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Punch Card",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_punch_card(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32861,7 +37553,12 @@ async def get_commit_punch_card(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Commit Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_commit_status(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -32901,13 +37598,20 @@ async def create_commit_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Watchers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_watchers(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -32946,7 +37650,13 @@ async def list_watchers(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_subscription(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -32985,7 +37695,13 @@ async def get_repository_subscription(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Configure Repository Subscription",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_repository_subscription(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33023,13 +37739,20 @@ async def configure_repository_subscription(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Unwatch Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unwatch_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -33068,7 +37791,13 @@ async def unwatch_repository(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33107,7 +37836,13 @@ async def list_tags(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Download Repository Archive",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_repository_archive(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33147,7 +37882,13 @@ async def download_repository_archive(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_teams(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -33186,7 +37927,13 @@ async def list_repository_teams(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_topics(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -33225,7 +37972,13 @@ async def list_repository_topics(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Topics",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_topics(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33262,13 +38015,20 @@ async def update_repository_topics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Clones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_clones(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33311,7 +38071,13 @@ async def list_repository_clones(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Popular Paths",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_popular_paths(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33350,7 +38116,13 @@ async def list_popular_paths(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_views(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33393,7 +38165,13 @@ async def get_repository_views(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Transfer Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def transfer_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -33432,13 +38210,20 @@ async def transfer_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Get Vulnerability Alerts Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vulnerability_alerts_status(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -33477,7 +38262,13 @@ async def get_vulnerability_alerts_status(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Enable Vulnerability Alerts",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enable_vulnerability_alerts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33516,7 +38307,13 @@ async def enable_vulnerability_alerts(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Disable Vulnerability Alerts",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_vulnerability_alerts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -33555,7 +38352,13 @@ async def disable_vulnerability_alerts(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Download Repository Archive as ZIP",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_repository_archive_zip(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. Case-insensitive."),
@@ -33595,7 +38398,12 @@ async def download_repository_archive_zip(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository From Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository_from_template(
     template_owner: str = Field(..., description="The account owner of the template repository. Case-insensitive."),
     template_repo: str = Field(..., description="The name of the template repository without the `.git` extension. Case-insensitive."),
@@ -33634,13 +38442,20 @@ async def create_repository_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Public Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_repositories(since: int | None = Field(None, description="Filter results to return only repositories with an ID greater than this value. Use this parameter for pagination by passing the ID of the last repository from the previous page.")) -> dict[str, Any] | ToolResult:
     """Retrieve all public repositories ordered by creation time. Pagination is controlled exclusively through the `since` parameter to fetch subsequent pages of results."""
 
@@ -33678,7 +38493,12 @@ async def list_public_repositories(since: int | None = Field(None, description="
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Add Issue Field Values",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_issue_field_values(
     repository_id: int = Field(..., description="The unique identifier of the repository."),
     issue_number: int = Field(..., description="The issue number to update with field values."),
@@ -33721,7 +38541,13 @@ async def add_issue_field_values(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Set Issue Field Values",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_issue_field_values(
     repository_id: int = Field(..., description="The unique identifier of the repository."),
     issue_number: int = Field(..., description="The number that identifies the issue within the repository."),
@@ -33764,7 +38590,13 @@ async def set_issue_field_values(
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Field Value",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_field_value(
     repository_id: int = Field(..., description="The unique identifier of the repository containing the issue."),
     issue_number: int = Field(..., description="The issue number that identifies which issue to modify."),
@@ -33804,7 +38636,13 @@ async def delete_issue_field_value(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_code(q: str = Field(..., description="Search query containing one or more keywords and qualifiers (e.g., language, repo, in:file). At least one search term is required; qualifiers can filter by language, repository, file path, and other code attributes.")) -> dict[str, Any] | ToolResult:
     """Search for code across repositories by query terms within file contents and paths. Returns up to 100 results per page, limited to the default branch and files under 384 KB."""
 
@@ -33842,7 +38680,13 @@ async def search_code(q: str = Field(..., description="Search query containing o
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_commits(
     order: Literal["desc", "asc"] | None = Field(None, description="Sort order for search results, determining whether results are ordered by highest or lowest match count. Only applies when using the sort parameter."),
     keywords: list[str] | None = Field(None, description="Search keywords to find in issues/PRs (e.g., ['windows', 'bug'])"),
@@ -33895,7 +38739,13 @@ async def search_commits(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_issues(
     order: Literal["desc", "asc"] | None = Field(None, description="Sort order for search results. Use ascending to show lowest match counts first, or descending for highest match counts first. Only applies when results are sorted."),
     keywords: list[str] | None = Field(None, description="Search keywords to find in issues/PRs (e.g., ['windows', 'bug'])"),
@@ -33948,7 +38798,13 @@ async def search_issues(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_labels(
     repository_id: int = Field(..., description="The numeric identifier of the repository to search labels within."),
     q: str = Field(..., description="The search keywords to match against label names and descriptions. Qualifiers are not supported in this query."),
@@ -33990,7 +38846,13 @@ async def search_labels(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_repositories(
     q: str = Field(..., description="Search query containing one or more keywords and qualifiers to filter repositories. Qualifiers allow you to limit results by language, stars, forks, creation date, and other repository attributes. Refer to GitHub's search query syntax documentation for supported qualifiers and formatting."),
     order: Literal["desc", "asc"] | None = Field(None, description="Sort order for search results. Use 'desc' to return results with the highest match count first, or 'asc' for lowest match count first. This parameter only applies when results are sorted."),
@@ -34031,7 +38893,13 @@ async def search_repositories(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_topics(q: str = Field(..., description="Search query containing one or more keywords and optional qualifiers (e.g., is:featured) to filter results. Qualifiers allow you to limit searches to specific topic attributes like featured status, language, or other criteria supported by GitHub's search interface.")) -> dict[str, Any] | ToolResult:
     """Search for GitHub topics using keywords and qualifiers to find the best matching results. Results are sorted by relevance and limited to 100 per page."""
 
@@ -34069,7 +38937,13 @@ async def search_topics(q: str = Field(..., description="Search query containing
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users(
     order: Literal["desc", "asc"] | None = Field(None, description="Sort order for search results based on match relevance. Use 'desc' for highest matches first or 'asc' for lowest matches first. Only applies when results are sorted."),
     keywords: list[str] | None = Field(None, description="Search keywords to find in issues/PRs (e.g., ['windows', 'bug'])"),
@@ -34122,7 +38996,13 @@ async def search_users(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile information of the currently authenticated user. Requires `user` scope for OAuth app tokens or personal access tokens (classic) to include private profile details."""
 
@@ -34149,7 +39029,13 @@ async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     blog: str | None = Field(None, description="The user's blog or personal website URL."),
     twitter_username: str | None = Field(None, description="The user's Twitter username."),
@@ -34187,13 +39073,20 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Blocked Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blocked_users_personal() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all users blocked by the authenticated user on their personal account."""
 
@@ -34220,7 +39113,13 @@ async def list_blocked_users_personal() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Check User Blocked",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_user_blocked(username: str = Field(..., description="The GitHub username handle to check for a blocking relationship.")) -> dict[str, Any] | ToolResult:
     """Determine if a specific user is blocked by the authenticated user. Returns a 204 status if the user is blocked, or 404 if the user is not blocked or has been identified as spam."""
 
@@ -34256,7 +39155,13 @@ async def check_user_blocked(username: str = Field(..., description="The GitHub 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Block User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def block_user(username: str = Field(..., description="The GitHub username handle of the user to block.")) -> dict[str, Any] | ToolResult:
     """Block a GitHub user to prevent interactions with them. Returns a 204 status on success, or 422 if the authenticated user cannot block the specified user."""
 
@@ -34292,7 +39197,13 @@ async def block_user(username: str = Field(..., description="The GitHub username
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Unblock User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unblock_user(username: str = Field(..., description="The GitHub username handle of the user to unblock.")) -> dict[str, Any] | ToolResult:
     """Unblock a previously blocked user account. Returns a 204 status code on successful completion."""
 
@@ -34328,7 +39239,13 @@ async def unblock_user(username: str = Field(..., description="The GitHub userna
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Codespaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codespaces(repository_id: int | None = Field(None, description="Filter codespaces to only those associated with a specific repository by its ID.")) -> dict[str, Any] | ToolResult:
     """Lists all codespaces for the authenticated user. Optionally filter results by a specific repository."""
 
@@ -34366,7 +39283,12 @@ async def list_codespaces(repository_id: int | None = Field(None, description="F
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Create Codespace for Authenticated User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_codespace_from_pull_request_2(body: _models.CodespacesCreateForAuthenticatedUserBodyV0 | _models.CodespacesCreateForAuthenticatedUserBodyV1 = Field(..., description="Configuration for the new codespace, including the target repository or pull request, optional branch/tag reference, and preferred geographic region for the codespace environment.")) -> dict[str, Any] | ToolResult:
     """Create a new codespace for the authenticated user from a repository or pull request. Requires either a repository ID or pull request reference, but not both."""
 
@@ -34399,13 +39321,20 @@ async def create_codespace_from_pull_request_2(body: _models.CodespacesCreateFor
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Codespace Secrets for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codespace_secrets_for_user() -> dict[str, Any] | ToolResult:
     """Retrieve all development environment secrets available for the authenticated user's codespaces. Secret values are not revealed; only metadata about available secrets is returned."""
 
@@ -34432,7 +39361,13 @@ async def list_codespace_secrets_for_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespaces Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespaces_public_key() -> dict[str, Any] | ToolResult:
     """Retrieve your public key needed to encrypt secrets for GitHub Codespaces. This key must be obtained before creating or updating any Codespaces secrets."""
 
@@ -34459,7 +39394,13 @@ async def get_codespaces_public_key() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespace Secret for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespace_secret_for_user(secret_name: str = Field(..., description="The name of the secret to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a development environment secret available to the authenticated user's codespaces without revealing its encrypted value. Requires Codespaces access and appropriate OAuth or personal access token scopes."""
 
@@ -34495,7 +39436,13 @@ async def get_codespace_secret_for_user(secret_name: str = Field(..., descriptio
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Codespace Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_codespace_secret(
     secret_name: str = Field(..., description="The name of the secret to create or update."),
     key_id: str = Field(..., description="The ID of the public key used to encrypt the secret value."),
@@ -34533,13 +39480,20 @@ async def create_or_update_codespace_secret(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Codespace Secret for User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_codespace_secret_for_user(secret_name: str = Field(..., description="The name of the secret to delete from the user's codespaces.")) -> dict[str, Any] | ToolResult:
     """Delete a development environment secret for the authenticated user. Removing the secret revokes access from all codespaces that were previously allowed to use it."""
 
@@ -34575,7 +39529,13 @@ async def delete_codespace_secret_for_user(secret_name: str = Field(..., descrip
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories for Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories_for_secret(secret_name: str = Field(..., description="The name of the user secret for which to list authorized repositories.")) -> dict[str, Any] | ToolResult:
     """List the repositories that have been granted access to use a user's development environment secret. The authenticated user must have Codespaces access to use this endpoint."""
 
@@ -34611,7 +39571,13 @@ async def list_repositories_for_secret(secret_name: str = Field(..., description
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Update Secret Repositories",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_secret_repositories(
     secret_name: str = Field(..., description="The name of the user secret to configure repository access for."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that will have access to this secret. Provide the complete list of repositories you want to authorize; any repositories not included will be removed from access."),
@@ -34647,13 +39613,20 @@ async def update_secret_repositories(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Add Repository to Codespace Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_repository_to_codespace_secret(
     secret_name: str = Field(..., description="The name of the Codespaces secret to which the repository will be added."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the secret's accessible repositories."),
@@ -34692,7 +39665,13 @@ async def add_repository_to_codespace_secret(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from Codespace Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_codespace_secret(
     secret_name: str = Field(..., description="The name of the Codespaces secret to modify."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the secret's access list."),
@@ -34731,7 +39710,13 @@ async def remove_repository_from_codespace_secret(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespace(codespace_name: str = Field(..., description="The name of the codespace to retrieve information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific codespace for the authenticated user. Requires the `codespace` scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -34767,7 +39752,13 @@ async def get_codespace(codespace_name: str = Field(..., description="The name o
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Update Codespace",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_codespace(
     codespace_name: str = Field(..., description="The name of the codespace to update."),
     machine: str | None = Field(None, description="The machine type to transition this codespace to. Changes take effect the next time the codespace is started."),
@@ -34805,13 +39796,20 @@ async def update_codespace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Codespace",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_codespace(codespace_name: str = Field(..., description="The name of the codespace to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a codespace for the authenticated user. Requires the `codespace` OAuth scope."""
 
@@ -34847,7 +39845,12 @@ async def delete_codespace(codespace_name: str = Field(..., description="The nam
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Export Codespace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_codespace(codespace_name: str = Field(..., description="The name of the codespace to export.")) -> dict[str, Any] | ToolResult:
     """Initiates an export of a codespace and returns a URL and ID to monitor the export status. Any uncommitted changes will be pushed to the codespace's repository or to a new/existing fork if pushing to the repository is not possible."""
 
@@ -34883,7 +39886,13 @@ async def export_codespace(codespace_name: str = Field(..., description="The nam
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Codespace Export Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_codespace_export_details(
     codespace_name: str = Field(..., description="The name of the codespace to retrieve export details for."),
     export_id: str = Field(..., description="The ID of the export operation to retrieve details for. Use `latest` to get the most recent export."),
@@ -34922,7 +39931,13 @@ async def get_codespace_export_details(
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="List Available Codespace Machines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_codespace_machines_available(codespace_name: str = Field(..., description="The name of the codespace for which to list available machine types.")) -> dict[str, Any] | ToolResult:
     """List the machine types available for a codespace to transition to. This helps determine which hardware configurations are compatible with the specified codespace."""
 
@@ -34958,7 +39973,12 @@ async def list_codespace_machines_available(codespace_name: str = Field(..., des
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Publish Codespace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_codespace(codespace_name: str = Field(..., description="The name of the codespace to publish. The codespace must be unpublished (not already associated with a repository).")) -> dict[str, Any] | ToolResult:
     """Publish an unpublished codespace by creating a new repository and associating it with the codespace. The codespace's token will have write permissions to the new repository, enabling you to push changes."""
 
@@ -34994,7 +40014,12 @@ async def publish_codespace(codespace_name: str = Field(..., description="The na
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Start Codespace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_codespace(codespace_name: str = Field(..., description="The name of the codespace to start.")) -> dict[str, Any] | ToolResult:
     """Start a codespace for the authenticated user. Requires the `codespace` OAuth scope."""
 
@@ -35030,7 +40055,13 @@ async def start_codespace(codespace_name: str = Field(..., description="The name
     return _response_data
 
 # Tags: codespaces
-@mcp.tool()
+@mcp.tool(
+    title="Stop Codespace for Authenticated User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def stop_codespace_authenticated(codespace_name: str = Field(..., description="The name of the codespace to stop.")) -> dict[str, Any] | ToolResult:
     """Stop a running codespace for the authenticated user. Requires the `codespace` OAuth scope."""
 
@@ -35066,7 +40097,13 @@ async def stop_codespace_authenticated(codespace_name: str = Field(..., descript
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Set Primary Email Visibility",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_primary_email_visibility(visibility: Literal["public", "private"] = Field(..., description="Controls whether your primary email address is publicly visible or kept private.")) -> dict[str, Any] | ToolResult:
     """Configure the visibility setting for your primary email address. Choose whether your primary email is publicly visible or private."""
 
@@ -35098,13 +40135,20 @@ async def set_primary_email_visibility(visibility: Literal["public", "private"] 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Emails for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_emails() -> dict[str, Any] | ToolResult:
     """Retrieve all email addresses associated with the authenticated user, including which email is publicly visible. Requires the `user:email` OAuth scope."""
 
@@ -35131,7 +40175,12 @@ async def list_emails() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Add Email for Authenticated User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_email(body: _models.UsersAddEmailForAuthenticatedUserBody | None = Field(None, description="A list of email addresses to add to the user's account. Accepts either an object with an `emails` array or a scalar email string.")) -> dict[str, Any] | ToolResult:
     """Add one or more email addresses to the authenticated user's account. Requires the `user` scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -35164,13 +40213,20 @@ async def add_email(body: _models.UsersAddEmailForAuthenticatedUserBody | None =
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Email",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_email(body: _models.UsersDeleteEmailForAuthenticatedUserBody | None = Field(None, description="Object containing one or more email addresses to delete from the account. At least one email address is required. Accepts either an object with an `emails` key containing an array of addresses, or a single email address, or an array of email addresses.")) -> dict[str, Any] | ToolResult:
     """Remove one or more email addresses from the authenticated user's GitHub account. Requires the `user` scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -35203,13 +40259,20 @@ async def delete_email(body: _models.UsersDeleteEmailForAuthenticatedUserBody | 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Followers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_followers() -> dict[str, Any] | ToolResult:
     """Retrieve a list of users who are following the authenticated user. This provides visibility into your followers on the platform."""
 
@@ -35236,7 +40299,13 @@ async def list_followers() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Followed Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_followed_users() -> dict[str, Any] | ToolResult:
     """Retrieve the list of users that the authenticated user follows. This allows you to see all accounts the current user is subscribed to."""
 
@@ -35263,7 +40332,13 @@ async def list_followed_users() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Check User Is Followed",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_user_is_followed(username: str = Field(..., description="The GitHub username to check if it is being followed by the authenticated user.")) -> dict[str, Any] | ToolResult:
     """Verify whether the authenticated user is following a specific GitHub user account. Returns true if the user is followed, false otherwise."""
 
@@ -35299,7 +40374,13 @@ async def check_user_is_followed(username: str = Field(..., description="The Git
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Follow User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def follow_user(username: str = Field(..., description="The GitHub username of the account to follow.")) -> dict[str, Any] | ToolResult:
     """Follow a GitHub user account. Requires the `user:follow` scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -35335,7 +40416,13 @@ async def follow_user(username: str = Field(..., description="The GitHub usernam
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Unfollow User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unfollow_user(username: str = Field(..., description="The GitHub username handle to unfollow.")) -> dict[str, Any] | ToolResult:
     """Unfollow a GitHub user. Requires the `user:follow` scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -35371,7 +40458,13 @@ async def unfollow_user(username: str = Field(..., description="The GitHub usern
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List GPG Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gpg_keys() -> dict[str, Any] | ToolResult:
     """Retrieve all GPG keys associated with the authenticated user's account. Requires `read:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -35398,7 +40491,12 @@ async def list_gpg_keys() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Add GPG Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_gpg_key(armored_public_key: str = Field(..., description="A GPG public key in ASCII-armored format. This is the exported public key block that begins with '-----BEGIN PGP PUBLIC KEY BLOCK-----' and ends with '-----END PGP PUBLIC KEY BLOCK-----'.")) -> dict[str, Any] | ToolResult:
     """Add a GPG key to the authenticated user's GitHub account. Requires the `write:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -35430,13 +40528,20 @@ async def add_gpg_key(armored_public_key: str = Field(..., description="A GPG pu
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get GPG Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gpg_key(gpg_key_id: int = Field(..., description="The unique identifier of the GPG key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific GPG key for the authenticated user. Requires the `read:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -35472,7 +40577,13 @@ async def get_gpg_key(gpg_key_id: int = Field(..., description="The unique ident
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete GPG Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_gpg_key(gpg_key_id: int = Field(..., description="The unique identifier of the GPG key to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a GPG key from the authenticated user's GitHub account. Requires `admin:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -35508,7 +40619,13 @@ async def delete_gpg_key(gpg_key_id: int = Field(..., description="The unique id
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List App Installations for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_installations_user() -> dict[str, Any] | ToolResult:
     """List all GitHub App installations that the authenticated user has explicit permission to access. This includes installations on repositories the user owns, collaborates on, or can access through organization membership."""
 
@@ -35535,7 +40652,13 @@ async def list_app_installations_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Add Repository to Installation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_repository_to_installation(
     installation_id: int = Field(..., description="The unique identifier of the installation to which the repository will be added."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the installation."),
@@ -35574,7 +40697,13 @@ async def add_repository_to_installation(
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository from App Installation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_from_app_installation(
     installation_id: int = Field(..., description="The unique identifier of the app installation from which to remove the repository."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the installation."),
@@ -35613,7 +40742,13 @@ async def remove_repository_from_app_installation(
     return _response_data
 
 # Tags: interactions
-@mcp.tool()
+@mcp.tool(
+    title="Get Interaction Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_interaction_restrictions() -> dict[str, Any] | ToolResult:
     """Retrieve the current interaction restrictions applied to your public repositories, including which types of GitHub users can interact and when the restriction expires."""
 
@@ -35640,7 +40775,13 @@ async def get_interaction_restrictions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: issues
-@mcp.tool()
+@mcp.tool(
+    title="List Assigned Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issues_assigned(
     filter_: Literal["assigned", "created", "mentioned", "subscribed", "repos", "all"] | None = Field(None, alias="filter", description="Filter issues by type of involvement: assigned to you, created by you, mentioning you, subscribed to, or all visible issues."),
     state: Literal["open", "closed", "all"] | None = Field(None, description="Filter issues by their current state: open, closed, or all states."),
@@ -35684,7 +40825,13 @@ async def list_issues_assigned(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List SSH Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ssh_keys() -> dict[str, Any] | ToolResult:
     """Retrieve all public SSH keys associated with the authenticated user's GitHub account. Requires `read:public_key` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -35711,7 +40858,12 @@ async def list_ssh_keys() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Add SSH Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_ssh_key(key: str = Field(..., description="The public SSH key to add to your GitHub account. Must be in a valid SSH key format (RSA, DSS, ED25519, or ECDSA).", pattern="^ssh-(rsa|dss|ed25519) |^ecdsa-sha2-nistp(256|384|521) ")) -> dict[str, Any] | ToolResult:
     """Add a public SSH key to the authenticated user's GitHub account. Requires the `write:public_key` OAuth scope or personal access token permission."""
 
@@ -35743,13 +40895,20 @@ async def add_ssh_key(key: str = Field(..., description="The public SSH key to a
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get SSH Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ssh_key(key_id: int = Field(..., description="The unique identifier of the SSH key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific public SSH key for the authenticated user. Requires the `read:public_key` scope."""
 
@@ -35785,7 +40944,13 @@ async def get_ssh_key(key_id: int = Field(..., description="The unique identifie
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete SSH Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_ssh_key(key_id: int = Field(..., description="The unique identifier of the SSH key to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a public SSH key from the authenticated user's GitHub account. Requires `admin:public_key` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -35821,7 +40986,13 @@ async def delete_ssh_key(key_id: int = Field(..., description="The unique identi
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_subscriptions() -> dict[str, Any] | ToolResult:
     """Retrieves all active marketplace subscriptions for the authenticated user. This includes any active plans or licenses the user has purchased."""
 
@@ -35848,7 +41019,13 @@ async def list_subscriptions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Subscriptions for Authenticated User (Stubbed)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_subscriptions_stubbed() -> dict[str, Any] | ToolResult:
     """Retrieves all active marketplace subscriptions for the authenticated user. This endpoint provides a view of the user's current subscription status and details."""
 
@@ -35875,7 +41052,13 @@ async def list_subscriptions_stubbed() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_memberships(state: Literal["active", "pending"] | None = Field(None, description="Filter memberships by their current state. Returns both active and pending memberships if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organization memberships for the authenticated user. Returns both active and pending memberships by default, or filter by membership state."""
 
@@ -35913,7 +41096,13 @@ async def list_organization_memberships(state: Literal["active", "pending"] | No
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Membership for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_membership_authenticated(org: str = Field(..., description="The name of the organization. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the authenticated user's membership status in a specified organization. Returns membership details if the user is an active or pending member, otherwise returns a 404 error."""
 
@@ -35949,7 +41138,13 @@ async def get_organization_membership_authenticated(org: str = Field(..., descri
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="Activate Organization Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def activate_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     state: Literal["active"] = Field(..., description="The desired membership state. Only active membership status is supported."),
@@ -35985,13 +41180,20 @@ async def activate_organization_membership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migrations() -> dict[str, Any] | ToolResult:
     """Retrieves all migrations that have been initiated by the authenticated user. This includes migrations in progress, completed, and failed states."""
 
@@ -36018,7 +41220,13 @@ async def list_migrations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Status for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_status_user(migration_id: int = Field(..., description="The unique identifier of the migration to retrieve status for.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a user migration by its unique identifier. The response includes the migration state (pending, exporting, exported, or failed) and can be used to track progress or determine when the migration archive is ready for download."""
 
@@ -36054,7 +41262,13 @@ async def get_migration_status_user(migration_id: int = Field(..., description="
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Download Migration Archive",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_migration_archive_user(migration_id: int = Field(..., description="The unique identifier of the migration for which to retrieve the archive.")) -> dict[str, Any] | ToolResult:
     """Download a user migration archive as a tar.gz file containing repository data, metadata, and attachments. The archive includes JSON files for various GitHub objects and Git repository data."""
 
@@ -36090,7 +41304,13 @@ async def download_migration_archive_user(migration_id: int = Field(..., descrip
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Migration Archive for Authenticated User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_migration_archive_user(migration_id: int = Field(..., description="The unique identifier of the migration whose archive should be deleted.")) -> dict[str, Any] | ToolResult:
     """Delete a user migration archive for a completed migration. Downloadable archives are automatically deleted after seven days, but you can manually remove them earlier. Migration metadata remains available even after the archive is deleted."""
 
@@ -36126,7 +41346,13 @@ async def delete_migration_archive_user(migration_id: int = Field(..., descripti
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="Unlock Migration Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlock_migration_repository_user(
     migration_id: int = Field(..., description="The unique identifier of the migration that locked the repository."),
     repo_name: str = Field(..., description="The name of the repository to unlock."),
@@ -36165,7 +41391,13 @@ async def unlock_migration_repository_user(
     return _response_data
 
 # Tags: migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Repositories for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_repositories_user(migration_id: int = Field(..., description="The unique identifier of the migration for which to retrieve associated repositories.")) -> dict[str, Any] | ToolResult:
     """Lists all repositories associated with a specific user migration. Use this to retrieve the repositories that were migrated as part of a migration operation."""
 
@@ -36201,7 +41433,13 @@ async def list_migration_repositories_user(migration_id: int = Field(..., descri
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations_authenticated() -> dict[str, Any] | ToolResult:
     """Retrieve all organizations for the authenticated user. The list is filtered based on the authorization scopes provided; OAuth app tokens and personal access tokens (classic) require at least `user` or `read:org` scope, while fine-grained access tokens will return an empty list."""
 
@@ -36228,7 +41466,13 @@ async def list_organizations_authenticated() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List Packages for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_packages(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type to filter by. Gradle packages use `maven`, container images pushed to ghcr.io use `container`, and `docker` finds images in the legacy Docker registry even if migrated to Container registry."),
     visibility: Literal["public", "private", "internal"] | None = Field(None, description="Filter results by package visibility level. The `internal` visibility is only supported for registries with granular permissions; for other ecosystems it is treated as `private`."),
@@ -36269,7 +41513,13 @@ async def list_packages(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Get Package",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` retrieves images from the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
@@ -36308,7 +41558,13 @@ async def get_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Package",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type to delete. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete."),
@@ -36347,7 +41603,12 @@ async def delete_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Restore Package",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The type of package to restore. Gradle packages use 'maven', container images use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to restore."),
@@ -36386,7 +41647,13 @@ async def restore_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List Package Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_package_versions(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve versions for."),
@@ -36429,7 +41696,13 @@ async def list_package_versions(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Get Package Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_package_version(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to ghcr.io use `container`, and `docker` retrieves images from the legacy Docker registry (docker.pkg.github.com)."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
@@ -36469,7 +41742,13 @@ async def get_package_version(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Package Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_package_version_authenticated(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type (e.g., npm, maven, docker). Gradle packages use 'maven', and Container registry images use 'container'."),
     package_name: str = Field(..., description="The name of the package to delete a version from."),
@@ -36509,7 +41788,12 @@ async def delete_package_version_authenticated(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Restore Package Version for Authenticated User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_package_version_for_authenticated_user(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The type of package registry (npm, Maven, RubyGems, Docker, NuGet, or Container)."),
     package_name: str = Field(..., description="The name of the package to restore."),
@@ -36549,7 +41833,13 @@ async def restore_package_version_for_authenticated_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Public Emails",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_emails() -> dict[str, Any] | ToolResult:
     """Retrieve all publicly visible email addresses for the authenticated user. Requires the `user:email` scope for OAuth apps and personal access tokens (classic)."""
 
@@ -36576,7 +41866,13 @@ async def list_public_emails() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories(
     visibility: Literal["all", "public", "private"] | None = Field(None, description="Filter repositories by visibility level. Defaults to all repositories regardless of visibility."),
     affiliation: str | None = Field(None, description="Filter repositories by the authenticated user's relationship to them. Accepts a comma-separated list of values: owner (owned by user), collaborator (user added as collaborator), or organization_member (accessible through organization membership). Defaults to all three types."),
@@ -36620,7 +41916,12 @@ async def list_repositories(
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository(
     name: str = Field(..., description="The name of the repository. This is a required identifier for the repository."),
     description: str | None = Field(None, description="A short description of the repository to help others understand its purpose."),
@@ -36674,13 +41975,20 @@ async def create_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Invitations for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_invitations_for_user() -> dict[str, Any] | ToolResult:
     """List all open repository invitations for the authenticated user. Returns pending invitations to collaborate on repositories."""
 
@@ -36707,7 +42015,12 @@ async def list_repository_invitations_for_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Accept Repository Invitation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def accept_repository_invitation(invitation_id: int = Field(..., description="The unique identifier of the repository invitation to accept.")) -> dict[str, Any] | ToolResult:
     """Accept a repository invitation for the authenticated user. This action confirms the user's intent to join the repository and grants them access based on the invitation's permissions."""
 
@@ -36743,7 +42056,13 @@ async def accept_repository_invitation(invitation_id: int = Field(..., descripti
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="Decline Repository Invitation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def decline_repository_invitation(invitation_id: int = Field(..., description="The unique identifier of the repository invitation to decline.")) -> dict[str, Any] | ToolResult:
     """Decline a repository invitation for the authenticated user. This removes the invitation and prevents the user from accessing the repository."""
 
@@ -36779,7 +42098,13 @@ async def decline_repository_invitation(invitation_id: int = Field(..., descript
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Social Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_social_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all social accounts connected to the authenticated user's profile. This includes any third-party social media or identity provider accounts that have been linked."""
 
@@ -36806,7 +42131,12 @@ async def list_social_accounts() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Add Social Accounts",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_social_accounts(account_urls: list[str] = Field(..., description="Array of complete URLs for the social media profiles to add. Each URL should point to a valid social media profile.")) -> dict[str, Any] | ToolResult:
     """Add one or more social media accounts to the authenticated user's profile. Requires the `user` scope for OAuth app tokens and personal access tokens (classic)."""
 
@@ -36838,13 +42168,20 @@ async def add_social_accounts(account_urls: list[str] = Field(..., description="
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Social Accounts",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_social_accounts(account_urls: list[str] = Field(..., description="Array of complete URLs for the social media profiles to delete. Each URL should point to the full profile address on the respective social platform.")) -> dict[str, Any] | ToolResult:
     """Remove one or more social media accounts from the authenticated user's profile. Requires the `user` OAuth scope."""
 
@@ -36876,13 +42213,20 @@ async def delete_social_accounts(account_urls: list[str] = Field(..., descriptio
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Starred Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_starred_repositories(direction: Literal["asc", "desc"] | None = Field(None, description="Sort order for the results. Use ascending to show oldest stars first, or descending to show newest stars first.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of repositories that the authenticated user has starred. Results can be sorted in ascending or descending order by star creation timestamp."""
 
@@ -36920,7 +42264,13 @@ async def list_starred_repositories(direction: Literal["asc", "desc"] | None = F
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Check Repository Starred",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_repository_starred(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -36959,7 +42309,13 @@ async def check_repository_starred(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Star Repository",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def star_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -36998,7 +42354,13 @@ async def star_repository(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="Unstar Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unstar_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -37037,7 +42399,13 @@ async def unstar_repository(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Watched Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_watched_repositories() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all repositories that the authenticated user is currently watching. This includes repositories the user has subscribed to for notifications and updates."""
 
@@ -37064,7 +42432,13 @@ async def list_watched_repositories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams for Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_authenticated() -> dict[str, Any] | ToolResult:
     """Retrieve all teams across all organizations to which the authenticated user belongs. Requires appropriate OAuth scopes or fine-grained personal access token with organization resource ownership."""
 
@@ -37091,7 +42465,13 @@ async def list_teams_authenticated() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(account_id: int = Field(..., description="The unique numeric identifier for the GitHub user account. This ID is durable and does not change even if the user's login name changes.")) -> dict[str, Any] | ToolResult:
     """Retrieve publicly available information about a GitHub user by their account ID. Returns user profile data including name, bio, location, and publicly visible email address if set."""
 
@@ -37127,7 +42507,12 @@ async def get_user(account_id: int = Field(..., description="The unique numeric 
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Draft Item for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_draft_item_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the project."),
     project_number: int = Field(..., description="The project's number, which uniquely identifies the project within the user's account."),
@@ -37171,7 +42556,13 @@ async def create_draft_item_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(since: int | None = Field(None, description="Filter results to return only users with an ID greater than this value. Use this parameter for pagination by passing the ID of the last user from the previous page.")) -> dict[str, Any] | ToolResult:
     """Retrieve all users in signup order, including personal and organization accounts. Pagination is controlled exclusively through the `since` parameter using Link headers for subsequent pages."""
 
@@ -37209,7 +42600,12 @@ async def list_users(since: int | None = Field(None, description="Filter results
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project View for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_view_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the project."),
     project_number: int = Field(..., description="The project's number identifier."),
@@ -37255,7 +42651,13 @@ async def create_project_view_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User by Username",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_by_username(username: str = Field(..., description="The GitHub username handle to look up. Case-insensitive identifier for the user account.")) -> dict[str, Any] | ToolResult:
     """Retrieve publicly available information about a GitHub user account. Returns profile data including public email if set, with access restrictions for Enterprise Managed Users."""
 
@@ -37291,7 +42693,12 @@ async def get_user_by_username(username: str = Field(..., description="The GitHu
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Attestations by Digests for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_attestations_by_digests_user(
     username: str = Field(..., description="The GitHub username whose attestations should be retrieved."),
     subject_digests: list[str] = Field(..., description="List of subject digests to fetch attestations for. Each digest identifies an artifact for which attestations are requested.", min_length=1, max_length=1024),
@@ -37328,13 +42735,20 @@ async def list_attestations_by_digests_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Attestations",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attestations_user(
     username: str = Field(..., description="The GitHub user account handle whose attestations will be deleted."),
     body: _models.UsersDeleteAttestationsBulkBodyV0 | _models.UsersDeleteAttestationsBulkBodyV1 = Field(..., description="Request payload containing deletion criteria. Provide either an array of subject digests (in format algorithm:hexvalue) or an array of attestation IDs, but not both."),
@@ -37371,13 +42785,20 @@ async def delete_attestations_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attestation by Subject Digest",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attestation_by_subject_digest_user(
     username: str = Field(..., description="The GitHub username (handle) of the account whose attestation should be deleted."),
     subject_digest: str = Field(..., description="The subject digest that uniquely identifies the attestation to delete."),
@@ -37416,7 +42837,13 @@ async def delete_attestation_by_subject_digest_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Attestation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attestation_user(
     username: str = Field(..., description="The GitHub username (handle) of the account that owns the repository containing the attestation."),
     attestation_id: int = Field(..., description="The unique identifier of the attestation to delete."),
@@ -37455,7 +42882,13 @@ async def delete_attestation_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List User Attestations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_attestations_user(
     username: str = Field(..., description="The GitHub user account handle whose repositories will be searched for attestations."),
     subject_digest: str = Field(..., description="The cryptographic digest identifying the artifact subject for which to retrieve attestations."),
@@ -37498,7 +42931,13 @@ async def list_attestations_user(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List User Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_events(username: str = Field(..., description="The GitHub username whose events should be listed.")) -> dict[str, Any] | ToolResult:
     """List events for a GitHub user. If authenticated as the specified user, private events are included; otherwise only public events are returned. Note: This API is not optimized for real-time use cases and may have latency of 30 seconds to 6 hours depending on time of day."""
 
@@ -37534,7 +42973,13 @@ async def list_user_events(username: str = Field(..., description="The GitHub us
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Events for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_events_for_user(
     username: str = Field(..., description="The GitHub username whose organization events should be retrieved. The authenticated user must have access to view this user's organization dashboard."),
     org: str = Field(..., description="The organization name to filter events for. Organization names are case-insensitive."),
@@ -37573,7 +43018,13 @@ async def list_organization_events_for_user(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List User Public Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_public_events(username: str = Field(..., description="The GitHub username (handle) for the user whose public events you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events for a GitHub user. Note: This API is not optimized for real-time use cases and may have event latency ranging from 30 seconds to 6 hours depending on the time of day."""
 
@@ -37609,7 +43060,13 @@ async def list_user_public_events(username: str = Field(..., description="The Gi
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Followers by Username",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_followers_by_username(username: str = Field(..., description="The GitHub username whose followers you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of users who are following the specified GitHub user account."""
 
@@ -37645,7 +43102,13 @@ async def list_followers_by_username(username: str = Field(..., description="The
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Following",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_following(username: str = Field(..., description="The GitHub username (handle) of the user whose following list should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of users that a specified GitHub user follows. This provides insight into the accounts and projects a user is interested in tracking."""
 
@@ -37681,7 +43144,13 @@ async def list_following(username: str = Field(..., description="The GitHub user
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Check User Following",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_user_following(
     username: str = Field(..., description="The GitHub username of the user whose following list will be checked."),
     target_user: str = Field(..., description="The GitHub username of the target user to check if they are being followed."),
@@ -37720,7 +43189,13 @@ async def check_user_following(
     return _response_data
 
 # Tags: gists
-@mcp.tool()
+@mcp.tool(
+    title="List User Gists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_gists(
     username: str = Field(..., description="The GitHub username whose gists should be listed."),
     since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format."),
@@ -37762,7 +43237,13 @@ async def list_user_gists(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List GPG Keys by Username",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gpg_keys_by_username(username: str = Field(..., description="The GitHub username whose GPG keys should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all GPG keys associated with a GitHub user account. This information is publicly accessible."""
 
@@ -37798,7 +43279,13 @@ async def list_gpg_keys_by_username(username: str = Field(..., description="The 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Hovercard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_hovercard(
     username: str = Field(..., description="The GitHub username handle for the user whose hovercard information you want to retrieve."),
     subject_type: Literal["organization", "repository", "issue", "pull_request"] | None = Field(None, description="The type of subject context to include in the hovercard response. When specified, must be paired with the corresponding subject_id to provide relationship context."),
@@ -37841,7 +43328,13 @@ async def get_user_hovercard(
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="Get User Installation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_installation(username: str = Field(..., description="The GitHub username (handle) for which to retrieve the app installation information.")) -> dict[str, Any] | ToolResult:
     """Retrieve the authenticated GitHub App's installation information for a specific user. Requires JWT authentication as a GitHub App."""
 
@@ -37877,7 +43370,13 @@ async def get_user_installation(username: str = Field(..., description="The GitH
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Public Keys for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_keys(username: str = Field(..., description="The GitHub username whose public keys should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all verified public SSH keys for a GitHub user. This endpoint is publicly accessible and does not require authentication."""
 
@@ -37913,7 +43412,13 @@ async def list_public_keys(username: str = Field(..., description="The GitHub us
     return _response_data
 
 # Tags: orgs
-@mcp.tool()
+@mcp.tool(
+    title="List User Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_organizations(username: str = Field(..., description="The GitHub username (handle) for the user whose public organization memberships you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """List public organization memberships for a specified GitHub user. This operation only returns public memberships; use the authenticated user organizations endpoint to retrieve both public and private memberships for the current user."""
 
@@ -37949,7 +43454,13 @@ async def list_user_organizations(username: str = Field(..., description="The Gi
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List User Packages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_packages(
     username: str = Field(..., description="The GitHub username whose packages to list."),
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type to filter by. Gradle packages use `maven`, Docker images in the Container registry use `container`, and `docker` finds images in the legacy Docker registry."),
@@ -37992,7 +43503,13 @@ async def list_user_packages(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Get Public Package",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_package_public(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` retrieves images from the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
@@ -38032,7 +43549,13 @@ async def get_package_public(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Package",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete."),
@@ -38072,7 +43595,12 @@ async def delete_user_package(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Restore Package for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_package_for_user(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. GitHub's Gradle registry uses 'maven', Container registry uses 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to restore."),
@@ -38112,7 +43640,13 @@ async def restore_package_for_user(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="List Package Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_package_versions_public(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package ecosystem type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve versions for."),
@@ -38152,7 +43686,13 @@ async def list_package_versions_public(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Get Package Version for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_package_version_public(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package ecosystem type. Gradle packages use `maven`, Docker images pushed to ghcr.io use `container`, and `docker` retrieves images from the legacy Docker registry (docker.pkg.github.com)."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
@@ -38193,7 +43733,13 @@ async def get_package_version_public(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Package Version for User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_package_version_user(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. GitHub's Gradle registry uses 'maven', Container registry uses 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete a version from."),
@@ -38234,7 +43780,12 @@ async def delete_package_version_user(
     return _response_data
 
 # Tags: packages
-@mcp.tool()
+@mcp.tool(
+    title="Restore Package Version for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_package_version_for_user(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The type of package registry. Gradle packages use 'maven', Docker images pushed to GitHub's Container registry use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to restore."),
@@ -38275,7 +43826,13 @@ async def restore_package_version_for_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List User Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_projects(
     username: str = Field(..., description="The GitHub username whose projects should be listed."),
     q: str | None = Field(None, description="Filter results to include only projects of a specified type."),
@@ -38317,7 +43874,13 @@ async def list_user_projects(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get User Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_project(
     project_number: int = Field(..., description="The unique numeric identifier for the project within the user's project collection."),
     username: str = Field(..., description="The GitHub username (handle) of the user who owns the project."),
@@ -38356,7 +43919,13 @@ async def get_user_project(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Fields for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_fields_user(
     project_number: int = Field(..., description="The numeric identifier of the GitHub Projects (V2) board."),
     username: str = Field(..., description="The GitHub username of the project owner."),
@@ -38395,7 +43964,12 @@ async def list_project_fields_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Field for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_project_field_user(
     username: str = Field(..., description="The GitHub username of the project owner."),
     project_number: int = Field(..., description="The numeric identifier of the project."),
@@ -38441,7 +44015,13 @@ async def add_project_field_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Field for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_field_user(
     project_number: int = Field(..., description="The project's unique number identifier within the user's account."),
     field_id: int = Field(..., description="The unique identifier of the field to retrieve from the project."),
@@ -38481,7 +44061,13 @@ async def get_project_field_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Items for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_items_user(
     project_number: int = Field(..., description="The numeric identifier for the project."),
     username: str = Field(..., description="The GitHub username of the project owner."),
@@ -38525,7 +44111,12 @@ async def list_project_items_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Item to User Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_item_to_project_user(
     username: str = Field(..., description="The GitHub username of the project owner."),
     project_number: int = Field(..., description="The project's unique number identifier."),
@@ -38562,13 +44153,20 @@ async def add_item_to_project_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Item for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_item_user(
     project_number: int = Field(..., description="The project's unique number identifier."),
     username: str = Field(..., description="The GitHub username of the project owner."),
@@ -38612,7 +44210,13 @@ async def get_project_item_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Item for User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_item_user(
     project_number: int = Field(..., description="The project's unique number identifier."),
     username: str = Field(..., description="The GitHub username or handle of the account that owns the project."),
@@ -38650,13 +44254,20 @@ async def update_project_item_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Item for User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_item_user(
     project_number: int = Field(..., description="The project number that identifies which project to modify. This is a unique numeric identifier for the project."),
     username: str = Field(..., description="The GitHub username of the account that owns the project. This is the handle used to identify the user account."),
@@ -38696,7 +44307,13 @@ async def delete_project_item_user(
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project View Items for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_view_items_user(
     project_number: int = Field(..., description="The numeric identifier for the project."),
     username: str = Field(..., description="The GitHub username or account handle."),
@@ -38740,7 +44357,13 @@ async def list_project_view_items_user(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Received Events for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_received_events(username: str = Field(..., description="The GitHub username whose received events should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve events received by a user through watching repositories and following other users. Private events are visible only to the authenticated user; otherwise only public events are returned. Note: This API is not real-time; event latency can range from 30 seconds to 6 hours depending on time of day."""
 
@@ -38776,7 +44399,13 @@ async def list_received_events(username: str = Field(..., description="The GitHu
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List User Public Received Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_public_received_events(username: str = Field(..., description="The GitHub username (handle) for the user account whose received public events should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events received by a GitHub user. Note: This API is not optimized for real-time use cases and may have event latency ranging from 30 seconds to 6 hours depending on time of day."""
 
@@ -38812,7 +44441,13 @@ async def list_user_public_received_events(username: str = Field(..., descriptio
     return _response_data
 
 # Tags: repos
-@mcp.tool()
+@mcp.tool(
+    title="List User Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_repositories(
     username: str = Field(..., description="The GitHub username whose repositories should be listed."),
     type_: Literal["all", "owner", "member"] | None = Field(None, alias="type", description="Filter repositories by type. Use 'owner' to show only repositories owned by the user, 'member' for repositories where the user is a collaborator, or 'all' for both."),
@@ -38855,7 +44490,13 @@ async def list_user_repositories(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Premium Request Usage Report for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_premium_request_usage_report_user(
     username: str = Field(..., description="The GitHub username for which to retrieve the premium request usage report."),
     year: int | None = Field(None, description="Filter results to a specific year. Must be a four-digit year value. If not specified, defaults to the current year."),
@@ -38901,7 +44542,13 @@ async def get_premium_request_usage_report_user(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Billing Usage Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_billing_usage_report(
     username: str = Field(..., description="The GitHub username for which to retrieve the billing usage report."),
     year: int | None = Field(None, description="Filter results to a specific year. Specify as a four-digit integer representing the year (e.g., 2025). Defaults to the current year if not provided."),
@@ -38945,7 +44592,13 @@ async def get_billing_usage_report(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Billing Usage Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_billing_usage_summary_user(
     username: str = Field(..., description="The GitHub username for the account to retrieve billing usage for."),
     year: int | None = Field(None, description="Filter results to a specific year. Specify as a four-digit year value. Defaults to the current year if not provided."),
@@ -38991,7 +44644,13 @@ async def get_billing_usage_summary_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Social Accounts for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_social_accounts_public(username: str = Field(..., description="The GitHub username (handle) for the user whose social accounts should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all social media accounts associated with a GitHub user. This endpoint is publicly accessible and requires only the username."""
 
@@ -39027,7 +44686,13 @@ async def list_social_accounts_public(username: str = Field(..., description="Th
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List SSH Signing Keys for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ssh_signing_keys_for_user(username: str = Field(..., description="The GitHub username whose SSH signing keys should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all SSH signing keys associated with a GitHub user account. This operation is publicly accessible and does not require authentication."""
 
@@ -39063,7 +44728,13 @@ async def list_ssh_signing_keys_for_user(username: str = Field(..., description=
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Starred Repositories by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_starred_repositories_by_user(
     username: str = Field(..., description="The GitHub username whose starred repositories should be listed."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The order in which to sort the starred repositories."),
@@ -39105,7 +44776,13 @@ async def list_starred_repositories_by_user(
     return _response_data
 
 # Tags: activity
-@mcp.tool()
+@mcp.tool(
+    title="List Watched Repositories by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_watched_repositories_by_user(username: str = Field(..., description="The GitHub username whose watched repositories should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of repositories that a user is watching. Watched repositories allow users to receive notifications about activity without being a collaborator."""
 
