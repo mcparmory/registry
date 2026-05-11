@@ -5,7 +5,7 @@ Outline MCP Server
 API Info:
 - API License: BSD-3-Clause (https://github.com/outline/openapi/blob/main/LICENSE)
 
-Generated: 2026-05-05 15:44:07 UTC
+Generated: 2026-05-11 20:01:10 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.getoutline.com/api")
 SERVER_NAME = "Outline"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -986,6 +1017,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1010,6 +1043,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1226,7 +1261,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Outline", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Create Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_attachment(
     name: str = Field(..., description="The filename of the attachment, including the file extension (e.g., image.png, document.pdf)."),
     content_type: str = Field(..., alias="contentType", description="The MIME type of the file being attached (e.g., image/png, application/pdf, text/plain). Must match the actual file format."),
@@ -1263,13 +1303,19 @@ async def create_attachment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Get Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve an attachment by its unique identifier. For private attachments, a temporary signed URL with embedded credentials is generated automatically."""
 
@@ -1301,13 +1347,20 @@ async def get_attachment(id_: str = Field(..., alias="id", description="The uniq
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attachment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attachment(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the attachment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an attachment by its unique identifier. Note that this action does not remove any references or links to the attachment that may exist in documents."""
 
@@ -1339,13 +1392,19 @@ async def delete_attachment(id_: str = Field(..., alias="id", description="The u
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Auth
-@mcp.tool()
+@mcp.tool(
+    title="Get Auth Info",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_auth_info() -> dict[str, Any] | ToolResult:
     """Retrieve authentication details and metadata for the current API key, including permissions and account information."""
 
@@ -1372,7 +1431,12 @@ async def get_auth_info() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_collection(id_: str = Field(..., alias="id", description="The UUID that uniquely identifies the collection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific collection using its unique identifier."""
 
@@ -1404,13 +1468,19 @@ async def get_collection(id_: str = Field(..., alias="id", description="The UUID
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection Document Structure",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_collection_document_structure(id_: str = Field(..., alias="id", description="The unique identifier of the collection, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the document structure of a collection as a hierarchical tree of navigation nodes, showing how documents are organized within the collection."""
 
@@ -1442,13 +1512,19 @@ async def get_collection_document_structure(id_: str = Field(..., alias="id", de
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="List Collections",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_collections(body: _models.CollectionsListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Consult API documentation for supported query parameters or filter options.")) -> dict[str, Any] | ToolResult:
     """Retrieve all collections that the authenticated user has access to. Returns a list of collections with their metadata and details."""
 
@@ -1481,13 +1557,19 @@ async def list_collections(body: _models.CollectionsListBody | None = Field(None
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Create Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_collection(
     name: str = Field(..., description="The name of the collection (e.g., 'Human Resources'). Used as the primary identifier for the collection."),
     description: str | None = Field(None, description="A brief description of the collection's purpose and contents. Markdown formatting is supported for rich text."),
@@ -1525,13 +1607,20 @@ async def create_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Update Collection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_collection(
     id_: str = Field(..., alias="id", description="The unique identifier of the collection to update, provided as a UUID."),
     name: str | None = Field(None, description="The new name for the collection. Use a clear, descriptive title that reflects the collection's purpose."),
@@ -1570,13 +1659,19 @@ async def update_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to which the user will be added."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID) of the user to add as a member to the collection."),
@@ -1612,13 +1707,20 @@ async def add_user_to_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Remove User From Collection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection from which the user will be removed."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID) of the user to remove from the collection."),
@@ -1653,13 +1755,19 @@ async def remove_user_from_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="List Collection Memberships",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_collection_memberships(body: _models.CollectionsMembershipsBody | None = Field(None, description="Request body containing the collection identifier and optional filtering criteria for the membership query.")) -> dict[str, Any] | ToolResult:
     """Retrieve all individual memberships for a specific collection. Note that this endpoint returns only direct memberships and does not include group-based memberships."""
 
@@ -1692,13 +1800,19 @@ async def list_collection_memberships(body: _models.CollectionsMembershipsBody |
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Add Group to Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_group_to_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to which the group will be granted access."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID) of the group whose members will receive access to the collection."),
@@ -1734,13 +1848,20 @@ async def add_group_to_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group from Collection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_from_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection from which the group will be removed."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID) of the group whose members will lose access to the collection."),
@@ -1775,13 +1896,19 @@ async def remove_group_from_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="List Collection Group Memberships",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_collection_group_memberships(body: _models.CollectionsGroupMembershipsBody | None = Field(None, description="Request body containing the collection identifier and optional filtering criteria for the group memberships query.")) -> dict[str, Any] | ToolResult:
     """Retrieve all groups that have been granted access to a specific collection. This lists the group memberships associated with the collection."""
 
@@ -1814,13 +1941,20 @@ async def list_collection_group_memberships(body: _models.CollectionsGroupMember
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Delete Collection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_collection(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a collection and all of its documents. This action cannot be undone, so exercise caution before proceeding."""
 
@@ -1852,13 +1986,19 @@ async def delete_collection(id_: str = Field(..., alias="id", description="The u
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Export Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to export. Required to specify which collection should be exported."),
     format_: Literal["outline-markdown", "json", "html"] | None = Field(None, alias="format", description="Export format for the collection. Choose from outline-markdown (default), json, or html. Determines the structure and format of exported documents."),
@@ -1893,13 +2033,19 @@ async def export_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Export All Collections",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_all_collections(
     format_: Literal["outline-markdown", "json", "html"] | None = Field(None, alias="format", description="Output format for the exported collections. Choose from outline-markdown for structured text, json for machine-readable data, or html for web-viewable content."),
     include_attachments: bool | None = Field(None, alias="includeAttachments", description="Whether to include file attachments and media in the export. Enabled by default."),
@@ -1935,13 +2081,19 @@ async def export_all_collections(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Create Comment on Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_comment_on_document(
     document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID format) of the document to which the comment will be added."),
     parent_comment_id: str | None = Field(None, alias="parentCommentId", description="The unique identifier (UUID format) of the parent comment if this is a reply; omit to create a top-level comment."),
@@ -1978,13 +2130,19 @@ async def create_comment_on_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to retrieve, formatted as a UUID."),
     include_anchor_text: bool | None = Field(None, alias="includeAnchorText", description="When enabled, includes the document text that the comment is anchored to in the response, if available."),
@@ -2019,13 +2177,19 @@ async def get_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Update Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to update, formatted as a UUID."),
     data: dict[str, Any] = Field(..., description="An object containing the comment fields to update. Specify the properties you want to modify in this object."),
@@ -2060,13 +2224,20 @@ async def update_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_comment(id_: str = Field(..., alias="id", description="The unique identifier of the comment to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Deletes a comment by its unique identifier. If the comment is a top-level comment, all of its child replies will be automatically deleted as well."""
 
@@ -2098,13 +2269,19 @@ async def delete_comment(id_: str = Field(..., alias="id", description="The uniq
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List Comments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_comments(body: _models.CommentsListBody | None = Field(None, description="Request body containing filter properties to match comments against. Structure and supported fields depend on the API's comment schema and filtering capabilities.")) -> dict[str, Any] | ToolResult:
     """Retrieve all comments matching the specified filter criteria. Use the request body to define which comments to return based on properties like author, date range, or associated resources."""
 
@@ -2137,13 +2314,19 @@ async def list_comments(body: _models.CommentsListBody | None = Field(None, desc
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: DataAttributes
-@mcp.tool()
+@mcp.tool(
+    title="Get Data Attribute",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_data_attribute(id_: str = Field(..., alias="id", description="The unique identifier (UUID format) of the data attribute to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific data attribute by its unique identifier. Use this operation to fetch detailed information about a single data attribute."""
 
@@ -2175,13 +2358,19 @@ async def get_data_attribute(id_: str = Field(..., alias="id", description="The 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: DataAttributes
-@mcp.tool()
+@mcp.tool(
+    title="List Data Attributes",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_data_attributes(body: _models.DataAttributesListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Consult API documentation for supported query parameters or filter options.")) -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all available data attributes in the system. Use this operation to discover and enumerate data attributes for reference or integration purposes."""
 
@@ -2214,13 +2403,19 @@ async def list_data_attributes(body: _models.DataAttributesListBody | None = Fie
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: DataAttributes
-@mcp.tool()
+@mcp.tool(
+    title="Update Data Attribute",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_data_attribute(
     id_: str = Field(..., alias="id", description="The unique identifier of the data attribute to update, formatted as a UUID."),
     name: str = Field(..., description="The name of the data attribute (e.g., 'Status'). Used to identify the attribute in the system."),
@@ -2259,13 +2454,20 @@ async def update_data_attribute(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: DataAttributes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Data Attribute",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_data_attribute(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the data attribute to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a data attribute from the system. Only administrators have permission to perform this operation."""
 
@@ -2297,13 +2499,19 @@ async def delete_data_attribute(id_: str = Field(..., alias="id", description="T
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_document(share_id: str | None = Field(None, alias="shareId", description="The unique identifier for a shared document, formatted as a UUID. This shareId allows access to documents shared with you without requiring the original document UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a document by its share identifier. Use this operation to access a document that has been shared with you via a shareId."""
 
@@ -2335,15 +2543,21 @@ async def get_document(share_id: str | None = Field(None, alias="shareId", descr
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Create Document From File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_document_from_file(
-    file_: dict[str, Any] = Field(..., alias="file", description="The file to import as a document. Supported formats include plain text, markdown, docx, csv, tsv, and html."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file to import as a document. Supported formats include plain text, markdown, docx, csv, tsv, and html.", json_schema_extra={'format': 'byte'}),
     publish: bool | None = Field(None, description="Whether to automatically publish the imported document upon creation. Defaults to unpublished if not specified."),
 ) -> dict[str, Any] | ToolResult:
     """Create a new document by importing a file. The document is placed at the collection root by default, or as a child document if a parent document ID is specified."""
@@ -2377,13 +2591,19 @@ async def create_document_from_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Export Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_document(
     id_: str = Field(..., alias="id", description="The document to export, specified by either its UUID or URL-friendly identifier."),
     paper_size: str | None = Field(None, alias="paperSize", description="Paper size for PDF exports, such as A4 or Letter. Only applicable when exporting to PDF format."),
@@ -2420,13 +2640,19 @@ async def export_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_documents(body: _models.DocumentsListBody | None = Field(None, description="Optional request body for filtering or configuring the document list retrieval.")) -> dict[str, Any] | ToolResult:
     """Retrieve all documents accessible to the current user, including both published and draft documents."""
 
@@ -2459,13 +2685,19 @@ async def list_documents(body: _models.DocumentsListBody | None = Field(None, de
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Children",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_document_children(id_: str = Field(..., alias="id", description="The unique identifier for the document, provided as either a UUID or URL-friendly ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the nested child structure (tree) of a document. Returns all immediate children and their hierarchical relationships for the specified document."""
 
@@ -2497,13 +2729,19 @@ async def get_document_children(id_: str = Field(..., alias="id", description="T
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Draft Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_draft_documents(body: _models.DocumentsDraftsBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported query parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all draft documents belonging to the current user. Returns a collection of documents that have not yet been finalized or published."""
 
@@ -2536,13 +2774,19 @@ async def list_draft_documents(body: _models.DocumentsDraftsBody | None = Field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Viewed Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_viewed_documents(body: _models.DocumentsViewedBody | None = Field(None, description="Optional request body for filtering or pagination options. If provided, structure should follow the API's standard filtering conventions.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all documents recently viewed by the current user, ordered by most recent view first."""
 
@@ -2575,13 +2819,19 @@ async def list_viewed_documents(body: _models.DocumentsViewedBody | None = Field
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Search Documents with Question",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_documents_with_question(body: _models.DocumentsAnswerQuestionBody | None = Field(None, description="Request payload containing the question and optional search parameters to query against your documents.")) -> dict[str, Any] | ToolResult:
     """Query documents using natural language questions to retrieve direct answers. Results are filtered to documents accessible by your current credentials, and requires AI answers to be enabled in your workspace."""
 
@@ -2614,13 +2864,19 @@ async def search_documents_with_question(body: _models.DocumentsAnswerQuestionBo
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Search Document Titles",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_document_titles(body: _models.DocumentsSearchTitlesBody | None = Field(None, description="Request body containing search parameters such as keywords and optional filters for refining title search results.")) -> dict[str, Any] | ToolResult:
     """Search document titles using keywords for fast, title-only matching. This operation is optimized for title searches and returns results faster than the full documents.search method."""
 
@@ -2653,13 +2909,19 @@ async def search_document_titles(body: _models.DocumentsSearchTitlesBody | None 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Search Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_documents(body: _models.DocumentsSearchBody | None = Field(None, description="Request body containing search parameters such as keywords, filters, and pagination options. Refer to the API documentation for the expected structure and available search filters.")) -> dict[str, Any] | ToolResult:
     """Search across all documents in your workspace using keywords. Results are automatically filtered to only include documents accessible with your current credentials."""
 
@@ -2692,13 +2954,19 @@ async def search_documents(body: _models.DocumentsSearchBody | None = Field(None
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Create Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_document(
     title: str | None = Field(None, description="The title of the document (e.g., 'Welcome to Acme Inc'). If not provided, the document will be created without a title."),
     color: str | None = Field(None, description="The color for the document icon in hexadecimal format (e.g., '#FF5733'). Helps visually distinguish documents in the workspace."),
@@ -2740,13 +3008,20 @@ async def create_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document(
     id_: str = Field(..., alias="id", description="The document identifier, accepting either a UUID or URL-friendly ID (e.g., 'hDYep1TPAM'). Required to specify which document to update."),
     title: str | None = Field(None, description="The new title for the document. Updates the document's display name."),
@@ -2790,13 +3065,19 @@ async def update_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Create Template From Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template_from_document(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the document to use as the template basis."),
     publish: bool = Field(..., description="Whether to publish the newly created template immediately. If true, the template becomes available for use; if false, it remains in draft state."),
@@ -2831,13 +3112,20 @@ async def create_template_from_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Unpublish Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unpublish_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID (urlId)."),
     detach_: bool | None = Field(None, alias="detach", description="Whether to detach the document from its collection when unpublishing. Defaults to false, keeping the document in the collection as a draft."),
@@ -2872,13 +3160,19 @@ async def unpublish_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Move Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_document(
     id_: str = Field(..., alias="id", description="The unique identifier of the document to move, accepting either a UUID or URL-friendly ID format."),
     index: float | None = Field(None, description="The position index where the document should be placed within its new parent collection. Lower indices position the document earlier in the collection structure."),
@@ -2915,13 +3209,20 @@ async def move_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Archive Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_document(id_: str = Field(..., alias="id", description="The document identifier, which can be either the UUID or the URL-friendly ID (urlId). Both formats are accepted interchangeably.")) -> dict[str, Any] | ToolResult:
     """Move a document to archived status, removing it from active view while preserving it for future search and restoration. Archived documents remain accessible but are hidden from standard document listings."""
 
@@ -2953,13 +3254,19 @@ async def archive_document(id_: str = Field(..., alias="id", description="The do
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Restore Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     revision_id: str | None = Field(None, alias="revisionId", description="Optional UUID of a specific revision to restore the document to. If not provided, the document is restored to its most recent state."),
@@ -2994,13 +3301,20 @@ async def restore_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_document(
     id_: str = Field(..., alias="id", description="The document identifier, either as a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     permanent: bool | None = Field(None, description="When true, permanently destroys the document with no recovery option instead of moving it to trash. Defaults to false (moves to trash)."),
@@ -3035,13 +3349,19 @@ async def delete_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Document Users",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_document_users(
     id_: str = Field(..., alias="id", description="The document identifier, either as a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     query: str | None = Field(None, description="Optional filter to search users by name. When provided, results are filtered to users matching this query string."),
@@ -3077,13 +3397,19 @@ async def list_document_users(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Document Memberships",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_document_memberships(
     id_: str = Field(..., alias="id", description="The document identifier, either as a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     query: str | None = Field(None, description="Optional filter to search memberships by user name. When provided, results are filtered to users matching this query."),
@@ -3119,13 +3445,19 @@ async def list_document_memberships(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or a URL-friendly ID (urlId)."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID format) of the user to add to the document."),
@@ -3161,13 +3493,20 @@ async def add_user_to_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Remove User From Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or a URL-friendly ID (urlId)."),
     user_id: str = Field(..., alias="userId", description="The UUID of the user to remove from the document."),
@@ -3202,13 +3541,20 @@ async def remove_user_from_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Archived Documents",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_archived_documents(body: _models.DocumentsArchivedBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported filter and pagination parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all archived documents in the workspace that the current user has access to. Returns a list of archived document records with their metadata."""
 
@@ -3241,13 +3587,19 @@ async def list_archived_documents(body: _models.DocumentsArchivedBody | None = F
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Deleted Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_deleted_documents(body: _models.DocumentsDeletedBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported query parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all deleted documents in the workspace that the current user has access to. This allows users to view and potentially recover deleted documents."""
 
@@ -3280,13 +3632,19 @@ async def list_deleted_documents(body: _models.DocumentsDeletedBody | None = Fie
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_document(
     id_: str = Field(..., alias="id", description="The document to duplicate, specified as either its UUID or URL-friendly identifier."),
     title: str | None = Field(None, description="Optional custom title for the duplicated document. If not provided, the original title will be used."),
@@ -3323,13 +3681,19 @@ async def duplicate_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Add Group to Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_group_to_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID format) of the group to grant access to the document."),
@@ -3365,13 +3729,20 @@ async def add_group_to_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group from Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_from_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID (urlId)."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID format) of the group whose access should be revoked from the document."),
@@ -3406,13 +3777,19 @@ async def remove_group_from_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="List Document Group Memberships",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_document_group_memberships(body: _models.DocumentsGroupMembershipsBody | None = Field(None, description="Request body containing the document identifier and optional filtering criteria for group memberships.")) -> dict[str, Any] | ToolResult:
     """Retrieve all group memberships associated with a specific document. This allows you to see which groups have access to or are linked with the document."""
 
@@ -3445,13 +3822,20 @@ async def list_document_group_memberships(body: _models.DocumentsGroupMembership
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Documents
-@mcp.tool()
+@mcp.tool(
+    title="Empty Trash",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_all_trash() -> dict[str, Any] | ToolResult:
     """Permanently delete all documents currently in the trash. This action is irreversible and can only be performed by admin users."""
 
@@ -3478,7 +3862,12 @@ async def delete_all_trash() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Events",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_events(body: _models.EventsListBody | None = Field(None, description="Optional request body for filtering or configuring the events list query. Specify any desired filters or parameters to narrow down the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all events from the knowledge base audit trail. Events represent important activities and changes that have occurred within the system."""
 
@@ -3511,13 +3900,19 @@ async def list_events(body: _models.EventsListBody | None = Field(None, descript
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: FileOperations
-@mcp.tool()
+@mcp.tool(
+    title="Get File Operation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_file_operation(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file operation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details and current status of a file operation by its unique identifier. Use this to monitor long-running import or export tasks."""
 
@@ -3549,13 +3944,20 @@ async def get_file_operation(id_: str = Field(..., alias="id", description="The 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: FileOperations
-@mcp.tool()
+@mcp.tool(
+    title="Delete File Operation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_operation(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file operation to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a file operation and permanently remove its associated files. Use this to clean up completed, failed, or unwanted import/export operations."""
 
@@ -3587,13 +3989,19 @@ async def delete_file_operation(id_: str = Field(..., alias="id", description="T
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: FileOperations
-@mcp.tool()
+@mcp.tool(
+    title="Get File Redirect",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_file_redirect(id_: str = Field(..., alias="id", description="The unique identifier (UUID format) of the file operation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a file by generating a temporary, signed URL with embedded credentials that redirects to the file's storage location."""
 
@@ -3625,13 +4033,19 @@ async def get_file_redirect(id_: str = Field(..., alias="id", description="The u
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: FileOperations
-@mcp.tool()
+@mcp.tool(
+    title="List File Operations",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_file_operations(body: _models.FileOperationsListBody | None = Field(None, description="Request body containing optional filter criteria such as operation type (import or export) to narrow results. Omit to retrieve all file operations.")) -> dict[str, Any] | ToolResult:
     """Retrieve all file operations (imports and exports) for the current workspace. Results can be filtered by operation type to show only imports, exports, or all operations."""
 
@@ -3664,13 +4078,19 @@ async def list_file_operations(body: _models.FileOperationsListBody | None = Fie
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_group(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific group, including its name and member count, using its unique identifier."""
 
@@ -3702,13 +4122,19 @@ async def get_group(id_: str = Field(..., alias="id", description="The unique id
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_groups(body: _models.GroupsListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Refer to API documentation for supported query parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all groups in the workspace. Groups organize users and control access permissions for collections."""
 
@@ -3741,13 +4167,19 @@ async def list_groups(body: _models.GroupsListBody | None = Field(None, descript
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(name: str = Field(..., description="The name of the group (e.g., 'Designers'). Used to identify and reference the group in permission assignments and user management.")) -> dict[str, Any] | ToolResult:
     """Create a new group with a specified name. Groups organize users and enable efficient permission management by allowing collection access to be assigned to multiple users simultaneously."""
 
@@ -3779,13 +4211,19 @@ async def create_group(name: str = Field(..., description="The name of the group
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group to update, formatted as a UUID."),
     name: str = Field(..., description="The new name for the group. Use a descriptive name that reflects the group's purpose or membership."),
@@ -3820,13 +4258,20 @@ async def update_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a group and revoke all member access to collections the group was added to. This action cannot be undone."""
 
@@ -3858,13 +4303,19 @@ async def delete_group(id_: str = Field(..., alias="id", description="The unique
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Memberships",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_group_memberships(body: _models.GroupsMembershipsBody | None = Field(None, description="Request body containing filter criteria, sorting options, and pagination parameters to customize the membership list results.")) -> dict[str, Any] | ToolResult:
     """Retrieve and filter all members belonging to a specific group. Use the request body to specify filtering criteria and pagination options."""
 
@@ -3897,13 +4348,19 @@ async def list_group_memberships(body: _models.GroupsMembershipsBody | None = Fi
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group to which the user will be added. Must be a valid UUID."),
     user_id: str = Field(..., alias="userId", description="The unique identifier of the user to add to the group. Must be a valid UUID."),
@@ -3938,13 +4395,20 @@ async def add_user_to_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove User From Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_group(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group from which the user will be removed."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID) of the user to remove from the group."),
@@ -3979,13 +4443,19 @@ async def remove_user_from_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuthClients
-@mcp.tool()
+@mcp.tool(
+    title="Get OAuth Client",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_oauth_client() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific OAuth client by providing either its unique identifier or client ID."""
 
@@ -4012,7 +4482,12 @@ async def get_oauth_client() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: OAuthClients
-@mcp.tool()
+@mcp.tool(
+    title="List OAuth Clients",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_oauth_clients(
     offset: float | None = Field(None, description="The number of results to skip before returning items, used for pagination. Defaults to 0 to start from the beginning."),
     limit: float | None = Field(None, description="The maximum number of OAuth clients to return in a single response, used for pagination. Defaults to 25 items per page."),
@@ -4047,13 +4522,20 @@ async def list_oauth_clients(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuthClients
-@mcp.tool()
+@mcp.tool(
+    title="Update OAuth Client",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_oauth_client(
     id_: str = Field(..., alias="id", description="The unique identifier of the OAuth client to update, formatted as a UUID."),
     name: str | None = Field(None, description="The display name for the OAuth client."),
@@ -4094,13 +4576,20 @@ async def update_oauth_client(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuthClients
-@mcp.tool()
+@mcp.tool(
+    title="Rotate OAuth Client Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def rotate_oauth_client_secret(id_: str = Field(..., alias="id", description="The unique identifier of the OAuth client, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Generate a new client secret for an OAuth client, immediately invalidating the previous secret. Update your application to use the new secret before the old one expires to avoid authentication failures."""
 
@@ -4132,13 +4621,20 @@ async def rotate_oauth_client_secret(id_: str = Field(..., alias="id", descripti
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuthClients
-@mcp.tool()
+@mcp.tool(
+    title="Delete OAuth Client",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_oauth_client(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the OAuth client to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an OAuth client and revoke all associated access tokens. This action cannot be undone and will immediately invalidate all active sessions using this client."""
 
@@ -4170,13 +4666,19 @@ async def delete_oauth_client(id_: str = Field(..., alias="id", description="The
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuthAuthentications
-@mcp.tool()
+@mcp.tool(
+    title="List OAuth Authentications",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_oauth_authentications(
     offset: float | None = Field(None, description="The number of results to skip before returning items, used for pagination. Defaults to 0 to start from the beginning."),
     limit: float | None = Field(None, description="The maximum number of OAuth authentications to return in a single response, used for pagination. Defaults to 25 items per page."),
@@ -4211,13 +4713,20 @@ async def list_oauth_authentications(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuthAuthentications
-@mcp.tool()
+@mcp.tool(
+    title="Revoke OAuth Authentication",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_oauth_authentication(
     oauth_client_id: str = Field(..., alias="oauthClientId", description="The unique identifier (UUID format) of the OAuth client application whose access should be revoked."),
     scope: list[str] | None = Field(None, description="Optional list of specific permission scopes to revoke. If omitted, all scopes for the OAuth client will be revoked."),
@@ -4252,13 +4761,19 @@ async def revoke_oauth_authentication(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Revisions
-@mcp.tool()
+@mcp.tool(
+    title="Get Revision",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_revision(id_: str = Field(..., alias="id", description="The unique identifier of the revision to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific revision of a document by its unique identifier. A revision represents a snapshot of the document at a particular point in time."""
 
@@ -4290,13 +4805,19 @@ async def get_revision(id_: str = Field(..., alias="id", description="The unique
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Revisions
-@mcp.tool()
+@mcp.tool(
+    title="List Revisions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_revisions(body: _models.RevisionsListBody | None = Field(None, description="Request body containing the document identifier and optional filtering criteria for revisions to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all revisions for a specific document. Revisions represent historical snapshots of document content and enable tracking of changes over time."""
 
@@ -4329,13 +4850,19 @@ async def list_revisions(body: _models.RevisionsListBody | None = Field(None, de
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shares
-@mcp.tool()
+@mcp.tool(
+    title="Get Share by Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_share_by_document(document_id: str | None = Field(None, alias="documentId", description="The unique identifier of the document whose share information should be retrieved. Must be a valid UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a share link using its associated document ID. This operation returns the share object containing access permissions and sharing configuration for the specified document."""
 
@@ -4367,13 +4894,19 @@ async def get_share_by_document(document_id: str | None = Field(None, alias="doc
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shares
-@mcp.tool()
+@mcp.tool(
+    title="List Shares",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_shares(body: _models.SharesListBody | None = Field(None, description="Optional request body for filtering or configuring the share list retrieval. Consult the API documentation for supported query parameters or filter options.")) -> dict[str, Any] | ToolResult:
     """Retrieve all share links available in the workspace. This operation returns a complete list of shares that have been created for collaborative access."""
 
@@ -4406,13 +4939,19 @@ async def list_shares(body: _models.SharesListBody | None = Field(None, descript
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shares
-@mcp.tool()
+@mcp.tool(
+    title="Create Share",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_share(document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID) of the document to create a share link for.")) -> dict[str, Any] | ToolResult:
     """Creates a new share link for accessing a document. If multiple shares are requested for the same document using the same API key, the existing share object is returned. Shares are unpublished by default."""
 
@@ -4444,13 +4983,20 @@ async def create_share(document_id: str = Field(..., alias="documentId", descrip
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shares
-@mcp.tool()
+@mcp.tool(
+    title="Update Share Published Status",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_share_published_status(
     id_: str = Field(..., alias="id", description="The unique identifier of the share to update, formatted as a UUID."),
     published: bool = Field(..., description="Whether the share should be published (true) and publicly accessible, or unpublished (false) and require authentication."),
@@ -4485,13 +5031,20 @@ async def update_share_published_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shares
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Share",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_share(id_: str = Field(..., alias="id", description="The unique identifier of the share to revoke, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Deactivate a share link to prevent further access to the shared document. Once revoked, the share link becomes inactive and can no longer be used."""
 
@@ -4523,13 +5076,19 @@ async def revoke_share(id_: str = Field(..., alias="id", description="The unique
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Stars
-@mcp.tool()
+@mcp.tool(
+    title="Add Star",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_star(
     document_id: str | None = Field(None, alias="documentId", description="The UUID of the document to star. Either this or collectionId must be provided."),
     index: str | None = Field(None, description="The position in the starred items list where this star should appear. If not specified, the star will be added at the end."),
@@ -4564,13 +5123,19 @@ async def add_star(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Stars
-@mcp.tool()
+@mcp.tool(
+    title="List Starred Documents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_starred_documents(
     offset: float | None = Field(None, description="Number of documents to skip from the beginning of the list, useful for pagination. Defaults to 0 to start from the first document."),
     limit: float | None = Field(None, description="Maximum number of documents to return per request, useful for controlling response size and pagination. Defaults to 25 documents."),
@@ -4605,13 +5170,19 @@ async def list_starred_documents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Stars
-@mcp.tool()
+@mcp.tool(
+    title="Update Star",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_star(
     id_: str = Field(..., alias="id", description="The unique identifier of the starred document to update, formatted as a UUID."),
     index: str = Field(..., description="The new display position for this starred document in the sidebar order. Lower indices appear higher in the list."),
@@ -4646,13 +5217,20 @@ async def update_star(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Stars
-@mcp.tool()
+@mcp.tool(
+    title="Remove Star",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_star(id_: str = Field(..., alias="id", description="The unique identifier of the starred document to remove, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Remove a star from a document, deleting it from the user's starred documents list in the sidebar."""
 
@@ -4684,13 +5262,19 @@ async def remove_star(id_: str = Field(..., alias="id", description="The unique 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Send User Invites",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_user_invites(invites: list[_models.Invite] = Field(..., description="Array of user invitations to send. Each invitation specifies the recipient and any relevant details for account creation. Order is preserved as submitted.")) -> dict[str, Any] | ToolResult:
     """Send email invitations to one or more users to join the workspace. Each invitation includes a personalized link that allows recipients to create an account and access the workspace."""
 
@@ -4722,13 +5306,19 @@ async def send_user_invites(invites: list[_models.Invite] = Field(..., descripti
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific user, including their name, email, avatar, and workspace role."""
 
@@ -4760,13 +5350,19 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_users(body: _models.UsersListBody | None = Field(None, description="Optional request body containing filter criteria and pagination options to customize the user list results.")) -> dict[str, Any] | ToolResult:
     """Retrieve and filter all users in the workspace. Supports optional filtering and pagination parameters to narrow results."""
 
@@ -4799,13 +5395,19 @@ async def list_users(body: _models.UsersListBody | None = Field(None, descriptio
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_user(
     name: str | None = Field(None, description="The user's display name. Can be any string value."),
     language: str | None = Field(None, description="The user's preferred language, specified as a BCP 47 language tag (e.g., en, en-US, fr-CA)."),
@@ -4841,13 +5443,19 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User Role",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_user_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose role should be updated, formatted as a UUID."),
     role: Literal["admin", "member", "viewer", "guest"] = Field(..., description="The new role to assign to the user. Must be one of: admin, member, viewer, or guest."),
@@ -4882,13 +5490,20 @@ async def update_user_role(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Suspend User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def suspend_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to suspend.")) -> dict[str, Any] | ToolResult:
     """Suspend a user account to prevent sign-in and exclude them from billing calculations. Suspended users retain their data but cannot access the system."""
 
@@ -4920,13 +5535,19 @@ async def suspend_user(id_: str = Field(..., alias="id", description="The unique
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Activate User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def activate_user(id_: str = Field(..., alias="id", description="The UUID of the user to activate.")) -> dict[str, Any] | ToolResult:
     """Reactivate a suspended user to restore their signin access. Activation triggers billing recalculation in hosted environments."""
 
@@ -4958,13 +5579,20 @@ async def activate_user(id_: str = Field(..., alias="id", description="The UUID 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a user account. Note: Deleted users can be recreated if they sign in via SSO again. Consider suspending the user instead in most cases to preserve data integrity."""
 
@@ -4996,13 +5624,19 @@ async def delete_user(id_: str = Field(..., alias="id", description="The unique 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List Document Views",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_document_views(
     document_id: str = Field(..., alias="documentId", description="The unique identifier of the document to retrieve views for, formatted as a UUID."),
     include_suspended: bool | None = Field(None, alias="includeSuspended", description="Whether to include view records from users with suspended accounts. Defaults to false, excluding suspended user views."),
@@ -5037,13 +5671,19 @@ async def list_document_views(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create View for Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_view_for_document(document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID) of the document for which to create the view.")) -> dict[str, Any] | ToolResult:
     """Creates a new view for a document. Note: This operation is provided for completeness, but it is recommended to create views through the Outline UI instead of programmatically."""
 
@@ -5075,13 +5715,19 @@ async def create_view_for_document(document_id: str = Field(..., alias="document
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     title: str = Field(..., description="The display name for the template. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     data: dict[str, Any] = Field(..., description="The template content structured as a ProseMirror document object, defining the default body and formatting for documents created from this template."),
@@ -5117,13 +5763,19 @@ async def create_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_templates(body: _models.TemplatesListBody | None = Field(None, description="Optional request body to filter templates by collection or apply other query criteria.")) -> dict[str, Any] | ToolResult:
     """Retrieve all templates available to the current user, with optional filtering by collection. Templates without an associated collection are accessible workspace-wide."""
 
@@ -5156,13 +5808,19 @@ async def list_templates(body: _models.TemplatesListBody | None = Field(None, de
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_template(id_: str = Field(..., alias="id", description="The unique identifier for the template, provided as either a UUID or a URL-friendly ID string.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific template by its unique identifier. Accepts either the UUID or URL-friendly ID format."""
 
@@ -5194,13 +5852,20 @@ async def get_template(id_: str = Field(..., alias="id", description="The unique
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     id_: str = Field(..., alias="id", description="The unique identifier for the template, accepting either a UUID or URL-friendly ID."),
     title: str | None = Field(None, description="The display name for the template."),
@@ -5237,13 +5902,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(id_: str = Field(..., alias="id", description="The unique identifier for the template, accepting either the UUID or the URL-friendly ID.")) -> dict[str, Any] | ToolResult:
     """Soft-delete a template by its unique identifier. The template can be restored later if needed."""
 
@@ -5275,13 +5947,19 @@ async def delete_template(id_: str = Field(..., alias="id", description="The uni
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Restore Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to restore. Accept either the UUID or the URL-friendly ID (urlId) format.")) -> dict[str, Any] | ToolResult:
     """Restore a previously deleted template using its unique identifier. This operation recovers a soft-deleted template and makes it available for use again."""
 
@@ -5313,13 +5991,19 @@ async def restore_template(id_: str = Field(..., alias="id", description="The un
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to duplicate. Accepts either the UUID or the URL-friendly ID (urlId) of the template."),
     title: str | None = Field(None, description="Optional custom title for the duplicated template. If not provided, the original template's title will be used for the copy."),
@@ -5354,6 +6038,7 @@ async def duplicate_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 

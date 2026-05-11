@@ -1,7 +1,7 @@
 """
 Outline MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:44:07 UTC
+Generated: 2026-05-11 20:01:10 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -369,7 +369,7 @@ class DocumentsInfoRequest(StrictModel):
 
 # Operation: create_document_from_file
 class DocumentsImportRequestBody(StrictModel):
-    file_: dict[str, Any] = Field(default=..., validation_alias="file", serialization_alias="file", description="The file to import as a document. Supported formats include plain text, markdown, docx, csv, tsv, and html.")
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file to import as a document. Supported formats include plain text, markdown, docx, csv, tsv, and html.", json_schema_extra={'format': 'byte'})
     publish: bool | None = Field(default=None, description="Whether to automatically publish the imported document upon creation. Defaults to unpublished if not specified.")
 class DocumentsImportRequest(StrictModel):
     """Create a new document by importing a file. The document is placed at the collection root by default, or as a child document if a parent document ID is specified."""

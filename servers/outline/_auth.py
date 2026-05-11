@@ -1,7 +1,7 @@
 """
 Authentication module for Outline MCP server.
 
-Generated: 2026-05-05 15:44:07 UTC
+Generated: 2026-05-11 20:01:10 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
