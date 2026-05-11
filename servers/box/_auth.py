@@ -1,7 +1,7 @@
 """
 Authentication module for Box MCP server.
 
-Generated: 2026-05-05 14:27:30 UTC
+Generated: 2026-05-11 19:32:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

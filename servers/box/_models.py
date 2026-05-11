@@ -1,7 +1,7 @@
 """
 Box MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:27:30 UTC
+Generated: 2026-05-11 19:32:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -411,7 +411,7 @@ class PostFilesIdContentRequestBodyAttributes(StrictModel):
     name: str | None = Field(default=None, validation_alias="name", serialization_alias="name", description="An optional new name to rename the file when this new version is uploaded. If omitted, the existing file name is retained.")
     content_modified_at: str | None = Field(default=None, validation_alias="content_modified_at", serialization_alias="content_modified_at", description="The date and time the file content was last modified, in ISO 8601 format. If omitted, the time of upload is used as the modification time.", json_schema_extra={'format': 'date-time'})
 class PostFilesIdContentRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="The binary content of the file to upload. This part must appear after the attributes part in the multipart request body; reversing the order will result in a 400 error.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary content of the file to upload. This part must appear after the attributes part in the multipart request body; reversing the order will result in a 400 error.", json_schema_extra={'format': 'byte'})
     attributes: PostFilesIdContentRequestBodyAttributes | None = None
 class PostFilesIdContentRequest(StrictModel):
     """Uploads a new version of an existing file's content, optionally renaming it or setting a custom last-modified timestamp. For files over 50MB, use the Chunk Upload APIs instead."""
@@ -427,7 +427,7 @@ class PostFilesContentRequestBodyAttributes(StrictModel):
     content_modified_at: str | None = Field(default=None, validation_alias="content_modified_at", serialization_alias="content_modified_at", description="The last modified timestamp of the file in ISO 8601 format. Defaults to the upload time if not provided.", json_schema_extra={'format': 'date-time'})
     parent: PostFilesContentRequestBodyAttributesParent | None = None
 class PostFilesContentRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="The binary content of the file to upload. Must appear after the attributes part in the multipart request body.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary content of the file to upload. Must appear after the attributes part in the multipart request body.", json_schema_extra={'format': 'byte'})
     attributes: PostFilesContentRequestBodyAttributes | None = None
 class PostFilesContentRequest(StrictModel):
     """Uploads a small file (under 50MB) to a specified Box folder. The attributes must be sent before the file content in the request body, or a 400 error will be returned."""
@@ -465,7 +465,7 @@ class PutFilesUploadSessionsIdRequestHeader(StrictModel):
     digest: str = Field(default=..., description="The RFC 3230 message digest of the uploaded chunk used to verify integrity. Must be a base64-encoded SHA1 hash formatted as `sha=<BASE64_ENCODED_DIGEST>`.")
     content_range: str = Field(default=..., validation_alias="content-range", serialization_alias="content-range", description="The inclusive byte range of this chunk within the full file, formatted as `bytes <start>-<end>/<total>`. The start must be a multiple of the session's part size, the end must be a multiple of the part size minus one, and ranges must not overlap with any previously uploaded part.")
 class PutFilesUploadSessionsIdRequestBody(StrictModel):
-    body: str | None = Field(default=None, description="The raw binary content of the file chunk being uploaded for this part.", json_schema_extra={'format': 'binary'})
+    body: str | None = Field(default=None, description="Base64-encoded binary request body. The raw binary content of the file chunk being uploaded for this part.", json_schema_extra={'format': 'byte'})
 class PutFilesUploadSessionsIdRequest(StrictModel):
     """Uploads a single binary chunk of a file as part of an active chunked upload session. Each part must conform to the byte range and part size defined when the upload session was created."""
     path: PutFilesUploadSessionsIdRequestPath
@@ -1822,7 +1822,7 @@ class GetUsersIdAvatarRequest(StrictModel):
 class PostUsersIdAvatarRequestPath(StrictModel):
     user_id: str = Field(default=..., description="The unique identifier of the user whose avatar is being added or updated.")
 class PostUsersIdAvatarRequestBody(StrictModel):
-    pic: str | None = Field(default=None, description="The image file to upload as the user's avatar. Must be a JPG or PNG file and cannot exceed 1MB in size.", json_schema_extra={'format': 'binary'})
+    pic: str | None = Field(default=None, description="Base64-encoded file content for upload. The image file to upload as the user's avatar. Must be a JPG or PNG file and cannot exceed 1MB in size.", json_schema_extra={'format': 'byte'})
 class PostUsersIdAvatarRequest(StrictModel):
     """Adds or replaces the avatar image for a specified user. Accepts JPG or PNG files up to 1MB in size."""
     path: PostUsersIdAvatarRequestPath

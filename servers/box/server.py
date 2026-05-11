@@ -7,7 +7,7 @@ API Info:
 - Contact: Box, Inc <devrel@box.com> (https://developer.box.com)
 - Terms of Service: https://cloud.app.box.com/s/rmwxu64h1ipr41u49w3bbuvbsa29wku9
 
-Generated: 2026-05-05 14:27:30 UTC
+Generated: 2026-05-11 19:32:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -44,6 +45,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.box.com/2.0")
@@ -60,7 +62,7 @@ OPERATION_URL_MAP: dict[str, str] = {
     "download_zip_archive": os.getenv("SERVER_URL_DOWNLOAD_ZIP_ARCHIVE", "https://dl.boxcloud.com/2.0"),
 }
 SERVER_NAME = "Box"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -551,6 +553,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -558,6 +582,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -647,6 +673,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -656,18 +683,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -678,24 +703,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1092,6 +1123,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1116,6 +1149,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1323,7 +1358,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Box", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Get File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file(
     file_id: str = Field(..., description="The unique identifier of the file to retrieve. The file ID can be found in the Box web app URL when viewing the file."),
     boxapi: str | None = Field(None, description="A shared link URL and optional password used to access files that have not been explicitly shared with the authenticated user. Use the format `shared_link=[link]` or `shared_link=[link]&shared_link_password=[password]` for password-protected links."),
@@ -1363,7 +1404,12 @@ async def get_file(
     return _response_data
 
 # Tags: Trashed files
-@mcp.tool()
+@mcp.tool(
+    title="Restore File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_file(
     file_id: str = Field(..., description="The unique identifier of the file to restore from the trash. The file ID can be found in the Box web app URL when viewing the file."),
     name: str | None = Field(None, description="An optional new name to assign to the file upon restoration, useful if a naming conflict exists in the destination folder."),
@@ -1400,13 +1446,20 @@ async def restore_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Update File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file(
     file_id: str = Field(..., description="The unique identifier of the file to update. Find this ID in the Box web app by opening the file and copying the numeric ID from the URL."),
     name: str | None = Field(None, description="A new name for the file. Must be unique within the parent folder; the uniqueness check is case-insensitive."),
@@ -1454,13 +1507,20 @@ async def update_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(file_id: str = Field(..., description="The unique identifier of the file to delete. Visible in the file's URL on the Box web application.")) -> dict[str, Any] | ToolResult:
     """Deletes a specified file from Box, either permanently or by moving it to the trash depending on enterprise settings."""
 
@@ -1496,7 +1556,13 @@ async def delete_file(file_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: App item associations
-@mcp.tool()
+@mcp.tool(
+    title="List File App Item Associations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_app_item_associations(
     file_id: str = Field(..., description="The unique identifier of the file whose app item associations should be retrieved. The file ID appears in the Box web app URL when viewing the file."),
     limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000."),
@@ -1541,7 +1607,13 @@ async def list_file_app_item_associations(
     return _response_data
 
 # Tags: Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Download File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_file(
     file_id: str = Field(..., description="The unique identifier of the file to download. Visible in the Box web app URL when viewing the file."),
     version: str | None = Field(None, description="The specific version ID of the file to download. If omitted, the latest version is returned."),
@@ -1586,12 +1658,17 @@ async def download_file(
     return _response_data
 
 # Tags: Uploads
-@mcp.tool()
+@mcp.tool(
+    title="Upload File Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file_version(
     file_id: str = Field(..., description="The unique identifier of the file to update. Visible in the Box web app URL when viewing the file."),
     name: str | None = Field(None, description="An optional new name to rename the file when this new version is uploaded. If omitted, the existing file name is retained."),
     content_modified_at: str | None = Field(None, description="The date and time the file content was last modified, in ISO 8601 format. If omitted, the time of upload is used as the modification time."),
-    file_: str | None = Field(None, alias="file", description="The binary content of the file to upload. This part must appear after the attributes part in the multipart request body; reversing the order will result in a 400 error."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. The binary content of the file to upload. This part must appear after the attributes part in the multipart request body; reversing the order will result in a 400 error.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a new version of an existing file's content, optionally renaming it or setting a custom last-modified timestamp. For files over 50MB, use the Chunk Upload APIs instead."""
 
@@ -1633,13 +1710,18 @@ async def upload_file_version(
     return _response_data
 
 # Tags: Uploads
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(
     name: str | None = Field(None, description="The name to assign to the uploaded file. Must be unique (case-insensitive) within the destination folder."),
     id_: str | None = Field(None, alias="id", description="The ID of the parent folder where the file will be uploaded. Use `0` to upload to the user's root folder."),
     content_created_at: str | None = Field(None, description="The original creation timestamp of the file in ISO 8601 format. Defaults to the upload time if not provided."),
     content_modified_at: str | None = Field(None, description="The last modified timestamp of the file in ISO 8601 format. Defaults to the upload time if not provided."),
-    file_: str | None = Field(None, alias="file", description="The binary content of the file to upload. Must appear after the attributes part in the multipart request body."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. The binary content of the file to upload. Must appear after the attributes part in the multipart request body.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a small file (under 50MB) to a specified Box folder. The attributes must be sent before the file content in the request body, or a 400 error will be returned."""
 
@@ -1681,7 +1763,12 @@ async def upload_file(
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="Create Upload Session",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_upload_session(
     folder_id: str | None = Field(None, description="The ID of the destination folder where the new file will be stored upon upload completion."),
     file_name: str | None = Field(None, description="The name to assign to the new file once the upload session is complete."),
@@ -1716,13 +1803,19 @@ async def create_upload_session(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="Create File Upload Session",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file_upload_session(
     file_id: str = Field(..., description="The unique identifier of the existing file for which the upload session will be created. The file ID can be found in the file's URL in the Box web application."),
     file_name: str | None = Field(None, description="An optional new name to assign to the file upon completing the upload session, replacing the current file name."),
@@ -1758,13 +1851,20 @@ async def create_file_upload_session(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="Get Upload Session",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_upload_session(upload_session_id: str = Field(..., description="The unique identifier of the upload session to retrieve, obtained when the upload session was created.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and details of an active chunked file upload session. The upload session ID is obtained from the Create upload session endpoint."""
 
@@ -1800,12 +1900,17 @@ async def get_upload_session(upload_session_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="Upload File Part",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file_part(
     upload_session_id: str = Field(..., description="The unique identifier of the upload session to which this file part belongs."),
     digest: str = Field(..., description="The RFC 3230 message digest of the uploaded chunk used to verify integrity. Must be a base64-encoded SHA1 hash formatted as `sha=<BASE64_ENCODED_DIGEST>`."),
     content_range: str = Field(..., alias="content-range", description="The inclusive byte range of this chunk within the full file, formatted as `bytes <start>-<end>/<total>`. The start must be a multiple of the session's part size, the end must be a multiple of the part size minus one, and ranges must not overlap with any previously uploaded part."),
-    body: str | None = Field(None, description="The raw binary content of the file chunk being uploaded for this part."),
+    body: str | None = Field(None, description="Base64-encoded binary request body. The raw binary content of the file chunk being uploaded for this part.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a single binary chunk of a file as part of an active chunked upload session. Each part must conform to the byte range and part size defined when the upload session was created."""
 
@@ -1825,6 +1930,7 @@ async def upload_file_part(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+    _http_headers["Content-Type"] = "application/octet-stream"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_file_part")
@@ -1840,13 +1946,21 @@ async def upload_file_part(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/octet-stream",
+        whole_body_base64=True,
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="Abort Upload Session",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def abort_upload_session(upload_session_id: str = Field(..., description="The unique identifier of the upload session to abort, as returned by the Create or Get upload session endpoints.")) -> dict[str, Any] | ToolResult:
     """Permanently aborts an active upload session and discards all uploaded data. This action is irreversible and cannot be undone."""
 
@@ -1882,7 +1996,13 @@ async def abort_upload_session(upload_session_id: str = Field(..., description="
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="List Upload Session Parts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_upload_session_parts(
     upload_session_id: str = Field(..., description="The unique identifier of the upload session whose uploaded parts you want to list."),
     offset: str | None = Field(None, description="The zero-based index of the first item to return, enabling pagination through large result sets. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error."),
@@ -1928,7 +2048,12 @@ async def list_upload_session_parts(
     return _response_data
 
 # Tags: Uploads (Chunked)
-@mcp.tool()
+@mcp.tool(
+    title="Commit Upload Session",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def commit_upload_session(
     upload_session_id: str = Field(..., description="The unique identifier of the upload session to commit."),
     digest: str = Field(..., description="The RFC 3230 message digest of the entire file used to verify integrity. Must be a Base64-encoded SHA1 hash formatted as `sha=<BASE64_ENCODED_DIGEST>`."),
@@ -1966,13 +2091,19 @@ async def commit_upload_session(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Copy File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_file(
     file_id: str = Field(..., description="The unique identifier of the file to copy. Visible in the Box web app URL when viewing the file."),
     name: str | None = Field(None, description="An optional new name for the copied file. Must not exceed 255 characters; non-printable ASCII characters, forward/backward slashes, and reserved names like '.' and '..' are automatically sanitized.", max_length=255),
@@ -2011,13 +2142,20 @@ async def copy_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Thumbnail",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_thumbnail(
     file_id: str = Field(..., description="The unique identifier of the file for which to retrieve a thumbnail. The file ID can be found in the URL when viewing the file in the Box web application."),
     extension: Literal["png", "jpg"] = Field(..., description="The image format for the thumbnail. PNG supports sizes up to 256x256; JPG supports sizes up to 320x320."),
@@ -2063,7 +2201,13 @@ async def get_file_thumbnail(
     return _response_data
 
 # Tags: Collaborations (List)
-@mcp.tool()
+@mcp.tool(
+    title="List File Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_collaborations(
     file_id: str = Field(..., description="The unique identifier of the file whose collaborations you want to retrieve. You can find this ID in the file's URL in the Box web application."),
     limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000."),
@@ -2107,7 +2251,13 @@ async def list_file_collaborations(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List File Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_comments(
     file_id: str = Field(..., description="The unique identifier of the file whose comments you want to retrieve. Find this ID in the file's URL on the Box web application."),
     limit: str | None = Field(None, description="The maximum number of comments to return per page. Must be between 1 and 1000."),
@@ -2153,7 +2303,13 @@ async def list_file_comments(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List File Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_tasks(file_id: str = Field(..., description="The unique identifier of the file whose tasks you want to retrieve. You can find this ID in the file's URL in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks associated with a specific file, returning the complete list in a single response. Note that this endpoint does not support pagination."""
 
@@ -2189,7 +2345,13 @@ async def list_file_tasks(file_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Trashed files
-@mcp.tool()
+@mcp.tool(
+    title="Get Trashed File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trashed_file(file_id: str = Field(..., description="The unique identifier of the file to retrieve from the trash. The file ID appears in the Box web app URL when viewing the file.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a file that was directly moved to the trash. Note: if a parent folder was trashed instead, use the trashed folder endpoint to inspect it."""
 
@@ -2225,7 +2387,13 @@ async def get_trashed_file(file_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Trashed files
-@mcp.tool()
+@mcp.tool(
+    title="Permanently Delete Trashed File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def permanently_delete_trashed_file(file_id: str = Field(..., description="The unique identifier of the trashed file to permanently delete. The file ID can be found in the URL when viewing the file in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a file that is currently in the trash, freeing storage and removing it from Box entirely. This action is irreversible and cannot be undone."""
 
@@ -2261,7 +2429,13 @@ async def permanently_delete_trashed_file(file_id: str = Field(..., description=
     return _response_data
 
 # Tags: File versions
-@mcp.tool()
+@mcp.tool(
+    title="List File Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_versions(
     file_id: str = Field(..., description="The unique identifier of the file whose version history you want to retrieve. The file ID can be found in the URL when viewing the file in the Box web application."),
     limit: str | None = Field(None, description="The maximum number of file versions to return per page. Accepts values up to 1000."),
@@ -2307,7 +2481,13 @@ async def list_file_versions(
     return _response_data
 
 # Tags: File versions
-@mcp.tool()
+@mcp.tool(
+    title="Get File Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version you want to retrieve. Visible in the file's URL in the Box web application."),
     file_version_id: str = Field(..., description="The unique identifier of the specific file version to retrieve."),
@@ -2346,7 +2526,12 @@ async def get_file_version(
     return _response_data
 
 # Tags: File versions
-@mcp.tool()
+@mcp.tool(
+    title="Restore File Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version you want to restore. Visible in the file's URL in the Box web application."),
     file_version_id: str = Field(..., description="The unique identifier of the specific file version to restore."),
@@ -2385,7 +2570,13 @@ async def restore_file_version(
     return _response_data
 
 # Tags: File versions
-@mcp.tool()
+@mcp.tool(
+    title="Delete File Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version will be deleted. The file ID can be found in the URL when viewing the file in the Box web application."),
     file_version_id: str = Field(..., description="The unique identifier of the specific file version to delete. This targets a single version entry within the file's version history."),
@@ -2424,7 +2615,13 @@ async def delete_file_version(
     return _response_data
 
 # Tags: File versions
-@mcp.tool()
+@mcp.tool(
+    title="Promote File Version",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def promote_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version you want to promote. Visible in the file's URL in the Box web application."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the specific file version to promote to the top of the version history."),
@@ -2461,13 +2658,20 @@ async def promote_file_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata instances (Files)
-@mcp.tool()
+@mcp.tool(
+    title="List File Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_metadata(
     file_id: str = Field(..., description="The unique identifier of the file whose metadata instances will be retrieved. The file ID can be found in the URL when viewing the file in the Box web application."),
     view: str | None = Field(None, description="Controls how taxonomy field values are represented in the response. When set to 'hydrated', taxonomy values include full taxonomy node details rather than just node identifiers."),
@@ -2509,7 +2713,13 @@ async def list_file_metadata(
     return _response_data
 
 # Tags: Classifications on files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Classification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_classification(file_id: str = Field(..., description="The unique identifier of the file whose security classification you want to retrieve. Visible in the file's Box web URL after '/files/'.")) -> dict[str, Any] | ToolResult:
     """Retrieves the security classification metadata applied to a specific file. Returns the classification instance associated with the file's enterprise security policy."""
 
@@ -2545,7 +2755,13 @@ async def get_file_classification(file_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Classifications on files
-@mcp.tool()
+@mcp.tool(
+    title="Add File Classification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_file_classification(
     file_id: str = Field(..., description="The unique identifier of the file to classify. The file ID can be found in the file's URL in the Box web application."),
     box__security__classification__key: str | None = Field(None, alias="Box__Security__Classification__Key", description="The classification label to apply to the file. Must match one of the available classification keys defined in the enterprise's classification template; retrieve valid keys from the classification template endpoint."),
@@ -2581,13 +2797,20 @@ async def add_file_classification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Classifications on files
-@mcp.tool()
+@mcp.tool(
+    title="Update File Classification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_classification(
     file_id: str = Field(..., description="The unique identifier of the file whose classification will be updated. The file ID can be found in the file's URL in the Box web application."),
     body: list[_models.PutFilesIdMetadataEnterpriseSecurityClassification6VmVochwUWoBodyItem] | None = Field(None, description="A list containing exactly one change operation object that specifies the update to apply to the classification label. Order is significant; only a single item describing the classification change should be included."),
@@ -2609,6 +2832,7 @@ async def update_file_classification(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/json-patch+json"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_file_classification")
@@ -2624,13 +2848,20 @@ async def update_file_classification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json-patch+json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Classifications on files
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Classification",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_classification(file_id: str = Field(..., description="The unique identifier of the file from which the classification will be removed. The file ID can be found in the URL when viewing the file in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Removes any existing security classification from a specified file. This permanently strips the classification metadata, and can also be called using an explicit enterprise ID in the endpoint path."""
 
@@ -2666,7 +2897,13 @@ async def remove_file_classification(file_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Metadata instances (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Get File Metadata Instance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_metadata_instance(
     file_id: str = Field(..., description="The unique identifier of the file whose metadata instance you want to retrieve. Find this ID in the file's URL in the Box web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to retrieve, either globally available templates or templates specific to your enterprise."),
@@ -2710,7 +2947,12 @@ async def get_file_metadata_instance(
     return _response_data
 
 # Tags: Metadata instances (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Create File Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file_metadata(
     file_id: str = Field(..., description="The unique identifier of the file to which the metadata instance will be applied. Visible in the file's URL in the Box web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to apply, either global (Box-provided templates) or enterprise (custom templates defined by your organization)."),
@@ -2749,13 +2991,20 @@ async def create_file_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata instances (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Update File Metadata",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_metadata(
     file_id: str = Field(..., description="The unique identifier of the file whose metadata instance will be updated. Visible in the file's URL in the Box web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to update, either globally defined templates or enterprise-specific ones."),
@@ -2779,6 +3028,7 @@ async def update_file_metadata(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/json-patch+json"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_file_metadata")
@@ -2794,13 +3044,20 @@ async def update_file_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json-patch+json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata instances (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Delete File Metadata",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_metadata(
     file_id: str = Field(..., description="The unique identifier of the file from which metadata will be removed. The file ID can be found in the URL when viewing the file in the Box web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to delete, either 'global' for Box-wide templates or 'enterprise' for templates specific to your organization."),
@@ -2840,7 +3097,13 @@ async def delete_file_metadata(
     return _response_data
 
 # Tags: Skills
-@mcp.tool()
+@mcp.tool(
+    title="List File Skills Cards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_skills_cards(file_id: str = Field(..., description="The unique identifier of the file whose Box Skills cards you want to retrieve. Visible in the file's URL on the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves all Box Skills metadata cards attached to a specific file. Useful for inspecting AI-generated insights such as transcripts, topics, or keywords extracted by Box Skills."""
 
@@ -2876,7 +3139,12 @@ async def list_file_skills_cards(file_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: Skills
-@mcp.tool()
+@mcp.tool(
+    title="Create Skill Cards",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_skill_cards(
     file_id: str = Field(..., description="The unique identifier of the file to which Box Skill cards will be applied. The file ID can be found in the URL when viewing the file in the Box web application."),
     cards: list[_models.SkillCard] | None = Field(None, description="An array of Box Skill card objects to attach to the file. Each item should represent a valid skill card type (e.g., keyword, transcript, timeline, or status card); order is not significant."),
@@ -2912,13 +3180,20 @@ async def create_skill_cards(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Skills
-@mcp.tool()
+@mcp.tool(
+    title="Update Skill Cards",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_skill_cards(
     file_id: str = Field(..., description="The unique identifier of the file whose Box Skills metadata cards will be updated. Visible in the file's URL on the Box web application."),
     body: list[_models.PutFilesIdMetadataGlobalBoxSkillsCardsBodyItem] | None = Field(None, description="An array of JSON-Patch operation objects describing the changes to apply to the Box Skills metadata cards. Each object follows the RFC 6902 JSON-Patch specification, with order of operations being significant."),
@@ -2940,6 +3215,7 @@ async def update_skill_cards(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/json-patch+json"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_skill_cards")
@@ -2955,13 +3231,20 @@ async def update_skill_cards(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json-patch+json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Skills
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Skills Cards",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_skills_cards(file_id: str = Field(..., description="The unique identifier of the file from which Box Skills cards will be removed. The file ID can be found in the file's URL in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Removes all Box Skills cards metadata from a specified file. This clears any AI-generated skill annotations (such as transcripts, topics, or faces) associated with the file."""
 
@@ -2997,7 +3280,13 @@ async def remove_file_skills_cards(file_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Watermarks (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Get File Watermark",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_watermark(file_id: str = Field(..., description="The unique identifier of the file whose watermark you want to retrieve. Visible in the file's URL on the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves the watermark applied to a specific file. Returns watermark details if one exists, or an error if no watermark has been applied."""
 
@@ -3033,7 +3322,12 @@ async def get_file_watermark(file_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Watermarks (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Apply File Watermark",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def apply_file_watermark(
     file_id: str = Field(..., description="The unique identifier of the file to watermark. Found in the file's URL in the Box web application."),
     imprint: Literal["default"] | None = Field(None, description="The type of watermark to apply to the file. Currently only the default imprint style is supported."),
@@ -3069,13 +3363,20 @@ async def apply_file_watermark(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Watermarks (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Watermark",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_watermark(file_id: str = Field(..., description="The unique identifier of the file from which the watermark will be removed. Found in the file's URL in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Removes an existing watermark from a specified file in Box. Use this to revoke watermark protection previously applied to a file."""
 
@@ -3111,7 +3412,13 @@ async def remove_file_watermark(file_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: File requests
-@mcp.tool()
+@mcp.tool(
+    title="Get File Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_request(file_request_id: str = Field(..., description="The unique identifier of the file request to retrieve. This ID can be found in the URL of the file request builder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific file request, including its configuration and status. Use this to inspect an existing file request created via the Box web application."""
 
@@ -3147,7 +3454,13 @@ async def get_file_request(file_request_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: File requests
-@mcp.tool()
+@mcp.tool(
+    title="Update File Request",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_request(
     file_request_id: str = Field(..., description="The unique identifier of the file request to update. Find this ID in the URL of the file request builder in the Box web application."),
     title: str | None = Field(None, description="The new title for the file request. If omitted, the existing title is preserved."),
@@ -3188,13 +3501,20 @@ async def update_file_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: File requests
-@mcp.tool()
+@mcp.tool(
+    title="Delete File Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_request(file_request_id: str = Field(..., description="The unique identifier of the file request to delete. This ID can be found in the URL of the file request builder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specified file request from Box. This action is irreversible and removes the file request and its associated upload link."""
 
@@ -3230,7 +3550,12 @@ async def delete_file_request(file_request_id: str = Field(..., description="The
     return _response_data
 
 # Tags: File requests
-@mcp.tool()
+@mcp.tool(
+    title="Copy File Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_file_request(
     file_request_id: str = Field(..., description="The unique identifier of the file request to copy. Find this ID in the URL when viewing a file request in the Box web application's file request builder."),
     body: _models.FileRequestCopyRequest | None = Field(None, description="The request body specifying the destination folder and any overrides to apply to the copied file request, such as a new title or description."),
@@ -3267,13 +3592,20 @@ async def copy_file_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to retrieve. The root folder of any Box account is always ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     sort: Literal["id", "name", "date", "size"] | None = Field(None, description="The secondary attribute by which folder items are sorted. Items are always grouped by type first (folders, then files, then web links); this parameter controls ordering within those groups. Not supported for marker-based pagination on the root folder."),
@@ -3321,7 +3653,12 @@ async def get_folder(
     return _response_data
 
 # Tags: Trashed folders
-@mcp.tool()
+@mcp.tool(
+    title="Restore Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to restore from trash. The folder ID can be found in the Box web app URL when viewing the folder."),
     name: str | None = Field(None, description="An optional new name to assign to the folder upon restoration, useful if a naming conflict exists at the destination."),
@@ -3358,13 +3695,20 @@ async def restore_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Update Folder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to update. Find this ID in the Box web app URL when viewing the folder. The root folder of any Box account always has the ID `0`."),
     name: str | None = Field(None, description="The new name for the folder. Names must be unique within the parent folder (case-insensitive) and cannot contain non-printable ASCII characters, forward or backward slashes, trailing spaces, or be `.` or `..`."),
@@ -3410,13 +3754,20 @@ async def update_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Delete Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to delete. The folder ID can be found in the URL when viewing the folder in the Box web app, and the root folder is always ID `0`."),
     recursive: bool | None = Field(None, description="When set to true, allows deletion of a non-empty folder by recursively deleting all of its contents along with the folder itself. If omitted or false, the request will fail if the folder contains any items."),
@@ -3458,7 +3809,13 @@ async def delete_folder(
     return _response_data
 
 # Tags: App item associations
-@mcp.tool()
+@mcp.tool(
+    title="List Folder App Item Associations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_app_item_associations(
     folder_id: str = Field(..., description="The unique identifier of the folder whose app item associations you want to retrieve. The folder ID appears in the URL when viewing the folder in the Box web app. The root folder is always ID 0."),
     limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000."),
@@ -3503,7 +3860,13 @@ async def list_folder_app_item_associations(
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_items(
     folder_id: str = Field(..., description="The unique identifier of the folder whose contents you want to list. The root folder of any Box account always uses the ID '0'; for other folders, find the ID in the URL when viewing the folder in the Box web app."),
     usemarker: bool | None = Field(None, description="Set to true to enable marker-based pagination, which returns a 'marker' token in the response to fetch the next page. Cannot be combined with offset-based pagination; use one method consistently throughout a paginated sequence."),
@@ -3552,7 +3915,12 @@ async def list_folder_items(
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder(
     name: str | None = Field(None, description="The display name for the new folder. Must be between 1 and 255 characters, must not contain non-printable ASCII characters, forward or backward slashes, or trailing spaces, and cannot be '.' or '..'. Names are checked case-insensitively for uniqueness within the parent folder.", min_length=1, max_length=255),
     id_: str | None = Field(None, alias="id", description="The unique ID of the parent folder in which the new folder will be created. Use '0' to create the folder at the root level of the user's account."),
@@ -3590,13 +3958,19 @@ async def create_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Copy Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to copy. The folder ID can be found in the Box web app URL when viewing the folder. The root folder (ID '0') cannot be copied."),
     name: str | None = Field(None, description="An optional name for the copied folder. If omitted, the original folder name is used. Names must be between 1 and 255 characters, cannot contain non-printable ASCII characters, forward or backward slashes, trailing spaces, or be exactly '.' or '..'.", min_length=1, max_length=255),
@@ -3634,13 +4008,20 @@ async def copy_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collaborations (List)
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_collaborations(
     folder_id: str = Field(..., description="The unique identifier of the folder whose collaborations you want to retrieve. Find this ID in the Box web app by opening the folder and copying the numeric ID from the URL."),
     limit: str | None = Field(None, description="The maximum number of collaboration records to return in a single page of results. Accepts values up to 1000."),
@@ -3684,7 +4065,13 @@ async def list_folder_collaborations(
     return _response_data
 
 # Tags: Trashed folders
-@mcp.tool()
+@mcp.tool(
+    title="Get Trashed Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trashed_folder(folder_id: str = Field(..., description="The unique identifier of the trashed folder to retrieve. Only folders directly moved to the trash are accessible; folders implicitly trashed via a parent cannot be retrieved by their own ID.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a specific folder that has been directly moved to the trash. Note: if a parent folder was trashed instead, only that parent folder can be retrieved via this endpoint."""
 
@@ -3720,7 +4107,13 @@ async def get_trashed_folder(folder_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Trashed folders
-@mcp.tool()
+@mcp.tool(
+    title="Permanently Delete Trashed Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def permanently_delete_trashed_folder(folder_id: str = Field(..., description="The unique identifier of the folder to permanently delete from trash. The folder ID can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a folder that is currently in the trash, freeing storage and removing it from Box entirely. This action is irreversible and cannot be undone."""
 
@@ -3756,7 +4149,13 @@ async def permanently_delete_trashed_folder(folder_id: str = Field(..., descript
     return _response_data
 
 # Tags: Metadata instances (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_metadata(
     folder_id: str = Field(..., description="The unique identifier of the folder whose metadata instances will be retrieved. Find this ID in the Box web app URL when viewing the folder."),
     view: str | None = Field(None, description="Controls how taxonomy field values are represented in the response. By default, taxonomy values are returned as node identifiers (API view); set to `hydrated` to return full taxonomy node details instead."),
@@ -3798,7 +4197,13 @@ async def list_folder_metadata(
     return _response_data
 
 # Tags: Classifications on folders
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Classification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_classification(folder_id: str = Field(..., description="The unique identifier of the folder whose classification metadata you want to retrieve. The root folder of a Box account is always ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves the security classification metadata applied to a specific folder. Returns the classification instance associated with the folder's enterprise security policy."""
 
@@ -3834,7 +4239,13 @@ async def get_folder_classification(folder_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Classifications on folders
-@mcp.tool()
+@mcp.tool(
+    title="Add Folder Classification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_folder_classification(
     folder_id: str = Field(..., description="The unique identifier of the folder to classify. The ID can be found in the folder's URL in the Box web app; the root folder is always ID '0'."),
     box__security__classification__key: str | None = Field(None, alias="Box__Security__Classification__Key", description="The classification label to apply to the folder. Must match an existing classification key from the enterprise's security classification template."),
@@ -3870,13 +4281,20 @@ async def add_folder_classification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Classifications on folders
-@mcp.tool()
+@mcp.tool(
+    title="Update Folder Classification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_folder_classification(
     folder_id: str = Field(..., description="The unique identifier of the folder whose classification will be updated. The folder ID can be found in the URL when viewing the folder in the Box web app. The root folder is always ID '0'."),
     body: list[_models.PutFoldersIdMetadataEnterpriseSecurityClassification6VmVochwUWoBodyItem] | None = Field(None, description="A list containing exactly one JSON Patch operation object describing the change to apply to the classification label. Only a single update operation is supported per request."),
@@ -3898,6 +4316,7 @@ async def update_folder_classification(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/json-patch+json"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_folder_classification")
@@ -3913,13 +4332,20 @@ async def update_folder_classification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json-patch+json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Classifications on folders
-@mcp.tool()
+@mcp.tool(
+    title="Remove Folder Classification",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_folder_classification(folder_id: str = Field(..., description="The unique identifier of the folder from which the classification will be removed. The root folder of a Box account is always represented by ID '0'.")) -> dict[str, Any] | ToolResult:
     """Removes any existing security classification from a specified folder. This operation clears all classification metadata applied via the enterprise security classification schema."""
 
@@ -3955,7 +4381,13 @@ async def remove_folder_classification(folder_id: str = Field(..., description="
     return _response_data
 
 # Tags: Metadata instances (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Metadata Instance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_metadata_instance(
     folder_id: str = Field(..., description="The unique identifier of the folder whose metadata instance you want to retrieve. Find this ID in the Box web app URL when viewing the folder. The root folder is always ID `0`, but is not supported by this operation."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to retrieve, either `global` for Box-wide templates or `enterprise` for templates defined within your organization."),
@@ -3995,7 +4427,12 @@ async def get_folder_metadata_instance(
     return _response_data
 
 # Tags: Metadata instances (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder_metadata(
     folder_id: str = Field(..., description="The unique identifier of the folder to which the metadata instance will be applied. The root folder of a Box account always uses ID `0`; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to apply, either `global` for Box-wide templates or `enterprise` for templates defined within your enterprise."),
@@ -4034,13 +4471,20 @@ async def create_folder_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata instances (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Update Folder Metadata",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_folder_metadata(
     folder_id: str = Field(..., description="The unique identifier of the folder to update metadata on. The ID appears in the folder's URL in the Box web app, and the root folder is always ID `0`."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, either globally defined or specific to the enterprise account."),
@@ -4064,6 +4508,7 @@ async def update_folder_metadata(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/json-patch+json"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_folder_metadata")
@@ -4079,13 +4524,20 @@ async def update_folder_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json-patch+json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata instances (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Folder Metadata",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_folder_metadata(
     folder_id: str = Field(..., description="The unique identifier of the folder from which metadata will be removed. The root folder of a Box account is always represented by ID '0'; other folder IDs can be found in the URL when viewing the folder in the web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, determining whether it is a globally available template or one specific to the enterprise account."),
@@ -4125,7 +4577,13 @@ async def delete_folder_metadata(
     return _response_data
 
 # Tags: Trashed items
-@mcp.tool()
+@mcp.tool(
+    title="List Trash Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_trash_items(
     limit: str | None = Field(None, description="The maximum number of items to return per page. Must be between 1 and 1000."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Offsets exceeding 10000 will result in a 400 error."),
@@ -4171,7 +4629,13 @@ async def list_trash_items(
     return _response_data
 
 # Tags: Watermarks (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Watermark",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_watermark(folder_id: str = Field(..., description="The unique identifier of the folder whose watermark you want to retrieve. The root folder of a Box account is always represented by the ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves the watermark applied to a specific folder in Box. Returns watermark details if one exists, or a 404 if no watermark has been applied."""
 
@@ -4207,7 +4671,13 @@ async def get_folder_watermark(folder_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: Watermarks (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Apply Folder Watermark",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def apply_folder_watermark(
     folder_id: str = Field(..., description="The unique identifier of the folder to watermark. The folder ID can be found in the URL when viewing the folder in the Box web app. The root folder of any Box account is always ID `0`."),
     imprint: Literal["default"] | None = Field(None, description="The type of watermark imprint to apply to the folder. Currently only the default imprint style is supported."),
@@ -4243,13 +4713,20 @@ async def apply_folder_watermark(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Watermarks (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Remove Folder Watermark",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_folder_watermark(folder_id: str = Field(..., description="The unique identifier of the folder from which the watermark will be removed. The root folder of a Box account is always represented by the ID '0'.")) -> dict[str, Any] | ToolResult:
     """Removes the watermark from a specified folder in Box. Once removed, the folder's content will no longer display watermark overlays."""
 
@@ -4285,7 +4762,13 @@ async def remove_folder_watermark(folder_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: Folder Locks
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Locks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_locks(folder_id: str = Field(..., description="The unique identifier of the folder whose locks you want to retrieve. You can find this ID in the folder's URL in the Box web application; the root folder is always ID `0`.")) -> dict[str, Any] | ToolResult:
     """Retrieves all lock details for a specified folder, including lock type and restrictions. You must be authenticated as the owner or co-owner of the folder to use this endpoint."""
 
@@ -4323,7 +4806,12 @@ async def list_folder_locks(folder_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: Folder Locks
-@mcp.tool()
+@mcp.tool(
+    title="Lock Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def lock_folder(
     move: bool | None = Field(None, description="Whether to lock the folder against move operations, preventing it from being relocated within the file system."),
     delete: bool | None = Field(None, description="Whether to lock the folder against deletion, preventing it from being permanently removed."),
@@ -4360,13 +4848,20 @@ async def lock_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folder Locks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Folder Lock",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_folder_lock(folder_lock_id: str = Field(..., description="The unique identifier of the folder lock to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes a specific folder lock, removing any restrictions it imposed on the folder. You must be authenticated as the owner or co-owner of the folder to perform this action."""
 
@@ -4402,7 +4897,13 @@ async def delete_folder_lock(folder_lock_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="Find Metadata Template by Instance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def find_metadata_template_by_instance(
     metadata_instance_id: str = Field(..., description="The unique UUID of a metadata template instance used to identify and retrieve the associated template definition."),
     limit: str | None = Field(None, description="The maximum number of metadata templates to return in a single page of results. Must be between 1 and 1000."),
@@ -4445,7 +4946,13 @@ async def find_metadata_template_by_instance(
     return _response_data
 
 # Tags: Classifications
-@mcp.tool()
+@mcp.tool(
+    title="List Classifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_classifications() -> dict[str, Any] | ToolResult:
     """Retrieves the enterprise security classification metadata template and returns all classification labels available to the enterprise. Can also be accessed by specifying the enterprise ID explicitly in the URL."""
 
@@ -4472,7 +4979,13 @@ async def list_classifications() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Metadata Template Schema",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metadata_template(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, either 'global' for Box-wide templates or 'enterprise' for templates specific to your organization."),
     template_key: str = Field(..., description="The unique key identifying the metadata template within its scope. To discover available template keys, list all templates for an enterprise or globally, or list templates applied to a file or folder."),
@@ -4511,7 +5024,13 @@ async def get_metadata_template(
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Metadata Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_metadata_template(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, determining its visibility and ownership — either globally available or restricted to the enterprise."),
     template_key: str = Field(..., description="The unique key identifying the metadata template within the given scope."),
@@ -4534,6 +5053,7 @@ async def update_metadata_template(
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "application/json-patch+json"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_metadata_template")
@@ -4549,13 +5069,20 @@ async def update_metadata_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json-patch+json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Metadata Template Schema",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_metadata_template(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, determining whether it applies globally across all enterprises or is specific to your enterprise."),
     template_key: str = Field(..., description="The unique key name identifying the metadata template within the specified scope."),
@@ -4594,7 +5121,13 @@ async def delete_metadata_template(
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Metadata Template by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metadata_template_by_id(template_id: str = Field(..., description="The unique identifier of the metadata template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific metadata template by its unique ID. Use this to inspect template structure, fields, and configuration for a known template."""
 
@@ -4630,7 +5163,13 @@ async def get_metadata_template_by_id(template_id: str = Field(..., description=
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="List Global Metadata Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_global_metadata_templates(limit: str | None = Field(None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.")) -> dict[str, Any] | ToolResult:
     """Retrieves all generic, global metadata templates available to every enterprise using Box. These templates are not organization-specific and can be applied universally across all Box accounts."""
 
@@ -4670,7 +5209,13 @@ async def list_global_metadata_templates(limit: str | None = Field(None, descrip
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Metadata Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_metadata_templates(limit: str | None = Field(None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all metadata templates created for use within the authenticated user's enterprise. Returns a paginated list of enterprise-scoped templates available for applying structured metadata to content."""
 
@@ -4710,7 +5255,12 @@ async def list_enterprise_metadata_templates(limit: str | None = Field(None, des
     return _response_data
 
 # Tags: Metadata templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Metadata Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_metadata_template(
     scope: str | None = Field(None, description="The scope under which the metadata template will be created. Must be set to 'enterprise', as global-scoped templates cannot be created via the API."),
     template_key: str | None = Field(None, alias="templateKey", description="A unique identifier for the template across the enterprise, used to reference it programmatically. Must start with a letter or underscore, followed by letters, digits, hyphens, or underscores, up to 64 characters. If omitted, the API auto-generates one from the display name.", max_length=64, pattern="^[a-zA-Z_][-a-zA-Z0-9_]*$"),
@@ -4749,13 +5299,19 @@ async def create_metadata_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Classifications
-@mcp.tool()
+@mcp.tool(
+    title="Initialize Classifications",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initialize_classifications(
     hidden: bool | None = Field(None, description="Controls whether the classification template is hidden from users on web and mobile devices. Set to true to restrict visibility, or false to make classifications available for selection."),
     copy_instance_on_item_copy: bool | None = Field(None, alias="copyInstanceOnItemCopy", description="Controls whether the assigned classification is automatically copied to a new item when a file or folder is copied. Set to true to propagate classifications on copy, or false to leave the copy unclassified."),
@@ -4791,13 +5347,20 @@ async def initialize_classifications(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata cascade policies
-@mcp.tool()
+@mcp.tool(
+    title="List Metadata Cascade Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metadata_cascade_policies(
     folder_id: str = Field(..., description="The ID of the folder for which to retrieve metadata cascade policies. Must be a valid non-root folder; the root folder with ID `0` is not supported."),
     owner_enterprise_id: str | None = Field(None, description="The ID of the enterprise whose metadata cascade policies should be returned. Defaults to the currently authenticated enterprise if not provided."),
@@ -4841,7 +5404,12 @@ async def list_metadata_cascade_policies(
     return _response_data
 
 # Tags: Metadata cascade policies
-@mcp.tool()
+@mcp.tool(
+    title="Create Metadata Cascade Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_metadata_cascade_policy(
     folder_id: str | None = Field(None, description="The unique identifier of the folder to which the cascade policy will be applied. The folder must already have an instance of the target metadata template applied to it."),
     metadata_template: str | None = Field(None, description="The metadata template identifier in 'scope/templateKey' format (e.g., 'enterprise_12345/contractTemplate')"),
@@ -4879,13 +5447,20 @@ async def create_metadata_cascade_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metadata cascade policies
-@mcp.tool()
+@mcp.tool(
+    title="Get Metadata Cascade Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metadata_cascade_policy(metadata_cascade_policy_id: str = Field(..., description="The unique identifier of the metadata cascade policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific metadata cascade policy assigned to a folder. Use this to inspect how metadata templates are being propagated from a folder to its contents."""
 
@@ -4921,7 +5496,12 @@ async def get_metadata_cascade_policy(metadata_cascade_policy_id: str = Field(..
     return _response_data
 
 # Tags: Metadata cascade policies
-@mcp.tool()
+@mcp.tool(
+    title="Apply Metadata Cascade Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def apply_metadata_cascade_policy(
     metadata_cascade_policy_id: str = Field(..., description="The unique identifier of the metadata cascade policy to force-apply to the folder's children."),
     conflict_resolution: Literal["none", "overwrite"] | None = Field(None, description="Determines how to handle conflicts when a child file already has an instance of the metadata template applied. Use 'none' to preserve existing values on the child, or 'overwrite' to replace them with the cascaded values from the folder."),
@@ -4957,13 +5537,19 @@ async def apply_metadata_cascade_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Query Items by Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_items_by_metadata(
     from_: str | None = Field(None, alias="from", description="The metadata template to query against, specified as `scope.templateKey`. Built-in Box-provided classification templates are not supported."),
     query: str | None = Field(None, description="A SQL-like logical expression used to filter items by their metadata field values. Use named placeholders (e.g., `:paramName`) to reference values defined in `query_params`."),
@@ -5002,13 +5588,20 @@ async def query_items_by_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_comment(comment_id: str = Field(..., description="The unique identifier of the comment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the message, metadata, and author information for a specific comment. Use this to fetch the full details of a single comment by its unique identifier."""
 
@@ -5044,7 +5637,13 @@ async def get_comment(comment_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Update Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_comment(
     comment_id: str = Field(..., description="The unique identifier of the comment to update."),
     message: str | None = Field(None, description="The new text content to replace the comment's existing message."),
@@ -5080,13 +5679,20 @@ async def update_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_comment(comment_id: str = Field(..., description="The unique identifier of the comment to permanently delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a comment by its unique identifier. This action is irreversible and cannot be undone."""
 
@@ -5122,7 +5728,12 @@ async def delete_comment(comment_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Create Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_comment(
     tagged_message: str | None = Field(None, description="The text of the comment using mention syntax to tag another user, formatted as `@[user_id:display_name]` anywhere in the message. Use the plain `message` parameter instead if no user mentions are needed."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the file or comment this comment will be attached to."),
@@ -5159,13 +5770,20 @@ async def create_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collaborations
-@mcp.tool()
+@mcp.tool(
+    title="Get Collaboration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collaboration(collaboration_id: str = Field(..., description="The unique identifier of the collaboration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a single collaboration by its unique identifier. Use this to inspect collaboration settings, permissions, and associated users or groups."""
 
@@ -5201,7 +5819,13 @@ async def get_collaboration(collaboration_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Collaborations
-@mcp.tool()
+@mcp.tool(
+    title="Update Collaboration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_collaboration(
     collaboration_id: str = Field(..., description="The unique identifier of the collaboration to update."),
     role: Literal["editor", "viewer", "previewer", "uploader", "previewer uploader", "viewer uploader", "co-owner", "owner"] | None = Field(None, description="The permission level to grant the collaborator. Not required when accepting a collaboration invitation. Valid values range from read-only access (viewer, previewer) to full ownership (owner)."),
@@ -5240,13 +5864,20 @@ async def update_collaboration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collaborations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Collaboration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_collaboration(collaboration_id: str = Field(..., description="The unique identifier of the collaboration to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a collaboration by its unique identifier. This action cannot be undone and will revoke the associated access or shared relationship."""
 
@@ -5282,7 +5913,13 @@ async def delete_collaboration(collaboration_id: str = Field(..., description="T
     return _response_data
 
 # Tags: Collaborations (List)
-@mcp.tool()
+@mcp.tool(
+    title="List Pending Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pending_collaborations(
     status: Literal["pending"] = Field(..., description="Filters collaborations by their current status. Only pending invites are supported by this endpoint."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through results. Must not exceed 10,000; requests beyond this limit will return a 400 error."),
@@ -5327,7 +5964,12 @@ async def list_pending_collaborations(
     return _response_data
 
 # Tags: Collaborations
-@mcp.tool()
+@mcp.tool(
+    title="Create Collaboration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_collaboration(
     notify: bool | None = Field(None, description="Whether to send an email notification to the invited collaborator when the collaboration is created."),
     item_type: Literal["file", "folder"] | None = Field(None, alias="itemType", description="The type of Box item the collaboration will be granted access to, either a file or a folder."),
@@ -5375,13 +6017,20 @@ async def create_collaboration(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_content(
     query: str | None = Field(None, description="The text to search for, matched against item names, descriptions, file content, and other fields. Supports boolean operators AND, OR, and NOT (uppercase only), and exact phrase matching using double quotes."),
     scope: Literal["user_content", "enterprise_content"] | None = Field(None, description="Restricts search results to content accessible by the current user (`user_content`) or all content across the entire enterprise (`enterprise_content`). Enterprise scope requires admin enablement via support."),
@@ -5451,7 +6100,12 @@ async def search_content(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the file on which the task will be created."),
     type_: Literal["file"] | None = Field(None, alias="type", description="The type of item the task is being created on; must always be set to 'file'."),
@@ -5491,13 +6145,20 @@ async def create_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(task_id: str = Field(..., description="The unique identifier of the task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific task by its unique identifier. Use this to fetch the current state, metadata, and attributes of a single task."""
 
@@ -5533,7 +6194,13 @@ async def get_task(task_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task(
     task_id: str = Field(..., description="The unique identifier of the task to update."),
     action: Literal["review", "complete"] | None = Field(None, description="The type of action assignees are prompted to perform: 'review' creates an approval task that can be approved or rejected, while 'complete' creates a general task that can be marked done."),
@@ -5572,13 +6239,20 @@ async def update_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(task_id: str = Field(..., description="The unique identifier of the task to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a task from its associated file. This action cannot be undone."""
 
@@ -5614,7 +6288,13 @@ async def delete_task(task_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: Task assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Task Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_assignments(task_id: str = Field(..., description="The unique identifier of the task whose assignments you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all assignments associated with a specific task, returning the list of users or groups assigned to it."""
 
@@ -5650,7 +6330,12 @@ async def list_task_assignments(task_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Task assignments
-@mcp.tool()
+@mcp.tool(
+    title="Assign Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_task(
     task_id: str | None = Field(None, alias="taskId", description="The unique identifier of the task to be assigned."),
     assign_to_id: str | None = Field(None, alias="assign_toId", description="The unique identifier of the user to assign the task to. Use the `login` parameter instead to specify the user by email address."),
@@ -5688,13 +6373,20 @@ async def assign_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_assignment(task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific task assignment, including its status, assignee, and associated task. Use this to inspect the current state of a single task assignment by its unique identifier."""
 
@@ -5730,7 +6422,13 @@ async def get_task_assignment(task_assignment_id: str = Field(..., description="
     return _response_data
 
 # Tags: Task assignments
-@mcp.tool()
+@mcp.tool(
+    title="Update Task Assignment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task_assignment(
     task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to update."),
     message: str | None = Field(None, description="An optional message from the assignee to accompany the task assignment update."),
@@ -5767,13 +6465,20 @@ async def update_task_assignment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task assignments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task Assignment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task_assignment(task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to delete.")) -> dict[str, Any] | ToolResult:
     """Removes a specific task assignment, unassigning the user from the associated task. This action permanently deletes the assignment record."""
 
@@ -5809,7 +6514,13 @@ async def delete_task_assignment(task_assignment_id: str = Field(..., descriptio
     return _response_data
 
 # Tags: Shared links (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Get Shared Link File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_shared_link_file(boxapi: str = Field(..., description="Authorization header value containing the shared link URL and an optional password, formatted as a key-value pair string using the shared_link and shared_link_password keys.")) -> dict[str, Any] | ToolResult:
     """Retrieves file information for a given shared link, supporting links originating from within or outside the current enterprise. Optionally returns shared link permission options when requested via the fields query parameter."""
 
@@ -5845,7 +6556,13 @@ async def get_shared_link_file(boxapi: str = Field(..., description="Authorizati
     return _response_data
 
 # Tags: Shared links (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Get File Shared Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_shared_link(
     file_id: str = Field(..., description="The unique identifier of the file whose shared link information you want to retrieve. The file ID can be found in the file's URL in the Box web application."),
     fields: str = Field(..., description="Specifies which fields to include in the response; must be set to request shared link data to be returned for the file."),
@@ -5887,7 +6604,13 @@ async def get_file_shared_link(
     return _response_data
 
 # Tags: Shared links (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Add File Shared Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_file_shared_link(
     file_id: str = Field(..., description="The unique identifier of the file to add a shared link to. Visible in the file's URL in the Box web application."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include 'shared_link' to return shared link details in the response."),
@@ -5934,13 +6657,20 @@ async def add_file_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Update File Shared Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_shared_link(
     file_id: str = Field(..., description="The unique identifier of the file whose shared link will be updated. The file ID can be found in the URL when viewing the file in the Box web application."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include 'shared_link' to ensure the updated shared link details are returned."),
@@ -5987,13 +6717,20 @@ async def update_file_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Files)
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Shared Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_shared_link(
     file_id: str = Field(..., description="The unique identifier of the file from which the shared link will be removed. The file ID can be found in the URL when viewing the file in the Box web application."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include 'shared_link' to confirm the shared link has been removed and retrieve the updated link state."),
@@ -6033,13 +6770,20 @@ async def remove_file_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder From Shared Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_from_shared_link(boxapi: str = Field(..., description="Authorization header containing the shared link URL and an optional password, formatted as a key-value string using the pattern shared_link=[link]&shared_link_password=[password].")) -> dict[str, Any] | ToolResult:
     """Retrieves folder metadata using a shared link, supporting links from within the current enterprise or external ones. Useful when only a shared link is available and full folder details are needed."""
 
@@ -6075,7 +6819,13 @@ async def get_folder_from_shared_link(boxapi: str = Field(..., description="Auth
     return _response_data
 
 # Tags: Shared links (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Shared Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_shared_link(
     folder_id: str = Field(..., description="The unique identifier of the folder whose shared link you want to retrieve. The root folder of a Box account is always ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     fields: str = Field(..., description="Must be set to 'shared_link' to explicitly request that shared link fields are included in the response. This field is required by the API to return shared link data."),
@@ -6117,7 +6867,13 @@ async def get_folder_shared_link(
     return _response_data
 
 # Tags: Shared links (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Add Folder Shared Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_folder_shared_link(
     folder_id: str = Field(..., description="The unique identifier of the folder to add a shared link to. The ID appears in the folder's URL in the Box web app, and the root folder is always ID `0`."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include `shared_link` to return the shared link details in the response."),
@@ -6164,13 +6920,20 @@ async def add_folder_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Update Folder Shared Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_folder_shared_link(
     folder_id: str = Field(..., description="The unique identifier of the folder whose shared link will be updated. The ID can be found in the folder's URL in the Box web app. The root folder is always ID `0`."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include `shared_link` to return the updated shared link details."),
@@ -6217,13 +6980,20 @@ async def update_folder_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Folders)
-@mcp.tool()
+@mcp.tool(
+    title="Remove Folder Shared Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_folder_shared_link(
     folder_id: str = Field(..., description="The unique identifier of the folder from which the shared link will be removed. The root folder of a Box account is always represented by the ID '0'."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include 'shared_link' to confirm the shared link has been removed from the folder."),
@@ -6263,13 +7033,19 @@ async def remove_folder_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Web links
-@mcp.tool()
+@mcp.tool(
+    title="Create Web Link",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_web_link(
     url: str | None = Field(None, description="The full URL the web link points to. Must begin with 'http://' or 'https://'."),
     id_: str | None = Field(None, alias="id", description="The ID of the parent folder where the web link will be created. Use '0' to target the root folder."),
@@ -6307,13 +7083,20 @@ async def create_web_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Web links
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific web link, including its URL, name, and associated metadata. Useful for inspecting or displaying a saved web link by its unique identifier."""
 
@@ -6349,7 +7132,12 @@ async def get_web_link(web_link_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Trashed web links
-@mcp.tool()
+@mcp.tool(
+    title="Restore Web Link",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_web_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link to restore from the trash."),
     name: str | None = Field(None, description="An optional new name to assign to the web link upon restoration, useful if a naming conflict exists in the destination folder."),
@@ -6386,13 +7174,20 @@ async def restore_web_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Web links
-@mcp.tool()
+@mcp.tool(
+    title="Update Web Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_web_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link to update."),
     url: str | None = Field(None, description="The new destination URL for the web link. Must begin with 'http://' or 'https://'."),
@@ -6436,13 +7231,20 @@ async def update_web_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Web links
-@mcp.tool()
+@mcp.tool(
+    title="Delete Web Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a web link by its unique identifier. This action cannot be undone."""
 
@@ -6478,7 +7280,13 @@ async def delete_web_link(web_link_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: Trashed web links
-@mcp.tool()
+@mcp.tool(
+    title="Get Trashed Web Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trashed_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to retrieve from the trash.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a web link that has been moved to the trash. Useful for inspecting or restoring a trashed web link before permanent deletion."""
 
@@ -6514,7 +7322,13 @@ async def get_trashed_web_link(web_link_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Trashed web links
-@mcp.tool()
+@mcp.tool(
+    title="Permanently Delete Web Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def permanently_delete_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to permanently delete from the trash.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a web link that is currently in the trash, removing it from Box entirely. This action is irreversible and cannot be undone."""
 
@@ -6550,7 +7364,13 @@ async def permanently_delete_web_link(web_link_id: str = Field(..., description=
     return _response_data
 
 # Tags: Shared links (Web Links)
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Link from Shared Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_link_from_shared_link(boxapi: str = Field(..., description="Authorization header containing the shared link URL and an optional password, formatted as a key-value string. Both the shared link and password fields must follow the prescribed header format.")) -> dict[str, Any] | ToolResult:
     """Retrieves web link details using only a shared link URL, supporting links originating from within or outside the current enterprise. Useful when the web link ID is unknown and only the shared link is available."""
 
@@ -6586,7 +7406,13 @@ async def get_web_link_from_shared_link(boxapi: str = Field(..., description="Au
     return _response_data
 
 # Tags: Shared links (Web Links)
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Link Shared Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_link_shared_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link whose shared link information you want to retrieve."),
     fields: str = Field(..., description="Specifies which fields to include in the response; must be set to request shared link data to be returned for the web link."),
@@ -6628,7 +7454,12 @@ async def get_web_link_shared_link(
     return _response_data
 
 # Tags: Shared links (Web Links)
-@mcp.tool()
+@mcp.tool(
+    title="Add Web Link Shared Link",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_web_link_shared_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link to which the shared link will be added."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response; must include 'shared_link' to return the shared link details."),
@@ -6675,13 +7506,20 @@ async def add_web_link_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Web Links)
-@mcp.tool()
+@mcp.tool(
+    title="Update Web Link Shared Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_web_link_shared_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link whose shared link settings will be updated."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response; must include 'shared_link' to return shared link details."),
@@ -6728,13 +7566,20 @@ async def update_web_link_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (Web Links)
-@mcp.tool()
+@mcp.tool(
+    title="Remove Web Link Shared Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_web_link_shared_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link from which the shared link will be removed."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response; must include 'shared_link' to confirm the shared link has been removed."),
@@ -6774,13 +7619,20 @@ async def remove_web_link_shared_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shared links (App Items)
-@mcp.tool()
+@mcp.tool(
+    title="Get App Item From Shared Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_item_from_shared_link(boxapi: str = Field(..., description="A header value containing the shared link URL and an optional password, formatted as a key-value pair string using the pattern `shared_link=[link]&shared_link_password=[password]`.")) -> dict[str, Any] | ToolResult:
     """Retrieves the app item associated with a given shared link, which may originate from the current enterprise or an external one. Requires the shared link URL and an optional password passed as a formatted header value."""
 
@@ -6816,7 +7668,13 @@ async def get_app_item_from_shared_link(boxapi: str = Field(..., description="A 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     filter_term: str | None = Field(None, description="Narrows results to users whose name or login starts with the given term. For externally managed users, the term must be an exact match and will return at most one result."),
     user_type: Literal["all", "managed", "external"] | None = Field(None, description="Filters results by user category: 'all' includes every user type with partial name/login matching (exact match required for external users), 'managed' returns only managed and app users with partial matching, and 'external' returns only external users whose login exactly matches the filter term."),
@@ -6863,7 +7721,12 @@ async def list_users(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Create User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user(
     is_platform_access_only: bool | None = Field(None, description="When set to true, designates this user as a platform (app) user rather than a standard managed enterprise user."),
     role: Literal["coadmin", "user"] | None = Field(None, description="The user's role within the enterprise, either a co-administrator with elevated privileges or a standard user."),
@@ -6918,13 +7781,20 @@ async def create_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for the currently authenticated user, whether that is an OAuth 2.0 authorizing user, a JWT service account, or an impersonated user specified via the As-User header."""
 
@@ -6951,7 +7821,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Session termination
-@mcp.tool()
+@mcp.tool(
+    title="Terminate User Sessions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def terminate_user_sessions(
     user_ids: list[str] | None = Field(None, description="A list of unique user IDs identifying the accounts whose sessions should be terminated. Order is not significant; each entry should be a valid numeric user ID string."),
     user_logins: list[str] | None = Field(None, description="A list of user login email addresses identifying the accounts whose sessions should be terminated. Order is not significant; each entry should be a valid email address associated with a user account."),
@@ -6986,13 +7862,20 @@ async def terminate_user_sessions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(user_id: str = Field(..., description="The unique identifier of the user whose information you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for a specific user within the enterprise. Also returns a limited set of fields for external collaborators, with restricted fields returning null."""
 
@@ -7028,7 +7911,13 @@ async def get_user(user_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     user_id: str = Field(..., description="The unique identifier of the user to update."),
     enterprise: str | None = Field(None, description="Set to null to remove the user from the enterprise and convert them to a free user."),
@@ -7087,13 +7976,20 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(
     user_id: str = Field(..., description="The unique identifier of the user to delete."),
     notify: bool | None = Field(None, description="Whether to send the user an email notification informing them of their account deletion."),
@@ -7136,7 +8032,13 @@ async def delete_user(
     return _response_data
 
 # Tags: User avatars
-@mcp.tool()
+@mcp.tool(
+    title="Get User Avatar",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_avatar(user_id: str = Field(..., description="The unique identifier of the user whose avatar image should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the avatar image for a specified user. Returns the user's profile picture as an image resource."""
 
@@ -7172,10 +8074,15 @@ async def get_user_avatar(user_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: User avatars
-@mcp.tool()
+@mcp.tool(
+    title="Upload User Avatar",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_user_avatar(
     user_id: str = Field(..., description="The unique identifier of the user whose avatar is being added or updated."),
-    pic: str | None = Field(None, description="The image file to upload as the user's avatar. Must be a JPG or PNG file and cannot exceed 1MB in size."),
+    pic: str | None = Field(None, description="Base64-encoded file content for upload. The image file to upload as the user's avatar. Must be a JPG or PNG file and cannot exceed 1MB in size.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Adds or replaces the avatar image for a specified user. Accepts JPG or PNG files up to 1MB in size."""
 
@@ -7216,7 +8123,13 @@ async def upload_user_avatar(
     return _response_data
 
 # Tags: User avatars
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Avatar",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_avatar(user_id: str = Field(..., description="The unique identifier of the user whose avatar will be permanently deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently removes the avatar image for the specified user. This action is irreversible and cannot be undone."""
 
@@ -7252,7 +8165,13 @@ async def delete_user_avatar(user_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Transfer folders
-@mcp.tool()
+@mcp.tool(
+    title="Transfer User Folders",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def transfer_user_folders(
     user_id: str = Field(..., description="The unique identifier of the user whose root folder and all owned content will be transferred."),
     notify: bool | None = Field(None, description="Whether to send email notifications to relevant users about the transfer action being performed."),
@@ -7292,13 +8211,20 @@ async def transfer_user_folders(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Email aliases
-@mcp.tool()
+@mcp.tool(
+    title="List User Email Aliases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_email_aliases(user_id: str = Field(..., description="The unique identifier of the user whose email aliases should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all secondary email aliases associated with a specific user account. Note that the user's primary login email is not included in the returned collection."""
 
@@ -7334,7 +8260,12 @@ async def list_user_email_aliases(user_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Email aliases
-@mcp.tool()
+@mcp.tool(
+    title="Create Email Alias",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_email_alias(
     user_id: str = Field(..., description="The unique identifier of the user account to which the email alias will be added."),
     email: str | None = Field(None, description="The email address to register as an alias on the user account. The domain portion must be verified and registered to your enterprise before use."),
@@ -7370,13 +8301,20 @@ async def create_email_alias(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Email aliases
-@mcp.tool()
+@mcp.tool(
+    title="Remove User Email Alias",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_email_alias(
     user_id: str = Field(..., description="The unique identifier of the user whose email alias will be removed."),
     email_alias_id: str = Field(..., description="The unique identifier of the email alias to remove from the user."),
@@ -7415,7 +8353,13 @@ async def remove_user_email_alias(
     return _response_data
 
 # Tags: Group memberships
-@mcp.tool()
+@mcp.tool(
+    title="List User Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_memberships(
     user_id: str = Field(..., description="The unique identifier of the user whose group memberships are being retrieved."),
     limit: str | None = Field(None, description="The maximum number of group memberships to return per page. Accepts values up to 1000."),
@@ -7459,7 +8403,12 @@ async def list_user_memberships(
     return _response_data
 
 # Tags: Invites
-@mcp.tool()
+@mcp.tool(
+    title="Invite Enterprise User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invite_enterprise_user(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the enterprise to which the user is being invited."),
     login: str | None = Field(None, description="The email address (login) of the existing Box user to invite to the enterprise."),
@@ -7495,13 +8444,20 @@ async def invite_enterprise_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Invites
-@mcp.tool()
+@mcp.tool(
+    title="Get Invite",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_invite(invite_id: str = Field(..., description="The unique identifier of the invite whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a specific user invite. Useful for checking whether an invite has been accepted, is pending, or has expired."""
 
@@ -7537,7 +8493,13 @@ async def get_invite(invite_id: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(
     filter_term: str | None = Field(None, description="Narrows results to only groups whose name begins with the specified search term. Omitting this parameter returns all groups."),
     limit: str | None = Field(None, description="Maximum number of groups to return in a single page of results. Accepts values between 1 and 1000."),
@@ -7582,7 +8544,12 @@ async def list_groups(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(
     name: str | None = Field(None, description="The display name for the new group, which must be unique across the entire enterprise."),
     provenance: str | None = Field(None, description="Identifies the external source system this group originates from (e.g., Active Directory or Okta). Setting this prevents Box admins from editing the group name or members via the Box web app, enabling one-way sync. Maximum 255 characters.", max_length=255),
@@ -7621,13 +8588,20 @@ async def create_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Session termination
-@mcp.tool()
+@mcp.tool(
+    title="Terminate Group Sessions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def terminate_group_sessions(group_ids: list[str] | None = Field(None, description="A list of group IDs whose sessions should be terminated. Order is not significant; each item should be a valid group ID string.")) -> dict[str, Any] | ToolResult:
     """Terminates all active sessions for one or more user groups by creating asynchronous jobs after validating group roles and permissions. Returns the status of the termination request."""
 
@@ -7659,13 +8633,20 @@ async def terminate_group_sessions(group_ids: list[str] | None = Field(None, des
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(group_id: str = Field(..., description="The unique identifier of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific group by its ID. Only group members or users with admin-level permissions can access this endpoint."""
 
@@ -7701,7 +8682,13 @@ async def get_group(group_id: str = Field(..., description="The unique identifie
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group(
     group_id: str = Field(..., description="The unique identifier of the group to update."),
     name: str | None = Field(None, description="The updated display name for the group, which must remain unique across the enterprise."),
@@ -7742,13 +8729,20 @@ async def update_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(group_id: str = Field(..., description="The unique identifier of the group to be permanently deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group and all associated data. Requires admin-level permissions to perform this action."""
 
@@ -7784,7 +8778,13 @@ async def delete_group(group_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Group memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Group Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of membership records to return per page. Accepts values up to 1000; omit to use the API default."),
@@ -7828,7 +8828,13 @@ async def list_group_members(
     return _response_data
 
 # Tags: Collaborations (List)
-@mcp.tool()
+@mcp.tool(
+    title="List Group Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_collaborations(
     group_id: str = Field(..., description="The unique identifier of the group whose collaborations you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000."),
@@ -7874,7 +8880,12 @@ async def list_group_collaborations(
     return _response_data
 
 # Tags: Group memberships
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_group(
     user_id: str | None = Field(None, alias="userId", description="The unique identifier of the user to be added to the group."),
     group_id: str | None = Field(None, alias="groupId", description="The unique identifier of the group the user will be added to."),
@@ -7913,13 +8924,20 @@ async def add_user_to_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Group memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_membership(group_membership_id: str = Field(..., description="The unique identifier of the group membership record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details of a specific group membership by its unique ID. Only group admins or users with admin-level permissions can access this endpoint."""
 
@@ -7955,7 +8973,13 @@ async def get_group_membership(group_membership_id: str = Field(..., description
     return _response_data
 
 # Tags: Group memberships
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_membership(
     group_membership_id: str = Field(..., description="The unique identifier of the group membership record to update."),
     role: Literal["member", "admin"] | None = Field(None, description="The role to assign to the user within the group. Accepted values are 'member' for standard access or 'admin' for elevated group management privileges."),
@@ -7992,13 +9016,20 @@ async def update_group_membership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Group memberships
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_member(group_membership_id: str = Field(..., description="The unique identifier of the group membership record to delete, representing the association between a specific user and group.")) -> dict[str, Any] | ToolResult:
     """Removes a user from a group by deleting the specified group membership. Only group admins or users with admin-level permissions can perform this action."""
 
@@ -8034,7 +9065,13 @@ async def remove_group_member(group_membership_id: str = Field(..., description=
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(limit: str | None = Field(None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all webhooks defined for the authenticated application, scoped to files and folders owned by the requesting user. Note that admins cannot view webhooks created by service accounts unless they have explicit access to those folders, and vice versa."""
 
@@ -8074,7 +9111,13 @@ async def list_webhooks(limit: str | None = Field(None, description="The maximum
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the configuration and details of a specific webhook by its unique identifier. Useful for inspecting webhook settings, target URLs, and event subscriptions."""
 
@@ -8110,7 +9153,13 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook by its unique identifier, stopping all future event notifications associated with it."""
 
@@ -8146,7 +9195,13 @@ async def delete_webhook(webhook_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Skills
-@mcp.tool()
+@mcp.tool(
+    title="Update Skill Cards on File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_skill_cards_on_file(
     skill_id: str = Field(..., description="The unique identifier of the Box Skill to apply metadata for. This determines which skill's cards are overwritten on the file."),
     status: Literal["invoked", "processing", "success", "transient_failure", "permanent_failure"] | None = Field(None, description="The current processing status of this skill invocation. Set to 'success' when providing completed Skill cards; use failure or processing states to reflect intermediate or error conditions. Accepted values are 'invoked', 'processing', 'success', 'transient_failure', or 'permanent_failure'."),
@@ -8191,13 +9246,20 @@ async def update_skill_cards_on_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_events(
     stream_type: Literal["all", "changes", "sync", "admin_logs", "admin_logs_streaming"] | None = Field(None, description="Controls the scope and type of events returned. Use 'all' for the authenticated user's full event history, 'changes' or 'sync' for file-tree-affecting events, 'admin_logs' for paginated historical enterprise-wide events within a date range, or 'admin_logs_streaming' for low-latency polling of recent enterprise-wide events. Admin privileges are required for the 'admin_logs' and 'admin_logs_streaming' types."),
     stream_position: str | None = Field(None, description="The cursor position in the event stream from which to begin returning events. Use 'now' to initialize a stream and receive only the latest position with no events, or '0' / null to retrieve all available events from the beginning."),
@@ -8247,7 +9309,13 @@ async def list_events(
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="List Collections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collections(
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, enabling pagination through large result sets. Offset values exceeding 10,000 will result in a 400 error."),
     limit: str | None = Field(None, description="The maximum number of collections to return in a single response page. Accepts values up to 1,000."),
@@ -8291,7 +9359,13 @@ async def list_collections(
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="List Collection Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collection_items(
     collection_id: str = Field(..., description="The unique identifier of the collection whose items you want to retrieve."),
     offset: str | None = Field(None, description="The zero-based index of the first item to return, enabling pagination through results. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error."),
@@ -8337,7 +9411,13 @@ async def list_collection_items(
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collection(collection_id: str = Field(..., description="The unique identifier of the collection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific collection by its unique identifier. Use this to fetch metadata and contents associated with a single collection."""
 
@@ -8373,7 +9453,13 @@ async def get_collection(collection_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Recent items
-@mcp.tool()
+@mcp.tool(
+    title="List Recent Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_recent_items(limit: str | None = Field(None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of items recently accessed by the current user, covering activity from the last 90 days or up to the last 1000 items accessed, whichever limit is reached first."""
 
@@ -8413,7 +9499,13 @@ async def list_recent_items(limit: str | None = Field(None, description="The max
     return _response_data
 
 # Tags: Retention policies
-@mcp.tool()
+@mcp.tool(
+    title="List Retention Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retention_policies(
     policy_name: str | None = Field(None, description="Filters results to only retention policies whose names begin with the specified string. The match is case-sensitive and prefix-based, so partial names from the start of the policy name are supported."),
     policy_type: Literal["finite", "indefinite"] | None = Field(None, description="Filters results by the retention policy type. Use 'finite' for policies with a defined expiration period, or 'indefinite' for policies that retain content without a set end date."),
@@ -8458,7 +9550,13 @@ async def list_retention_policies(
     return _response_data
 
 # Tags: Retention policies
-@mcp.tool()
+@mcp.tool(
+    title="Get Retention Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retention_policy(retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific retention policy by its unique identifier. Use this to inspect policy settings such as retention duration, disposition action, and assignment scope."""
 
@@ -8494,7 +9592,13 @@ async def get_retention_policy(retention_policy_id: str = Field(..., description
     return _response_data
 
 # Tags: Retention policies
-@mcp.tool()
+@mcp.tool(
+    title="Update Retention Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_retention_policy(
     retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to update."),
     policy_name: str | None = Field(None, description="The updated display name for the retention policy."),
@@ -8538,13 +9642,20 @@ async def update_retention_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Retention policies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Retention Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_retention_policy(retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to permanently delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a retention policy by its unique identifier. This action is irreversible and removes the policy and its associated settings."""
 
@@ -8580,7 +9691,13 @@ async def delete_retention_policy(retention_policy_id: str = Field(..., descript
     return _response_data
 
 # Tags: Retention policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Retention Policy Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retention_policy_assignments(
     retention_policy_id: str = Field(..., description="The unique identifier of the retention policy whose assignments you want to retrieve."),
     type_: Literal["folder", "enterprise", "metadata_template"] | None = Field(None, alias="type", description="Filters the results to only return assignments of a specific type. Accepted values are 'folder', 'enterprise', or 'metadata_template'."),
@@ -8625,7 +9742,12 @@ async def list_retention_policy_assignments(
     return _response_data
 
 # Tags: Retention policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="Assign Retention Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_retention_policy(
     policy_id: str | None = Field(None, description="The unique identifier of the retention policy to assign to the target item."),
     type_: Literal["enterprise", "folder", "metadata_template"] | None = Field(None, alias="type", description="The category of item the retention policy will be assigned to. Use 'enterprise' to apply policy-wide, 'folder' for a specific folder, or 'metadata_template' to target items matching a metadata template."),
@@ -8664,13 +9786,20 @@ async def assign_retention_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Retention policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Retention Policy Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retention_policy_assignment(retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific retention policy assignment by its unique ID. Use this to inspect how a retention policy has been applied to a particular content target."""
 
@@ -8706,7 +9835,13 @@ async def get_retention_policy_assignment(retention_policy_assignment_id: str = 
     return _response_data
 
 # Tags: Retention policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Retention Policy Assignment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_retention_policy_assignment(retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment to remove.")) -> dict[str, Any] | ToolResult:
     """Removes a retention policy assignment, detaching the retention policy from the previously assigned content. This action stops the policy from being enforced on that content going forward."""
 
@@ -8742,7 +9877,13 @@ async def delete_retention_policy_assignment(retention_policy_assignment_id: str
     return _response_data
 
 # Tags: Retention policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Files Under Retention",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_files_under_retention(
     retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment whose retained files you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of files to return per page. Accepts values up to 1000; omit to use the API default."),
@@ -8786,7 +9927,13 @@ async def list_files_under_retention(
     return _response_data
 
 # Tags: Retention policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="List File Versions Under Retention",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_versions_under_retention(
     retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment whose retained file versions you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000."),
@@ -8830,7 +9977,13 @@ async def list_file_versions_under_retention(
     return _response_data
 
 # Tags: Legal hold policies
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Hold Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_hold_policies(
     policy_name: str | None = Field(None, description="Filters results to only include policies whose names begin with this search term. The match is case-insensitive."),
     limit: str | None = Field(None, description="The maximum number of legal hold policies to return in a single page of results. Accepts values up to 1000."),
@@ -8873,7 +10026,13 @@ async def list_legal_hold_policies(
     return _response_data
 
 # Tags: Legal hold policies
-@mcp.tool()
+@mcp.tool(
+    title="Get Legal Hold Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_legal_hold_policy(legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific legal hold policy by its unique identifier. Use this to inspect policy configuration, status, and associated metadata."""
 
@@ -8909,7 +10068,13 @@ async def get_legal_hold_policy(legal_hold_policy_id: str = Field(..., descripti
     return _response_data
 
 # Tags: Legal hold policies
-@mcp.tool()
+@mcp.tool(
+    title="Update Legal Hold Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_legal_hold_policy(
     legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to update."),
     policy_name: str | None = Field(None, description="The updated display name for the legal hold policy. Must not exceed 254 characters.", max_length=254),
@@ -8947,13 +10112,20 @@ async def update_legal_hold_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Legal hold policies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Legal Hold Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_legal_hold_policy(legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes an existing legal hold policy by its ID. This is an asynchronous operation, so the policy may not be fully removed immediately when the response is returned."""
 
@@ -8989,7 +10161,13 @@ async def delete_legal_hold_policy(legal_hold_policy_id: str = Field(..., descri
     return _response_data
 
 # Tags: Legal hold policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Hold Policy Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_hold_policy_assignments(
     policy_id: str = Field(..., description="The unique identifier of the legal hold policy whose assignments you want to retrieve."),
     assign_to_type: Literal["file", "file_version", "folder", "user", "ownership", "interactions"] | None = Field(None, description="Narrows results to only assignments targeting a specific item type. Accepted values are 'file', 'file_version', 'folder', 'user', 'ownership', or 'interactions'."),
@@ -9034,7 +10212,12 @@ async def list_legal_hold_policy_assignments(
     return _response_data
 
 # Tags: Legal hold policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="Assign Legal Hold Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_legal_hold_policy(
     policy_id: str | None = Field(None, description="The unique identifier of the legal hold policy to assign to the target item."),
     type_: Literal["file", "file_version", "folder", "user", "ownership", "interactions"] | None = Field(None, alias="type", description="The category of item to which the legal hold policy will be applied. Must be one of: file, file_version, folder, user, ownership, or interactions."),
@@ -9071,13 +10254,20 @@ async def assign_legal_hold_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Legal hold policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Legal Hold Policy Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific legal hold policy assignment by its unique ID. Use this to inspect which users, folders, or files are bound to a particular legal hold policy."""
 
@@ -9113,7 +10303,13 @@ async def get_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str 
     return _response_data
 
 # Tags: Legal hold policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="Remove Legal Hold Policy Assignment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment to remove.")) -> dict[str, Any] | ToolResult:
     """Removes a legal hold policy assignment from an item, unlinking the policy from the associated content. This is an asynchronous operation; the hold may not be fully released by the time the response is returned."""
 
@@ -9149,7 +10345,13 @@ async def remove_legal_hold_policy_assignment(legal_hold_policy_assignment_id: s
     return _response_data
 
 # Tags: Legal hold policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Hold Assignment Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_hold_assignment_files(
     legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment whose held files you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of files to return per page, up to a maximum of 1000."),
@@ -9193,7 +10395,13 @@ async def list_legal_hold_assignment_files(
     return _response_data
 
 # Tags: Legal hold policy assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Hold Assignment File Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_hold_assignment_file_versions(
     legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment whose past file versions on hold should be retrieved."),
     limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000."),
@@ -9237,7 +10445,13 @@ async def list_legal_hold_assignment_file_versions(
     return _response_data
 
 # Tags: File version legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Get File Version Legal Hold",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_version_legal_hold(file_version_legal_hold_id: str = Field(..., description="The unique identifier of the file version legal hold record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details about the legal hold policies assigned to a specific file version. Use this to inspect which legal holds are actively applied to a given file version."""
 
@@ -9273,7 +10487,13 @@ async def get_file_version_legal_hold(file_version_legal_hold_id: str = Field(..
     return _response_data
 
 # Tags: File version legal holds
-@mcp.tool()
+@mcp.tool(
+    title="List File Version Legal Holds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_version_legal_holds(
     policy_id: str = Field(..., description="The unique identifier of the legal hold policy whose file version holds you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of file version legal hold records to return in a single page of results; must be between 1 and 1000."),
@@ -9316,7 +10536,13 @@ async def list_file_version_legal_holds(
     return _response_data
 
 # Tags: Shield information barriers
-@mcp.tool()
+@mcp.tool(
+    title="Get Information Barrier",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_information_barrier(shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details of a specific shield information barrier by its unique ID. Useful for inspecting the configuration and status of an existing barrier between user groups."""
 
@@ -9352,7 +10578,13 @@ async def get_information_barrier(shield_information_barrier_id: str = Field(...
     return _response_data
 
 # Tags: Shield information barriers
-@mcp.tool()
+@mcp.tool(
+    title="Update Shield Barrier Status",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_shield_barrier_status(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the shield information barrier whose status you want to change."),
     status: Literal["pending", "disabled"] | None = Field(None, description="The target status to apply to the shield information barrier. Accepted values are 'pending' (barrier is queued for activation) or 'disabled' (barrier is turned off)."),
@@ -9387,13 +10619,20 @@ async def update_shield_barrier_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shield information barriers
-@mcp.tool()
+@mcp.tool(
+    title="List Shield Information Barriers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_shield_information_barriers(limit: str | None = Field(None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all shield information barriers configured for the enterprise associated with the JWT token. Shield information barriers restrict communication and data access between internal groups."""
 
@@ -9433,7 +10672,12 @@ async def list_shield_information_barriers(limit: str | None = Field(None, descr
     return _response_data
 
 # Tags: Shield information barriers
-@mcp.tool()
+@mcp.tool(
+    title="Create Shield Information Barrier",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_shield_information_barrier(enterprise: _models.PostShieldInformationBarriersBodyEnterprise | None = Field(None, description="The type and ID of the enterprise under which this shield information barrier will be created.")) -> dict[str, Any] | ToolResult:
     """Creates a shield information barrier within an enterprise to separate individuals or groups and prevent confidential information from passing between them. Use this to enforce ethical walls or compliance boundaries within the same firm."""
 
@@ -9465,13 +10709,20 @@ async def create_shield_information_barrier(enterprise: _models.PostShieldInform
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shield information barrier reports
-@mcp.tool()
+@mcp.tool(
+    title="List Barrier Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_barrier_reports(
     shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier whose reports should be listed."),
     limit: str | None = Field(None, description="The maximum number of reports to return per page. Accepts values up to 1000; omit to use the server default."),
@@ -9514,7 +10765,12 @@ async def list_barrier_reports(
     return _response_data
 
 # Tags: Shield information barrier reports
-@mcp.tool()
+@mcp.tool(
+    title="Create Barrier Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_barrier_report(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the shield information barrier for which the report will be generated."),
     type_: Literal["shield_information_barrier"] | None = Field(None, alias="type", description="The resource type of the shield information barrier being referenced. Must be set to the designated barrier type value."),
@@ -9549,13 +10805,20 @@ async def create_barrier_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shield information barrier reports
-@mcp.tool()
+@mcp.tool(
+    title="Get Barrier Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_barrier_report(shield_information_barrier_report_id: str = Field(..., description="The unique identifier of the shield information barrier report to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific shield information barrier report by its unique ID. Use this to fetch the status and details of a previously created compliance barrier report."""
 
@@ -9591,7 +10854,13 @@ async def get_barrier_report(shield_information_barrier_report_id: str = Field(.
     return _response_data
 
 # Tags: Shield information barrier segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Barrier Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_barrier_segment(shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific shield information barrier segment by its unique ID. Shield information barrier segments define the boundaries that restrict information flow between groups within an organization."""
 
@@ -9627,7 +10896,13 @@ async def get_barrier_segment(shield_information_barrier_segment_id: str = Field
     return _response_data
 
 # Tags: Shield information barrier segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Barrier Segment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_barrier_segment(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to update."),
     name: str | None = Field(None, description="The new name to assign to the barrier segment. Must contain at least one non-whitespace character.", pattern="\\S+"),
@@ -9664,13 +10939,20 @@ async def update_barrier_segment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shield information barrier segments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Barrier Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_barrier_segment(shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a shield information barrier segment by its unique ID. This action removes the segment and its associated configurations from the information barrier."""
 
@@ -9706,7 +10988,13 @@ async def delete_barrier_segment(shield_information_barrier_segment_id: str = Fi
     return _response_data
 
 # Tags: Shield information barrier segments
-@mcp.tool()
+@mcp.tool(
+    title="List Barrier Segments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_barrier_segments(
     shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier whose segments you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of barrier segment objects to return in a single page of results. Accepts values up to 1000."),
@@ -9749,7 +11037,12 @@ async def list_barrier_segments(
     return _response_data
 
 # Tags: Shield information barrier segments
-@mcp.tool()
+@mcp.tool(
+    title="Create Barrier Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_barrier_segment(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the parent shield information barrier under which this segment will be created."),
     type_: Literal["shield_information_barrier"] | None = Field(None, alias="type", description="The resource type of the associated shield information barrier; must be set to the designated barrier type value."),
@@ -9787,13 +11080,20 @@ async def create_barrier_segment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shield information barrier segment members
-@mcp.tool()
+@mcp.tool(
+    title="Get Barrier Segment Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_barrier_segment_member(shield_information_barrier_segment_member_id: str = Field(..., description="The unique identifier of the shield information barrier segment member to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific shield information barrier segment member by its unique ID. Useful for inspecting the details of an individual member assigned to a barrier segment."""
 
@@ -9829,7 +11129,13 @@ async def get_barrier_segment_member(shield_information_barrier_segment_member_i
     return _response_data
 
 # Tags: Shield information barrier segment members
-@mcp.tool()
+@mcp.tool(
+    title="Delete Barrier Segment Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_barrier_segment_member(shield_information_barrier_segment_member_id: str = Field(..., description="The unique identifier of the shield information barrier segment member to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific member from a shield information barrier segment. Use this to revoke a user's association with a segment when access restrictions need to be updated."""
 
@@ -9865,7 +11171,13 @@ async def delete_barrier_segment_member(shield_information_barrier_segment_membe
     return _response_data
 
 # Tags: Shield information barrier segment members
-@mcp.tool()
+@mcp.tool(
+    title="List Barrier Segment Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_barrier_segment_members(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of segment members to return in a single page of results. Must be between 1 and 1000."),
@@ -9908,7 +11220,12 @@ async def list_barrier_segment_members(
     return _response_data
 
 # Tags: Shield information barrier segment members
-@mcp.tool()
+@mcp.tool(
+    title="Add Barrier Segment Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_barrier_segment_member(
     shield_information_barrier_id: str | None = Field(None, alias="shield_information_barrierId", description="The unique identifier of the shield information barrier that the target segment belongs to."),
     shield_information_barrier_segment_id: str | None = Field(None, alias="shield_information_barrier_segmentId", description="The unique identifier of the shield information barrier segment to which the user will be added as a member."),
@@ -9946,13 +11263,20 @@ async def add_barrier_segment_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Shield information barrier segment restrictions
-@mcp.tool()
+@mcp.tool(
+    title="Get Barrier Segment Restriction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_barrier_segment_restriction(shield_information_barrier_segment_restriction_id: str = Field(..., description="The unique identifier of the shield information barrier segment restriction to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific shield information barrier segment restriction by its unique ID. Use this to inspect the details of an existing restriction between two information barrier segments."""
 
@@ -9988,7 +11312,13 @@ async def get_barrier_segment_restriction(shield_information_barrier_segment_res
     return _response_data
 
 # Tags: Shield information barrier segment restrictions
-@mcp.tool()
+@mcp.tool(
+    title="List Barrier Segment Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_barrier_segment_restrictions(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment whose restrictions you want to list."),
     limit: str | None = Field(None, description="The maximum number of restriction records to return in a single page of results. Must be between 1 and 1000."),
@@ -10031,7 +11361,13 @@ async def list_barrier_segment_restrictions(
     return _response_data
 
 # Tags: Device pinners
-@mcp.tool()
+@mcp.tool(
+    title="Get Device Pin",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_device_pin(device_pinner_id: str = Field(..., description="The unique identifier of the device pin to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific device pin by its unique identifier. Useful for inspecting the status and metadata of an individual device pinning record."""
 
@@ -10067,7 +11403,13 @@ async def get_device_pin(device_pinner_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Device pinners
-@mcp.tool()
+@mcp.tool(
+    title="Delete Device Pin",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_device_pin(device_pinner_id: str = Field(..., description="The unique identifier of the device pin to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific device pin, revoking the trusted device association for the corresponding user. This action cannot be undone."""
 
@@ -10103,7 +11445,13 @@ async def delete_device_pin(device_pinner_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Device pinners
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Device Pins",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_device_pins(
     enterprise_id: str = Field(..., description="The unique identifier of the enterprise whose device pins you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of device pins to return per page, up to a maximum of 1000."),
@@ -10148,7 +11496,13 @@ async def list_enterprise_device_pins(
     return _response_data
 
 # Tags: Terms of service user statuses
-@mcp.tool()
+@mcp.tool(
+    title="List Terms of Service User Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_terms_of_service_user_statuses(
     tos_id: str = Field(..., description="The unique identifier of the terms of service whose user acceptance statuses should be retrieved."),
     user_id: str | None = Field(None, description="When provided, restricts the results to the acceptance status of a single user matching this ID."),
@@ -10189,7 +11543,12 @@ async def list_terms_of_service_user_statuses(
     return _response_data
 
 # Tags: Terms of service user statuses
-@mcp.tool()
+@mcp.tool(
+    title="Create Terms of Service User Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_terms_of_service_user_status(
     tos_id: str | None = Field(None, alias="tosId", description="The unique identifier of the terms of service document to associate with the user status."),
     user_id: str | None = Field(None, alias="userId", description="The unique identifier of the user whose terms of service acceptance status is being recorded."),
@@ -10227,13 +11586,20 @@ async def create_terms_of_service_user_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Terms of service user statuses
-@mcp.tool()
+@mcp.tool(
+    title="Update Terms of Service User Status",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_terms_of_service_user_status(
     terms_of_service_user_status_id: str = Field(..., description="The unique identifier of the terms of service user status record to update."),
     is_accepted: bool | None = Field(None, description="Indicates whether the user has accepted the terms of service; set to true to mark acceptance or false to mark rejection."),
@@ -10269,13 +11635,20 @@ async def update_terms_of_service_user_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Domain restrictions for collaborations
-@mcp.tool()
+@mcp.tool(
+    title="Get Collaboration Whitelist Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collaboration_whitelist_entry(collaboration_whitelist_entry_id: str = Field(..., description="The unique identifier of the collaboration whitelist entry to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific domain that has been approved for external collaborations within the current enterprise. Use this to inspect the details of a single whitelisted domain entry by its unique ID."""
 
@@ -10311,7 +11684,13 @@ async def get_collaboration_whitelist_entry(collaboration_whitelist_entry_id: st
     return _response_data
 
 # Tags: Standard and Zones Storage Policy Assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Storage Policy Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_storage_policy_assignments(
     resolved_for_type: Literal["user", "enterprise"] = Field(..., description="The type of entity to retrieve storage policy assignments for, either a specific user or an entire enterprise."),
     resolved_for_id: str = Field(..., description="The unique identifier of the user or enterprise whose storage policy assignments should be retrieved. Must correspond to the entity type specified in resolved_for_type."),
@@ -10352,7 +11731,12 @@ async def list_storage_policy_assignments(
     return _response_data
 
 # Tags: Standard and Zones Storage Policy Assignments
-@mcp.tool()
+@mcp.tool(
+    title="Assign Storage Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_storage_policy(
     storage_policy_type: Literal["storage_policy"] | None = Field(None, alias="storage_policyType", description="The resource type being assigned as the storage policy; must always be 'storage_policy'."),
     assigned_to_type: Literal["user", "enterprise"] | None = Field(None, alias="assigned_toType", description="The type of entity receiving the storage policy assignment, either an individual user or an entire enterprise."),
@@ -10390,13 +11774,20 @@ async def assign_storage_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Standard and Zones Storage Policy Assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Storage Policy Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_storage_policy_assignment(storage_policy_assignment_id: str = Field(..., description="The unique identifier of the storage policy assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific storage policy assignment by its unique identifier. Useful for inspecting which storage policy is applied to a particular user or enterprise."""
 
@@ -10432,7 +11823,13 @@ async def get_storage_policy_assignment(storage_policy_assignment_id: str = Fiel
     return _response_data
 
 # Tags: Standard and Zones Storage Policy Assignments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Storage Policy Assignment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_storage_policy_assignment(storage_policy_assignment_id: str = Field(..., description="The unique identifier of the storage policy assignment to delete.")) -> dict[str, Any] | ToolResult:
     """Removes a storage policy assignment, causing the affected user to inherit the enterprise's default storage policy. Note: this endpoint is rate-limited to two calls per user within any 24-hour period."""
 
@@ -10468,7 +11865,12 @@ async def delete_storage_policy_assignment(storage_policy_assignment_id: str = F
     return _response_data
 
 # Tags: Zip Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Create Zip Download",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_zip_download(
     items: list[_models.PostZipDownloadsBodyItemsItem] | None = Field(None, description="A list of files and folders to include in the zip archive. Order is not significant; each item should specify its type and identifier."),
     download_file_name: str | None = Field(None, description="The base name for the generated zip archive file, without the file extension. The `.zip` extension will be appended automatically."),
@@ -10503,13 +11905,20 @@ async def create_zip_download(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Zip Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Download Zip Archive",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_zip_archive(zip_download_id: str = Field(..., description="The unique identifier for the zip archive, obtained from the `download_url` field returned by the Create Zip Download API.")) -> dict[str, Any] | ToolResult:
     """Downloads the binary contents of a previously created zip archive using the download URL provided when the archive was requested. This endpoint requires no authentication and is intended for direct browser-based downloads; the URL is time-limited and a new zip download request must be created if the session expires."""
 
@@ -10545,7 +11954,13 @@ async def download_zip_archive(zip_download_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Zip Downloads
-@mcp.tool()
+@mcp.tool(
+    title="Get Zip Download Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_zip_download_status(zip_download_id: str = Field(..., description="The unique identifier for the zip archive whose status is being checked, obtained from the response of the Create zip download API.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current download progress and status of a zip archive, including any items that were skipped. This endpoint is accessible only after the download has started and remains valid for 12 hours from initiation."""
 
@@ -10581,7 +11996,13 @@ async def get_zip_download_status(zip_download_id: str = Field(..., description=
     return _response_data
 
 # Tags: Box Sign requests
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Sign Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_sign_request(
     sign_request_id: str = Field(..., description="The unique identifier of the sign request to cancel."),
     reason: str | None = Field(None, description="An optional explanation for why the sign request is being cancelled, useful for audit trails and notifying stakeholders."),
@@ -10617,13 +12038,19 @@ async def cancel_sign_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Box Sign requests
-@mcp.tool()
+@mcp.tool(
+    title="Resend Sign Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resend_sign_request(sign_request_id: str = Field(..., description="The unique identifier of the signature request to resend notifications for.")) -> dict[str, Any] | ToolResult:
     """Resends the signature request email to all outstanding signers who have not yet completed signing. Useful for following up on pending signatures without creating a new request."""
 
@@ -10659,7 +12086,13 @@ async def resend_sign_request(sign_request_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Box Sign requests
-@mcp.tool()
+@mcp.tool(
+    title="Get Sign Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sign_request(sign_request_id: str = Field(..., description="The unique identifier of the Box Sign request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific Box Sign request by its unique ID. Use this to check the status, signers, and configuration of an existing signature request."""
 
@@ -10695,7 +12128,13 @@ async def get_sign_request(sign_request_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Box Sign requests
-@mcp.tool()
+@mcp.tool(
+    title="List Sign Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sign_requests(
     limit: str | None = Field(None, description="Maximum number of signature requests to return per page. Accepts values up to 1000."),
     senders: list[str] | None = Field(None, description="Filters results to only include signature requests sent by the specified email addresses. Requires `shared_requests` to be set to `true` when used. Order is not significant; each item should be a valid email address."),
@@ -10739,7 +12178,12 @@ async def list_sign_requests(
     return _response_data
 
 # Tags: Box Sign requests
-@mcp.tool()
+@mcp.tool(
+    title="Create Sign Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_sign_request(body: _models.SignRequestCreateRequest | None = Field(None, description="The request body containing all details needed to create the signature request, including the document to be signed, signer information, and any signing configuration options.")) -> dict[str, Any] | ToolResult:
     """Creates a Box Sign signature request by preparing a document for signing and dispatching it to one or more signers. Use this to initiate a new e-signature workflow on a document stored in Box."""
 
@@ -10772,13 +12216,20 @@ async def create_sign_request(body: _models.SignRequestCreateRequest | None = Fi
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Workflows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflows(
     folder_id: str = Field(..., description="The unique identifier of the folder whose associated workflows you want to retrieve. The root folder of a Box account is always ID 0; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     trigger_type: str | None = Field(None, description="Filters workflows by their trigger type, returning only workflows that match the specified trigger. Use to narrow results to a specific trigger category."),
@@ -10822,7 +12273,12 @@ async def list_workflows(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Start Workflow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_workflow(
     workflow_id: str = Field(..., description="The unique identifier of the workflow to start."),
     type_: Literal["workflow_parameters"] | None = Field(None, alias="type", description="Identifies the type of the top-level parameters object being submitted; must be set to 'workflow_parameters'."),
@@ -10866,13 +12322,20 @@ async def start_workflow(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Box Sign templates
-@mcp.tool()
+@mcp.tool(
+    title="List Sign Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sign_templates(limit: str | None = Field(None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all Box Sign templates created by the authenticated user. Returns a paginated list of templates available for use in signing workflows."""
 
@@ -10912,7 +12375,13 @@ async def list_sign_templates(limit: str | None = Field(None, description="The m
     return _response_data
 
 # Tags: Box Sign templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Sign Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sign_template(template_id: str = Field(..., description="The unique identifier of the Box Sign template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific Box Sign template by its unique ID. Use this to inspect template configuration, fields, and signers before initiating a signing request."""
 
@@ -10948,7 +12417,13 @@ async def get_sign_template(template_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Integration mappings
-@mcp.tool()
+@mcp.tool(
+    title="List Slack Integration Mappings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_slack_integration_mappings(
     limit: str | None = Field(None, description="Maximum number of integration mappings to return per page. Accepts values up to 1000."),
     partner_item_type: Literal["channel"] | None = Field(None, description="Filters results to only return mappings for the specified Slack item type. Currently only 'channel' is supported."),
@@ -10995,7 +12470,13 @@ async def list_slack_integration_mappings(
     return _response_data
 
 # Tags: Integration mappings
-@mcp.tool()
+@mcp.tool(
+    title="List Teams Integration Mappings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_integration_mappings(
     partner_item_type: Literal["channel", "team"] | None = Field(None, description="Filters results to only return mappings for the specified Microsoft Teams item type, either a channel or a team."),
     partner_item_id: str | None = Field(None, description="Filters results to only return mappings associated with the specified Microsoft Teams item ID."),
@@ -11038,7 +12519,12 @@ async def list_teams_integration_mappings(
     return _response_data
 
 # Tags: Integration mappings
-@mcp.tool()
+@mcp.tool(
+    title="Create Teams Integration Mapping",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_teams_integration_mapping(
     partner_item: _models.PostIntegrationMappingsTeamsBodyPartnerItem | None = Field(None, description="The Microsoft Teams channel to map, identifying the partner-side resource in the integration."),
     box_item: _models.PostIntegrationMappingsTeamsBodyBoxItem | None = Field(None, description="The Box item (such as a folder) to map to the Teams channel, identifying the Box-side resource in the integration."),
@@ -11073,13 +12559,19 @@ async def create_teams_integration_mapping(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI
-@mcp.tool()
+@mcp.tool(
+    title="Extract Metadata Freeform",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_metadata_freeform(
     prompt: str | None = Field(None, description="The freeform prompt instructing the LLM on what metadata to extract and how. Supports XML or JSON schema format and can be up to 10,000 characters long."),
     items: Annotated[list[_models.AiItemBase], AfterValidator(_check_unique_items)] | None = Field(None, description="The list of files the LLM will process for metadata extraction. Order is not significant; each item must reference a valid file. Between 1 and 25 files may be included.", min_length=1, max_length=25),
@@ -11115,13 +12607,19 @@ async def extract_metadata_freeform(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI
-@mcp.tool()
+@mcp.tool(
+    title="Extract Structured Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_structured_metadata(
     items: Annotated[list[_models.AiItemBase], AfterValidator(_check_unique_items)] | None = Field(None, description="The list of files to be processed by the LLM. Accepts between 1 and 25 file items; order does not affect extraction results.", min_length=1, max_length=25),
     template_key: str | None = Field(None, description="The unique key identifying the metadata template to use for extraction. Required when using a metadata template instead of a custom fields list."),
@@ -11163,13 +12661,20 @@ async def extract_structured_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Studio
-@mcp.tool()
+@mcp.tool(
+    title="List AI Agents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ai_agents(
     mode: list[str] | None = Field(None, description="Filters results to only return agents configured for the specified modes. Accepts one or more of the following values: `ask`, `text_gen`, or `extract`. Order is not significant."),
     agent_state: list[str] | None = Field(None, description="Filters results to only return agents in the specified states. Accepts one or more of the following values: `enabled`, `disabled`, or `enabled_for_selected_users`. Order is not significant."),
@@ -11218,7 +12723,12 @@ async def list_ai_agents(
     return _response_data
 
 # Tags: AI Studio
-@mcp.tool()
+@mcp.tool(
+    title="Create AI Agent",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_ai_agent(
     type_: Literal["ai_agent"] | None = Field(None, alias="type", description="Identifies this configuration as an AI agent resource."),
     ask_type: Literal["ai_agent_ask"] | None = Field(None, alias="askType", description="Identifies the ask capability block as an AI agent ask handler."),
@@ -11284,13 +12794,20 @@ async def create_ai_agent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Studio
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Agent",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_agent(agent_id: str = Field(..., description="The unique identifier of the AI agent to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific AI agent by its unique identifier. Returns the full agent configuration and metadata for the specified agent."""
 
@@ -11326,7 +12843,13 @@ async def get_ai_agent(agent_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Metadata taxonomies
-@mcp.tool()
+@mcp.tool(
+    title="List Metadata Taxonomies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metadata_taxonomies(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomies to retrieve, typically representing an enterprise or organizational boundary."),
     limit: str | None = Field(None, description="The maximum number of taxonomy items to return in a single page of results, up to a maximum of 1000."),
@@ -11370,7 +12893,13 @@ async def list_metadata_taxonomies(
     return _response_data
 
 # Tags: Metadata taxonomies
-@mcp.tool()
+@mcp.tool(
+    title="Get Metadata Taxonomy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metadata_taxonomy(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically representing an enterprise or organizational unit."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy to retrieve within the specified namespace."),
@@ -11409,7 +12938,13 @@ async def get_metadata_taxonomy(
     return _response_data
 
 # Tags: Metadata taxonomies
-@mcp.tool()
+@mcp.tool(
+    title="List Taxonomy Nodes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_taxonomy_nodes(
     namespace: str = Field(..., description="The namespace that owns the metadata taxonomy, used to scope the taxonomy to a specific organization or enterprise."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy within the given namespace."),
@@ -11459,7 +12994,13 @@ async def list_taxonomy_nodes(
     return _response_data
 
 # Tags: Metadata taxonomies
-@mcp.tool()
+@mcp.tool(
+    title="Get Taxonomy Node",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_taxonomy_node(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically representing an enterprise or organizational unit."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy within the namespace, representing a classification domain such as geography or department."),
@@ -11499,7 +13040,13 @@ async def get_taxonomy_node(
     return _response_data
 
 # Tags: Metadata taxonomies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Taxonomy Node",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_taxonomy_node(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically representing an organization or enterprise account."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy within the namespace."),
@@ -11539,7 +13086,13 @@ async def delete_taxonomy_node(
     return _response_data
 
 # Tags: Metadata taxonomies
-@mcp.tool()
+@mcp.tool(
+    title="List Taxonomy Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_taxonomy_field_options(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically tied to an enterprise account."),
     template_key: str = Field(..., description="The unique key identifying the metadata template that contains the taxonomy field."),
