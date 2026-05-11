@@ -1,7 +1,7 @@
 """
-Authentication module for Ahrefs API MCP server.
+Authentication module for Ahrefs MCP server.
 
-Generated: 2026-05-05 14:03:03 UTC
+Generated: 2026-05-11 22:51:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

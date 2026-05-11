@@ -1,11 +1,11 @@
-# Ahrefs API MCP Server
+# Ahrefs MCP Server
 <!-- mcp-name: com.mcparmory/ahrefs -->
 
 Base URL: https://api.ahrefs.com
 | | |
 |---|---|
 | **Category** | Analytics |
-| **Tools** | 118 |
+| **Tools** | 116 |
 | **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
@@ -69,6 +69,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ### OAuth2

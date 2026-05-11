@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Ahrefs API MCP Server
+Ahrefs MCP Server
 
 API Info:
 - Terms of Service: https://ahrefs.com/terms
 
-Generated: 2026-05-05 14:03:03 UTC
+Generated: 2026-05-11 22:51:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.ahrefs.com")
-SERVER_NAME = "Ahrefs API"
-SERVER_VERSION = "1.0.2"
+SERVER_NAME = "Ahrefs"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1017,6 +1048,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1041,6 +1074,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1254,10 +1289,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Ahrefs API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Ahrefs", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Rating",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_rating(
     target: str = Field(..., description="The domain or URL to analyze. This is the primary target for which you want to retrieve the domain rating."),
     date: str = Field(..., description="The date for which to retrieve metrics, specified in YYYY-MM-DD format (e.g., 2024-01-15)."),
@@ -1299,7 +1340,13 @@ async def get_domain_rating(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Backlinks Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_backlinks_stats(
     target: str = Field(..., description="The domain or URL to analyze for backlink statistics. This is the target you want to get data for."),
     date: str = Field(..., description="The date for which to retrieve backlink metrics, specified in YYYY-MM-DD format."),
@@ -1342,7 +1389,13 @@ async def get_backlinks_stats(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Outlinks Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outlinks_stats(
     target: str = Field(..., description="The domain or URL to analyze for outlink statistics."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol to filter by: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both protocols if not specified."),
@@ -1384,7 +1437,13 @@ async def list_outlinks_stats(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_metrics(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain (example.com) or a specific URL path."),
     date: str = Field(..., description="The date for which to retrieve metrics, specified in YYYY-MM-DD format."),
@@ -1428,7 +1487,13 @@ async def get_domain_metrics(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Referring Domains History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_refdomains_history(
     target: str = Field(..., description="The domain or URL to analyze for referring domain history."),
     date_from: str = Field(..., description="The start date for the historical analysis period, specified in YYYY-MM-DD format."),
@@ -1473,7 +1538,13 @@ async def get_refdomains_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Rating History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_rating_history(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain (e.g., example.com) or a specific URL path."),
     date_from: str = Field(..., description="The start date for the historical data range in YYYY-MM-DD format (e.g., 2024-01-01)."),
@@ -1516,7 +1587,13 @@ async def get_domain_rating_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get URL Rating History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_url_rating_history(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain (e.g., example.com) or a specific URL path."),
     date_from: str = Field(..., description="The start date for the historical data retrieval in YYYY-MM-DD format (e.g., 2024-01-01)."),
@@ -1559,7 +1636,13 @@ async def get_url_rating_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Page History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_page_history(
     target: str = Field(..., description="The domain or URL to analyze. This is the primary search target for retrieving page history data."),
     date_from: str = Field(..., description="The start date for the historical period in YYYY-MM-DD format (e.g., 2024-01-15). This marks the beginning of the data range to retrieve."),
@@ -1605,7 +1688,13 @@ async def list_page_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Metrics History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_metrics_history(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain, subdomain, or specific URL path depending on the mode parameter."),
     date_from: str = Field(..., description="The start date for the historical data range in YYYY-MM-DD format (e.g., 2024-01-01)."),
@@ -1652,7 +1741,13 @@ async def get_domain_metrics_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Keyword History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_keyword_history(
     target: str = Field(..., description="The domain or URL to analyze for keyword history."),
     date_from: str = Field(..., description="The start date for the historical period in YYYY-MM-DD format."),
@@ -1698,7 +1793,13 @@ async def list_keyword_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Country Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_country_metrics(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain (example.com) or a specific URL path depending on the mode parameter."),
     date: str = Field(..., description="The date for which to retrieve metrics, specified in YYYY-MM-DD format."),
@@ -1743,7 +1844,13 @@ async def list_country_metrics(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Pages by Traffic",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pages_by_traffic(
     target: str = Field(..., description="The domain or URL to analyze for traffic data."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Calculate search volume based on monthly totals or average values. Defaults to monthly calculation, which also affects traffic and traffic value metrics."),
@@ -1786,7 +1893,13 @@ async def list_pages_by_traffic(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Search Volume History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_search_volume_history(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain, subdomain, or specific URL path depending on the mode selected."),
     date_from: str = Field(..., description="The start date for the historical data range in YYYY-MM-DD format."),
@@ -1833,7 +1946,13 @@ async def get_search_volume_history(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Backlinks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_backlinks(
     target: str = Field(..., description="The domain or URL to analyze for backlinks."),
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Refer to the response schema for valid column identifiers."),
@@ -1881,7 +2000,13 @@ async def list_backlinks(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Broken Backlinks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_broken_backlinks(
     select: str = Field(..., description="Comma-separated list of column names to include in the response. See the response schema for all available column identifiers."),
     target: str = Field(..., description="The target of your search: either a domain name or a specific URL."),
@@ -1928,7 +2053,13 @@ async def list_broken_backlinks(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Referring Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_refdomains(
     target: str = Field(..., description="The domain or URL to analyze for referring domains."),
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Refer to the response schema for valid column identifiers."),
@@ -1975,7 +2106,13 @@ async def list_refdomains(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Anchor Text",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_anchor_text(
     target: str = Field(..., description="The target domain or URL to analyze for incoming anchor text. Can be a full domain or specific URL path."),
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Refer to the response schema for valid column identifiers."),
@@ -2022,7 +2159,13 @@ async def list_anchor_text(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Organic Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organic_keywords(
     select: str = Field(..., description="Comma-separated list of column names to include in the response; refer to the response schema for valid identifiers."),
     target: str = Field(..., description="The domain or URL to analyze for organic keywords."),
@@ -2070,7 +2213,13 @@ async def list_organic_keywords(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Organic Competitors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organic_competitors(
     target: str = Field(..., description="The domain or URL to analyze for competitors. Can be a full domain (example.com) or specific URL path."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter country code (ISO 3166-1 alpha-2 format) specifying the geographic market for competitor analysis."),
@@ -2120,7 +2269,13 @@ async def list_organic_competitors(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Top Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_top_pages(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain, subdomain, or specific URL path depending on the mode selected."),
     date: str = Field(..., description="The date for which to retrieve metrics, specified in YYYY-MM-DD format."),
@@ -2168,7 +2323,13 @@ async def list_top_pages(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Paid Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_paid_pages(
     select: str = Field(..., description="Comma-separated list of column names to include in the response. Refer to the response schema for valid column identifiers."),
     target: str = Field(..., description="The domain or URL to analyze for paid pages."),
@@ -2216,7 +2377,13 @@ async def list_paid_pages(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Pages by Backlinks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pages_by_backlinks(
     select: str = Field(..., description="Comma-separated list of column names to include in the response. Consult the response schema to see all available columns you can request."),
     target: str = Field(..., description="The domain or URL to analyze. This is the target for which you want to find pages ranked by backlinks."),
@@ -2268,7 +2435,13 @@ async def list_pages_by_backlinks(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Pages by Internal Links",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pages_by_internal_links(
     target: str = Field(..., description="The domain or URL to analyze. Can be a full domain (example.com) or a specific URL path depending on the mode parameter."),
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Refer to the response schema for valid column identifiers."),
@@ -2314,7 +2487,13 @@ async def list_pages_by_internal_links(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Linked Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_linked_domains(
     target: str = Field(..., description="The domain or URL to analyze for incoming links. This is the target whose linked domains you want to discover."),
     select: str = Field(..., description="Comma-separated list of data columns to include in results. Refer to the response schema for valid column identifiers."),
@@ -2360,7 +2539,13 @@ async def list_linked_domains(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List External Anchors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_anchors(
     target: str = Field(..., description="The domain or URL to analyze for outgoing external anchors."),
     select: str = Field(..., description="Comma-separated list of column identifiers to include in the response. See response schema for valid column names."),
@@ -2406,7 +2591,13 @@ async def list_external_anchors(
     return _response_data
 
 # Tags: Site Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Internal Anchors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_internal_anchors(
     target: str = Field(..., description="The domain or URL to analyze for outgoing internal anchors."),
     select: str = Field(..., description="Comma-separated list of columns to include in the response. See response schema for valid column identifiers."),
@@ -2452,7 +2643,13 @@ async def list_internal_anchors(
     return _response_data
 
 # Tags: Keywords Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Keyword Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_keyword_metrics(
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Refer to the response schema for valid column identifiers."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter ISO 3166-1 country code (e.g., 'us', 'gb', 'de') specifying the target market for keyword data."),
@@ -2502,7 +2699,13 @@ async def get_keyword_metrics(
     return _response_data
 
 # Tags: Keywords Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Keyword Volume History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_keyword_volume_history(
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="The target country for volume data, specified as a two-letter ISO 3166-1 alpha-2 country code (e.g., 'us' for United States, 'gb' for United Kingdom)."),
     keyword: str = Field(..., description="The keyword term to retrieve volume history for."),
@@ -2545,7 +2748,13 @@ async def get_keyword_volume_history(
     return _response_data
 
 # Tags: Keywords Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Get Keyword Volume by Country",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_keyword_volume_by_country(
     keyword: str = Field(..., description="The keyword to analyze. Provide the exact search term you want to get volume data for."),
     limit: int | None = Field(None, description="Maximum number of countries to return in the results. Omit to get all available data."),
@@ -2587,7 +2796,13 @@ async def get_keyword_volume_by_country(
     return _response_data
 
 # Tags: Keywords Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Search Matching Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_matching_keywords(
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Specify which metrics and attributes you want returned for each matching keyword."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter ISO country code (e.g., 'us', 'gb', 'de') that determines the geographic market for keyword data and search volume metrics."),
@@ -2634,7 +2849,13 @@ async def search_matching_keywords(
     return _response_data
 
 # Tags: Keywords Explorer
-@mcp.tool()
+@mcp.tool(
+    title="List Related Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_related_keywords(
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Required parameter that determines which metrics and attributes are returned."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter ISO country code (e.g., 'us', 'gb', 'de') specifying the geographic market for keyword data. Required parameter."),
@@ -2680,7 +2901,13 @@ async def list_related_keywords(
     return _response_data
 
 # Tags: Keywords Explorer
-@mcp.tool()
+@mcp.tool(
+    title="Search Keyword Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_keyword_suggestions(
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Required parameter that determines which fields are returned for each suggestion."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter ISO 3166-1 country code specifying the geographic market for keyword suggestions. Required parameter that determines regional search data."),
@@ -2725,7 +2952,13 @@ async def search_keyword_suggestions(
     return _response_data
 
 # Tags: Site Audit
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_projects(
     project_url: str | None = Field(None, description="Filter results to projects matching this target URL. The comparison ignores protocol differences and trailing slashes for flexible matching."),
     project_name: str | None = Field(None, description="Filter results to projects matching this name."),
@@ -2767,7 +3000,13 @@ async def list_audit_projects(
     return _response_data
 
 # Tags: Site Audit
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_issues(
     project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Site Audit project dashboard (https://app.ahrefs.com/site-audit/#project_id#)."),
     date: str | None = Field(None, description="Optional timestamp in ISO 8601 format (YYYY-MM-DDThh:mm:ss UTC) to retrieve issues from a specific crawl. Defaults to the most recent crawl if not provided. For scheduled crawls, returns data from the latest crawl completed before this timestamp; for Always-on audits, returns data as of the specified date and time. If only the date is provided without time, it defaults to 00:00:00 UTC."),
@@ -2808,7 +3047,13 @@ async def list_audit_issues(
     return _response_data
 
 # Tags: Site Audit
-@mcp.tool()
+@mcp.tool(
+    title="Get Page Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_content(
     select: str = Field(..., description="Comma-separated list of column identifiers to include in the response. Refer to the response schema for valid column names."),
     target_url: str = Field(..., description="The full URL of the page to retrieve content for."),
@@ -2851,7 +3096,13 @@ async def get_page_content(
     return _response_data
 
 # Tags: Site Audit
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_pages(
     project_id: int = Field(..., description="The unique identifier of the project. Only projects with verified ownership are supported. You can find this in your Site Audit project URL on Ahrefs."),
     date: str | None = Field(None, description="The crawl date to retrieve metrics from in ISO 8601 format (YYYY-MM-DDThh:mm:ss UTC). Defaults to the most recent crawl if omitted. For scheduled crawls, returns data from the latest crawl before this timestamp; for Always-on audits, returns data as of the specified date. If time is omitted, defaults to 00:00:00 UTC."),
@@ -2903,7 +3154,13 @@ async def list_audit_pages(
     return _response_data
 
 # Tags: Rank Tracker
-@mcp.tool()
+@mcp.tool(
+    title="Get Rank Tracker Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rank_tracker_overview(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project, found in the project URL on Ahrefs."),
     date: str = Field(..., description="The date for which to report metrics, specified in YYYY-MM-DD format."),
@@ -2950,7 +3207,13 @@ async def get_rank_tracker_overview(
     return _response_data
 
 # Tags: Rank Tracker
-@mcp.tool()
+@mcp.tool(
+    title="Get SERP Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_serp_overview(
     project_id: int = Field(..., description="The unique identifier of your Rank Tracker project, found in the project URL on Ahrefs."),
     keyword: str = Field(..., description="The keyword to retrieve SERP data for."),
@@ -2997,7 +3260,13 @@ async def get_serp_overview(
     return _response_data
 
 # Tags: Rank Tracker
-@mcp.tool()
+@mcp.tool(
+    title="List Competitor Rankings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_competitor_rankings(
     project_id: int = Field(..., description="The unique identifier of your Rank Tracker project, found in the project URL within Ahrefs."),
     date: str = Field(..., description="The date for which to retrieve ranking metrics, specified in YYYY-MM-DD format."),
@@ -3044,7 +3313,13 @@ async def list_competitor_rankings(
     return _response_data
 
 # Tags: Rank Tracker
-@mcp.tool()
+@mcp.tool(
+    title="List Competitor Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_competitor_pages(
     project_id: int = Field(..., description="The unique identifier of your Rank Tracker project, found in the project URL on Ahrefs."),
     date: str = Field(..., description="The date for which to retrieve metrics, specified in YYYY-MM-DD format."),
@@ -3092,7 +3367,13 @@ async def list_competitor_pages(
     return _response_data
 
 # Tags: Rank Tracker
-@mcp.tool()
+@mcp.tool(
+    title="List Competitor Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_competitor_stats(
     select: str = Field(..., description="Comma-separated list of metric columns to include in the response. Refer to the response schema for available column identifiers."),
     date: str = Field(..., description="The date for which to retrieve metrics, formatted as YYYY-MM-DD."),
@@ -3136,7 +3417,13 @@ async def list_competitor_stats(
     return _response_data
 
 # Tags: SERP Overview
-@mcp.tool()
+@mcp.tool(
+    title="Get SERP Overview for Keyword",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_serp_overview_keyword(
     select: str = Field(..., description="Comma-separated list of data columns to include in the response. Refer to the response schema documentation for valid column identifiers."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter ISO 3166-1 country code (e.g., 'us', 'gb', 'de') indicating the search market for the SERP data."),
@@ -3180,7 +3467,12 @@ async def get_serp_overview_keyword(
     return _response_data
 
 # Tags: Batch Analysis
-@mcp.tool()
+@mcp.tool(
+    title="Analyze Targets Batch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def analyze_targets_batch(
     select: list[str] = Field(..., description="Specify which SEO metrics to include in the response (e.g., url, ahrefs_rank). Refer to the response schema for all available column identifiers."),
     targets: list[_models.PostV3BatchAnalysisBodyTargetsItem] = Field(..., description="Provide a list of targets (domains, URLs, or keywords) to analyze. Each target will be evaluated for the selected metrics."),
@@ -3217,13 +3509,20 @@ async def analyze_targets_batch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Subscription Information
-@mcp.tool()
+@mcp.tool(
+    title="Get Subscription Limits and Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_subscription_limits_and_usage() -> dict[str, Any] | ToolResult:
     """Retrieve current workspace and API key limits and usage information. This request is free and does not consume any API units."""
 
@@ -3250,7 +3549,13 @@ async def get_subscription_limits_and_usage() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects(
     owned_by: str | None = Field(None, description="Filter projects by the email address of the project owner."),
     access: Literal["private", "shared"] | None = Field(None, description="Filter projects by access type: either private (accessible only to you) or shared (accessible to others)."),
@@ -3292,7 +3597,12 @@ async def list_projects(
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     protocol: Literal["both", "http", "https"] = Field(..., description="The protocol(s) to monitor for the target: http only, https only, or both protocols."),
     url: str = Field(..., description="The URL of the target resource or service that this project will monitor or manage."),
@@ -3331,13 +3641,20 @@ async def create_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Access",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_access(
     access: Literal["private", "shared"] = Field(..., description="The new access level for the project. Must be either 'private' to restrict access to the project owner, or 'shared' to allow others to access it."),
     project_id: int = Field(..., description="The unique identifier of the project to update. You can find this ID in the URL of your Rank Tracker project dashboard in Ahrefs (the numeric value in the project URL)."),
@@ -3372,13 +3689,20 @@ async def update_project_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Project Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_keywords(project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Rank Tracker project dashboard (the numeric ID in the project URL).")) -> dict[str, Any] | ToolResult:
     """Retrieve all keywords tracked for a specific project in Rank Tracker. This operation is free and does not consume any API units."""
 
@@ -3416,7 +3740,13 @@ async def list_project_keywords(project_id: int = Field(..., description="The un
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Add Keywords",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_keywords(
     project_id: int = Field(..., description="The unique identifier of the project you want to add keywords to. You can find this ID in the URL of your Rank Tracker project dashboard."),
     locations: list[_models.PutV3ManagementProjectKeywordsBodyLocationsItem] = Field(..., description="A list of locations where the keywords should be tracked. Use the Locations and languages endpoint to retrieve valid country codes, language codes, and location IDs for your target regions."),
@@ -3455,13 +3785,20 @@ async def add_keywords(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Keywords",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_keywords(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project, found in the project URL within Ahrefs."),
     keywords: list[_models.PutV3ManagementProjectKeywordsDeleteBodyKeywordsItem] = Field(..., description="An array of keywords to remove from the project. Each keyword should be specified as a string value."),
@@ -3499,13 +3836,20 @@ async def delete_keywords(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Project Competitors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_competitors(project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Rank Tracker project dashboard (the numeric ID in the project overview URL).")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of competitors tracked for a specific project. This operation is free and does not consume any API units."""
 
@@ -3543,7 +3887,12 @@ async def list_project_competitors(project_id: int = Field(..., description="The
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Add Competitors",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_competitors(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project. You can find this ID in the URL of your project dashboard (https://app.ahrefs.com/rank-tracker/overview/#project_id#)."),
     competitors: list[_models.PostV3ManagementProjectCompetitorsBodyCompetitorsItem] = Field(..., description="An array of competitor entries to add to the project. Each item represents a competitor domain or website to track."),
@@ -3581,13 +3930,20 @@ async def add_competitors(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Competitors",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_competitors(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project, found in the project URL within Ahrefs (e.g., https://app.ahrefs.com/rank-tracker/overview/#project_id#)."),
     competitors: list[_models.PostV3ManagementProjectCompetitorsDeleteBodyCompetitorsItem] = Field(..., description="An array of competitor identifiers to remove from the project. Each item should be a competitor ID."),
@@ -3625,13 +3981,20 @@ async def delete_competitors(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Locations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_locations(
     country_code: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="The two-letter ISO 3166-1 alpha-2 country code identifying the country for which to retrieve location and language information."),
     us_state: Literal["al", "ak", "az", "ar", "ca", "co", "ct", "de", "dc", "fl", "ga", "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "va", "wa", "wv", "wi", "wy"] | None = Field(None, description="The two-letter ISO 3166-2:US state code. Required only when country_code is set to 'us' to retrieve state-specific location and language data."),
@@ -3672,7 +4035,13 @@ async def list_locations(
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Keyword List Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_keyword_list_keywords(keyword_list_id: int = Field(..., description="The unique identifier of the keyword list from which to retrieve keywords.")) -> dict[str, Any] | ToolResult:
     """Retrieve all keywords from a specified keyword list. This operation is free and does not consume any API units."""
 
@@ -3710,7 +4079,12 @@ async def list_keyword_list_keywords(keyword_list_id: int = Field(..., descripti
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Add Keywords to List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_keywords_to_list(
     keyword_list_id: int = Field(..., description="The unique identifier of the keyword list to update. Must reference an existing keyword list."),
     keywords: list[str] = Field(..., description="An array of keywords to add to the list. Each keyword is a string value; order is preserved as provided."),
@@ -3748,13 +4122,20 @@ async def add_keywords_to_list(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Keyword List Keywords",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_keyword_list_keywords(
     keyword_list_id: int = Field(..., description="The unique identifier of the keyword list from which keywords will be removed."),
     keywords: list[str] = Field(..., description="An array of keywords to delete from the specified keyword list. Each keyword in the array will be removed from the list."),
@@ -3792,13 +4173,20 @@ async def delete_keyword_list_keywords(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Radar Prompts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_radar_prompts(report_id: str = Field(..., description="The unique identifier of the Brand Radar report. You can find this ID in the URL of your Brand Radar report within Ahrefs (the #report_id# segment in https://app.ahrefs.com/brand-radar/reports/#report_id#/...).")) -> dict[str, Any] | ToolResult:
     """Retrieve the Brand Radar prompts associated with a specific report. This operation is free and does not consume any API units."""
 
@@ -3836,7 +4224,12 @@ async def list_brand_radar_prompts(report_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Create Brand Radar Prompt",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_brand_radar_prompt(
     report_id: str = Field(..., description="The unique identifier of the Brand Radar report where prompts will be applied. You can find this ID in the URL of your Brand Radar report in Ahrefs."),
     countries: list[str] = Field(..., description="A list of two-letter country codes in ISO 3166-1 alpha-2 format specifying the geographic regions for the prompts."),
@@ -3875,13 +4268,20 @@ async def create_brand_radar_prompt(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Brand Radar Prompts",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_brand_radar_prompts(
     report_id: str = Field(..., description="The unique identifier of the Brand Radar report from which to delete prompts. You can find this ID in the URL of your Brand Radar report in Ahrefs."),
     prompts: list[str] = Field(..., description="List of custom prompts to delete. Each prompt must be valid UTF-8 encoded text and not exceed 400 characters in length."),
@@ -3920,13 +4320,20 @@ async def delete_brand_radar_prompts(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Radar Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_radar_reports() -> dict[str, Any] | ToolResult:
     """Retrieve brand radar reports to monitor brand performance and competitive insights. This endpoint is free to use and does not consume any API units."""
 
@@ -3953,7 +4360,12 @@ async def list_brand_radar_reports() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Create Brand Radar Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_brand_radar_report(
     data_source: Literal["chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="The AI data source to monitor for brand mentions. Choose from ChatGPT, Gemini, Perplexity, or Copilot."),
     frequency: Literal["daily", "weekly", "monthly", "off"] = Field(..., description="The update frequency for the report. Select daily for real-time monitoring, weekly for periodic summaries, monthly for long-term trends, or off to disable the report."),
@@ -3989,13 +4401,19 @@ async def create_brand_radar_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Management
-@mcp.tool()
+@mcp.tool(
+    title="Update Brand Radar Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_brand_radar_report(
     prompts_frequency: list[_models.PatchV3ManagementBrandRadarReportsBodyPromptsFrequencyItem] = Field(..., description="The frequency at which the report should generate prompts. Specify as an array of frequency values."),
     report_id: str = Field(..., description="The unique identifier of the Brand Radar report to update. You can find this ID in the URL of your report in Ahrefs at https://app.ahrefs.com/brand-radar/reports/#report_id#/..."),
@@ -4030,13 +4448,20 @@ async def update_brand_radar_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List AI Responses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ai_responses(
     select: str = Field(..., description="Comma-separated list of columns to include in the response. Required to specify which data fields you want returned."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of chatbot models to query. Choose from Google AI Overviews, Google AI Mode, ChatGPT, Gemini, Perplexity, or Copilot. Note: Google models cannot be combined with each other or with non-Google models."),
@@ -4083,7 +4508,13 @@ async def list_ai_responses(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Cited Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cited_pages(
     select: str = Field(..., description="Comma-separated list of columns to include in the response. Required to specify which data fields you want returned."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of chatbot models to query. Choose from Google AI Overviews, Google AI Mode, ChatGPT, Gemini, Perplexity, or Copilot. Note: Google models cannot be combined with each other or with non-Google models in a single request."),
@@ -4129,7 +4560,13 @@ async def list_cited_pages(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Cited Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cited_domains(
     select: str = Field(..., description="Comma-separated list of column identifiers to include in the response. Required to specify which data fields you want returned."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of chatbot models and AI sources to query. Choose from Google AI Overviews, Google AI Mode, ChatGPT, Gemini, Perplexity, or Copilot. Note: Google models cannot be combined with each other or with non-Google models in a single request."),
@@ -4175,7 +4612,13 @@ async def list_cited_domains(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Radar Impression Overviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_radar_impression_overviews(
     select: str = Field(..., description="Comma-separated list of columns to include in the response. Required parameter that determines which data fields are returned."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of chatbot models to query. Choose from: google_ai_overviews, google_ai_mode, chatgpt, gemini, perplexity, or copilot. Note: Google models cannot be combined with each other or with non-Google models in a single request."),
@@ -4219,7 +4662,13 @@ async def list_brand_radar_impression_overviews(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Mentions Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_mentions_overview(
     select: str = Field(..., description="Comma-separated list of column identifiers to include in the response. Required to specify which data fields to return."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of AI chatbot models to query. Choose from Google AI Overviews, Google AI Mode, ChatGPT, Gemini, Perplexity, or Copilot. Note: Google models cannot be combined with each other or with non-Google models."),
@@ -4263,7 +4712,13 @@ async def list_brand_mentions_overview(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="Get Share of Voice Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_share_of_voice_overview(
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of chatbot models to query. Google models (google_ai_overviews and google_ai_mode) cannot be combined with each other or with non-Google models. Required parameter."),
     where: str | None = Field(None, description="Filter expression to narrow results using recognized column identifiers specific to this endpoint."),
@@ -4306,7 +4761,13 @@ async def get_share_of_voice_overview(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Mention Impressions History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_mention_impressions_history(
     brand: str = Field(..., description="The brand name to track for mentions and impressions."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="One or more AI chatbot platforms to query, provided as a comma-separated list. Google models (google_ai_overviews, google_ai_mode) cannot be combined with each other or with non-Google platforms (chatgpt, gemini, perplexity, copilot)."),
@@ -4352,7 +4813,13 @@ async def list_brand_mention_impressions_history(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Mention History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_mention_history(
     brand: str = Field(..., description="The brand name to retrieve mention history for."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="One or more chatbot models to query, provided as a comma-separated list. Google models (google_ai_overviews, google_ai_mode) cannot be combined with each other or with non-Google models (chatgpt, gemini, perplexity, copilot)."),
@@ -4398,7 +4865,13 @@ async def list_brand_mention_history(
     return _response_data
 
 # Tags: Brand Radar
-@mcp.tool()
+@mcp.tool(
+    title="List Brand SOV History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_sov_history(
     date_from: str = Field(..., description="Start date for the historical period in YYYY-MM-DD format."),
     data_source: Literal["google_ai_overviews", "google_ai_mode", "chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="Comma-separated list of chatbot models to analyze (google_ai_overviews, google_ai_mode, chatgpt, gemini, perplexity, or copilot). Google models cannot be combined with each other or with non-Google models."),
@@ -4443,7 +4916,13 @@ async def list_brand_sov_history(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Web Analytics Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_web_analytics_stats(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve analytics statistics."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query, specified in ISO 8601 format. If omitted, defaults to the earliest available data."),
@@ -4488,7 +4967,13 @@ async def list_web_analytics_stats(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Analytics Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_analytics_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose analytics data you want to retrieve."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for aggregating data points. Choose from hourly, daily, weekly, or monthly granularity depending on the level of detail needed."),
@@ -4532,7 +5017,13 @@ async def get_web_analytics_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Source Channels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_source_channels(
     project_id: int = Field(..., description="The unique identifier for the project whose source channel analytics you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response."),
@@ -4577,7 +5068,13 @@ async def list_source_channels(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Source Channels Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_source_channels_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose analytics data should be retrieved."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for aggregating data points in the chart. Choose from hourly, daily, weekly, or monthly granularity."),
@@ -4622,7 +5119,13 @@ async def get_source_channels_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Traffic Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_traffic_sources(
     project_id: int = Field(..., description="The unique identifier of the project to retrieve traffic sources for."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response."),
@@ -4667,7 +5170,13 @@ async def list_traffic_sources(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Traffic Sources Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_traffic_sources_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose traffic sources you want to analyze."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for grouping data points in the chart. Choose from hourly, daily, weekly, or monthly granularity."),
@@ -4712,7 +5221,13 @@ async def get_traffic_sources_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Referrers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_referrers(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve referrer analytics."),
     limit: int | None = Field(None, description="Maximum number of referrer records to return in the response."),
@@ -4757,7 +5272,13 @@ async def list_referrers(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Referrers Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_referrers_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time granularity for data points in the chart. Choose from hourly, daily, weekly, or monthly intervals."),
     project_id: int = Field(..., description="The unique identifier for the project whose referrers data should be retrieved."),
@@ -4802,7 +5323,13 @@ async def get_referrers_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List UTM Parameters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_utm_parameters(
     utm_param: Literal["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"] = Field(..., description="The UTM parameter to use as the grouping dimension. Choose from: utm_source, utm_medium, utm_campaign, utm_term, or utm_content."),
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve UTM parameter analytics."),
@@ -4848,7 +5375,13 @@ async def list_utm_parameters(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get UTM Parameters Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_utm_params_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose analytics data you want to retrieve."),
     utm_param: Literal["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"] = Field(..., description="The UTM parameter to use as the primary dimension for the chart. Choose from: utm_source, utm_medium, utm_campaign, utm_term, or utm_content."),
@@ -4894,7 +5427,13 @@ async def get_utm_params_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Entry Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entry_pages(
     project_id: int = Field(..., description="The unique identifier for the project whose entry pages data should be retrieved."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Useful for pagination and controlling response size."),
@@ -4946,7 +5485,13 @@ async def list_entry_pages(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Entry Pages Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_entry_pages_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Set the time interval for data points on the chart: hourly, daily, weekly, or monthly granularity."),
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve entry pages chart data."),
@@ -4991,7 +5536,13 @@ async def get_entry_pages_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Exit Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_exit_pages(
     project_id: int = Field(..., description="The unique identifier of the project to retrieve exit pages data for."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response."),
@@ -5036,7 +5587,13 @@ async def list_exit_pages(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Exit Pages Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_exit_pages_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time granularity for aggregating chart data points. Choose from hourly, daily, weekly, or monthly intervals."),
     project_id: int = Field(..., description="The unique identifier of the project to retrieve exit pages data for."),
@@ -5081,7 +5638,13 @@ async def get_exit_pages_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Top Pages by Page Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_top_pages_by_pageviews(
     project_id: int = Field(..., description="The unique identifier for the project whose page analytics you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of top pages to return in the results. Defaults to a system-defined limit if not specified."),
@@ -5126,7 +5689,13 @@ async def list_top_pages_by_pageviews(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Top Pages Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_top_pages_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time granularity for data aggregation: hourly, daily, weekly, or monthly."),
     project_id: int = Field(..., description="The numeric identifier of the project to retrieve analytics for."),
@@ -5171,7 +5740,13 @@ async def get_top_pages_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Web Analytics by City",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_web_analytics_by_city(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve city-level analytics data."),
     limit: int | None = Field(None, description="Maximum number of city results to return in the response. If not specified, a default limit applies."),
@@ -5216,7 +5791,13 @@ async def list_web_analytics_by_city(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Analytics Cities Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_analytics_cities_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose analytics data you want to retrieve."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for data aggregation. Choose from hourly, daily, weekly, or monthly granularity to control the resolution of your chart data points."),
@@ -5261,7 +5842,13 @@ async def get_web_analytics_cities_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Continent Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_continent_analytics(
     project_id: int = Field(..., description="The unique identifier for the project whose analytics data you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of continent records to return in the response."),
@@ -5306,7 +5893,13 @@ async def list_continent_analytics(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Continents Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_continents_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose analytics data you want to retrieve."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for data aggregation. Choose from hourly, daily, weekly, or monthly granularity."),
@@ -5351,7 +5944,13 @@ async def get_continents_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Web Analytics by Country",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_web_analytics_by_country(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve country-level web analytics data."),
     limit: int | None = Field(None, description="Maximum number of country records to return in the response. Use this to paginate through large result sets."),
@@ -5396,7 +5995,13 @@ async def list_web_analytics_by_country(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Countries Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_countries_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time granularity for data points: hourly, daily, weekly, or monthly aggregation."),
     project_id: int = Field(..., description="The numeric identifier of the project to retrieve analytics for."),
@@ -5441,7 +6046,13 @@ async def get_countries_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Language Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_language_analytics(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve language analytics data."),
     limit: int | None = Field(None, description="Maximum number of language records to return in the response. Useful for pagination or limiting result set size."),
@@ -5486,7 +6097,13 @@ async def list_language_analytics(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Language Analytics Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_language_analytics_chart(
     project_id: int = Field(..., description="The unique identifier for the project whose language analytics data should be retrieved."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for aggregating data points in the chart. Choose from hourly, daily, weekly, or monthly granularity."),
@@ -5531,7 +6148,13 @@ async def get_language_analytics_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Browser Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_browser_analytics(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve browser analytics data."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response."),
@@ -5576,7 +6199,13 @@ async def list_browser_analytics(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Browser Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_browser_chart(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve browser analytics data."),
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="The time interval for aggregating data points in the chart. Choose from hourly, daily, weekly, or monthly granularity."),
@@ -5621,7 +6250,13 @@ async def get_browser_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Browser Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_browser_versions(
     project_id: int = Field(..., description="The unique identifier for the project whose browser version data you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. If not specified, a default limit applies."),
@@ -5666,7 +6301,13 @@ async def list_browser_versions(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Browser Versions Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_browser_versions_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time interval for chart data points. Choose from hourly, daily, weekly, or monthly granularity."),
     project_id: int = Field(..., description="The unique identifier of the project to retrieve analytics data for."),
@@ -5711,7 +6352,13 @@ async def get_browser_versions_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Device Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_device_analytics(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve device analytics."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response."),
@@ -5756,7 +6403,13 @@ async def list_device_analytics(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Devices Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_devices_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time granularity for data aggregation. Choose from hourly, daily, weekly, or monthly intervals."),
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve device analytics."),
@@ -5801,7 +6454,13 @@ async def get_devices_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Operating Systems Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_operating_systems_analytics(
     project_id: int = Field(..., description="The unique identifier for the project whose operating system analytics you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Useful for pagination and controlling response size."),
@@ -5846,7 +6505,13 @@ async def list_operating_systems_analytics(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Operating Systems Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_operating_systems_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time granularity for data points in the chart. Choose from hourly, daily, weekly, or monthly intervals."),
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve operating systems chart data."),
@@ -5891,7 +6556,13 @@ async def get_operating_systems_chart(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Operating System Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_operating_system_versions(
     project_id: int = Field(..., description="The unique identifier of the project for which to retrieve operating system versions data."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response."),
@@ -5936,7 +6607,13 @@ async def list_operating_system_versions(
     return _response_data
 
 # Tags: Web Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Operating System Versions Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_operating_system_versions_chart(
     granularity: Literal["hourly", "daily", "weekly", "monthly"] = Field(..., description="Time interval for aggregating data points in the chart. Choose from hourly, daily, weekly, or monthly granularity."),
     project_id: int = Field(..., description="Unique identifier of the project to retrieve analytics data for."),
@@ -5981,7 +6658,13 @@ async def get_operating_system_versions_chart(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Search Performance History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_search_performance_history(
     date_from: str = Field(..., description="The start date for the historical period in YYYY-MM-DD format. Required to define the beginning of the data range."),
     where: str | None = Field(None, description="Filter results by specific fields using supported filter expressions to narrow down the performance data returned."),
@@ -6026,7 +6709,13 @@ async def get_search_performance_history(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Keyword Position History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_keyword_position_history(
     date_from: str = Field(..., description="The start date for the historical period in YYYY-MM-DD format. Required to define the beginning of your analysis window."),
     where: str | None = Field(None, description="Filter conditions to narrow results by specific criteria such as keywords, URLs, or other query parameters."),
@@ -6071,7 +6760,13 @@ async def list_keyword_position_history(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Page History (GSC)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_page_history_gsc(
     date_from: str = Field(..., description="The start date for the historical period in YYYY-MM-DD format. Required to define the beginning of the data range."),
     where: str | None = Field(None, description="Filter results by supported fields using query syntax to narrow down the page history data returned."),
@@ -6116,7 +6811,13 @@ async def list_page_history_gsc(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Device Performance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_device_performance(
     date_from: str = Field(..., description="Start date for the performance data in YYYY-MM-DD format (e.g., 2024-01-01). This is the beginning of the historical period to analyze."),
     date_to: str | None = Field(None, description="End date for the performance data in YYYY-MM-DD format (e.g., 2024-01-31). If not provided, defaults to the current date. Must be on or after the start date."),
@@ -6159,7 +6860,13 @@ async def list_device_performance(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List GSC Metrics by Country",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gsc_metrics_by_country(
     date_from: str = Field(..., description="The start date for the metrics period in YYYY-MM-DD format. Required to define the historical data range."),
     where: str | None = Field(None, description="Filter results using supported field conditions to narrow down the metrics returned."),
@@ -6204,7 +6911,13 @@ async def list_gsc_metrics_by_country(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List CTR by Position",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ctr_by_position(
     date_from: str = Field(..., description="Start date for the historical period in YYYY-MM-DD format (required)."),
     date_to: str | None = Field(None, description="End date for the historical period in YYYY-MM-DD format. If omitted, defaults to the start date."),
@@ -6246,7 +6959,13 @@ async def list_ctr_by_position(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Search Performance by Position",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_search_performance_by_position(
     date_from: str = Field(..., description="The start date for the historical period you want to analyze, specified in YYYY-MM-DD format. This parameter is required."),
     where: str | None = Field(None, description="Filter results using supported field conditions to narrow down the performance data returned."),
@@ -6290,7 +7009,13 @@ async def list_search_performance_by_position(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Keyword History (GSC)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_keyword_history_gsc(
     date_from: str = Field(..., description="Start date for the historical period in YYYY-MM-DD format (inclusive). Required to define the date range for keyword history retrieval."),
     where: str | None = Field(None, description="Filter results by supported fields using query syntax to narrow down keyword history data."),
@@ -6334,7 +7059,13 @@ async def list_keyword_history_gsc(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List GSC Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gsc_keywords(
     date_from: str = Field(..., description="Start date for the historical data range in YYYY-MM-DD format. Required to define the beginning of the analysis period."),
     where: str | None = Field(None, description="Filter keywords using a filter expression to narrow results by specific criteria."),
@@ -6379,7 +7110,13 @@ async def list_gsc_keywords(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Page History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_history(
     date_from: str = Field(..., description="Start date for the historical period in YYYY-MM-DD format. Required to define the beginning of the data range."),
     pages: str | None = Field(None, description="Comma-separated list of page URLs to retrieve history data for. If not specified, data for all pages is included."),
@@ -6423,7 +7160,13 @@ async def get_page_history(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List GSC Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gsc_pages(
     date_from: str = Field(..., description="Start date for the historical data range in YYYY-MM-DD format; required to define the beginning of the analysis period."),
     where: str | None = Field(None, description="Filter pages by supported field criteria using query syntax to narrow results to specific pages or patterns."),
@@ -6468,7 +7211,13 @@ async def list_gsc_pages(
     return _response_data
 
 # Tags: GSC Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Anonymous Queries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_anonymous_queries(
     select: str = Field(..., description="Comma-separated list of column names to include in the response. Refer to the response schema for valid column identifiers."),
     country: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="Two-letter country code in ISO 3166-1 alpha-2 format (e.g., 'us', 'gb', 'de') to scope results to a specific country."),
@@ -6597,7 +7346,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python ahrefs_api_server.py", file=sys.stderr)
+        print("  python ahrefs_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -6699,7 +7448,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Ahrefs API MCP Server")
+    parser = argparse.ArgumentParser(description="Ahrefs MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -6800,7 +7549,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Ahrefs API MCP Server")
+    logger.info("Starting Ahrefs MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
