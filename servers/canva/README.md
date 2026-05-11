@@ -5,7 +5,7 @@ Base URL: https://api.canva.com/rest
 | | |
 |---|---|
 | **Category** | Media & Entertainment |
-| **Tools** | 40 |
+| **Tools** | 36 |
 | **Auth** | OAuth2 |
 
 ## API Info
@@ -67,6 +67,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_ID` — OAuth2 client ID
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
+
 Do not commit credentials to version control.
 
 ### OAuth2

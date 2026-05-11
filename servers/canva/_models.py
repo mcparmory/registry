@@ -1,7 +1,7 @@
 """
 Canva MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:33:15 UTC
+Generated: 2026-05-11 19:34:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -96,7 +96,7 @@ class CreateAssetUploadJobRequestHeader(StrictModel):
     asset_upload_metadata: CreateAssetUploadJobHeaderAssetUploadMetadata = Field(default=..., validation_alias="Asset-Upload-Metadata", serialization_alias="Asset-Upload-Metadata", description="Metadata describing the asset being uploaded, including asset name, type, and other identifying information.")
 class CreateAssetUploadJobRequestBody(StrictModel):
     """Binary of the asset to upload."""
-    body: str = Field(default=..., description="The raw binary file content to upload as an asset. The file must be in a supported format as documented in the Assets API overview.", json_schema_extra={'format': 'binary'})
+    body: str = Field(default=..., description="Base64-encoded binary request body. The raw binary file content to upload as an asset. The file must be in a supported format as documented in the Assets API overview.", json_schema_extra={'format': 'byte'})
 class CreateAssetUploadJobRequest(StrictModel):
     """Initiates an asynchronous job to upload an asset file to the user's content library. Use the returned job ID to poll for completion status and retrieve the uploaded asset details."""
     header: CreateAssetUploadJobRequestHeader
@@ -264,7 +264,7 @@ class CreateDesignImportJobRequestHeader(StrictModel):
     import_metadata: CreateDesignImportJobHeaderImportMetadata = Field(default=..., validation_alias="Import-Metadata", serialization_alias="Import-Metadata", description="Metadata describing the design being imported, including details about the source file and import configuration. Provided as an HTTP header parameter.")
 class CreateDesignImportJobRequestBody(StrictModel):
     """Binary of the file to import."""
-    body: str = Field(default=..., description="The binary file content to import as a design. The file must be in a supported format for design imports.", json_schema_extra={'format': 'binary'})
+    body: str = Field(default=..., description="Base64-encoded binary request body. The binary file content to import as a design. The file must be in a supported format for design imports.", json_schema_extra={'format': 'byte'})
 class CreateDesignImportJobRequest(StrictModel):
     """Initiates an asynchronous job to import an external file as a new design in Canva. Supported file types include various design formats; use the Get design import job API to check job status and retrieve results."""
     header: CreateDesignImportJobRequestHeader

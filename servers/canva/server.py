@@ -7,7 +7,7 @@ API Info:
 - Contact: Canva Developer Community (https://community.canva.dev/)
 - Terms of Service: https://www.canva.com/trust/legal/
 
-Generated: 2026-05-05 14:33:15 UTC
+Generated: 2026-05-11 19:34:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -43,11 +44,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.canva.com/rest")
 SERVER_NAME = "Canva"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1050,6 +1081,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1074,6 +1107,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1281,7 +1316,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Canva", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Get Asset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_asset(asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to retrieve. Must be alphanumeric with hyphens and underscores allowed.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific asset by its unique identifier. Use this operation to fetch asset information such as properties, status, and configuration details."""
 
@@ -1317,7 +1358,13 @@ async def get_asset(asset_id: str = Field(..., alias="assetId", description="The
     return _response_data
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Update Asset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_asset(
     asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to update. Must be alphanumeric with hyphens and underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     name: str | None = Field(None, description="The new name for the asset as displayed in the Canva UI. Leave undefined or empty to skip updating the name.", max_length=50),
@@ -1354,13 +1401,20 @@ async def update_asset(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Delete Asset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_asset(asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to delete.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Delete an asset by its ID, moving it to trash. This mirrors the Canva UI behavior and does not remove the asset from designs that already use it."""
 
@@ -1396,10 +1450,15 @@ async def delete_asset(asset_id: str = Field(..., alias="assetId", description="
     return _response_data
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Upload Asset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_asset(
     asset_upload_metadata: _models.CreateAssetUploadJobHeaderAssetUploadMetadata = Field(..., alias="Asset-Upload-Metadata", description="Metadata describing the asset being uploaded, including asset name, type, and other identifying information."),
-    body: str = Field(..., description="The raw binary file content to upload as an asset. The file must be in a supported format as documented in the Assets API overview."),
+    body: str = Field(..., description="Base64-encoded binary request body. The raw binary file content to upload as an asset. The file must be in a supported format as documented in the Assets API overview.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous job to upload an asset file to the user's content library. Use the returned job ID to poll for completion status and retrieve the uploaded asset details."""
 
@@ -1421,6 +1480,7 @@ async def upload_asset(
     _http_headers = _encode_content_params(_http_headers, {
         "Asset-Upload-Metadata": "application/json",
     })
+    _http_headers["Content-Type"] = "application/octet-stream"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_asset")
@@ -1436,13 +1496,21 @@ async def upload_asset(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/octet-stream",
+        whole_body_base64=True,
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Get Asset Upload Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_asset_upload_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the asset upload job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and result of an asset upload job. Use this to poll for completion after creating an upload job, as the operation is asynchronous and may require multiple requests until a success or failed status is returned."""
 
@@ -1478,7 +1546,12 @@ async def get_asset_upload_job(job_id: str = Field(..., alias="jobId", descripti
     return _response_data
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Initiate URL Asset Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_url_asset_upload(
     name: str = Field(..., description="A descriptive name for the asset being uploaded. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     url: str = Field(..., description="The publicly accessible URL of the file to import. The URL must be reachable from the internet and support direct file access. Must be between 8 and 2048 characters.", min_length=8, max_length=2048),
@@ -1513,13 +1586,20 @@ async def initiate_url_asset_upload(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: asset
-@mcp.tool()
+@mcp.tool(
+    title="Get Asset Upload Job from URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_asset_upload_job_from_url(job_id: str = Field(..., alias="jobId", description="The unique identifier of the asset upload job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and result of an asset upload job created via URL. Poll this endpoint until the job reaches a terminal state (success or failed)."""
 
@@ -1555,7 +1635,12 @@ async def get_asset_upload_job_from_url(job_id: str = Field(..., alias="jobId", 
     return _response_data
 
 # Tags: autofill
-@mcp.tool()
+@mcp.tool(
+    title="Autofill Design",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def autofill_design(
     brand_template_id: str = Field(..., description="The ID of the brand template to use for autofilling. Brand template IDs were migrated to a new format in September 2025; old IDs remain supported for 6 months."),
     data: dict[str, _models.DatasetValue] = Field(..., description="Data object containing field names mapped to their values. Supports images (via asset_id), text strings, and chart data with typed rows and cells."),
@@ -1591,13 +1676,20 @@ async def autofill_design(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: autofill
-@mcp.tool()
+@mcp.tool(
+    title="Get Autofill Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_autofill_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design autofill job to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve the result of a design autofill job. Poll this endpoint until the job reaches a `success` or `failed` status to get the final result."""
 
@@ -1633,7 +1725,13 @@ async def get_autofill_job(job_id: str = Field(..., alias="jobId", description="
     return _response_data
 
 # Tags: brand_template
-@mcp.tool()
+@mcp.tool(
+    title="List Brand Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_brand_templates(
     query: str | None = Field(None, description="Search brand templates by one or more search terms to filter the results."),
     limit: str | None = Field(None, description="The maximum number of brand templates to return in the response."),
@@ -1679,7 +1777,13 @@ async def list_brand_templates(
     return _response_data
 
 # Tags: brand_template
-@mcp.tool()
+@mcp.tool(
+    title="Get Brand Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_brand_template(brand_template_id: str = Field(..., alias="brandTemplateId", description="The unique identifier for the brand template. Must be 1-50 characters long and contain only alphanumeric characters, hyphens, or underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a brand template. Note: Brand template IDs were migrated to a new format in September 2025; old IDs remain valid for 6 months. Requires the user to be a member of a Canva Enterprise organization."""
 
@@ -1715,7 +1819,13 @@ async def get_brand_template(brand_template_id: str = Field(..., alias="brandTem
     return _response_data
 
 # Tags: brand_template
-@mcp.tool()
+@mcp.tool(
+    title="Get Brand Template Dataset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_brand_template_dataset(brand_template_id: str = Field(..., alias="brandTemplateId", description="The unique identifier of the brand template. Brand template IDs were migrated to a new format in September 2025; old IDs remain valid for 6 months.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the dataset definition for a brand template, including any autofill data fields and their accepted types (images, text, or charts). Use this to understand what data can be populated when creating a design autofill job."""
 
@@ -1751,7 +1861,13 @@ async def get_brand_template_dataset(brand_template_id: str = Field(..., alias="
     return _response_data
 
 # Tags: comment
-@mcp.tool()
+@mcp.tool(
+    title="List Comment Replies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comment_replies(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread for which to retrieve replies.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
@@ -1794,7 +1910,12 @@ async def list_comment_replies(
     return _response_data
 
 # Tags: comment
-@mcp.tool()
+@mcp.tool(
+    title="Create Comment Reply",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_comment_reply(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread to reply to. This ID is returned when a thread is created or can be obtained from existing replies in the thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
@@ -1831,13 +1952,20 @@ async def create_comment_reply(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: comment
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment Thread",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_comment_thread(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
@@ -1876,7 +2004,13 @@ async def get_comment_thread(
     return _response_data
 
 # Tags: comment
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment Reply",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_comment_reply(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread containing the reply.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
@@ -1916,7 +2050,12 @@ async def get_comment_reply(
     return _response_data
 
 # Tags: comment
-@mcp.tool()
+@mcp.tool(
+    title="Create Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_comment(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design where the comment will be created.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     message_plaintext: str = Field(..., description="The comment message in plaintext. You can mention users by including their User ID and Team ID in the format [user_id:team_id]. If assigning the comment to a user, you must mention them in this message.", min_length=1, max_length=2048),
@@ -1953,13 +2092,20 @@ async def create_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: design
-@mcp.tool()
+@mcp.tool(
+    title="List Designs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_designs(
     query: str | None = Field(None, description="Search term or terms to filter designs by title or content. Searches across both user-created and shared designs.", max_length=255),
     ownership: Literal["any", "owned", "shared"] | None = Field(None, description="Filter designs based on ownership status. Use 'owned' for designs created by the user, 'shared' for designs shared with the user, or 'any' to include both."),
@@ -2004,7 +2150,12 @@ async def list_designs(
     return _response_data
 
 # Tags: design
-@mcp.tool()
+@mcp.tool(
+    title="Create Design",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_design(
     design_type: Annotated[_models.PresetDesignTypeInput | _models.CustomDesignTypeInput, Field(discriminator="type_")] | None = Field(None, description="The preset design type to use for the new design. Either specify a design_type or provide custom height and width dimensions."),
     asset_id: str | None = Field(None, description="The ID of an image asset from the user's projects to insert into the created design. Currently supports image assets only."),
@@ -2040,13 +2191,20 @@ async def create_design(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: design
-@mcp.tool()
+@mcp.tool(
+    title="Get Design",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_design(design_id: str = Field(..., alias="designId", description="The unique identifier for the design to retrieve. Must be alphanumeric with hyphens and underscores allowed, between 1 and 50 characters in length.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves comprehensive metadata for a specific design, including owner information, editing and viewing URLs, and thumbnail details."""
 
@@ -2082,7 +2240,13 @@ async def get_design(design_id: str = Field(..., alias="designId", description="
     return _response_data
 
 # Tags: design
-@mcp.tool()
+@mcp.tool(
+    title="List Design Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_design_pages(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the pages to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     offset: str | None = Field(None, description="The page index to start retrieving from. Pages use one-based numbering, where the first page has index 1."),
@@ -2128,7 +2292,13 @@ async def list_design_pages(
     return _response_data
 
 # Tags: design
-@mcp.tool()
+@mcp.tool(
+    title="List Design Export Formats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_design_export_formats(design_id: str = Field(..., alias="designId", description="The unique identifier of the design whose export formats you want to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the available file formats for exporting a design. The returned formats depend on the design type and page types within the design, showing only formats supported by all pages."""
 
@@ -2164,10 +2334,15 @@ async def list_design_export_formats(design_id: str = Field(..., alias="designId
     return _response_data
 
 # Tags: design_import
-@mcp.tool()
+@mcp.tool(
+    title="Import Design",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_design(
     import_metadata: _models.CreateDesignImportJobHeaderImportMetadata = Field(..., alias="Import-Metadata", description="Metadata describing the design being imported, including details about the source file and import configuration. Provided as an HTTP header parameter."),
-    body: str = Field(..., description="The binary file content to import as a design. The file must be in a supported format for design imports."),
+    body: str = Field(..., description="Base64-encoded binary request body. The binary file content to import as a design. The file must be in a supported format for design imports.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous job to import an external file as a new design in Canva. Supported file types include various design formats; use the Get design import job API to check job status and retrieve results."""
 
@@ -2189,6 +2364,7 @@ async def import_design(
     _http_headers = _encode_content_params(_http_headers, {
         "Import-Metadata": "application/json",
     })
+    _http_headers["Content-Type"] = "application/octet-stream"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("import_design")
@@ -2204,13 +2380,21 @@ async def import_design(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/octet-stream",
+        whole_body_base64=True,
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: design_import
-@mcp.tool()
+@mcp.tool(
+    title="Get Design Import Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_design_import_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design import job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and result of a design import job. Use this to poll for completion after creating an import job, as the operation is asynchronous and may require multiple requests until a success or failed status is returned."""
 
@@ -2246,7 +2430,12 @@ async def get_design_import_job(job_id: str = Field(..., alias="jobId", descript
     return _response_data
 
 # Tags: design_import
-@mcp.tool()
+@mcp.tool(
+    title="Import Design from URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_design_from_url(
     title: str = Field(..., description="The title for the imported design. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     url: str = Field(..., description="The publicly accessible URL of the file to import. The URL must be reachable from the internet and support direct file access.", min_length=1, max_length=2048),
@@ -2282,13 +2471,20 @@ async def import_design_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: design_import
-@mcp.tool()
+@mcp.tool(
+    title="Get URL Import Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_url_import_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the URL import job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and result of a URL import job. Use this to poll for completion of an asynchronous import operation, which will return a `success` or `failed` status once processing is complete."""
 
@@ -2324,7 +2520,12 @@ async def get_url_import_job(job_id: str = Field(..., alias="jobId", description
     return _response_data
 
 # Tags: export
-@mcp.tool()
+@mcp.tool(
+    title="Start Design Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_design_export(
     design_id: str = Field(..., description="The unique identifier of the design to export."),
     format_: Annotated[_models.PdfExportFormat | _models.JpgExportFormat | _models.PngExportFormat | _models.PptxExportFormat | _models.GifExportFormat | _models.Mp4ExportFormat, Field(discriminator="type_")] = Field(..., alias="format", description="The desired export file format and associated configuration options."),
@@ -2359,13 +2560,20 @@ async def start_design_export(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: export
-@mcp.tool()
+@mcp.tool(
+    title="Get Design Export Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_design_export_job(export_id: str = Field(..., alias="exportId", description="The unique identifier of the export job to retrieve status and results for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and results of a design export job. When successful, returns download URLs for each page of the exported design (valid for 24 hours). You may need to poll this endpoint until the job reaches a terminal status (success or failed)."""
 
@@ -2401,7 +2609,13 @@ async def get_design_export_job(export_id: str = Field(..., alias="exportId", de
     return _response_data
 
 # Tags: folder
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder(folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to retrieve. Must be 1-50 characters containing alphanumeric characters, hyphens, or underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the name and metadata details of a specific folder by its folder ID."""
 
@@ -2437,7 +2651,13 @@ async def get_folder(folder_id: str = Field(..., alias="folderId", description="
     return _response_data
 
 # Tags: folder
-@mcp.tool()
+@mcp.tool(
+    title="Rename Folder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rename_folder(
     folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to rename.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     name: str = Field(..., description="The new name for the folder as it will appear in the Canva UI. Must be between 1 and 255 characters.", min_length=1, max_length=255),
@@ -2473,13 +2693,20 @@ async def rename_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: folder
-@mcp.tool()
+@mcp.tool(
+    title="Delete Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_folder(folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to delete.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a folder by moving its contents to Trash. Content owned by the folder owner goes to Trash, while content owned by other users is moved to the top level of their projects."""
 
@@ -2515,7 +2742,13 @@ async def delete_folder(folder_id: str = Field(..., alias="folderId", descriptio
     return _response_data
 
 # Tags: folder
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_items(
     folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to list items from.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     limit: str | None = Field(None, description="Maximum number of folder items to return in the response. Defaults to 50 items."),
@@ -2565,7 +2798,12 @@ async def list_folder_items(
     return _response_data
 
 # Tags: folder
-@mcp.tool()
+@mcp.tool(
+    title="Move Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_item(
     to_folder_id: str = Field(..., description="The ID of the destination folder. Use the special ID `root` to move the item to the top level of the user's projects.", min_length=1, max_length=50),
     item_id: str = Field(..., description="The ID of the item to move. Video assets are not supported.", min_length=1, max_length=50),
@@ -2600,13 +2838,19 @@ async def move_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: folder
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder(
     name: str = Field(..., description="The name for the new folder. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     parent_folder_id: str = Field(..., description="The ID of the parent folder where this folder will be created. Use `root` for top-level projects, `uploads` for the Uploads folder, or provide a specific folder ID.", min_length=1, max_length=50),
@@ -2641,13 +2885,20 @@ async def create_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: oidc
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user_info() -> dict[str, Any] | ToolResult:
     """Retrieves the current authenticated user's identity claims and profile information. Returns the same user attributes that were included in the ID token during authorization."""
 
@@ -2674,7 +2925,12 @@ async def get_current_user_info() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: resize
-@mcp.tool()
+@mcp.tool(
+    title="Start Design Resize Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_design_resize_job(
     design_id: str = Field(..., description="The unique identifier of the design to be resized."),
     design_type: Annotated[_models.PresetDesignTypeInput | _models.CustomDesignTypeInput, Field(discriminator="type_")] = Field(..., description="The target design type for the resized design. Can be either a preset design type or a custom design with specified height and width dimensions."),
@@ -2709,13 +2965,20 @@ async def start_design_resize_job(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: resize
-@mcp.tool()
+@mcp.tool(
+    title="Get Resize Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_resize_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design resize job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and result of an asynchronous design resize job. Use this to poll for job completion after initiating a resize operation, which will include the resized design metadata upon success."""
 
@@ -2751,7 +3014,13 @@ async def get_resize_job(job_id: str = Field(..., alias="jobId", description="Th
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the current authenticated user's ID and team ID based on the provided access token."""
 
@@ -2778,7 +3047,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="List User Capabilities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_capabilities() -> dict[str, Any] | ToolResult:
     """Retrieves the list of API capabilities available for the authenticated user account. This shows which features and operations the user's access token is authorized to use."""
 
@@ -2805,7 +3080,13 @@ async def list_user_capabilities() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="Get User Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_profile() -> dict[str, Any] | ToolResult:
     """Retrieve the profile information for the authenticated user associated with the provided access token. Currently returns the user's display name, with additional profile data expected in future releases."""
 

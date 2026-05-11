@@ -1,7 +1,7 @@
 """
 Authentication module for Canva MCP server.
 
-Generated: 2026-05-05 14:33:15 UTC
+Generated: 2026-05-11 19:34:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
