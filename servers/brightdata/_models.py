@@ -1,7 +1,7 @@
 """
 Bright Data MCP Server - Pydantic Models
 
-Generated: 2026-05-05 20:33:08 UTC
+Generated: 2026-05-11 23:11:12 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

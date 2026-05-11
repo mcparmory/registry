@@ -5,7 +5,7 @@ Base URL: https://api.brightdata.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 35 |
+| **Tools** | 30 |
 | **Auth** | Bearer Token |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ---

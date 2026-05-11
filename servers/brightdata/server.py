@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Bright Data MCP Server
-Generated: 2026-05-05 20:33:08 UTC
+Generated: 2026-05-11 23:11:12 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.brightdata.com")
 SERVER_NAME = "Bright Data"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1213,7 +1248,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Bright Data", middleware=[_JsonCoercionMiddleware()])
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Cities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cities(country: str = Field(..., description="The ISO 3166-1 alpha-2 two-letter country code identifying the country whose cities should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of cities belonging to a specified country. Useful for populating location options or validating city data within a given country."""
 
@@ -1251,7 +1292,13 @@ async def list_cities(country: str = Field(..., description="The ISO 3166-1 alph
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Countries by Zone",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_countries_by_zone() -> dict[str, Any] | ToolResult:
     """Retrieves a complete list of all available countries organized by zone type. Use this to discover supported countries and their associated geographic or regulatory zones."""
 
@@ -1278,7 +1325,13 @@ async def list_countries_by_zone() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Customer Balance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_customer_balance() -> dict[str, Any] | ToolResult:
     """Retrieves the total account balance for the authenticated customer. Returns the current balance across all associated accounts or funds."""
 
@@ -1305,7 +1358,13 @@ async def get_customer_balance() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Bandwidth Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bandwidth_stats(
     from_: str | None = Field(None, alias="from", description="The start of the time range for which to retrieve bandwidth stats, specified as an ISO 8601 datetime string."),
     to: str | None = Field(None, description="The end of the time range for which to retrieve bandwidth stats, specified as an ISO 8601 datetime string."),
@@ -1346,7 +1405,13 @@ async def get_bandwidth_stats(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Zone Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_zone_info(zone: str = Field(..., description="The identifier or name of the zone whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status and details of a specified zone. Use this to monitor zone health, availability, or configuration state."""
 
@@ -1384,7 +1449,12 @@ async def get_zone_info(zone: str = Field(..., description="The identifier or na
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Zone",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_zone(
     name: str = Field(..., description="Unique name to identify the zone within your account."),
     plan_type: Literal["static", "resident", "unblocker", "browser_api"] = Field(..., alias="planType", description="The billing and access plan type for the zone. Controls how the zone is provisioned and billed."),
@@ -1442,13 +1512,20 @@ async def create_zone(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Zone",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_zone(zone: str | None = Field(None, description="The name of the zone to delete. If omitted, all zones associated with your account will be deleted.")) -> dict[str, Any] | ToolResult:
     """Deletes a specified DNS zone or, if no zone is provided, deletes all zones associated with your account. Use with caution as this action is irreversible."""
 
@@ -1480,13 +1557,20 @@ async def delete_zone(zone: str | None = Field(None, description="The name of th
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zone Blacklisted IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_blacklisted_ips(zones: str | None = Field(None, description="A comma-separated list of zone identifiers to filter results by. Omitting this parameter defaults to all zones.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of denylisted (blacklisted) IP addresses for one or more specified zones. If no zones are specified, results are returned across all zones."""
 
@@ -1524,7 +1608,12 @@ async def list_zone_blacklisted_ips(zones: str | None = Field(None, description=
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Add IPs to Zone Denylist",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_ips_to_zone_denylist(
     ip: str | list[str] = Field(..., description="One or more IP addresses to block, accepted as a single IP string, an array of IP strings, a hyphenated IP range, a CIDR subnet, or a netmask notation subnet. Each IP string in an array must be individually quoted."),
     zone: str | None = Field(None, description="The name of the zone to apply the denylist entry to. If omitted, the IP block will be applied across all your zones."),
@@ -1559,13 +1648,20 @@ async def add_ips_to_zone_denylist(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Blacklist Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_blacklist_entry(
     zone: str | None = Field(None, description="The name of the zone whose blacklist should be modified. If omitted, the deletion applies across all your zones."),
     ip: str | None = Field(None, description="The IP address or address group to remove from the blacklist. Accepts a single IP address, a hyphen-delimited IP range, a CIDR subnet, or a subnet mask notation."),
@@ -1600,13 +1696,20 @@ async def delete_blacklist_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Zone Bandwidth Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_zone_bandwidth_stats(
     zone: str = Field(..., description="The name of the zone for which to retrieve bandwidth statistics."),
     from_: str | None = Field(None, alias="from", description="The start of the time range for filtering bandwidth stats, specified in ISO 8601 datetime format. If omitted, results may default to the earliest available data."),
@@ -1648,7 +1751,13 @@ async def get_zone_bandwidth_stats(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Set Zone Status",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_zone_status(
     zone: str = Field(..., description="The name of the DNS zone whose active status will be changed."),
     disable: Literal[0, 1] = Field(..., description="Controls the zone's active state: use 0 to activate the zone or 1 to disable it."),
@@ -1683,13 +1792,20 @@ async def set_zone_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Count Available IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def count_available_ips(
     zone: str | None = Field(None, description="The name of the zone for which to count available IP addresses. If omitted, results may reflect a default or global scope."),
     plan: _models.GetZoneCountAvailableIpsQueryPlan | None = Field(None, description="A plan object used to filter the available IP count based on specific plan criteria or resource tier constraints."),
@@ -1730,7 +1846,13 @@ async def count_available_ips(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Zone Cost",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_zone_cost(
     zone: str = Field(..., description="The name of the zone for which to retrieve cost and bandwidth statistics."),
     from_: str | None = Field(None, alias="from", description="The start of the date range for filtering results, specified in ISO 8601 format."),
@@ -1772,7 +1894,12 @@ async def get_zone_cost(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Add Zone Domain Permission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_zone_domain_permission(
     zone: str = Field(..., description="The name of the zone to which the domain permission rule will be applied."),
     type_: Literal["whitelist", "blacklist"] = Field(..., alias="type", description="Determines whether the specified domains are added to the allowlist (permitted) or denylist (blocked) for the zone. Use 'whitelist' to allow domains or 'blacklist' to deny them."),
@@ -1808,13 +1935,20 @@ async def add_zone_domain_permission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Active Zones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_active_zones() -> dict[str, Any] | ToolResult:
     """Retrieves all currently active zones in the system. Use this to get a complete list of zones that are operational and available for further actions."""
 
@@ -1841,7 +1975,13 @@ async def list_active_zones() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zones() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all available zones. Use this to discover zone identifiers and configurations for subsequent zone-specific operations."""
 
@@ -1868,7 +2008,13 @@ async def list_zones() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zone IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_ips(
     zone: str = Field(..., description="The name of the zone whose static IPs should be retrieved."),
     ip_per_country: str | None = Field(None, description="When provided, the response includes the total number of IPs available per country for the specified zone."),
@@ -1909,7 +2055,12 @@ async def list_zone_ips(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Add Zone Static IPs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_zone_static_ips(
     customer: str = Field(..., description="The unique identifier of the customer account to which the zone belongs."),
     zone: str = Field(..., description="The name of the zone to which the static IPs will be added."),
@@ -1947,13 +2098,20 @@ async def add_zone_static_ips(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Remove Zone IPs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_zone_ips(
     zone: str | None = Field(None, description="The name of the zone from which the specified IP addresses will be removed."),
     ips: list[str] | None = Field(None, description="A list of IP addresses to delete from the zone. Each item should be a valid IPv4 or IPv6 address string; order is not significant."),
@@ -1988,13 +2146,20 @@ async def remove_zone_ips(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Migrate Zone IPs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def migrate_zone_ips(
     from_: str = Field(..., alias="from", description="The name of the source zone from which the specified Static IPs will be migrated."),
     to: str = Field(..., description="The name of the destination zone to which the specified Static IPs will be migrated."),
@@ -2030,13 +2195,19 @@ async def migrate_zone_ips(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Zone IPs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_zone_ips(
     zone: str = Field(..., description="The name of the zone whose IPs should be refreshed."),
     vips: list[str] | None = Field(None, description="List of dedicated residential virtual IPs (VIPs) to refresh. Omit this parameter to refresh all allocated VIPs in the zone. Only applicable for Dedicated Residential IPs."),
@@ -2074,13 +2245,20 @@ async def refresh_zone_ips(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Unavailable Zone IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_unavailable_zone_ips() -> dict[str, Any] | ToolResult:
     """Retrieves the live connectivity status of Static (Datacenter/ISP) zones and any IPs currently experiencing problems. Use this to monitor and diagnose unavailable or degraded proxy IPs in real time."""
 
@@ -2107,7 +2285,13 @@ async def list_unavailable_zone_ips() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zone Passwords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_passwords(zone: str = Field(..., description="The identifier of the zone whose passwords should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all passwords associated with a specified zone. Useful for managing zone-level credentials and access configurations."""
 
@@ -2145,7 +2329,13 @@ async def list_zone_passwords(zone: str = Field(..., description="The identifier
     return _response_data
 
 # Tags: Proxy
-@mcp.tool()
+@mcp.tool(
+    title="List Proxies Pending Replacement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_proxies_pending_replacement(zone: str | None = Field(None, description="The zone identifier used to filter proxies pending replacement. If omitted, results may span all accessible zones.")) -> dict[str, Any] | ToolResult:
     """Retrieves all proxies within a specified zone that are currently pending replacement. Useful for monitoring and managing proxy lifecycle transitions within a zone."""
 
@@ -2183,7 +2373,13 @@ async def list_proxies_pending_replacement(zone: str | None = Field(None, descri
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zone Recent IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_recent_ips(zones: str | None = Field(None, description="Specifies which zones to retrieve recent attempting IPs for. Use a wildcard to include all zones, or provide a specific zone identifier to filter results.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of IP addresses that have recently attempted to access your zones. Useful for monitoring access patterns and identifying suspicious activity."""
 
@@ -2221,7 +2417,13 @@ async def list_zone_recent_ips(zones: str | None = Field(None, description="Spec
     return _response_data
 
 # Tags: Proxy
-@mcp.tool()
+@mcp.tool(
+    title="List Zone Route IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_route_ips(
     zone: str = Field(..., description="The name of the zone for which to retrieve available IPs."),
     country: str | None = Field(None, description="Filters the returned IPs to only those belonging to the specified country, provided as a 2-letter ISO 3166-1 alpha-2 country code."),
@@ -2263,7 +2465,13 @@ async def list_zone_route_ips(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zone Dedicated IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_dedicated_ips(zone: str = Field(..., description="The name of the zone for which to retrieve available residential dedicated IPs.")) -> dict[str, Any] | ToolResult:
     """Retrieves all available residential dedicated IPs (VIPs) assigned to a specified zone. Use this to discover static IP resources available within a given zone for dedicated routing."""
 
@@ -2301,7 +2509,13 @@ async def list_zone_dedicated_ips(zone: str = Field(..., description="The name o
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Static Cities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_static_cities(
     country: str = Field(..., description="The country for which to retrieve available static network cities, specified as a country code."),
     pool_ip_type: Literal["dc", "static_res"] | None = Field(None, description="The static network type to filter cities by: datacenter ('dc') or ISP/residential ('static_res')."),
@@ -2342,7 +2556,13 @@ async def list_static_cities(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Zone Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_zone_status(zone: str = Field(..., description="The identifier or name of the zone whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a specified zone. Use this to monitor zone health, availability, or operational state."""
 
@@ -2380,7 +2600,12 @@ async def get_zone_status(zone: str = Field(..., description="The identifier or 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Toggle Zone Failover",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def toggle_zone_failover(
     zone: str | None = Field(None, description="The name of the Static zone for which automatic failover should be toggled."),
     active: Literal[0, 1] | None = Field(None, description="Controls whether automatic failover is enabled or disabled for the zone. Use 1 to enable automatic failover and 0 to disable it."),
@@ -2415,13 +2640,20 @@ async def toggle_zone_failover(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Remove Zone VIPs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_zone_vips(
     zone: str = Field(..., description="The name of the zone from which the specified VIPs will be removed."),
     gips: list[str] = Field(..., description="A list of Virtual IP addresses to remove from the zone. Order is not significant; each item should be a valid IP address string."),
@@ -2456,13 +2688,20 @@ async def remove_zone_vips(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Zone Whitelisted IPs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_zone_whitelisted_ips(zones: str | None = Field(None, description="A comma-separated list of zone identifiers to filter results by. When omitted, results are returned for all zones.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of allowlisted IP addresses for one or more specified zones. Useful for auditing or reviewing which IPs have been granted access within a zone."""
 
@@ -2500,7 +2739,12 @@ async def list_zone_whitelisted_ips(zones: str | None = Field(None, description=
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Add Zone Whitelist IP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_zone_whitelist_ip(
     ip: str | list[str] = Field(..., description="One or more IP addresses to add to the allowlist, accepted as a single IP string, an array of IP strings, a hyphenated IP range, a CIDR subnet, or a netmask notation subnet."),
     zone: str | None = Field(None, description="The name of the zone whose allowlist will be updated. If omitted, the IP(s) will be added to the allowlist for all zones associated with your account."),
@@ -2535,13 +2779,20 @@ async def add_zone_whitelist_ip(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Whitelist IP",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_whitelist_ip(
     zone: str | None = Field(None, description="The name of the zone whose whitelist will be modified. If omitted, the deletion applies to all zones associated with your account."),
     ip: str | None = Field(None, description="The IP address or address group to remove from the whitelist. Accepts a single IP address, a hyphen-delimited IP range, a CIDR subnet notation, or an IP with a subnet mask."),
@@ -2576,6 +2827,7 @@ async def delete_whitelist_ip(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
