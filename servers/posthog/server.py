@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PostHog MCP Server
-Generated: 2026-05-11 20:07:50 UTC
+Generated: 2026-05-11 21:38:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -48,7 +48,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{region}.posthog.com".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "PostHog"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))

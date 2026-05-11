@@ -1,7 +1,7 @@
 """
 Posthog MCP Server - Pydantic Models
 
-Generated: 2026-05-11 20:07:50 UTC
+Generated: 2026-05-11 21:38:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
