@@ -1,13 +1,13 @@
 """
 Codacy MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:41:25 UTC
+Generated: 2026-05-11 23:17:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field, RootModel
@@ -1514,7 +1514,7 @@ class RetrieveLatestMetricValueRequestPath(StrictModel):
     metric_name: str = Field(default=..., validation_alias="metricName", serialization_alias="metricName", description="The identifier of the metric to retrieve. Use the readyMetricsForOrganization endpoint to list all available metric names for the organization.")
 class RetrieveLatestMetricValueRequestBodyEntityFilter(StrictModel):
     repositories: list[str] | None = Field(default=None, validation_alias="repositories", serialization_alias="repositories", description="Optional list of repository identifiers to scope the metric value to specific repositories within the organization. Order is not significant.")
-    segment_ids: list[int] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="Optional list of segment IDs used to filter the metric value by predefined organizational segments. Order is not significant.")
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="Optional list of segment IDs used to filter the metric value by predefined organizational segments. Order is not significant.")
 class RetrieveLatestMetricValueRequestBody(StrictModel):
     dimensions_filter: list[DimensionsFilter] | None = Field(default=None, validation_alias="dimensionsFilter", serialization_alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric query by specific dimensional criteria. Order is not significant.")
     entity_filter: RetrieveLatestMetricValueRequestBodyEntityFilter | None = Field(default=None, validation_alias="entityFilter", serialization_alias="entityFilter")
@@ -1530,7 +1530,7 @@ class RetrieveLatestMetricGroupedValuesRequestPath(StrictModel):
     metric_name: str = Field(default=..., validation_alias="metricName", serialization_alias="metricName", description="The name of the aggregating metric to retrieve latest grouped values for. Use the readyMetricsForOrganization endpoint to list all available metric names.")
 class RetrieveLatestMetricGroupedValuesRequestBodyFilterEntityFilter(StrictModel):
     repositories: list[str] | None = Field(default=None, validation_alias="repositories", serialization_alias="repositories", description="List of repository names to scope the metric results to. When omitted, results span all repositories in the organization.")
-    segment_ids: list[int] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied.")
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied.")
 class RetrieveLatestMetricGroupedValuesRequestBodyFilter(StrictModel):
     dimensions_filter: list[DimensionsFilter] | None = Field(default=None, validation_alias="dimensionsFilter", serialization_alias="dimensionsFilter", description="List of dimension filter values to narrow the metric results. Valid dimension values depend on the requested metric.")
     entity_filter: RetrieveLatestMetricGroupedValuesRequestBodyFilterEntityFilter | None = Field(default=None, validation_alias="entityFilter", serialization_alias="entityFilter")
@@ -1553,7 +1553,7 @@ class RetrieveValueForPeriodRequestPath(StrictModel):
     metric_name: str = Field(default=..., validation_alias="metricName", serialization_alias="metricName", description="The unique name of the metric to retrieve. Use the readyMetricsForOrganization operation to list all available metric names for the organization.")
 class RetrieveValueForPeriodRequestBodyFilterEntityFilter(StrictModel):
     repositories: list[str] | None = Field(default=None, validation_alias="repositories", serialization_alias="repositories", description="Optional list of repository names to scope the metric retrieval. When omitted, the metric is calculated across all repositories in the organization.")
-    segment_ids: list[int] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="Optional list of segment IDs to filter the metric data by predefined organizational segments.")
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="Optional list of segment IDs to filter the metric data by predefined organizational segments.")
 class RetrieveValueForPeriodRequestBodyFilter(StrictModel):
     dimensions_filter: list[DimensionsFilter] | None = Field(default=None, validation_alias="dimensionsFilter", serialization_alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric data by specific dimensional criteria.")
     entity_filter: RetrieveValueForPeriodRequestBodyFilterEntityFilter | None = Field(default=None, validation_alias="entityFilter", serialization_alias="entityFilter")
@@ -1573,7 +1573,7 @@ class RetrieveGroupedValuesForPeriodRequestPath(StrictModel):
     metric_name: str = Field(default=..., validation_alias="metricName", serialization_alias="metricName", description="The metric to retrieve values for. Use the readyMetricsForOrganization endpoint to list all available metric names for your organization.")
 class RetrieveGroupedValuesForPeriodRequestBodyFilterEntityFilter(StrictModel):
     repositories: list[str] | None = Field(default=None, validation_alias="repositories", serialization_alias="repositories", description="List of repository names to scope the metric results to. When omitted, results include all repositories in the organization.")
-    segment_ids: list[int] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied.")
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied.")
 class RetrieveGroupedValuesForPeriodRequestBodyFilter(StrictModel):
     dimensions_filter: list[DimensionsFilter] | None = Field(default=None, validation_alias="dimensionsFilter", serialization_alias="dimensionsFilter", description="List of dimension filter values to narrow metric results to specific dimension members. Items should match valid dimension values for the requested metric.")
     entity_filter: RetrieveGroupedValuesForPeriodRequestBodyFilterEntityFilter | None = Field(default=None, validation_alias="entityFilter", serialization_alias="entityFilter")
@@ -1598,7 +1598,7 @@ class RetrieveTimerangeMetricValuesRequestPath(StrictModel):
     metric_name: str = Field(default=..., validation_alias="metricName", serialization_alias="metricName", description="The metric to retrieve values for. Use the readyMetricsForOrganization endpoint to discover all available metric names for your organization.")
 class RetrieveTimerangeMetricValuesRequestBodyFilterEntityFilter(StrictModel):
     repositories: list[str] | None = Field(default=None, validation_alias="repositories", serialization_alias="repositories", description="List of repository names to scope the metric results to. When omitted, results cover all repositories in the organization.")
-    segment_ids: list[int] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="List of segment IDs to filter the metric results by. When omitted, no segment filtering is applied.")
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="segmentIds", serialization_alias="segmentIds", description="List of segment IDs to filter the metric results by. When omitted, no segment filtering is applied.")
 class RetrieveTimerangeMetricValuesRequestBodyFilter(StrictModel):
     dimensions_filter: list[DimensionsFilter] | None = Field(default=None, validation_alias="dimensionsFilter", serialization_alias="dimensionsFilter", description="List of dimension filters to narrow metric results to specific dimension values. Valid dimensions depend on the requested metric.")
     entity_filter: RetrieveTimerangeMetricValuesRequestBodyFilterEntityFilter | None = Field(default=None, validation_alias="entityFilter", serialization_alias="entityFilter")
@@ -2288,7 +2288,7 @@ class SearchSecurityItemsRequestBody(StrictModel):
     statuses: list[str] | None = Field(default=None, description="List of statuses to filter security items by. Refer to SrmStatus for valid values. Order is not significant.")
     categories: list[str] | None = Field(default=None, description="List of security categories to filter by. Use the special value `_other_` to include items that have no assigned security category. Order is not significant.")
     scan_types: list[str] | None = Field(default=None, validation_alias="scanTypes", serialization_alias="scanTypes", description="List of scan types to filter results by, such as static analysis, dependency scanning, secrets detection, and others. Order is not significant.")
-    segments: list[int] | None = Field(default=None, description="List of segment IDs to filter security items by. Segments represent logical groupings within the organization. Order is not significant.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of segment IDs to filter security items by. Segments represent logical groupings within the organization. Order is not significant.")
     dast_target_urls: list[str] | None = Field(default=None, validation_alias="dastTargetUrls", serialization_alias="dastTargetUrls", description="List of DAST target URLs to filter results to only items associated with those targets. Order is not significant.")
     search_text: str | None = Field(default=None, validation_alias="searchText", serialization_alias="searchText", description="Free-text search string to match against security item content, such as titles or descriptions.")
 class SearchSecurityItemsRequest(StrictModel):
@@ -2307,7 +2307,7 @@ class SearchSecurityDashboardRequestBody(StrictModel):
     priorities: list[Literal["Low", "Medium", "High", "Critical"]] | None = Field(default=None, description="List of security issue priority levels to include in the metrics. Refer to SrmPriority for the set of valid priority values.")
     categories: list[str] | None = Field(default=None, description="List of security categories to filter issues by. Use the special value `_other_` to include issues that have no assigned security category.")
     scan_types: list[str] | None = Field(default=None, validation_alias="scanTypes", serialization_alias="scanTypes", description="List of scan types to restrict metrics to. Multiple scan types can be specified to combine results across different analysis methods.")
-    segments: list[int] | None = Field(default=None, description="List of numeric segment IDs to filter the dashboard metrics by. Segments represent logical groupings of repositories or teams within the organization.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of numeric segment IDs to filter the dashboard metrics by. Segments represent logical groupings of repositories or teams within the organization.")
 class SearchSecurityDashboardRequest(StrictModel):
     """Retrieves aggregated security and risk management metrics for an organization's dashboard, with optional filtering by repositories, priorities, categories, scan types, and segments."""
     path: SearchSecurityDashboardRequestPath
@@ -2320,7 +2320,7 @@ class SearchSecurityDashboardRepositoriesRequestPath(StrictModel):
 class SearchSecurityDashboardRepositoriesRequestBody(StrictModel):
     """Request body with filters."""
     repositories: list[str] | None = Field(default=None, description="List of repository names to narrow results to specific repositories; order is not significant. If omitted, all repositories in the organization are considered.")
-    segments: list[int] | None = Field(default=None, description="List of segment IDs to filter repositories by organizational segment; order is not significant. If omitted, all segments are included.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of segment IDs to filter repositories by organizational segment; order is not significant. If omitted, all segments are included.")
 class SearchSecurityDashboardRepositoriesRequest(StrictModel):
     """Searches repositories within an organization for security findings, returning matching results with their associated security data. If no filters are applied, defaults to returning the 10 repositories with the highest number of findings."""
     path: SearchSecurityDashboardRepositoriesRequestPath
@@ -2333,7 +2333,7 @@ class SearchSecurityDashboardHistoryRequestPath(StrictModel):
 class SearchSecurityDashboardHistoryRequestBody(StrictModel):
     """Request body with filters."""
     repositories: list[str] | None = Field(default=None, description="List of repository names to scope the history results to. When omitted, results cover all repositories in the organization. Order is not significant.")
-    segments: list[int] | None = Field(default=None, description="List of segment IDs to filter the history results by. Segments represent logical groupings within the organization. Order is not significant.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of segment IDs to filter the history results by. Segments represent logical groupings within the organization. Order is not significant.")
 class SearchSecurityDashboardHistoryRequest(StrictModel):
     """Retrieves the historical evolution of security findings over time for an organization, optionally filtered by specific repositories or segments. Useful for tracking security posture trends and identifying improvements or regressions."""
     path: SearchSecurityDashboardHistoryRequestPath
@@ -2346,7 +2346,7 @@ class SearchSecurityDashboardCategoriesRequestPath(StrictModel):
 class SearchSecurityDashboardCategoriesRequestBody(StrictModel):
     """Request body with filters."""
     repositories: list[str] | None = Field(default=None, description="List of repository names to scope the results to; omit to include all repositories in the organization. Order is not significant.")
-    segments: list[int] | None = Field(default=None, description="List of segment IDs to filter results by; omit to include all segments. Order is not significant.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of segment IDs to filter results by; omit to include all segments. Order is not significant.")
 class SearchSecurityDashboardCategoriesRequest(StrictModel):
     """Retrieves security categories with their associated findings for an organization, optionally filtered by repositories or segments. If no filters are provided, returns the 10 categories with the highest finding counts."""
     path: SearchSecurityDashboardCategoriesRequestPath
@@ -2358,7 +2358,7 @@ class UploadDastReportRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the remote Git provider.")
     tool_name: Literal["ZAP"] = Field(default=..., validation_alias="toolName", serialization_alias="toolName", description="The DAST tool that generated the report. Currently only ZAP (OWASP Zed Attack Proxy) is supported.")
 class UploadDastReportRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file containing the DAST scan results. For ZAP reports, ensure the `@generated` timestamp field is in English locale using the format `EEE, d MMM yyyy HH:mm:ss` (ZAP's default), otherwise the report will be rejected.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file containing the DAST scan results. For ZAP reports, ensure the `@generated` timestamp field is in English locale using the format `EEE, d MMM yyyy HH:mm:ss` (ZAP's default), otherwise the report will be rejected.", json_schema_extra={'format': 'byte'})
     report_format: Literal["json"] = Field(default=..., validation_alias="reportFormat", serialization_alias="reportFormat", description="The format of the uploaded report file. Must match the structure expected for the specified tool.")
 class UploadDastReportRequest(StrictModel):
     """Uploads a Dynamic Application Security Testing (DAST) scan report to Codacy for the specified organization and tool. The report is parsed and integrated into the organization's security findings dashboard."""
@@ -2443,7 +2443,7 @@ class SearchSbomDependenciesRequestBody(StrictModel):
     """Request body with filters."""
     text: str | None = Field(default=None, description="Free-text search string matched against SBOM component fields including package URL (purl) and full component name.")
     repositories: list[str] | None = Field(default=None, description="List of repository names within the organization to restrict results to. Order is not significant; each item should be a repository name string.")
-    segments: list[int] | None = Field(default=None, description="List of segment IDs to restrict results to. Order is not significant; each item should be an integer segment identifier.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of segment IDs to restrict results to. Order is not significant; each item should be an integer segment identifier.")
     finding_severities: list[Literal["Critical", "High", "Medium", "Low"]] | None = Field(default=None, validation_alias="findingSeverities", serialization_alias="findingSeverities", description="List of vulnerability severity levels to include in results. Order is not significant; valid values are `Critical`, `High`, `Medium`, and `Low`.")
     risk_categories: list[Literal["Forbidden", "Restricted", "Reciprocal", "Notice", "Permissive", "Unencumbered", "Unknown"]] | None = Field(default=None, validation_alias="riskCategories", serialization_alias="riskCategories", description="List of license risk category labels to filter dependencies by. Order is not significant; each item should be a valid license risk category string.")
 class SearchSbomDependenciesRequest(StrictModel):
@@ -2497,7 +2497,7 @@ class UploadImageSbomRequestPath(StrictModel):
     provider: str = Field(default=..., description="Short code identifying the Git provider hosting the organization.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider.")
 class UploadImageSbomRequestBody(StrictModel):
-    sbom: str = Field(default=..., description="The SBOM file to upload, provided as binary data in either SPDX or CycloneDX format.", json_schema_extra={'format': 'binary'})
+    sbom: str = Field(default=..., description="Base64-encoded file content for upload. The SBOM file to upload, provided as binary data in either SPDX or CycloneDX format.", json_schema_extra={'format': 'byte'})
     environment: str | None = Field(default=None, description="The deployment environment associated with the Docker image (e.g., production, staging), used to contextualize the SBOM within a specific runtime environment.")
     image_name: str | None = Field(default=None, validation_alias="imageName", serialization_alias="imageName", description="Name of the Docker image")
     tag: str | None = Field(default=None, description="Tag of the Docker image")
@@ -2704,7 +2704,7 @@ class SearchReportSecurityItemsRequestBody(StrictModel):
     statuses: list[Literal["Overdue", "OnTrack", "DueSoon", "ClosedOnTime", "ClosedLate", "Ignored"]] | None = Field(default=None, description="List of statuses to filter security issues by. Valid values are defined by the SrmStatus enumeration. Order is not significant.")
     categories: list[str] | None = Field(default=None, description="List of security categories to filter by. Use the special value `_other_` to include issues that have no assigned security category. Order is not significant.")
     scan_types: list[str] | None = Field(default=None, validation_alias="scanTypes", serialization_alias="scanTypes", description="List of scan types to restrict results to. Order is not significant.")
-    segments: list[int] | None = Field(default=None, description="List of numeric segment IDs to filter results by. Order is not significant.")
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="List of numeric segment IDs to filter results by. Order is not significant.")
     search_text: str | None = Field(default=None, validation_alias="searchText", serialization_alias="searchText", description="Free-text string used to search within security item fields, such as title or description.")
 class SearchReportSecurityItemsRequest(StrictModel):
     """Generates a filtered CSV export of security and risk management items for an organization. Supports filtering by repository, priority, status, category, scan type, segment, and free-text search."""

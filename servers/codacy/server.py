@@ -6,7 +6,7 @@ API Info:
 - API License: Codacy. All rights reserved (https://www.codacy.com)
 - Contact: Codacy Team <code@codacy.com> (https://www.codacy.com)
 
-Generated: 2026-05-05 14:41:25 UTC
+Generated: 2026-05-11 23:17:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.codacy.com/api/v3")
 SERVER_NAME = "Codacy"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1079,6 +1110,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1103,6 +1136,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1310,7 +1345,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Codacy", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Repositories with Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_repositories_with_analysis(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier code for the desired provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
@@ -1357,7 +1398,12 @@ async def list_organization_repositories_with_analysis(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Search Organization Repositories with Analysis",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_organization_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used by the provider."),
@@ -1400,13 +1446,20 @@ async def search_organization_repositories(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_analysis(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1450,7 +1503,13 @@ async def get_repository_analysis(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_tools(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1490,7 +1549,13 @@ async def list_repository_tools(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Tool Conflicts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tool_conflicts(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1530,7 +1595,13 @@ async def list_tool_conflicts(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Configure Repository Tool",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_repository_tool(
     provider: str = Field(..., description="Identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization on the Git provider that owns the repository."),
@@ -1571,13 +1642,20 @@ async def configure_repository_tool(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Tool Patterns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_tool_patterns(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1633,7 +1711,13 @@ async def list_repository_tool_patterns(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Update Repository Tool Patterns",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_update_repository_tool_patterns(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization on the Git provider that owns the repository."),
@@ -1681,13 +1765,20 @@ async def bulk_update_repository_tool_patterns(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Tool Pattern",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_tool_pattern_config(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1729,7 +1820,13 @@ async def get_repository_tool_pattern_config(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Tool Patterns Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tool_patterns_overview(
     provider: str = Field(..., description="Short code identifying the Git hosting provider for the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account that owns the repository on the Git provider."),
@@ -1780,7 +1877,13 @@ async def get_tool_patterns_overview(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Tool Pattern Conflicts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tool_pattern_conflicts(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1821,7 +1924,13 @@ async def list_tool_pattern_conflicts(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Analysis Progress",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_analysis_progress(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization that owns the repository on the Git provider."),
@@ -1865,7 +1974,13 @@ async def get_repository_analysis_progress(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_requests(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1913,7 +2028,13 @@ async def list_pull_requests(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -1956,7 +2077,13 @@ async def get_pull_request(
     return _response_data
 
 # Tags: coverage
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Coverage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_coverage(
     provider: str = Field(..., description="Short code identifying the Git hosting provider (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -1999,7 +2126,13 @@ async def get_pull_request_coverage(
     return _response_data
 
 # Tags: coverage
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request File Coverage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_file_coverage(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2042,7 +2175,13 @@ async def list_pull_request_file_coverage(
     return _response_data
 
 # Tags: coverage
-@mcp.tool()
+@mcp.tool(
+    title="Reanalyze Pull Request Coverage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def reanalyze_pull_request_coverage(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -2085,7 +2224,13 @@ async def reanalyze_pull_request_coverage(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_commits(
     provider: str = Field(..., description="The Git provider hosting the repository. Use the short identifier for the target platform (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2133,7 +2278,13 @@ async def list_pull_request_commits(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Bypass Pull Request Analysis",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def bypass_pull_request_analysis(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -2176,7 +2327,12 @@ async def bypass_pull_request_analysis(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Pull Request AI Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_pull_request_ai_review(
     provider: str = Field(..., description="Short code identifying the Git hosting provider for the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
@@ -2219,7 +2375,13 @@ async def trigger_pull_request_ai_review(
     return _response_data
 
 # Tags: analysis, coverage
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Coverage Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_coverage_reports(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -2262,7 +2424,13 @@ async def list_pull_request_coverage_reports(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_issues(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2312,7 +2480,13 @@ async def list_pull_request_issues(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Clones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_clones(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2362,7 +2536,13 @@ async def list_pull_request_clones(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Clones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_clones(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2411,7 +2591,13 @@ async def list_commit_clones(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_logs(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2454,7 +2640,13 @@ async def list_pull_request_logs(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Analysis Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_analysis_logs(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2495,7 +2687,13 @@ async def list_commit_analysis_logs(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_files(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2547,7 +2745,13 @@ async def list_commit_files(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Request Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_request_files(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2597,7 +2801,12 @@ async def list_pull_request_files(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Follow Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def follow_repository(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2637,7 +2846,13 @@ async def follow_repository(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Unfollow Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unfollow_repository(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
@@ -2677,7 +2892,13 @@ async def unfollow_repository(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Quality Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_quality_settings(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2727,13 +2948,20 @@ async def update_repository_quality_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Regenerate Repository SSH User Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def regenerate_repository_ssh_user_key(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository, such as gh for GitHub, gl for GitLab, or bb for Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
@@ -2773,7 +3001,13 @@ async def regenerate_repository_ssh_user_key(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Regenerate Repository SSH Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def regenerate_repository_ssh_key(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -2813,7 +3047,13 @@ async def regenerate_repository_ssh_key(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository SSH Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_ssh_key(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2853,7 +3093,12 @@ async def get_repository_ssh_key(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Sync Repository with Provider",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def sync_repository(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -2893,7 +3138,13 @@ async def sync_repository(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Get Build Server Analysis Setting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_build_server_analysis_setting(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -2933,7 +3184,13 @@ async def get_build_server_analysis_setting(
     return _response_data
 
 # Tags: language-settings
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Languages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_languages(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -2973,7 +3230,13 @@ async def list_repository_languages(
     return _response_data
 
 # Tags: language-settings
-@mcp.tool()
+@mcp.tool(
+    title="Configure Repository Language Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_repository_language_settings(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3011,13 +3274,20 @@ async def configure_repository_language_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Commit Quality Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_commit_quality_settings(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
@@ -3057,7 +3327,13 @@ async def get_repository_commit_quality_settings(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Reset Repository Commit Quality Settings",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_repository_commit_quality_settings(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider under which the repository resides."),
@@ -3097,7 +3373,13 @@ async def reset_repository_commit_quality_settings(
     return _response_data
 
 # Tags: repository, configuration
-@mcp.tool()
+@mcp.tool(
+    title="Reset Repository Quality Settings",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_repository_quality_settings(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization or account name as it appears on the Git provider."),
@@ -3137,7 +3419,13 @@ async def reset_repository_quality_settings(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Pull Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_pull_requests(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
@@ -3183,7 +3471,13 @@ async def list_organization_pull_requests(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_statistics(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3230,7 +3524,13 @@ async def list_commit_statistics(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Category Overviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_category_overviews(
     provider: str = Field(..., description="Identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization on the Git provider that owns the repository."),
@@ -3274,7 +3574,12 @@ async def list_repository_category_overviews(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Search Repository Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_repository_issues(
     provider: str = Field(..., description="Identifier for the Git provider hosting the repository, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -3320,7 +3625,13 @@ async def search_repository_issues(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Ignore Repository Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_ignore_repository_issues(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3360,13 +3671,19 @@ async def bulk_ignore_repository_issues(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Issues Overview",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_repository_issues_overview(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3406,7 +3723,13 @@ async def get_repository_issues_overview(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_issue(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3449,7 +3772,13 @@ async def get_repository_issue(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Set Issue Ignored State",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_issue_ignored_state(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
@@ -3490,13 +3819,19 @@ async def set_issue_ignored_state(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Ignore Issue False Positive",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def ignore_issue_false_positive(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3537,7 +3872,12 @@ async def ignore_issue_false_positive(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Ignored Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_ignored_issues(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3583,7 +3923,13 @@ async def list_ignored_issues(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_commits(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3630,7 +3976,13 @@ async def list_repository_commits(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_analysis(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository, such as 'gh' for GitHub, 'gl' for GitLab, or 'bb' for Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3671,7 +4023,13 @@ async def get_commit_analysis(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Delta Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_delta_statistics(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3712,7 +4070,13 @@ async def get_commit_delta_statistics(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Delta Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_delta_issues(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -3762,7 +4126,13 @@ async def list_commit_delta_issues(
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Get Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and account details of the currently authenticated user. Useful for confirming identity, accessing user metadata, or personalizing responses based on the active session."""
 
@@ -3789,7 +4159,13 @@ async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Update Current User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_current_user(
     name: str | None = Field(None, description="The display name to assign to the authenticated user's profile."),
     should_do_client_qualification: bool | None = Field(None, alias="shouldDoClientQualification", description="Whether the system should trigger client qualification checks for this user."),
@@ -3824,13 +4200,20 @@ async def update_current_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations(limit: str | None = Field(None, description="Maximum number of organizations to return in a single response, between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves all organizations that the currently authenticated user belongs to. Returns a paginated list up to the specified limit."""
 
@@ -3870,7 +4253,13 @@ async def list_organizations(limit: str | None = Field(None, description="Maximu
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations by Provider",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations_by_provider(
     provider: str = Field(..., description="The Git provider to query for organizations. Use the short identifier code for the desired platform (e.g., GitHub, GitLab, Bitbucket)."),
     limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
@@ -3914,7 +4303,13 @@ async def list_organizations_by_provider(
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_for_user(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -3953,7 +4348,13 @@ async def get_organization_for_user(
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="List User Emails",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_emails() -> dict[str, Any] | ToolResult:
     """Retrieves all email addresses associated with the authenticated user's account, including primary and secondary addresses along with their verification and visibility status."""
 
@@ -3980,7 +4381,13 @@ async def list_emails() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Remove User Email",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_email() -> dict[str, Any] | ToolResult:
     """Removes a specified email address from the authenticated user's account. The primary email and the last remaining email address cannot be removed."""
 
@@ -4007,7 +4414,13 @@ async def remove_user_email() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Set Default Email",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_default_email() -> dict[str, Any] | ToolResult:
     """Designates a specified email address as the primary default for the authenticated user, automatically removing the default status from any previously designated email. Only one email address can hold default status at a time."""
 
@@ -4034,7 +4447,13 @@ async def set_default_email() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="List Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_integrations(limit: str | None = Field(None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves all integrations connected to the authenticated user's account. Returns a paginated list of integration records up to the specified limit."""
 
@@ -4074,7 +4493,13 @@ async def list_integrations(limit: str | None = Field(None, description="Maximum
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Delete Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_integration(provider: str = Field(..., description="The identifier for the Git provider whose integration should be deleted. Accepted values include short codes for supported providers such as GitHub, GitLab, and Bitbucket.")) -> dict[str, Any] | ToolResult:
     """Permanently removes the connected Git provider integration for the authenticated user. Once deleted, the user will need to re-authenticate to restore access for that provider."""
 
@@ -4110,7 +4535,13 @@ async def delete_integration(provider: str = Field(..., description="The identif
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
@@ -4149,7 +4580,13 @@ async def get_organization(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
@@ -4188,7 +4625,13 @@ async def delete_organization(
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization by Installation ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_by_installation_id(
     provider: str = Field(..., description="The git provider identifier for the installation. Currently only GitHub ('gh') is supported."),
     installation_id: str = Field(..., alias="installationId", description="The unique numeric identifier of the Codacy installation to look up the associated organization for."),
@@ -4229,7 +4672,13 @@ async def get_organization_by_installation_id(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Billing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_billing(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -4268,7 +4717,12 @@ async def get_organization_billing(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Billing",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_organization_billing(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -4307,7 +4761,13 @@ async def update_organization_billing(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Billing Card",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_billing_card(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -4346,7 +4806,12 @@ async def get_organization_billing_card(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Add Billing Card",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_billing_card(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -4385,7 +4850,13 @@ async def add_billing_card(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Estimate Organization Billing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def estimate_organization_billing(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -4429,7 +4900,12 @@ async def estimate_organization_billing(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Change Organization Billing Plan",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def change_organization_billing_plan(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -4468,7 +4944,12 @@ async def change_organization_billing_plan(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Apply Organization Provider Settings",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def apply_organization_provider_settings(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by its short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -4507,7 +4988,13 @@ async def apply_organization_provider_settings(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Provider Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_provider_settings(
     provider: str = Field(..., description="The Git provider identifier representing the source control platform to query (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider platform."),
@@ -4546,7 +5033,13 @@ async def get_provider_settings(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Configure Provider Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_provider_settings(
     provider: str = Field(..., description="Short identifier for the Git provider platform hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -4591,13 +5084,20 @@ async def configure_provider_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Provider Integration Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_provider_integration_settings(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -4637,7 +5137,13 @@ async def get_repository_provider_integration_settings(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository Integration Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository_integration_settings(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -4683,13 +5189,20 @@ async def update_repository_integration_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Create Post Commit Hook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_post_commit_hook(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider under which the repository resides."),
@@ -4729,7 +5242,12 @@ async def create_post_commit_hook(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Repository Provider Integration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_repository_provider_integration(
     provider: str = Field(..., description="The Git provider hosting the repository. Accepted values are 'gh' for GitHub, 'gl' for GitLab, or 'bb' for Bitbucket. Note: this operation is only supported for GitLab and Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or workspace on the Git provider under which the repository resides."),
@@ -4769,7 +5287,13 @@ async def refresh_repository_provider_integration(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier code for the desired provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -4818,7 +5342,13 @@ async def list_organization_repositories(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Onboarding Progress",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_onboarding_progress(
     provider: str = Field(..., description="Short code identifying the Git provider where the organization is hosted. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
@@ -4857,7 +5387,13 @@ async def get_organization_onboarding_progress(
     return _response_data
 
 # Tags: people
-@mcp.tool()
+@mcp.tool(
+    title="List Organization People",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_people(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -4904,7 +5440,12 @@ async def list_organization_people(
     return _response_data
 
 # Tags: people
-@mcp.tool()
+@mcp.tool(
+    title="Add Organization Members",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_organization_members(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -4943,7 +5484,13 @@ async def add_organization_members(
     return _response_data
 
 # Tags: people
-@mcp.tool()
+@mcp.tool(
+    title="Export Organization People to CSV",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_organization_people_csv(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by its short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -4982,7 +5529,13 @@ async def export_organization_people_csv(
     return _response_data
 
 # Tags: people
-@mcp.tool()
+@mcp.tool(
+    title="Remove Organization Members",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_organization_members(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -5019,13 +5572,20 @@ async def remove_organization_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: app
-@mcp.tool()
+@mcp.tool(
+    title="Get Git Provider App Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_git_provider_app_permissions(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
@@ -5064,7 +5624,13 @@ async def get_git_provider_app_permissions(
     return _response_data
 
 # Tags: people
-@mcp.tool()
+@mcp.tool(
+    title="List Organization People Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_people_suggestions(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -5110,7 +5676,12 @@ async def list_organization_people_suggestions(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Reanalyze Commit",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reanalyze_commit(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -5149,13 +5720,20 @@ async def reanalyze_commit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider platform."),
@@ -5195,7 +5773,13 @@ async def get_repository(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization on the Git provider that owns the repository."),
@@ -5235,7 +5819,13 @@ async def delete_repository(
     return _response_data
 
 # Tags: people
-@mcp.tool()
+@mcp.tool(
+    title="List Repository People Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_people_suggestions(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization as it appears on the Git provider."),
@@ -5282,7 +5872,13 @@ async def list_repository_people_suggestions(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_branches(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the repository (e.g., 'gh' for GitHub, 'gl' for GitLab, 'bb' for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -5332,7 +5928,13 @@ async def list_repository_branches(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Configure Branch Analysis",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_branch_analysis(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -5371,13 +5973,20 @@ async def configure_branch_analysis(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Set Organization Join Mode",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_organization_join_mode(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -5414,13 +6023,20 @@ async def set_organization_join_mode(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Set Default Branch",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_default_branch(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization on the Git provider that owns the repository."),
@@ -5461,7 +6077,13 @@ async def set_default_branch(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List Branch Required Checks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branch_required_checks(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -5502,7 +6124,12 @@ async def list_branch_required_checks(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Add Codacy Badge",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_codacy_badge(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
@@ -5541,7 +6168,13 @@ async def add_codacy_badge(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Check Organization Leave Eligibility",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_organization_leave_eligibility(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -5580,7 +6213,13 @@ async def check_organization_leave_eligibility(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Join Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_join_requests(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -5626,7 +6265,12 @@ async def list_organization_join_requests(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Join Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def join_organization(
     provider: str = Field(..., description="Short code identifying the Git provider where the organization is hosted. Accepted values include identifiers for GitHub, GitLab, and Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider. This must match the organization's remote identifier on that platform."),
@@ -5665,7 +6309,13 @@ async def join_organization(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Decline Organization Join Requests",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def decline_organization_join_requests(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Use the short code for the target platform (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. This must match the exact organization identifier used by the provider."),
@@ -5704,7 +6354,13 @@ async def decline_organization_join_requests(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Join Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_join_request(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -5746,7 +6402,12 @@ async def delete_organization_join_request(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Add Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_repository(
     repository_full_path: str = Field(..., alias="repositoryFullPath", description="The full path of the repository on the Git provider, beginning at the organization level with each path segment separated by a forward slash."),
     provider: str = Field(..., description="The Git provider that hosts the repository, identifying the source platform where the repository resides."),
@@ -5781,13 +6442,19 @@ async def add_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Add Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_organization(
     provider: str = Field(..., description="The Git provider that hosts the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_identifier: str = Field(..., alias="remoteIdentifier", description="The unique identifier for the organization on the Git provider, used to locate and link the organization remotely."),
@@ -5825,13 +6492,20 @@ async def add_organization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Delete Enterprise Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_enterprise_token(provider: str = Field(..., description="Identifier for the Git provider whose enterprise token should be deleted. Accepts short provider codes representing supported Git hosting services.")) -> dict[str, Any] | ToolResult:
     """Deletes the stored GitHub Enterprise account token for the authenticated user. Once removed, the token will no longer be used to access enterprise-level resources."""
 
@@ -5867,7 +6541,13 @@ async def delete_enterprise_token(provider: str = Field(..., description="Identi
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Provider Tokens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_provider_tokens() -> dict[str, Any] | ToolResult:
     """Retrieves all enterprise provider account tokens configured by the authenticated user on Codacy's platform. Useful for auditing or managing active integrations with enterprise identity and source control providers."""
 
@@ -5894,7 +6574,12 @@ async def list_enterprise_provider_tokens() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Add Enterprise Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_enterprise_token(
     token: str = Field(..., description="The GitHub Enterprise personal access token with read permissions to be stored and used for authenticating enterprise-level resource requests."),
     provider: str = Field(..., description="The Git hosting provider associated with the enterprise account token being added."),
@@ -5929,13 +6614,20 @@ async def add_enterprise_token(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="List API Tokens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_tokens(limit: str | None = Field(None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves all API tokens associated with the authenticated user's account. Useful for auditing active tokens or managing programmatic access credentials."""
 
@@ -5975,7 +6667,12 @@ async def list_api_tokens(limit: str | None = Field(None, description="Maximum n
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Create API Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_token(expires_at: str | None = Field(None, alias="expiresAt", description="Optional expiration date and time for the API token in ISO 8601 format. If omitted, the token does not expire.")) -> dict[str, Any] | ToolResult:
     """Creates a new account-level API token for the authenticated user, optionally scoped to a specific expiration date. API tokens are used to authenticate requests to the Codacy."""
 
@@ -6007,13 +6704,20 @@ async def create_api_token(expires_at: str | None = Field(None, alias="expiresAt
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: account
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_token(token_id: str = Field(..., alias="tokenId", description="The unique numeric identifier of the API token to delete. Obtain this ID from the list of tokens associated with the authenticated user's account.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific API token belonging to the authenticated user. Once deleted, any integrations or clients using this token will lose access immediately."""
 
@@ -6051,7 +6755,13 @@ async def delete_user_token(token_id: str = Field(..., alias="tokenId", descript
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="Delete Billing Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_billing_subscription(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
@@ -6090,7 +6800,13 @@ async def delete_billing_subscription(
     return _response_data
 
 # Tags: integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Provider Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_provider_integrations(limit: str | None = Field(None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of provider integrations configured on Codacy's platform. Use this to discover available third-party integrations such as version control, CI, or issue tracking providers."""
 
@@ -6130,7 +6846,13 @@ async def list_provider_integrations(limit: str | None = Field(None, description
     return _response_data
 
 # Tags: admin
-@mcp.tool()
+@mcp.tool(
+    title="Search Entities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_entities(search: str | None = Field(None, description="A search string used to filter results by matching against entity names or IDs such as organizations or repositories.")) -> dict[str, Any] | ToolResult:
     """Search across Codacy entities such as Organizations and Repositories by name or ID. Restricted to Codacy admins only."""
 
@@ -6168,7 +6890,13 @@ async def search_entities(search: str | None = Field(None, description="A search
     return _response_data
 
 # Tags: admin
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dormant Accounts",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dormant_accounts(body: str | None = Field(None, description="Raw CSV content exported from GitHub Enterprise identifying the dormant user accounts to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes Codacy user accounts identified as dormant, based on a CSV file exported from GitHub Enterprise. Restricted to Codacy administrators only."""
 
@@ -6186,6 +6914,7 @@ async def delete_dormant_accounts(body: str | None = Field(None, description="Ra
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_body = next(iter(_http_body.values()), None) if _http_body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "text/plain"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_dormant_accounts")
@@ -6201,13 +6930,20 @@ async def delete_dormant_accounts(body: str | None = Field(None, description="Ra
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="text/plain",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: languages
-@mcp.tool()
+@mcp.tool(
+    title="List Tool Supported Languages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tool_supported_languages() -> dict[str, Any] | ToolResult:
     """Retrieves the list of programming or spoken languages supported by the currently available tools. Use this to determine valid language options before invoking language-specific tool operations."""
 
@@ -6234,7 +6970,13 @@ async def list_tool_supported_languages() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: tools
-@mcp.tool()
+@mcp.tool(
+    title="List Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tools(limit: str | None = Field(None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available tools. Use the limit parameter to control how many tools are returned in a single response."""
 
@@ -6274,7 +7016,13 @@ async def list_tools(limit: str | None = Field(None, description="Maximum number
     return _response_data
 
 # Tags: tools
-@mcp.tool()
+@mcp.tool(
+    title="List Tool Patterns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tool_patterns(
     tool_uuid: str = Field(..., alias="toolUuid", description="The unique UUID identifying the tool whose patterns should be retrieved."),
     limit: str | None = Field(None, description="Maximum number of patterns to return in a single response. Accepts values between 1 and 100."),
@@ -6319,7 +7067,12 @@ async def list_tool_patterns(
     return _response_data
 
 # Tags: tools
-@mcp.tool()
+@mcp.tool(
+    title="Submit Pattern Feedback",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_pattern_feedback(
     tool_uuid: str = Field(..., alias="toolUuid", description="The unique UUID identifying the tool whose pattern is being reviewed."),
     pattern_id: str = Field(..., alias="patternId", description="The identifier of the specific pattern within the tool that the feedback applies to."),
@@ -6359,13 +7112,20 @@ async def submit_pattern_feedback(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: tools
-@mcp.tool()
+@mcp.tool(
+    title="Get Pattern",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pattern(
     tool_uuid: str = Field(..., alias="toolUuid", description="The UUID uniquely identifying the tool whose pattern you want to retrieve."),
     pattern_id: str = Field(..., alias="patternId", description="The identifier of the specific pattern to retrieve, typically referencing a named rule or checker within the tool."),
@@ -6404,7 +7164,13 @@ async def get_pattern(
     return _response_data
 
 # Tags: tools
-@mcp.tool()
+@mcp.tool(
+    title="List Duplication Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_duplication_tools() -> dict[str, Any] | ToolResult:
     """Retrieves the complete list of available duplication tools. Use this to discover which duplication tools are accessible for subsequent operations."""
 
@@ -6431,7 +7197,13 @@ async def list_duplication_tools() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: tools
-@mcp.tool()
+@mcp.tool(
+    title="List Metrics Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metrics_tools() -> dict[str, Any] | ToolResult:
     """Retrieves the complete list of available metrics tools. Use this to discover which metrics tools are accessible for monitoring, analysis, or reporting workflows."""
 
@@ -6458,7 +7230,12 @@ async def list_metrics_tools() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Start Organization Metrics Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_organization_metrics_collection(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -6495,13 +7272,20 @@ async def start_organization_metrics_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Ready Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ready_metrics(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization. Accepted values include identifiers for GitHub, GitLab, and Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider, used to scope the metrics retrieval to that specific organization."),
@@ -6540,13 +7324,18 @@ async def list_ready_metrics(
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Metric Value",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_latest_metric_value(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     metric_name: str = Field(..., alias="metricName", description="The identifier of the metric to retrieve. Use the readyMetricsForOrganization endpoint to list all available metric names for the organization."),
     repositories: list[str] | None = Field(None, description="Optional list of repository identifiers to scope the metric value to specific repositories within the organization. Order is not significant."),
-    segment_ids: list[int] | None = Field(None, alias="segmentIds", description="Optional list of segment IDs used to filter the metric value by predefined organizational segments. Order is not significant."),
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="segmentIds", description="Optional list of segment IDs used to filter the metric value by predefined organizational segments. Order is not significant."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric query by specific dimensional criteria. Order is not significant."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieves the current (latest) value of an aggregating metric for an organization, such as open issues. Note: this endpoint only supports aggregating metrics and does not work for accumulating metrics like fixed issues."""
@@ -6581,20 +7370,26 @@ async def get_latest_metric_value(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Grouped Metric Values",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_latest_grouped_metric_values(
     provider: str = Field(..., description="The Git provider hosting the organization, used to identify which platform to query."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     metric_name: str = Field(..., alias="metricName", description="The name of the aggregating metric to retrieve latest grouped values for. Use the readyMetricsForOrganization endpoint to list all available metric names."),
     group_by: list[str] = Field(..., alias="groupBy", description="One or more grouping dimensions that determine how metric values are aggregated and returned. Accepted values are `organization`, `repository`, or a metric-specific dimension; for OpenIssues, NewIssues, and FixedIssues the supported dimensions are `category` and `severity`."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the metric results to. When omitted, results span all repositories in the organization."),
-    segment_ids: list[int] | None = Field(None, alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied."),
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="List of dimension filter values to narrow the metric results. Valid dimension values depend on the requested metric."),
     sort_direction: str | None = Field(None, alias="sortDirection", description="Direction in which the returned metric values are sorted, either ascending or descending."),
     limit: int | None = Field(None, description="Maximum number of grouped metric value entries to return in the response."),
@@ -6632,13 +7427,19 @@ async def get_latest_grouped_metric_values(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric Period Value",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_metric_period_value(
     provider: str = Field(..., description="The Git provider hosting the organization, specified as a short identifier code."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -6646,7 +7447,7 @@ async def get_metric_period_value(
     date: str = Field(..., description="The start date of the period for which to retrieve the metric value, in ISO 8601 date-time format."),
     period: Literal["day", "week", "month"] = Field(..., description="The granularity of the time period to retrieve the metric for, determining how the start date is interpreted and the duration of the window."),
     repositories: list[str] | None = Field(None, description="Optional list of repository names to scope the metric retrieval. When omitted, the metric is calculated across all repositories in the organization."),
-    segment_ids: list[int] | None = Field(None, alias="segmentIds", description="Optional list of segment IDs to filter the metric data by predefined organizational segments."),
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="segmentIds", description="Optional list of segment IDs to filter the metric data by predefined organizational segments."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric data by specific dimensional criteria."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieves the value of a specific organization metric for a given time period, identified by its start date. Aggregating metrics return the average value for the period, while accumulating metrics return the total historical sum."""
@@ -6682,13 +7483,19 @@ async def get_metric_period_value(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Grouped Metric Values for Period",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_grouped_metric_values_for_period(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -6697,7 +7504,7 @@ async def get_grouped_metric_values_for_period(
     date: str = Field(..., description="The start date of the period for which to retrieve metric values, specified in ISO 8601 date-time format."),
     period: Literal["day", "week", "month"] = Field(..., description="The granularity of the time period to retrieve metric values for, relative to the provided start date."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the metric results to. When omitted, results include all repositories in the organization."),
-    segment_ids: list[int] | None = Field(None, alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied."),
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="segmentIds", description="List of segment identifiers to filter the metric results by. When omitted, no segment filtering is applied."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="List of dimension filter values to narrow metric results to specific dimension members. Items should match valid dimension values for the requested metric."),
     sort_direction: str | None = Field(None, alias="sortDirection", description="Direction in which to sort the returned grouped values, either ascending or descending."),
     limit: int | None = Field(None, description="Maximum number of grouped value entries to return in the response."),
@@ -6736,20 +7543,26 @@ async def get_grouped_metric_values_for_period(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric Time Range Values",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_metric_time_range_values(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     metric_name: str = Field(..., alias="metricName", description="The metric to retrieve values for. Use the readyMetricsForOrganization endpoint to discover all available metric names for your organization."),
     group_by: list[str] = Field(..., alias="groupBy", description="Specifies how results are grouped. Accepted values are `organization`, `repository`, or a metric-specific dimension (e.g., `category` or `severity` for issue-related metrics). Order of items is not significant."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the metric results to. When omitted, results cover all repositories in the organization."),
-    segment_ids: list[int] | None = Field(None, alias="segmentIds", description="List of segment IDs to filter the metric results by. When omitted, no segment filtering is applied."),
+    segment_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="segmentIds", description="List of segment IDs to filter the metric results by. When omitted, no segment filtering is applied."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="List of dimension filters to narrow metric results to specific dimension values. Valid dimensions depend on the requested metric."),
     sort_direction: str | None = Field(None, alias="sortDirection", description="Controls the sort direction of the returned results. Applies to the ordering of grouped or time-series data."),
     limit: int | None = Field(None, description="Maximum number of results to return. When omitted, the backend applies a default limit."),
@@ -6793,13 +7606,20 @@ async def get_metric_time_range_values(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Ready Enterprise Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ready_enterprise_metrics(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise. Specifies which version control platform to target."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug (URL-friendly name) identifying the enterprise whose ready metrics are being retrieved."),
@@ -6838,7 +7658,12 @@ async def list_ready_enterprise_metrics(
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Enterprise Metric Values",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_latest_enterprise_metric_values(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug name that uniquely identifies the enterprise."),
@@ -6876,13 +7701,19 @@ async def get_latest_enterprise_metric_values(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Metric Latest Values Grouped",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_metric_latest_values_grouped(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug name that uniquely identifies the enterprise."),
@@ -6924,13 +7755,19 @@ async def list_enterprise_metric_latest_values_grouped(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise Metric by Period",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_enterprise_metric_by_period(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug name of the enterprise to retrieve metrics for."),
@@ -6971,13 +7808,19 @@ async def get_enterprise_metric_by_period(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise Metric Grouped by Period",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_enterprise_metric_grouped_by_period(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug name that uniquely identifies the enterprise."),
@@ -7022,13 +7865,19 @@ async def get_enterprise_metric_grouped_by_period(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise Metric Timeseries",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_enterprise_metric_timeseries(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug name that uniquely identifies the enterprise."),
@@ -7074,13 +7923,20 @@ async def get_enterprise_metric_timeseries(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_files(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -7130,7 +7986,13 @@ async def list_repository_files(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List Ignored Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ignored_files(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -7178,7 +8040,13 @@ async def list_ignored_files(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get File Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_analysis(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository, such as gh for GitHub, gl for GitLab, or bb for Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -7221,7 +8089,13 @@ async def get_file_analysis(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List File Clones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_clones(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -7269,7 +8143,13 @@ async def list_file_clones(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List File Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_issues(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -7317,7 +8197,13 @@ async def list_file_issues(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Risk Checklist",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_risk_checklist(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -7356,7 +8242,13 @@ async def get_ai_risk_checklist(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="List Coding Standards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coding_standards(
     provider: str = Field(..., description="The Git provider hosting the organization, used to identify which platform to query."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider, used to scope the coding standards lookup."),
@@ -7395,7 +8287,12 @@ async def list_coding_standards(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Create Coding Standard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_coding_standard(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -7440,13 +8337,19 @@ async def create_coding_standard(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Create Compliance Standard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_compliance_standard(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -7484,13 +8387,19 @@ async def create_compliance_standard(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Create Coding Standard from Preset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_coding_standard_from_preset(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -7540,13 +8449,20 @@ async def create_coding_standard_from_preset(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Get Coding Standard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
@@ -7588,7 +8504,13 @@ async def get_coding_standard(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Coding Standard",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -7630,7 +8552,12 @@ async def delete_coding_standard(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Coding Standard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -7672,7 +8599,13 @@ async def duplicate_coding_standard(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="List Coding Standard Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coding_standard_tools(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -7714,7 +8647,13 @@ async def list_coding_standard_tools(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Set Default Coding Standard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_default_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -7754,13 +8693,20 @@ async def set_default_coding_standard(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="List Coding Standard Tool Patterns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coding_standard_tool_patterns(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -7817,7 +8763,13 @@ async def list_coding_standard_tool_patterns(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Get Coding Standard Tool Patterns Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coding_standard_tool_patterns_overview(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -7870,7 +8822,12 @@ async def get_coding_standard_tool_patterns_overview(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Update Coding Standard Tool Patterns",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def bulk_update_coding_standard_tool_patterns(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Exact name of the organization as it appears on the Git provider."),
@@ -7920,13 +8877,20 @@ async def bulk_update_coding_standard_tool_patterns(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Configure Coding Standard Tool",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_coding_standard_tool(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -7969,7 +8933,13 @@ async def configure_coding_standard_tool(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="List Coding Standard Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coding_standard_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -8016,7 +8986,13 @@ async def list_coding_standard_repositories(
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Update Coding Standard Repositories",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_coding_standard_repositories(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -8057,13 +9033,20 @@ async def update_coding_standard_repositories(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Set Default Gate Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_default_gate_policy(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
@@ -8105,7 +9088,13 @@ async def set_default_gate_policy(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Set Default Gate Policy to Codacy Builtin",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_default_gate_policy_to_codacy_builtin(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -8144,7 +9133,13 @@ async def set_default_gate_policy_to_codacy_builtin(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Get Gate Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gate_policy(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
@@ -8186,7 +9181,13 @@ async def get_gate_policy(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Update Gate Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gate_policy(
     provider: str = Field(..., description="The short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -8244,13 +9245,20 @@ async def update_gate_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Gate Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_gate_policy(
     provider: str = Field(..., description="Short code identifying the Git provider for the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -8292,7 +9300,13 @@ async def delete_gate_policy(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="List Gate Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gate_policies(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
@@ -8337,7 +9351,12 @@ async def list_gate_policies(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Create Gate Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_gate_policy(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -8393,13 +9412,20 @@ async def create_gate_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Sync Organization Name",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def sync_organization_name(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as gh for GitHub, gl for GitLab, or bb for Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider, used to locate the correct organization for synchronization."),
@@ -8438,7 +9464,13 @@ async def sync_organization_name(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Check Submodules Enabled",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_submodules_enabled(
     provider: str = Field(..., description="Short code identifying the Git provider for the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -8477,7 +9509,13 @@ async def check_submodules_enabled(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="List Gate Policy Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gate_policy_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization name as it appears on the Git provider."),
@@ -8524,7 +9562,13 @@ async def list_gate_policy_repositories(
     return _response_data
 
 # Tags: gate policies
-@mcp.tool()
+@mcp.tool(
+    title="Update Gate Policy Repositories",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gate_policy_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -8565,13 +9609,19 @@ async def update_gate_policy_repositories(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: coding standards
-@mcp.tool()
+@mcp.tool(
+    title="Promote Coding Standard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def promote_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -8613,7 +9663,13 @@ async def promote_coding_standard(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="List Repository API Tokens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_api_tokens(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization as it appears on the Git provider platform."),
@@ -8653,7 +9709,12 @@ async def list_repository_api_tokens(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository_token(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider platform."),
@@ -8693,7 +9754,13 @@ async def create_repository_token(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository_token(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization and repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider platform."),
@@ -8736,7 +9803,13 @@ async def delete_repository_token(
     return _response_data
 
 # Tags: repository, coverage
-@mcp.tool()
+@mcp.tool(
+    title="List Coverage Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coverage_reports(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -8782,7 +9855,13 @@ async def list_coverage_reports(
     return _response_data
 
 # Tags: repository, coverage
-@mcp.tool()
+@mcp.tool(
+    title="List Commit Coverage Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_commit_coverage_reports(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -8829,7 +9908,13 @@ async def list_commit_coverage_reports(
     return _response_data
 
 # Tags: repository, coverage
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Coverage Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_coverage_report(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -8871,7 +9956,13 @@ async def get_commit_coverage_report(
     return _response_data
 
 # Tags: file
-@mcp.tool()
+@mcp.tool(
+    title="Get File Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_content(
     provider: str = Field(..., description="Short code identifying the Git hosting provider (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -8921,7 +10012,13 @@ async def get_file_content(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get File Coverage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_coverage(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -8964,7 +10061,13 @@ async def get_file_coverage(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Set File Ignored State",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_file_ignored_state(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
@@ -9003,13 +10106,19 @@ async def set_file_ignored_state(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Ignore Security Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def ignore_security_item(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -9048,13 +10157,19 @@ async def ignore_security_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Unignore Security Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unignore_security_item(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -9094,7 +10209,13 @@ async def unignore_security_item(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Get Security Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_security_item(
     provider: str = Field(..., description="The Git provider hosting the organization, specified as a short identifier code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
@@ -9134,7 +10255,12 @@ async def get_security_item(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Search Security Items",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_security_items(
     provider: str = Field(..., description="The Git provider hosting the organization. Identifies which platform to query."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -9146,7 +10272,7 @@ async def search_security_items(
     statuses: list[str] | None = Field(None, description="List of statuses to filter security items by. Refer to SrmStatus for valid values. Order is not significant."),
     categories: list[str] | None = Field(None, description="List of security categories to filter by. Use the special value `_other_` to include items that have no assigned security category. Order is not significant."),
     scan_types: list[str] | None = Field(None, alias="scanTypes", description="List of scan types to filter results by, such as static analysis, dependency scanning, secrets detection, and others. Order is not significant."),
-    segments: list[int] | None = Field(None, description="List of segment IDs to filter security items by. Segments represent logical groupings within the organization. Order is not significant."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of segment IDs to filter security items by. Segments represent logical groupings within the organization. Order is not significant."),
     dast_target_urls: list[str] | None = Field(None, alias="dastTargetUrls", description="List of DAST target URLs to filter results to only items associated with those targets. Order is not significant."),
     search_text: str | None = Field(None, alias="searchText", description="Free-text search string to match against security item content, such as titles or descriptions."),
 ) -> dict[str, Any] | ToolResult:
@@ -9186,13 +10312,19 @@ async def search_security_items(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Get Security Dashboard Metrics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_security_dashboard_metrics(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -9200,7 +10332,7 @@ async def get_security_dashboard_metrics(
     priorities: list[Literal["Low", "Medium", "High", "Critical"]] | None = Field(None, description="List of security issue priority levels to include in the metrics. Refer to SrmPriority for the set of valid priority values."),
     categories: list[str] | None = Field(None, description="List of security categories to filter issues by. Use the special value `_other_` to include issues that have no assigned security category."),
     scan_types: list[str] | None = Field(None, alias="scanTypes", description="List of scan types to restrict metrics to. Multiple scan types can be specified to combine results across different analysis methods."),
-    segments: list[int] | None = Field(None, description="List of numeric segment IDs to filter the dashboard metrics by. Segments represent logical groupings of repositories or teams within the organization."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of numeric segment IDs to filter the dashboard metrics by. Segments represent logical groupings of repositories or teams within the organization."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated security and risk management metrics for an organization's dashboard, with optional filtering by repositories, priorities, categories, scan types, and segments."""
 
@@ -9233,18 +10365,24 @@ async def get_security_dashboard_metrics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Search Repositories with Security Findings",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_repositories_with_security_findings(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     repositories: list[str] | None = Field(None, description="List of repository names to narrow results to specific repositories; order is not significant. If omitted, all repositories in the organization are considered."),
-    segments: list[int] | None = Field(None, description="List of segment IDs to filter repositories by organizational segment; order is not significant. If omitted, all segments are included."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of segment IDs to filter repositories by organizational segment; order is not significant. If omitted, all segments are included."),
 ) -> dict[str, Any] | ToolResult:
     """Searches repositories within an organization for security findings, returning matching results with their associated security data. If no filters are applied, defaults to returning the 10 repositories with the highest number of findings."""
 
@@ -9277,18 +10415,24 @@ async def search_repositories_with_security_findings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Search Security Findings History",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_security_findings_history(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the history results to. When omitted, results cover all repositories in the organization. Order is not significant."),
-    segments: list[int] | None = Field(None, description="List of segment IDs to filter the history results by. Segments represent logical groupings within the organization. Order is not significant."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of segment IDs to filter the history results by. Segments represent logical groupings within the organization. Order is not significant."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieves the historical evolution of security findings over time for an organization, optionally filtered by specific repositories or segments. Useful for tracking security posture trends and identifying improvements or regressions."""
 
@@ -9321,18 +10465,24 @@ async def search_security_findings_history(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Search Security Category Findings",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_security_category_finding(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the results to; omit to include all repositories in the organization. Order is not significant."),
-    segments: list[int] | None = Field(None, description="List of segment IDs to filter results by; omit to include all segments. Order is not significant."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of segment IDs to filter results by; omit to include all segments. Order is not significant."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieves security categories with their associated findings for an organization, optionally filtered by repositories or segments. If no filters are provided, returns the 10 categories with the highest finding counts."""
 
@@ -9365,18 +10515,24 @@ async def search_security_category_finding(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Upload DAST Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_dast_report(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the remote Git provider."),
     tool_name: Literal["ZAP"] = Field(..., alias="toolName", description="The DAST tool that generated the report. Currently only ZAP (OWASP Zed Attack Proxy) is supported."),
-    file_: str = Field(..., alias="file", description="The binary file containing the DAST scan results. For ZAP reports, ensure the `@generated` timestamp field is in English locale using the format `EEE, d MMM yyyy HH:mm:ss` (ZAP's default), otherwise the report will be rejected."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file containing the DAST scan results. For ZAP reports, ensure the `@generated` timestamp field is in English locale using the format `EEE, d MMM yyyy HH:mm:ss` (ZAP's default), otherwise the report will be rejected.", json_schema_extra={'format': 'byte'}),
     report_format: Literal["json"] = Field(..., alias="reportFormat", description="The format of the uploaded report file. Must match the structure expected for the specified tool."),
 ) -> dict[str, Any] | ToolResult:
     """Uploads a Dynamic Application Security Testing (DAST) scan report to Codacy for the specified organization and tool. The report is parsed and integrated into the organization's security findings dashboard."""
@@ -9418,7 +10574,13 @@ async def upload_dast_report(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="List DAST Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dast_reports(
     provider: str = Field(..., description="The Git provider hosting the organization, used to identify the source control platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -9463,7 +10625,13 @@ async def list_dast_reports(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="List Security Managers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_security_managers(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
@@ -9508,7 +10676,12 @@ async def list_security_managers(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Assign Security Manager",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_security_manager(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Use the short code for the desired provider (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -9547,13 +10720,20 @@ async def assign_security_manager(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Security Manager",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_security_manager(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
@@ -9595,7 +10775,13 @@ async def revoke_security_manager(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories with Security Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories_with_security_issues(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -9641,7 +10827,13 @@ async def list_repositories_with_security_issues(
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="List Security Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_security_categories(
     provider: str = Field(..., description="The Git provider hosting the organization. Identifies which platform to query for security data."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used on the platform."),
@@ -9686,7 +10878,12 @@ async def list_security_categories(
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Search SBOM Dependencies",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_sbom_dependencies(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -9695,7 +10892,7 @@ async def search_sbom_dependencies(
     column_order: Literal["asc", "desc"] | None = Field(None, alias="columnOrder", description="Direction in which to sort the results relative to the chosen sort column. Use `asc` for ascending or `desc` for descending order."),
     text: str | None = Field(None, description="Free-text search string matched against SBOM component fields including package URL (purl) and full component name."),
     repositories: list[str] | None = Field(None, description="List of repository names within the organization to restrict results to. Order is not significant; each item should be a repository name string."),
-    segments: list[int] | None = Field(None, description="List of segment IDs to restrict results to. Order is not significant; each item should be an integer segment identifier."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of segment IDs to restrict results to. Order is not significant; each item should be an integer segment identifier."),
     finding_severities: list[Literal["Critical", "High", "Medium", "Low"]] | None = Field(None, alias="findingSeverities", description="List of vulnerability severity levels to include in results. Order is not significant; valid values are `Critical`, `High`, `Medium`, and `Low`."),
     risk_categories: list[Literal["Forbidden", "Restricted", "Reciprocal", "Notice", "Permissive", "Unencumbered", "Unknown"]] | None = Field(None, alias="riskCategories", description="List of license risk category labels to filter dependencies by. Order is not significant; each item should be a valid license risk category string."),
 ) -> dict[str, Any] | ToolResult:
@@ -9735,13 +10932,19 @@ async def search_sbom_dependencies(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Search Dependency Repositories",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_dependency_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization name as it appears on the Git provider."),
@@ -9785,13 +10988,19 @@ async def search_dependency_repositories(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Search SBOM Repositories",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_sbom_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
@@ -9835,13 +11044,20 @@ async def search_sbom_repositories(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository SBOM Download URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_sbom_download_url(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -9881,11 +11097,16 @@ async def get_repository_sbom_download_url(
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Upload Image SBOM",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_image_sbom(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
-    sbom: str = Field(..., description="The SBOM file to upload, provided as binary data in either SPDX or CycloneDX format."),
+    sbom: str = Field(..., description="Base64-encoded file content for upload. The SBOM file to upload, provided as binary data in either SPDX or CycloneDX format.", json_schema_extra={'format': 'byte'}),
     environment: str | None = Field(None, description="The deployment environment associated with the Docker image (e.g., production, staging), used to contextualize the SBOM within a specific runtime environment."),
     image_ref: str | None = Field(None, description="Full Docker image reference in the format 'repositoryName/imageName:tag'"),
 ) -> dict[str, Any] | ToolResult:
@@ -9931,7 +11152,13 @@ async def upload_image_sbom(
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Delete Image SBOMs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_image_sboms(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -9971,7 +11198,13 @@ async def delete_image_sboms(
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="Delete Image Tag SBOM",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_image_tag_sbom(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -10012,7 +11245,13 @@ async def delete_image_tag_sbom(
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Images",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_images(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
@@ -10057,7 +11296,13 @@ async def list_organization_images(
     return _response_data
 
 # Tags: sbom
-@mcp.tool()
+@mcp.tool(
+    title="List Image Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_image_tags(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -10103,7 +11348,13 @@ async def list_image_tags(
     return _response_data
 
 # Tags: jira
-@mcp.tool()
+@mcp.tool(
+    title="List Jira Tickets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jira_tickets(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -10147,7 +11398,12 @@ async def list_jira_tickets(
     return _response_data
 
 # Tags: jira
-@mcp.tool()
+@mcp.tool(
+    title="Create Jira Ticket",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_jira_ticket(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -10198,13 +11454,20 @@ async def create_jira_ticket(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: jira
-@mcp.tool()
+@mcp.tool(
+    title="Unlink Jira Ticket",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlink_jira_ticket(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the provider (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization as it appears on the Git provider platform."),
@@ -10245,13 +11508,20 @@ async def unlink_jira_ticket(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Jira Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_jira_integration(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -10290,7 +11560,13 @@ async def get_jira_integration(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Delete Jira Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_jira_integration(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -10329,7 +11605,13 @@ async def delete_jira_integration(
     return _response_data
 
 # Tags: jira
-@mcp.tool()
+@mcp.tool(
+    title="List Jira Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jira_projects(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
@@ -10375,7 +11657,13 @@ async def list_jira_projects(
     return _response_data
 
 # Tags: jira
-@mcp.tool()
+@mcp.tool(
+    title="List Jira Issue Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jira_issue_types(
     provider: str = Field(..., description="Short code identifying the Git provider for the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -10422,7 +11710,13 @@ async def list_jira_issue_types(
     return _response_data
 
 # Tags: jira
-@mcp.tool()
+@mcp.tool(
+    title="List Jira Issue Type Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jira_issue_type_fields(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -10470,7 +11764,13 @@ async def list_jira_issue_type_fields(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Slack Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_slack_integration(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -10509,7 +11809,13 @@ async def get_slack_integration(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Diff",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_diff(
     provider: str = Field(..., description="Short code identifying the Git hosting provider for the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -10552,7 +11858,13 @@ async def get_pull_request_diff(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Diff",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_diff(
     provider: str = Field(..., description="Short code identifying the Git hosting provider (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -10593,7 +11905,13 @@ async def get_commit_diff(
     return _response_data
 
 # Tags: repository
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit Diff Between",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit_diff_between(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -10635,7 +11953,13 @@ async def get_commit_diff_between(
     return _response_data
 
 # Tags: reports
-@mcp.tool()
+@mcp.tool(
+    title="Export Organization Security Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_organization_security_items(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Each provider has a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider. This is the organization's handle or slug, not a display name."),
@@ -10674,7 +11998,12 @@ async def export_organization_security_items(
     return _response_data
 
 # Tags: reports
-@mcp.tool()
+@mcp.tool(
+    title="Export Security Items CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_security_items_csv(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -10683,7 +12012,7 @@ async def export_security_items_csv(
     statuses: list[Literal["Overdue", "OnTrack", "DueSoon", "ClosedOnTime", "ClosedLate", "Ignored"]] | None = Field(None, description="List of statuses to filter security issues by. Valid values are defined by the SrmStatus enumeration. Order is not significant."),
     categories: list[str] | None = Field(None, description="List of security categories to filter by. Use the special value `_other_` to include issues that have no assigned security category. Order is not significant."),
     scan_types: list[str] | None = Field(None, alias="scanTypes", description="List of scan types to restrict results to. Order is not significant."),
-    segments: list[int] | None = Field(None, description="List of numeric segment IDs to filter results by. Order is not significant."),
+    segments: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="List of numeric segment IDs to filter results by. Order is not significant."),
     search_text: str | None = Field(None, alias="searchText", description="Free-text string used to search within security item fields, such as title or description."),
 ) -> dict[str, Any] | ToolResult:
     """Generates a filtered CSV export of security and risk management items for an organization. Supports filtering by repository, priority, status, category, scan type, segment, and free-text search."""
@@ -10717,13 +12046,20 @@ async def export_security_items_csv(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Commit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_commit(commit_id: str = Field(..., alias="commitId", description="The unique numeric identifier of the commit to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific commit, including its metadata, changes, and associated data. Use this to inspect the full details of a known commit by its unique identifier."""
 
@@ -10761,7 +12097,13 @@ async def get_commit(commit_id: str = Field(..., alias="commitId", description="
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Check Repository Quickfix Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_repository_quickfix_suggestions(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
@@ -10805,7 +12147,13 @@ async def check_repository_quickfix_suggestions(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Quickfixes Patch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_quickfixes_patch(
     provider: str = Field(..., description="Identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
@@ -10849,7 +12197,13 @@ async def get_issue_quickfixes_patch(
     return _response_data
 
 # Tags: analysis
-@mcp.tool()
+@mcp.tool(
+    title="Get Pull Request Issues Patch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pull_request_issues_patch(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
@@ -10892,7 +12246,13 @@ async def get_pull_request_issues_patch(
     return _response_data
 
 # Tags: organization
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Audit Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_audit_logs(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
@@ -10939,7 +12299,13 @@ async def list_organization_audit_logs(
     return _response_data
 
 # Tags: segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment Sync Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segment_sync_status(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Use the short code for the desired platform (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider. This must match the exact remote organization name used by the provider."),
@@ -10978,7 +12344,13 @@ async def get_segment_sync_status(
     return _response_data
 
 # Tags: segments
-@mcp.tool()
+@mcp.tool(
+    title="List Segment Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segment_keys(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
@@ -11024,7 +12396,13 @@ async def list_segment_keys(
     return _response_data
 
 # Tags: segments
-@mcp.tool()
+@mcp.tool(
+    title="List Segment Keys with IDs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segment_keys_with_ids(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -11070,7 +12448,13 @@ async def list_segment_keys_with_ids(
     return _response_data
 
 # Tags: segments
-@mcp.tool()
+@mcp.tool(
+    title="List Segment Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segment_values(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -11117,7 +12501,13 @@ async def list_segment_values(
     return _response_data
 
 # Tags: dast
-@mcp.tool()
+@mcp.tool(
+    title="List DAST Targets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dast_targets(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
@@ -11162,7 +12552,12 @@ async def list_dast_targets(
     return _response_data
 
 # Tags: dast
-@mcp.tool()
+@mcp.tool(
+    title="Create DAST Target",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dast_target(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -11201,13 +12596,20 @@ async def create_dast_target(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dast
-@mcp.tool()
+@mcp.tool(
+    title="Delete DAST Target",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dast_target(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -11249,7 +12651,12 @@ async def delete_dast_target(
     return _response_data
 
 # Tags: dast
-@mcp.tool()
+@mcp.tool(
+    title="Trigger DAST Analysis",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_dast_analysis(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
@@ -11291,7 +12698,13 @@ async def trigger_dast_analysis(
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_organizations(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug identifier for the enterprise whose organizations you want to retrieve."),
     provider: str = Field(..., description="The Git provider hosting the enterprise, specified as a short identifier code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
@@ -11336,7 +12749,13 @@ async def list_enterprise_organizations(
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprises",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprises(
     provider: str = Field(..., description="The Git provider to query for enterprises, identified by its short code (e.g., GitHub, GitLab, Bitbucket)."),
     limit: str | None = Field(None, description="Maximum number of enterprise records to return in a single response, between 1 and 100 inclusive."),
@@ -11380,7 +12799,13 @@ async def list_enterprises(
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_enterprise(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug identifier for the enterprise, typically a lowercase hyphenated name used in URLs."),
     provider: str = Field(..., description="The short code identifying the git provider hosting the enterprise (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
@@ -11419,7 +12844,13 @@ async def get_enterprise(
     return _response_data
 
 # Tags: enterprise
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Seats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enterprise_seats(
     provider: str = Field(..., description="The Git provider hosting the enterprise, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug identifier of the enterprise whose seats are being listed."),
@@ -11465,7 +12896,13 @@ async def list_enterprise_seats(
     return _response_data
 
 # Tags: reports
-@mcp.tool()
+@mcp.tool(
+    title="Export Enterprise Seats CSV",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_enterprise_seats_csv(
     provider: str = Field(..., description="The Git provider hosting the enterprise, identified by a short slug (e.g., GitHub, GitLab, Bitbucket)."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug (URL-friendly identifier) of the enterprise whose seat data should be exported."),
@@ -11504,7 +12941,13 @@ async def export_enterprise_seats_csv(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="List Payment Plans",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_payment_plans() -> dict[str, Any] | ToolResult:
     """Retrieves all available payment plans offered in Codacy, allowing users to review pricing tiers and subscription options."""
 
@@ -11531,7 +12974,12 @@ async def list_payment_plans() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: security
-@mcp.tool()
+@mcp.tool(
+    title="Get OSSF Scorecard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_ossf_scorecard() -> dict[str, Any] | ToolResult:
     """Retrieves the OSSF (Open Source Security Foundation) Scorecard for a repository, providing security health metrics and risk assessments across key supply chain security practices."""
 

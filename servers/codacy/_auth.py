@@ -1,7 +1,7 @@
 """
 Authentication module for Codacy MCP server.
 
-Generated: 2026-05-05 14:41:25 UTC
+Generated: 2026-05-11 23:17:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

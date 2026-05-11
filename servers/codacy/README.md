@@ -5,7 +5,7 @@ Base URL: https://app.codacy.com/api/v3
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 236 |
+| **Tools** | 226 |
 | **Auth** | API Key |
 
 ## API Info
@@ -56,6 +56,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (api-token)
+
 Do not commit credentials to version control.
 
 ---
