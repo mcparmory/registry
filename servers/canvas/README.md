@@ -5,7 +5,7 @@ Base URL: https:///api/v1
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 696 |
+| **Tools** | 673 |
 | **Auth** | Bearer Token, OAuth2 |
 
 ---
@@ -66,6 +66,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `BEARER_TOKEN` — Bearer token
 - `SERVER_CANVAS_DOMAIN` — Your Canvas instance hostname from the URL bar when logged in.
+
 Do not commit credentials to version control.
 
 ### OAuth2

@@ -1,13 +1,13 @@
 """
 Canvas MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:35:11 UTC
+Generated: 2026-05-11 19:36:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -4118,8 +4118,8 @@ class UpdateSingleGradingPeriodRequestPath(StrictModel):
     course_id: str = Field(default=..., description="The unique identifier of the course containing the grading period.")
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the grading period to update.")
 class UpdateSingleGradingPeriodRequestBody(StrictModel):
-    grading_periods_end_date: list[str] = Field(default=..., validation_alias="grading_periods[end_date]", serialization_alias="grading_periods[end_date]", description="The date when the grading period ends. Provided as an array where the first element is the end date.")
-    grading_periods_start_date: list[str] = Field(default=..., validation_alias="grading_periods[start_date]", serialization_alias="grading_periods[start_date]", description="The date when the grading period starts. Provided as an array where the first element is the start date.")
+    grading_periods_end_date: list[Annotated[str, Field(json_schema_extra={'format': 'date'})]] = Field(default=..., validation_alias="grading_periods[end_date]", serialization_alias="grading_periods[end_date]", description="The date when the grading period ends. Provided as an array where the first element is the end date.")
+    grading_periods_start_date: list[Annotated[str, Field(json_schema_extra={'format': 'date'})]] = Field(default=..., validation_alias="grading_periods[start_date]", serialization_alias="grading_periods[start_date]", description="The date when the grading period starts. Provided as an array where the first element is the start date.")
     grading_periods_weight: list[float] | None = Field(default=None, validation_alias="grading_periods[weight]", serialization_alias="grading_periods[weight]", description="A numeric weight value that determines how much assignments in this grading period contribute to the total course grade relative to other periods in the grading period set. Provided as an array where the first element is the weight value.")
 class UpdateSingleGradingPeriodRequest(StrictModel):
     """Update an existing grading period for a course, including its date range and optional weight contribution to the overall grade calculation."""

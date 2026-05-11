@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Canvas MCP Server
-Generated: 2026-05-05 14:35:11 UTC
+Generated: 2026-05-11 19:36:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -22,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -47,7 +49,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{canvas_domain}/api/v1".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Canvas"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1293,6 +1324,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1317,6 +1350,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1533,7 +1568,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Canvas", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: plagiarism_detection_platform_assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment LTI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment_lti(assignment_id: str = Field(..., description="The Canvas assignment ID or LTI assignment ID that uniquely identifies the assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single Canvas assignment by its Canvas ID or LTI ID. Tool providers can only access assignments associated with their tool."""
 
@@ -1569,7 +1610,13 @@ async def get_assignment_lti(assignment_id: str = Field(..., description="The Ca
     return _response_data
 
 # Tags: originality_reports
-@mcp.tool()
+@mcp.tool(
+    title="Get Originality Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_originality_report(
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the file."),
     file_id: str = Field(..., description="The unique identifier of the file for which to retrieve the originality report."),
@@ -1608,7 +1655,13 @@ async def get_originality_report(
     return _response_data
 
 # Tags: originality_reports
-@mcp.tool()
+@mcp.tool(
+    title="Update Originality Report",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_originality_report(
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the file."),
     file_id: str = Field(..., description="The unique identifier of the file for which the originality report is being updated."),
@@ -1649,13 +1702,20 @@ async def update_originality_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: plagiarism_detection_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment that contains the submission."),
     submission_id: str = Field(..., description="The unique identifier of the submission to retrieve."),
@@ -1694,7 +1754,13 @@ async def get_submission(
     return _response_data
 
 # Tags: plagiarism_detection_submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Submission Attempts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_submission_attempts(
     assignment_id: str = Field(..., description="The unique identifier of the assignment associated with the submission."),
     submission_id: str = Field(..., description="The unique identifier of the submission whose attempt history should be retrieved."),
@@ -1733,7 +1799,12 @@ async def list_submission_attempts(
     return _response_data
 
 # Tags: originality_reports
-@mcp.tool()
+@mcp.tool(
+    title="Submit Originality Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_originality_report(
     assignment_id: str = Field(..., description="The unique identifier of the assignment."),
     submission_id: str = Field(..., description="The unique identifier of the student submission."),
@@ -1777,13 +1848,20 @@ async def submit_originality_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: originality_reports
-@mcp.tool()
+@mcp.tool(
+    title="Get Originality Report Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_originality_report_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment associated with the submission."),
     submission_id: str = Field(..., description="The unique identifier of the student submission for which to retrieve the originality report."),
@@ -1823,7 +1901,13 @@ async def get_originality_report_submission(
     return _response_data
 
 # Tags: originality_reports
-@mcp.tool()
+@mcp.tool(
+    title="Update Originality Report Submission",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_originality_report_submission(
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the submission."),
     submission_id: str = Field(..., description="The unique identifier of the submission associated with the originality report."),
@@ -1865,13 +1949,20 @@ async def update_originality_report_submission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: plagiarism_detection_platform_users
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Members (LTI)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_members_lti(group_id: str = Field(..., description="The unique identifier of the group from which to retrieve members.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Canvas users that are members of a specific group. Tool providers can only access groups within their installed context."""
 
@@ -1907,7 +1998,13 @@ async def get_group_members_lti(group_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: webhooks_subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_subscriptions() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all webhook subscriptions for a tool proxy. Use the 'EndKey' from the response to set 'StartKey' in subsequent requests to fetch additional pages."""
 
@@ -1934,7 +2031,13 @@ async def list_webhook_subscriptions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: webhooks_subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_subscription(id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific webhook subscription by its ID. Use this to view the configuration and status of an individual LTI webhook subscription."""
 
@@ -1970,7 +2073,13 @@ async def get_webhook_subscription(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: webhooks_subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook_subscription(id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a webhook subscription by its ID. This removes the subscription and stops delivery of webhook events to the configured endpoint."""
 
@@ -2006,7 +2115,13 @@ async def delete_webhook_subscription(id_: str = Field(..., alias="id", descript
     return _response_data
 
 # Tags: plagiarism_detection_platform_users
-@mcp.tool()
+@mcp.tool(
+    title="Get LTI User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_lti_user(id_: str = Field(..., alias="id", description="The Canvas user ID or LTI ID of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single Canvas user by their Canvas ID or LTI ID. Tool providers can only access users who have been assigned an assignment associated with their tool."""
 
@@ -2042,7 +2157,13 @@ async def get_lti_user(id_: str = Field(..., alias="id", description="The Canvas
     return _response_data
 
 # Tags: sis_integration
-@mcp.tool()
+@mcp.tool(
+    title="List SIS Export Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sis_export_assignments(
     account_id: str = Field(..., description="The account ID to query for SIS-enabled assignments."),
     course_id: str | None = Field(None, description="Filter results to a specific course within the account."),
@@ -2090,7 +2211,13 @@ async def list_sis_export_assignments(
     return _response_data
 
 # Tags: sis_integration
-@mcp.tool()
+@mcp.tool(
+    title="List SIS Export Assignments by Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sis_export_assignments_by_course(
     course_id: str = Field(..., description="The ID of the course containing the assignments to retrieve."),
     account_id: str | None = Field(None, description="The ID of the account to query when filtering courses by date range. Used in conjunction with starts_before and ends_after parameters."),
@@ -2138,7 +2265,13 @@ async def list_sis_export_assignments_by_course(
     return _response_data
 
 # Tags: sis_integration
-@mcp.tool()
+@mcp.tool(
+    title="Disable SIS Grade Exports",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_sis_grade_exports(
     course_id: str = Field(..., description="The ID of the course containing assignments to disable for SIS export."),
     grading_period_id: str | None = Field(None, description="Optional ID of a specific grading period to limit the disable operation to assignments within that period only."),
@@ -2177,13 +2310,20 @@ async def disable_sis_grade_exports(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="List Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_accounts(
     include: list[Literal["lti_guid", "registration_settings", "services"]] | None = Field(None, description="Specify which additional account information to include in the response. Options include LTI identifiers, privacy and terms of use settings, and service availability status (service information requires account management permissions)."),
     per_page: int | None = Field(None, description="Number of accounts to return per page for pagination. Must be between 1 and 100.", ge=1, le=100),
@@ -2227,7 +2367,13 @@ async def list_accounts(
     return _response_data
 
 # Tags: account_domain_lookups
-@mcp.tool()
+@mcp.tool(
+    title="Search Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_domains(
     name: str | None = Field(None, description="Campus name to search for. Supports partial matching against account domain names."),
     domain: str | None = Field(None, description="Domain value to search for. Supports partial matching against registered domains."),
@@ -2268,7 +2414,13 @@ async def search_domains(
     return _response_data
 
 # Tags: account_notifications
-@mcp.tool()
+@mcp.tool(
+    title="List Active Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_active_notifications(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve notifications.")) -> dict[str, Any] | ToolResult:
     """Retrieves all active global notifications for the current user in the specified account. Closed or dismissed notifications are excluded from the results."""
 
@@ -2304,7 +2456,12 @@ async def list_active_notifications(account_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: account_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Create Notification",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_notification(
     account_id: str = Field(..., description="The account identifier where the notification will be created."),
     account_notification_end_at: str = Field(..., description="The end date and time when the notification will stop displaying to users, in ISO 8601 format."),
@@ -2352,7 +2509,13 @@ async def create_notification(
     return _response_data
 
 # Tags: account_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Get Notification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notification(
     account_id: str = Field(..., description="The unique identifier of the account containing the notification."),
     id_: str = Field(..., alias="id", description="The unique identifier of the notification to retrieve."),
@@ -2391,7 +2554,13 @@ async def get_notification(
     return _response_data
 
 # Tags: account_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Update Notification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_notification(
     account_id: str = Field(..., description="The account identifier for which the notification is being updated."),
     id_: str = Field(..., alias="id", description="The notification identifier to update."),
@@ -2435,13 +2604,20 @@ async def update_notification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: account_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Dismiss Notification",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def dismiss_notification(
     account_id: str = Field(..., description="The unique identifier of the account that owns the notification."),
     id_: str = Field(..., alias="id", description="The unique identifier of the notification to dismiss."),
@@ -2480,7 +2656,13 @@ async def dismiss_notification(
     return _response_data
 
 # Tags: admins
-@mcp.tool()
+@mcp.tool(
+    title="List Admins",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_admins(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve administrators."),
     per_page: int | None = Field(None, description="The maximum number of administrator records to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -2522,7 +2704,12 @@ async def list_admins(
     return _response_data
 
 # Tags: admins
-@mcp.tool()
+@mcp.tool(
+    title="Promote Account Admin",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def promote_account_admin(
     account_id: str = Field(..., description="The unique identifier of the account where the user will be promoted to admin."),
     user_id: str = Field(..., description="The unique identifier of the user to promote to admin status."),
@@ -2570,7 +2757,13 @@ async def promote_account_admin(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Department Participation Completed",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_department_participation_completed(account_id: str = Field(..., description="The account identifier for which to retrieve department-level participation data.")) -> dict[str, Any] | ToolResult:
     """Retrieve department-level participation metrics for concluded courses in the default term, aggregated by date and content category. Returns page view hits across all courses in the department."""
 
@@ -2606,7 +2799,13 @@ async def list_department_participation_completed(account_id: str = Field(..., d
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Department Grade Distribution Completed",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_department_grade_distribution_completed(account_id: str = Field(..., description="The unique identifier for the account whose department grade data should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the distribution of student grades across all courses in a department. Returns raw grade counts binned to the nearest integer (0-100 range), where each student contributes one grade per course regardless of enrollment in multiple sections."""
 
@@ -2642,7 +2841,13 @@ async def list_department_grade_distribution_completed(account_id: str = Field(.
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Department Statistics Completed",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_department_statistics(account_id: str = Field(..., description="The unique identifier for the account whose department statistics should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves numeric statistics for a department, aggregated by term or applied filters. Provides insights into department-level performance and activity metrics."""
 
@@ -2678,7 +2883,13 @@ async def get_department_statistics(account_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Department Participation Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_department_participation_data(account_id: str = Field(..., description="The Canvas account ID for which to retrieve department-level participation analytics.")) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated page view participation metrics for all courses in a department, grouped by date and content category. Includes data from all available courses in the default term."""
 
@@ -2714,7 +2925,13 @@ async def list_department_participation_data(account_id: str = Field(..., descri
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Department Grade Distribution",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_department_grade_distribution(account_id: str = Field(..., description="The unique identifier for the account whose department grade data should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the distribution of current student grades across all courses in a department. Grades are binned to the nearest integer (0-100 range), with each student contributing one grade per course regardless of multiple enrollments in the same course."""
 
@@ -2750,7 +2967,13 @@ async def list_department_grade_distribution(account_id: str = Field(..., descri
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Department Statistics Current",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_department_statistics_current(account_id: str = Field(..., description="The unique identifier for the account whose department statistics should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves numeric statistics for a department, including metrics for the current term or specified filter criteria. Provides aggregated performance and engagement data at the department level."""
 
@@ -2786,7 +3009,13 @@ async def get_department_statistics_current(account_id: str = Field(..., descrip
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Department Participation by Term",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_department_participation_by_term(
     account_id: str = Field(..., description="The Canvas account ID for which to retrieve department participation data."),
     term_id: str = Field(..., description="The term ID for which to retrieve participation metrics. Includes all available and concluded courses within the specified term."),
@@ -2825,7 +3054,13 @@ async def list_department_participation_by_term(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Department Grade Distributions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_department_grade_distributions(
     account_id: str = Field(..., description="The unique identifier for the account containing the department and term data."),
     term_id: str = Field(..., description="The unique identifier for the academic term for which to retrieve grade distribution data."),
@@ -2864,7 +3099,13 @@ async def list_department_grade_distributions(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Department Statistics for Term",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_department_statistics_term(
     account_id: str = Field(..., description="The unique identifier for the account containing the department and term data."),
     term_id: str = Field(..., description="The unique identifier for the term for which to retrieve department-level statistics."),
@@ -2903,7 +3144,13 @@ async def get_department_statistics_term(
     return _response_data
 
 # Tags: authentication_providers
-@mcp.tool()
+@mcp.tool(
+    title="List Authentication Providers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_authentication_providers(
     account_id: str = Field(..., description="The unique identifier of the account for which to list authentication providers."),
     per_page: int | None = Field(None, description="The maximum number of authentication providers to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -2945,7 +3192,13 @@ async def list_authentication_providers(
     return _response_data
 
 # Tags: authentication_providers
-@mcp.tool()
+@mcp.tool(
+    title="Get Authentication Provider",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_authentication_provider(
     account_id: str = Field(..., description="The unique identifier of the account that owns the authentication provider."),
     id_: str = Field(..., alias="id", description="The unique identifier of the authentication provider to retrieve."),
@@ -2984,7 +3237,13 @@ async def get_authentication_provider(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Content Migrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_migrations(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve content migrations."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
@@ -3026,7 +3285,13 @@ async def list_content_migrations(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Content Migration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def initiate_content_migration(
     account_id: str = Field(..., description="The account ID where the content migration will be created."),
     migration_type: str = Field(..., description="The migration source type. Determines the import format and processing logic. Available types include Canvas cartridge, Common Cartridge, course copy, zip file, QTI, and Moodle formats."),
@@ -3086,7 +3351,13 @@ async def initiate_content_migration(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Systems",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_systems(account_id: str = Field(..., description="The unique identifier of the account for which to list available migration systems.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of currently available migration system types for an account. Available migration types may change over time."""
 
@@ -3122,7 +3393,13 @@ async def list_migration_systems(account_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_issues(
     account_id: str = Field(..., description="The unique identifier of the account containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
@@ -3165,7 +3442,13 @@ async def list_migration_issues(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_issue(
     account_id: str = Field(..., description="The Canvas account ID that contains the content migration."),
     content_migration_id: str = Field(..., description="The content migration ID that contains the migration issue."),
@@ -3205,7 +3488,12 @@ async def get_migration_issue(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Migration Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resolve_migration_issue(
     account_id: str = Field(..., description="The account ID that contains the content migration."),
     content_migration_id: str = Field(..., description="The content migration ID that contains the migration issue."),
@@ -3243,13 +3531,20 @@ async def resolve_migration_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Migration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_migration(
     account_id: str = Field(..., description="The unique identifier of the account containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
@@ -3288,7 +3583,13 @@ async def get_content_migration(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Content Migration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_content_migration(
     account_id: str = Field(..., description="The account identifier that owns the content migration."),
     id_: str = Field(..., alias="id", description="The content migration identifier to update."),
@@ -3327,7 +3628,13 @@ async def update_content_migration(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Courses by Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_courses_by_account(
     account_id: str = Field(..., description="The ID of the account containing the courses to retrieve."),
     with_enrollments: bool | None = Field(None, description="Filter courses based on whether they have active enrollments."),
@@ -3386,7 +3693,12 @@ async def list_courses_by_account(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Create Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_course(
     account_id: str = Field(..., description="The account ID where the course will be created."),
     course_allow_student_forum_attachments: bool | None = Field(None, description="Allow students to attach files to forum posts."),
@@ -3460,7 +3772,12 @@ async def create_course(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Update Courses",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def bulk_update_courses(
     account_id: str = Field(..., description="The account ID that contains the courses to update."),
     course_ids: list[str] = Field(..., description="List of course IDs to update. Up to 500 courses can be updated in a single request. Order is not significant."),
@@ -3497,13 +3814,20 @@ async def bulk_update_courses(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_account(
     account_id: str = Field(..., description="The unique identifier of the account containing the course."),
     id_: str = Field(..., alias="id", description="The unique identifier of the course to retrieve."),
@@ -3549,7 +3873,13 @@ async def get_course_account(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Get Enrollment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_enrollment(
     account_id: str = Field(..., description="The account identifier that contains the enrollment record."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment object to retrieve."),
@@ -3590,7 +3920,13 @@ async def get_enrollment(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="List External Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_tools(
     account_id: str = Field(..., description="The account identifier for which to retrieve external tools."),
     search_term: str | None = Field(None, description="Filter tools by partial name match. Returns only tools whose names contain this search term."),
@@ -3635,7 +3971,12 @@ async def list_external_tools(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Create External Tool",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_tool(
     account_id: str = Field(..., description="The account ID where the external tool will be created."),
     consumer_key: str = Field(..., description="The OAuth consumer key for authenticating requests to the external tool."),
@@ -3702,7 +4043,13 @@ async def create_external_tool(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Get External Tool Sessionless Launch URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_tool_sessionless_launch_url(
     account_id: str = Field(..., description="The Canvas account ID where the external tool is configured."),
     id_: str | None = Field(None, alias="id", description="The external tool ID to launch. Required unless url is provided or launch_type is assessment or module_item."),
@@ -3748,7 +4095,13 @@ async def get_external_tool_sessionless_launch_url(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Get External Tool",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_tool(
     account_id: str = Field(..., description="The unique identifier of the account containing the external tool."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to retrieve."),
@@ -3787,7 +4140,13 @@ async def get_external_tool(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Update External Tool",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_tool(
     account_id: str = Field(..., description="The unique identifier of the account containing the external tool."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to update."),
@@ -3826,7 +4185,13 @@ async def update_external_tool(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Remove External Tool",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_external_tool(
     account_id: str = Field(..., description="The unique identifier of the account containing the external tool to be deleted."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool integration to be removed."),
@@ -3865,7 +4230,13 @@ async def remove_external_tool(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Account Features",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_account_features(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve features."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows control over response size for pagination.", ge=1, le=100),
@@ -3907,7 +4278,13 @@ async def list_account_features(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Enabled Features",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enabled_features(
     account_id: str = Field(..., description="The unique identifier of the account for which to list enabled features."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows pagination through large result sets.", ge=1, le=100),
@@ -3949,7 +4326,13 @@ async def list_enabled_features(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve the feature flag."),
     feature: str = Field(..., description="The unique identifier of the feature flag to retrieve."),
@@ -3988,7 +4371,13 @@ async def get_feature_flag(
     return _response_data
 
 # Tags: grading_periods
-@mcp.tool()
+@mcp.tool(
+    title="List Grading Periods",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grading_periods(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve grading periods."),
     per_page: int | None = Field(None, description="The maximum number of grading periods to return per page.", ge=1, le=100),
@@ -4030,7 +4419,13 @@ async def list_grading_periods(
     return _response_data
 
 # Tags: grading_periods
-@mcp.tool()
+@mcp.tool(
+    title="Delete Grading Period",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_grading_period(
     account_id: str = Field(..., description="The unique identifier of the account containing the grading period to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to delete."),
@@ -4069,7 +4464,13 @@ async def delete_grading_period(
     return _response_data
 
 # Tags: grading_standards
-@mcp.tool()
+@mcp.tool(
+    title="List Grading Standards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grading_standards(
     account_id: str = Field(..., description="The account ID that defines the context for retrieving grading standards."),
     per_page: int | None = Field(None, description="The maximum number of grading standards to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -4111,7 +4512,12 @@ async def list_grading_standards(
     return _response_data
 
 # Tags: grading_standards
-@mcp.tool()
+@mcp.tool(
+    title="Create Grading Standard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_grading_standard(
     account_id: str = Field(..., description="The account ID where the grading standard will be created."),
     grading_scheme_entry_name: list[str] = Field(..., description="Array of grade names (e.g., 'A', 'A-', 'B+') corresponding to each grading scheme entry. Order must match grading_scheme_entry_value array."),
@@ -4156,7 +4562,13 @@ async def create_grading_standard(
     return _response_data
 
 # Tags: grading_standards
-@mcp.tool()
+@mcp.tool(
+    title="Get Grading Standard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_grading_standard(
     account_id: str = Field(..., description="The unique identifier of the account containing the grading standard."),
     grading_standard_id: str = Field(..., description="The unique identifier of the grading standard to retrieve."),
@@ -4195,7 +4607,13 @@ async def get_grading_standard(
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="List Group Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_categories(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve group categories."),
     per_page: int | None = Field(None, description="The maximum number of group categories to return per page. Allows control over result set size for pagination.", ge=1, le=100),
@@ -4237,7 +4655,12 @@ async def list_group_categories(
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="Create Group Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group_category(
     account_id: str = Field(..., description="The account ID where the group category will be created."),
     name: str = Field(..., description="The name of the group category."),
@@ -4288,7 +4711,13 @@ async def create_group_category(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups in Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups_in_account(
     account_id: str = Field(..., description="The unique identifier of the account context in which to list groups."),
     only_own_groups: bool | None = Field(None, description="When enabled, restricts results to only groups that the authenticated user is a member of."),
@@ -4335,7 +4764,13 @@ async def list_groups_in_account(
     return _response_data
 
 # Tags: logins
-@mcp.tool()
+@mcp.tool(
+    title="List Logins",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_logins(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve login records."),
     per_page: int | None = Field(None, description="The maximum number of login records to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
@@ -4377,7 +4812,12 @@ async def list_logins(
     return _response_data
 
 # Tags: logins
-@mcp.tool()
+@mcp.tool(
+    title="Create Login",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_login(
     account_id: str = Field(..., description="The account ID where the login will be created."),
     login_unique_id: str = Field(..., description="The unique identifier for the new login. This value must be unique within the account."),
@@ -4425,7 +4865,13 @@ async def create_login(
     return _response_data
 
 # Tags: logins
-@mcp.tool()
+@mcp.tool(
+    title="Update User Login",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_login(
     account_id: str = Field(..., description="The account ID containing the user login to update."),
     id_: str = Field(..., alias="id", description="The login ID to update."),
@@ -4465,13 +4911,20 @@ async def update_user_login(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Links",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_links(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve outcome links."),
     outcome_style: str | None = Field(None, description="Controls the level of detail returned for outcomes in the response. Use 'abbrev' for condensed information or 'full' for comprehensive details."),
@@ -4514,7 +4967,13 @@ async def list_outcome_links(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_groups(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve outcome groups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all outcome groups associated with a specific account. Outcome groups organize related outcomes for tracking and reporting purposes."""
 
@@ -4550,7 +5009,13 @@ async def list_outcome_groups(account_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Outcome Group Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outcome_group_account(
     account_id: str = Field(..., description="The unique identifier of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve."),
@@ -4589,7 +5054,13 @@ async def get_outcome_group_account(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Outcome Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_outcome_group(
     account_id: str = Field(..., description="The account ID that contains the outcome group."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to update."),
@@ -4631,13 +5102,20 @@ async def update_outcome_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Outcome Group Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_outcome_group_account(
     account_id: str = Field(..., description="The account ID that contains the outcome group to delete."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to delete."),
@@ -4676,7 +5154,12 @@ async def delete_outcome_group_account(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Copy Outcome Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_outcome_group(
     account_id: str = Field(..., description="The account ID where the outcome group will be imported."),
     id_: str = Field(..., alias="id", description="The ID of the destination outcome group where the import will be created as a new subgroup."),
@@ -4723,7 +5206,13 @@ async def copy_outcome_group(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcomes Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcomes_account(
     account_id: str = Field(..., description="The unique identifier of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group whose linked outcomes should be retrieved."),
@@ -4767,7 +5256,12 @@ async def list_outcomes_account(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Link Outcome",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_outcome(
     account_id: str = Field(..., description="The ID of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to link the outcome into."),
@@ -4824,7 +5318,13 @@ async def link_outcome(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Link Existing Outcome",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def link_outcome_existing(
     account_id: str = Field(..., description="The account ID that contains the outcome group."),
     id_: str = Field(..., alias="id", description="The outcome group ID where the outcome will be linked."),
@@ -4874,13 +5374,20 @@ async def link_outcome_existing(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Unlink Outcome",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlink_outcome(
     account_id: str = Field(..., description="The account ID that contains the outcome group."),
     id_: str = Field(..., alias="id", description="The outcome group ID from which to unlink the outcome."),
@@ -4920,7 +5427,13 @@ async def unlink_outcome(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Subgroups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_subgroups(
     account_id: str = Field(..., description="The unique identifier of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group whose child subgroups should be listed."),
@@ -4963,7 +5476,12 @@ async def list_subgroups(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Outcome Subgroup",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_outcome_subgroup(
     account_id: str = Field(..., description="The unique identifier of the account containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group under which the subgroup will be created."),
@@ -5009,7 +5527,12 @@ async def create_outcome_subgroup(
     return _response_data
 
 # Tags: outcome_imports
-@mcp.tool()
+@mcp.tool(
+    title="Import Outcomes",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_outcomes(
     account_id: str = Field(..., description="The Canvas account ID where outcomes will be imported."),
     attachment: str | None = Field(None, description="CSV outcome data file. Required when using application/x-www-form-urlencoded form submission. Omit this parameter if sending raw POST request with Content-Type header instead."),
@@ -5054,7 +5577,13 @@ async def import_outcomes(
     return _response_data
 
 # Tags: outcome_imports
-@mcp.tool()
+@mcp.tool(
+    title="Get Outcome Import Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outcome_import_status(
     account_id: str = Field(..., description="The Canvas account ID for which to retrieve the outcome import status."),
     id_: str = Field(..., alias="id", description="The outcome import ID to check, or 'latest' to retrieve the most recent import."),
@@ -5093,7 +5622,13 @@ async def get_outcome_import_status(
     return _response_data
 
 # Tags: proficiency_ratings
-@mcp.tool()
+@mcp.tool(
+    title="List Proficiency Ratings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_proficiency_ratings(account_id: str = Field(..., description="The Canvas account ID for which to retrieve proficiency ratings.")) -> dict[str, Any] | ToolResult:
     """Retrieve account-level proficiency ratings for learning outcomes. If ratings are not defined for the specified account, the operation returns ratings from the nearest parent super-account. Returns 404 if no proficiency ratings are found in the account hierarchy."""
 
@@ -5129,7 +5664,13 @@ async def list_proficiency_ratings(account_id: str = Field(..., description="The
     return _response_data
 
 # Tags: proficiency_ratings
-@mcp.tool()
+@mcp.tool(
+    title="Set Proficiency Ratings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_proficiency_ratings(
     account_id: str = Field(..., description="The account ID for which to set proficiency ratings."),
     ratings_color: list[int] | None = Field(None, description="Array of hex color codes associated with each rating level. Order corresponds to rating levels, with each color in the format of a 6-character hexadecimal string."),
@@ -5173,7 +5714,13 @@ async def set_proficiency_ratings(
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="Check Account Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_account_permissions(
     account_id: str = Field(..., description="The account ID to check permissions for. Use the special value 'self' to reference the domain root account."),
     permissions: list[str] | None = Field(None, description="Optional list of specific permission names to validate against the authenticated user. Permission names are defined in the role creation endpoint. If omitted, all permissions for the user are returned."),
@@ -5218,7 +5765,13 @@ async def check_account_permissions(
     return _response_data
 
 # Tags: account_reports
-@mcp.tool()
+@mcp.tool(
+    title="List Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_reports(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve reports."),
     per_page: int | None = Field(None, description="The maximum number of reports to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
@@ -5260,7 +5813,13 @@ async def list_reports(
     return _response_data
 
 # Tags: account_reports
-@mcp.tool()
+@mcp.tool(
+    title="List Reports by Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_reports_by_type(
     account_id: str = Field(..., description="The unique identifier for the account whose reports you want to retrieve."),
     report: str = Field(..., description="The type or category of reports to retrieve. Specifies which report type to filter by."),
@@ -5299,7 +5858,12 @@ async def list_reports_by_type(
     return _response_data
 
 # Tags: account_reports
-@mcp.tool()
+@mcp.tool(
+    title="Generate Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_report(
     account_id: str = Field(..., description="The unique identifier of the account for which to generate the report."),
     report: str = Field(..., description="The type of report to generate. Must match one of the available report names for the account."),
@@ -5346,7 +5910,13 @@ async def generate_report(
     return _response_data
 
 # Tags: account_reports
-@mcp.tool()
+@mcp.tool(
+    title="Get Report Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_report_status(
     account_id: str = Field(..., description="The unique identifier of the account that contains the report."),
     report: str = Field(..., description="The type or category of the report being queried."),
@@ -5386,7 +5956,13 @@ async def get_report_status(
     return _response_data
 
 # Tags: account_reports
-@mcp.tool()
+@mcp.tool(
+    title="Delete Report",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_report(
     account_id: str = Field(..., description="The unique identifier for the account that owns the report."),
     report: str = Field(..., description="The type or category identifier of the report to be deleted."),
@@ -5426,7 +6002,13 @@ async def delete_report(
     return _response_data
 
 # Tags: roles
-@mcp.tool()
+@mcp.tool(
+    title="List Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_roles(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve roles."),
     state: list[Literal["active", "inactive"]] | None = Field(None, description="Filter roles by their state. When omitted, only active roles are returned. Specify multiple states as an array to include roles in any of those states."),
@@ -5473,7 +6055,13 @@ async def list_roles(
     return _response_data
 
 # Tags: roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the role to retrieve."),
     account_id: str = Field(..., description="The account ID that contains the role being retrieved."),
@@ -5518,7 +6106,13 @@ async def get_role(
     return _response_data
 
 # Tags: roles
-@mcp.tool()
+@mcp.tool(
+    title="Deactivate Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def deactivate_role(
     account_id: str = Field(..., description="The account identifier that contains the role to deactivate."),
     id_: str = Field(..., alias="id", description="The role identifier to deactivate."),
@@ -5563,7 +6157,12 @@ async def deactivate_role(
     return _response_data
 
 # Tags: roles
-@mcp.tool()
+@mcp.tool(
+    title="Reactivate Role",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reactivate_role(
     account_id: str = Field(..., description="The unique identifier of the account containing the role."),
     id_: str = Field(..., alias="id", description="The unique identifier of the role to reactivate."),
@@ -5609,7 +6208,13 @@ async def reactivate_role(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Root Outcome Group for Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_root_outcome_group_account(account_id: str = Field(..., description="The unique identifier of the account for which to retrieve the root outcome group.")) -> dict[str, Any] | ToolResult:
     """Retrieve the root outcome group for a specific account. This operation redirects to the root outcome group's URL for the given account context."""
 
@@ -5645,7 +6250,13 @@ async def get_root_outcome_group_account(account_id: str = Field(..., descriptio
     return _response_data
 
 # Tags: rubrics
-@mcp.tool()
+@mcp.tool(
+    title="List Rubrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rubrics(
     account_id: str = Field(..., description="The unique identifier of the account whose rubrics you want to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of rubrics to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -5687,7 +6298,13 @@ async def list_rubrics(
     return _response_data
 
 # Tags: rubrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Rubric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rubric(
     account_id: str = Field(..., description="The account ID that contains the rubric."),
     id_: str = Field(..., alias="id", description="The ID of the rubric to retrieve."),
@@ -5731,7 +6348,13 @@ async def get_rubric(
     return _response_data
 
 # Tags: api_token_scopes
-@mcp.tool()
+@mcp.tool(
+    title="List Scopes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_scopes(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve scopes."),
     group_by: Literal["resource_name"] | None = Field(None, description="Optionally group the returned scopes by a specific attribute. When set to 'resource_name', scopes are organized by their associated resource."),
@@ -5773,7 +6396,12 @@ async def list_scopes(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Register User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def register_user(
     account_id: str = Field(..., description="The account identifier where the user will be registered."),
     pseudonym_unique_id: str = Field(..., description="The user's login identifier. Must be a valid email address format."),
@@ -5825,7 +6453,12 @@ async def register_user(
     return _response_data
 
 # Tags: shared_brand_configs
-@mcp.tool()
+@mcp.tool(
+    title="Create Shared Theme",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_shared_theme(
     account_id: str = Field(..., description="The unique identifier of the account where the shared theme will be created."),
     shared_brand_config_brand_config_md5: str = Field(..., description="The MD5 hash of the brand config to be shared. This identifies the specific theme configuration being made available to other users."),
@@ -5869,7 +6502,13 @@ async def create_shared_theme(
     return _response_data
 
 # Tags: shared_brand_configs
-@mcp.tool()
+@mcp.tool(
+    title="Update Shared Theme",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_shared_theme(
     account_id: str = Field(..., description="The unique identifier of the account that owns the shared theme."),
     id_: str = Field(..., alias="id", description="The unique identifier of the shared theme to update."),
@@ -5908,7 +6547,13 @@ async def update_shared_theme(
     return _response_data
 
 # Tags: sis_import_errors
-@mcp.tool()
+@mcp.tool(
+    title="List SIS Import Errors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sis_import_errors(account_id: str = Field(..., description="The Canvas account ID for which to retrieve SIS import errors.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of SIS import errors for an account or specific SIS import. Import errors are retained for 30 days before being automatically removed."""
 
@@ -5944,7 +6589,13 @@ async def list_sis_import_errors(account_id: str = Field(..., description="The C
     return _response_data
 
 # Tags: sis_imports
-@mcp.tool()
+@mcp.tool(
+    title="List SIS Imports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sis_imports(
     account_id: str = Field(..., description="The Canvas account ID for which to retrieve SIS imports."),
     created_since: str | None = Field(None, description="Filter results to show only SIS imports created after the specified date. Use ISO 8601 format for the timestamp."),
@@ -5986,7 +6637,13 @@ async def list_sis_imports(
     return _response_data
 
 # Tags: sis_imports
-@mcp.tool()
+@mcp.tool(
+    title="Abort All Pending SIS Imports",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def abort_pending_sis_imports(account_id: str = Field(..., description="The unique identifier of the account whose pending SIS imports should be aborted.")) -> dict[str, Any] | ToolResult:
     """Abort all pending SIS imports for an account that have been created but not yet processed or are currently processing. This operation cancels any queued or in-progress imports."""
 
@@ -6022,7 +6679,13 @@ async def abort_pending_sis_imports(account_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: sis_imports
-@mcp.tool()
+@mcp.tool(
+    title="Get SIS Import Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sis_import_status(
     account_id: str = Field(..., description="The Canvas account ID that contains the SIS import."),
     id_: str = Field(..., alias="id", description="The ID of the SIS import job whose status you want to retrieve."),
@@ -6061,7 +6724,13 @@ async def get_sis_import_status(
     return _response_data
 
 # Tags: sis_imports
-@mcp.tool()
+@mcp.tool(
+    title="Abort SIS Import",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def abort_sis_import(
     account_id: str = Field(..., description="The Canvas account ID that contains the SIS import to abort."),
     id_: str = Field(..., alias="id", description="The ID of the SIS import batch to abort."),
@@ -6100,7 +6769,13 @@ async def abort_sis_import(
     return _response_data
 
 # Tags: sis_import_errors
-@mcp.tool()
+@mcp.tool(
+    title="List SIS Import Errors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sis_import_errors_by_import(
     account_id: str = Field(..., description="The Canvas account ID that contains the SIS import."),
     id_: str = Field(..., alias="id", description="The ID of the specific SIS import to retrieve errors for."),
@@ -6139,7 +6814,13 @@ async def list_sis_import_errors_by_import(
     return _response_data
 
 # Tags: sis_imports
-@mcp.tool()
+@mcp.tool(
+    title="Restore SIS Import Workflow States",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def restore_sis_import_workflow_states(
     account_id: str = Field(..., description="The Canvas account ID containing the SIS import to restore."),
     id_: str = Field(..., alias="id", description="The SIS import batch ID whose workflow states should be restored."),
@@ -6178,13 +6859,20 @@ async def restore_sis_import_workflow_states(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="List Sub Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sub_accounts(
     account_id: str = Field(..., description="The unique identifier of the parent account for which to retrieve sub-accounts."),
     recursive: bool | None = Field(None, description="When true, returns the entire account tree hierarchy beneath this account (paginated). When false, returns only direct child sub-accounts. Defaults to false."),
@@ -6226,7 +6914,12 @@ async def list_sub_accounts(
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="Create Sub Account",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_sub_account(
     account_id: str = Field(..., description="The unique identifier of the parent account under which the sub-account will be created."),
     account_name: str = Field(..., description="The display name for the new sub-account."),
@@ -6277,7 +6970,13 @@ async def create_sub_account(
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Sub Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sub_account(
     account_id: str = Field(..., description="The ID of the parent account containing the sub-account to delete."),
     id_: str = Field(..., alias="id", description="The ID of the sub-account to delete."),
@@ -6316,7 +7015,13 @@ async def delete_sub_account(
     return _response_data
 
 # Tags: enrollment_terms
-@mcp.tool()
+@mcp.tool(
+    title="List Enrollment Terms",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enrollment_terms(
     account_id: str = Field(..., description="The unique identifier of the account containing the enrollment terms."),
     workflow_state: list[Literal["active", "deleted", "all"]] | None = Field(None, description="Filter results to only include terms in specified workflow states. If not provided, defaults to active terms only."),
@@ -6364,7 +7069,12 @@ async def list_enrollment_terms(
     return _response_data
 
 # Tags: enrollment_terms
-@mcp.tool()
+@mcp.tool(
+    title="Create Enrollment Term",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_term(
     account_id: str = Field(..., description="The account ID where the enrollment term will be created."),
     enrollment_term_end_at: str | None = Field(None, description="The end date and time for the enrollment term in ISO 8601 format."),
@@ -6412,7 +7122,13 @@ async def create_term(
     return _response_data
 
 # Tags: enrollment_terms
-@mcp.tool()
+@mcp.tool(
+    title="Update Enrollment Term",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_enrollment_term(
     account_id: str = Field(..., description="The account ID that contains the enrollment term to update."),
     id_: str = Field(..., alias="id", description="The enrollment term ID to update."),
@@ -6454,13 +7170,20 @@ async def update_enrollment_term(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: enrollment_terms
-@mcp.tool()
+@mcp.tool(
+    title="Delete Enrollment Term",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_enrollment_term(
     account_id: str = Field(..., description="The unique identifier of the account containing the enrollment term to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment term to delete."),
@@ -6499,7 +7222,13 @@ async def delete_enrollment_term(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Account Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_account_users(
     account_id: str = Field(..., description="The account identifier. Use 'self' to reference the current account."),
     search_term: str | None = Field(None, description="Filter users by partial name or full user ID. Minimum 3 characters required. Administrative users can search by SIS ID, login ID, name, or email; non-administrative users can only search by name."),
@@ -6544,7 +7273,12 @@ async def list_account_users(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user(
     account_id: str = Field(..., description="The account identifier where the user will be created."),
     pseudonym_unique_id: str = Field(..., description="The user's login identifier. For self-registration, this must be a valid email address."),
@@ -6608,7 +7342,13 @@ async def create_user(
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="Remove User from Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_account(
     account_id: str = Field(..., description="The unique identifier of the root account from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the account. Warning: Users can remove themselves, which will prevent them from making API calls or logging into Canvas for this account."),
@@ -6647,7 +7387,13 @@ async def remove_user_from_account(
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="Get Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account(id_: str = Field(..., alias="id", description="The unique identifier of the account to retrieve. Can be either the account's internal ID or its SIS (Student Information System) account ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific account using its unique identifier or SIS account ID."""
 
@@ -6683,7 +7429,13 @@ async def get_account(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="Update Account",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_account(
     id_: str = Field(..., alias="id", description="The unique identifier of the account to update."),
     account_default_group_storage_quota_mb: str | None = Field(None, description="Default storage quota in megabytes for groups within this account. Applied when group-specific quotas are not set."),
@@ -6737,13 +7489,20 @@ async def update_account(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: announcements
-@mcp.tool()
+@mcp.tool(
+    title="List Announcements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_announcements(
     context_codes: list[str] = Field(..., description="List of course context codes to retrieve announcements from (e.g., course_123). Caller must have View Announcements permission in all specified courses."),
     active_only: bool | None = Field(None, description="Filter to return only published announcements. Only applies to users with permission to view unpublished items. Defaults to false for users with unpublished access, otherwise true."),
@@ -6790,7 +7549,13 @@ async def list_announcements(
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Appointment Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_appointment_groups(
     context_codes: list[str] | None = Field(None, description="Filter results to only appointment groups associated with specific context codes. Provide as an array of context code identifiers."),
     include_past_appointments: bool | None = Field(None, description="Include appointment groups with past reservation dates. Defaults to false, returning only current and future appointment groups."),
@@ -6837,7 +7602,12 @@ async def list_appointment_groups(
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Appointment Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_appointment_group(
     appointment_group_context_codes: list[str] = Field(..., description="One or more context codes (e.g., course_1, course_2) that define which courses this appointment group belongs to. Users with appropriate permissions in these courses can sign up for available time slots."),
     appointment_group_title: str = Field(..., description="Brief title for the appointment group displayed to users (e.g., 'Office Hours', 'Final Exam Slots')."),
@@ -6897,7 +7667,13 @@ async def create_appointment_group(
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Next Appointments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_next_appointments(appointment_group_ids: list[str] | None = Field(None, description="Filter results to specific appointment groups by their IDs. If omitted, searches across all appointment groups. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Retrieve the next available appointment for signup. Returns a single appointment if available, or an empty array if no future appointments exist."""
 
@@ -6938,7 +7714,13 @@ async def list_next_appointments(appointment_group_ids: list[str] | None = Field
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Appointment Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_appointment_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group to retrieve."),
     include: list[Literal["child_events", "appointments", "all_context_codes"]] | None = Field(None, description="Optional array of related data to include in the response. Specify 'child_events' for time slot reservations, 'appointments' for appointment details, or 'all_context_codes' for all associated context codes. Appointments are always included by default."),
@@ -6983,7 +7765,13 @@ async def get_appointment_group(
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Appointment Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_appointment_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group to update."),
     appointment_group_context_codes: list[str] = Field(..., description="Array of context codes (e.g., course_1, course_2) that this group should be linked to. Users in these contexts with appropriate permissions can sign up. At least one context code is required."),
@@ -7034,13 +7822,20 @@ async def update_appointment_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Appointment Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_appointment_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group to cancel."),
     cancel_reason: str | None = Field(None, description="Optional reason for canceling the appointment group. This reason may be communicated to users with reservations."),
@@ -7082,7 +7877,13 @@ async def cancel_appointment_group(
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Appointment Group Participants",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_appointment_group_participants(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group."),
     registration_status: Literal["all", "registered"] | None = Field(None, description="Filter results by participation status. Use 'registered' to show only groups that have registered, or 'all' to include all participating groups."),
@@ -7125,7 +7926,13 @@ async def list_appointment_group_participants(
     return _response_data
 
 # Tags: appointment_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Appointment Group Participants",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_appointment_group_participants_users(
     id_: str = Field(..., alias="id", description="The unique identifier of the appointment group."),
     registration_status: Literal["all", "registered"] | None = Field(None, description="Filter results by participation status. Use 'registered' to show only confirmed participants, or 'all' to include all potential participants."),
@@ -7168,7 +7975,13 @@ async def list_appointment_group_participants_users(
     return _response_data
 
 # Tags: authentications_log
-@mcp.tool()
+@mcp.tool(
+    title="List Authentication Events by Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_authentication_events_by_account(
     account_id: str = Field(..., description="The unique identifier of the account for which to retrieve authentication events."),
     start_time: str | None = Field(None, description="The start of the time range for retrieving events. If omitted, defaults to the earliest available events."),
@@ -7211,7 +8024,13 @@ async def list_authentication_events_by_account(
     return _response_data
 
 # Tags: authentications_log
-@mcp.tool()
+@mcp.tool(
+    title="List Authentication Events by Login",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_authentication_events_by_login(
     login_id: str = Field(..., description="The unique identifier of the login for which to retrieve authentication events."),
     start_time: str | None = Field(None, description="The start of the time range for retrieving events. If omitted, defaults to the earliest available events."),
@@ -7254,7 +8073,13 @@ async def list_authentication_events_by_login(
     return _response_data
 
 # Tags: authentications_log
-@mcp.tool()
+@mcp.tool(
+    title="List Authentication Events by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_authentication_events_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose authentication events you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering events. If omitted, defaults to the earliest available events."),
@@ -7297,7 +8122,13 @@ async def list_authentication_events_by_user(
     return _response_data
 
 # Tags: course_audit_log
-@mcp.tool()
+@mcp.tool(
+    title="List Course Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_events(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve change events."),
     start_time: str | None = Field(None, description="The start of the time range for filtering events. Events on or after this timestamp will be included."),
@@ -7340,7 +8171,13 @@ async def list_course_events(
     return _response_data
 
 # Tags: grade_change_log
-@mcp.tool()
+@mcp.tool(
+    title="List Grade Changes by Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grade_changes_by_assignment(
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve grade change events."),
     start_time: str | None = Field(None, description="The start of the time range for filtering grade change events. Only events on or after this timestamp will be included."),
@@ -7383,7 +8220,13 @@ async def list_grade_changes_by_assignment(
     return _response_data
 
 # Tags: grade_change_log
-@mcp.tool()
+@mcp.tool(
+    title="List Grade Changes by Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grade_changes_by_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve grade change events."),
     start_time: str | None = Field(None, description="The start of the time range for filtering grade change events (inclusive). Events on or after this timestamp will be included."),
@@ -7426,7 +8269,13 @@ async def list_grade_changes_by_course(
     return _response_data
 
 # Tags: grade_change_log
-@mcp.tool()
+@mcp.tool(
+    title="List Grade Changes by Grader",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grade_changes_by_grader(
     grader_id: str = Field(..., description="The unique identifier of the grader whose grade change events you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering events. Only events on or after this timestamp will be included."),
@@ -7469,7 +8318,13 @@ async def list_grade_changes_by_grader(
     return _response_data
 
 # Tags: grade_change_log
-@mcp.tool()
+@mcp.tool(
+    title="List Grade Changes by Student",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grade_changes_by_student(
     student_id: str = Field(..., description="The unique identifier of the student whose grade change events you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering grade change events (inclusive). Specify in ISO 8601 date-time format."),
@@ -7512,7 +8367,13 @@ async def list_grade_changes_by_student(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="List Calendar Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_events(
     context_codes: list[str] | None = Field(None, description="List of context codes to filter events by specific courses, groups, or users. Use the format context_type_context_id (e.g., course_42). Limited to 10 codes; additional codes are ignored. If omitted, returns only the current user's personal calendar events."),
     excludes: list[list[dict[str, Any]]] | None = Field(None, description="Array of event attributes to exclude from the response. Reduces payload size by omitting unnecessary data."),
@@ -7558,7 +8419,12 @@ async def list_events(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Create Calendar Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_calendar_event(
     calendar_event_context_code: str = Field(..., description="Context code identifying the course, group, or user calendar where this event should be created."),
     calendar_event_all_day: bool | None = Field(None, description="Mark the event as spanning the entire day, which causes any specified start and end times to be ignored."),
@@ -7611,7 +8477,13 @@ async def create_calendar_event(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Get Calendar Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_calendar_event(id_: str = Field(..., alias="id", description="The unique identifier of the calendar event or assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single calendar event or assignment by its ID. Returns detailed information about the specified event including timing, description, and any associated metadata."""
 
@@ -7647,7 +8519,13 @@ async def get_calendar_event(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Update Calendar Event",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the calendar event to update."),
     calendar_event_all_day: bool | None = Field(None, description="When true, the event spans the entire day and specific times are ignored."),
@@ -7694,13 +8572,20 @@ async def update_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Delete Calendar Event",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_calendar_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the calendar event to delete."),
     cancel_reason: str | None = Field(None, description="The reason for deleting or canceling the event. This is useful for audit trails and notifications."),
@@ -7742,7 +8627,13 @@ async def delete_calendar_event(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Reserve Appointment Slot",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reserve_appointment_slot(
     id_: str = Field(..., alias="id", description="The unique identifier of the calendar event or appointment group for which the time slot is being reserved."),
     cancel_existing: bool | None = Field(None, description="If true, automatically cancel any previous reservations held by this participant for the same appointment group. Defaults to false."),
@@ -7787,7 +8678,13 @@ async def reserve_appointment_slot(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Reserve Time Slot",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reserve_time_slot(
     id_: str = Field(..., alias="id", description="The calendar event ID for which to reserve a time slot."),
     participant_id: str = Field(..., description="The user or group ID for whom the reservation is being made. Defaults to the current user or their candidate group if not specified."),
@@ -7832,7 +8729,13 @@ async def reserve_time_slot(
     return _response_data
 
 # Tags: collaborations
-@mcp.tool()
+@mcp.tool(
+    title="List Collaboration Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collaboration_members(
     id_: str = Field(..., alias="id", description="The unique identifier of the collaboration."),
     include: list[Literal["collaborator_lti_id", "avatar_image_url"]] | None = Field(None, description="Optional member information to include in the response. Specify which additional fields to return with each member record."),
@@ -7878,7 +8781,13 @@ async def list_collaboration_members(
     return _response_data
 
 # Tags: comm_messages
-@mcp.tool()
+@mcp.tool(
+    title="List Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_messages(
     user_id: str = Field(..., description="The unique identifier of the user whose messages you want to retrieve."),
     start_time: str | None = Field(None, description="The start of the time range for filtering messages. Messages sent on or after this time will be included."),
@@ -7921,7 +8830,13 @@ async def list_messages(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="List Conversations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversations(
     include_all_conversation_ids: bool | None = Field(None, description="When enabled, the response structure changes to include both paginated conversation data and a complete list of all conversation IDs in the same order, rather than returning conversations as a top-level array."),
     include: list[Literal["participant_avatars"]] | None = Field(None, description="Specify which additional data to include for each conversation. Use 'participant_avatars' to add avatar URLs for all users participating in the conversation."),
@@ -7966,7 +8881,12 @@ async def list_conversations(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Create Conversation Thread",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_conversation_thread(
     body: str = Field(..., description="The message content to be sent. This is the primary message text."),
     recipients: list[str] = Field(..., description="Array of recipient identifiers. Can include user IDs or course/group IDs prefixed with 'course_' or 'group_' respectively. For courses or groups with over 100 enrollments, bulk_message and group_conversation must both be enabled."),
@@ -8014,7 +8934,12 @@ async def create_conversation_thread(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Update Conversations Batch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_conversations_batch(
     conversation_ids: list[str] = Field(..., description="List of conversation IDs to update. Maximum of 500 conversations per request."),
     event: Literal["mark_as_read", "mark_as_unread", "star", "unstar", "archive", "destroy"] = Field(..., description="The action to perform on each conversation in the batch."),
@@ -8049,13 +8974,20 @@ async def update_conversations_batch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="List Conversation Batches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversation_batches() -> dict[str, Any] | ToolResult:
     """Retrieves all currently running conversation batches for the authenticated user. Conversation batches are created when bulk private messages are sent asynchronously."""
 
@@ -8082,7 +9014,13 @@ async def list_conversation_batches() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="List Message Recipients",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_recipients(
     search: str | None = Field(None, description="Search terms for matching recipients by name or identifier. Multiple terms separated by whitespace will return only results matching all terms."),
     context: str | None = Field(None, description="Limit search results to a specific course or group context. Use format course_[id] or group_[id]."),
@@ -8129,7 +9067,12 @@ async def list_message_recipients(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Mark All Conversations as Read",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def mark_all_conversations_as_read() -> dict[str, Any] | ToolResult:
     """Mark all conversations as read in a single operation. This updates the read status for every conversation in the user's inbox."""
 
@@ -8156,7 +9099,13 @@ async def mark_all_conversations_as_read() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Get Unread Conversation Count",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_unread_conversation_count() -> dict[str, Any] | ToolResult:
     """Retrieve the total number of unread conversations for the authenticated user. This provides a quick way to check for new messages without fetching full conversation details."""
 
@@ -8183,7 +9132,13 @@ async def get_unread_conversation_count() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Conversation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_conversation(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation to retrieve."),
     auto_mark_as_read: bool | None = Field(None, description="Whether to automatically mark the conversation as read if it is currently unread. Defaults to true, but this default will change to false in a future API release."),
@@ -8225,7 +9180,13 @@ async def retrieve_conversation(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Update Conversation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_conversation(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation to update."),
     conversation_starred: bool | None = Field(None, description="Mark or unmark the conversation as starred in the current user's view."),
@@ -8263,13 +9224,20 @@ async def update_conversation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Conversation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_conversation(id_: str = Field(..., alias="id", description="The unique identifier of the conversation to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a conversation and all its associated messages. This action only removes the conversation from the current user's view."""
 
@@ -8305,7 +9273,12 @@ async def delete_conversation(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Send Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation to which the message will be sent."),
     body: str = Field(..., description="The message content to be sent to conversation recipients."),
@@ -8352,7 +9325,12 @@ async def send_message(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Add Conversation Recipients",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_conversation_recipients(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation to add recipients to."),
     recipients: list[str] = Field(..., description="An array of recipient identifiers to add to the conversation. Identifiers can be user IDs or prefixed resource IDs for courses (prefixed with 'course_') or groups (prefixed with 'group_'). Order is not significant."),
@@ -8395,7 +9373,13 @@ async def add_conversation_recipients(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Remove Messages",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_messages(
     id_: str = Field(..., alias="id", description="The unique identifier of the conversation containing the messages to delete."),
     remove: list[str] = Field(..., description="An array of message identifiers to be removed from the conversation. Order is not significant."),
@@ -8438,7 +9422,13 @@ async def remove_messages(
     return _response_data
 
 # Tags: accounts
-@mcp.tool()
+@mcp.tool(
+    title="List Accounts by Course Admin",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_accounts_by_course_admin() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of accounts accessible to the current user through their admin course enrollments (teacher, TA, or designer roles). Returns account identifiers, names, workflow states, and hierarchy information."""
 
@@ -8465,7 +9455,13 @@ async def list_accounts_by_course_admin() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Courses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_courses(
     enrollment_state: Literal["active", "invited_or_pending", "completed"] | None = Field(None, description="Filter courses by the user's enrollment state. Only returns courses where the user has an enrollment matching the specified state, respecting section, course, and term date overrides."),
     exclude_blueprint_courses: bool | None = Field(None, description="When enabled, excludes courses that are configured as blueprint courses from the results."),
@@ -8513,7 +9509,13 @@ async def list_courses(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Course Activities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_activities(
     course_id: str = Field(..., description="The unique identifier of the course whose activity stream you want to retrieve."),
     per_page: int | None = Field(None, description="Number of activity items to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -8555,7 +9557,13 @@ async def list_course_activities(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Activity Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_activity_summary(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the activity stream summary.")) -> dict[str, Any] | ToolResult:
     """Retrieves a summary of the current user's activity stream for a specific course. This provides an overview of recent course-related activities."""
 
@@ -8591,7 +9599,13 @@ async def get_course_activity_summary(course_id: str = Field(..., description="T
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Participation Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_participation_analytics(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve participation analytics.")) -> dict[str, Any] | ToolResult:
     """Retrieve historical participation analytics for a course, including daily page view hits and participation counts across the entire course history. Data is aggregated by day with page views broken down by access category."""
 
@@ -8627,7 +9641,13 @@ async def get_course_participation_analytics(course_id: str = Field(..., descrip
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_analytics(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve assignment analytics."),
     async_: bool | None = Field(None, alias="async", description="Enable asynchronous processing for large datasets. When true, the response may include a progress_url for polling completion status instead of immediate results."),
@@ -8669,7 +9689,13 @@ async def list_assignment_analytics(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Course Student Summaries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_student_summaries(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve student summary data."),
     sort_column: Literal["name", "name_descending", "score", "score_descending", "participations", "participations_descending", "page_views", "page_views_descending"] | None = Field(None, description="The metric by which to sort results. Defaults to sorting by student name in ascending order."),
@@ -8712,7 +9738,13 @@ async def list_course_student_summaries(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Student Course Participation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_student_course_participation(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve participation data."),
     student_id: str = Field(..., description="The unique identifier of the student whose participation data should be retrieved."),
@@ -8751,7 +9783,13 @@ async def get_student_course_participation(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Student Assignment Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_student_assignment_analytics(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignments."),
     student_id: str = Field(..., description="The unique identifier of the student whose assignment data and grades should be retrieved."),
@@ -8790,7 +9828,13 @@ async def list_student_assignment_analytics(
     return _response_data
 
 # Tags: analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Student Messaging Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_student_messaging_analytics(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve messaging analytics."),
     student_id: str = Field(..., description="The unique identifier of the student whose messaging activity should be analyzed."),
@@ -8829,7 +9873,13 @@ async def get_course_student_messaging_analytics(
     return _response_data
 
 # Tags: assignment_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_groups(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment groups."),
     include: list[Literal["assignments", "discussion_topic", "all_dates", "assignment_visibility", "overrides", "submission"]] | None = Field(None, description="Associations to include with each assignment group. Options include discussion topics, all dates, assignment visibility (requires Differentiated Assignments feature), and submission data (only valid when assignments are included)."),
@@ -8882,7 +9932,12 @@ async def list_assignment_groups(
     return _response_data
 
 # Tags: assignment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Assignment Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_assignment_group(
     course_id: str = Field(..., description="The unique identifier of the course where the assignment group will be created."),
     group_weight: float | None = Field(None, description="The percentage of the total course grade that this assignment group represents, expressed as a decimal value."),
@@ -8932,7 +9987,13 @@ async def create_assignment_group(
     return _response_data
 
 # Tags: assignment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment group."),
     assignment_group_id: str = Field(..., description="The unique identifier of the assignment group to retrieve."),
@@ -8982,7 +10043,13 @@ async def get_assignment_group(
     return _response_data
 
 # Tags: assignment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Assignment Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_assignment_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment group."),
     assignment_group_id: str = Field(..., description="The unique identifier of the assignment group to be updated."),
@@ -9021,7 +10088,13 @@ async def update_assignment_group(
     return _response_data
 
 # Tags: assignment_groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Assignment Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_assignment_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment group to delete."),
     assignment_group_id: str = Field(..., description="The unique identifier of the assignment group to delete."),
@@ -9066,7 +10139,13 @@ async def delete_assignment_group(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignments(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignments."),
     include: list[Literal["submission", "assignment_visibility", "all_dates", "overrides", "observed_users"]] | None = Field(None, description="Associations to include with each assignment response, such as assignment visibility rules (requires Differentiated Assignments feature) or submissions from observed users."),
@@ -9119,7 +10198,12 @@ async def list_assignments(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Create Assignment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_assignment(
     course_id: str = Field(..., description="The unique identifier of the course where the assignment will be created."),
     assignment_name: str = Field(..., description="The name or title of the assignment displayed to students and in course materials."),
@@ -9210,7 +10294,13 @@ async def create_assignment(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Gradeable Students for Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gradeable_students_for_assignments(
     course_id: str = Field(..., description="The unique identifier of the course."),
     assignment_ids: list[str] | None = Field(None, description="Optional list of assignment IDs to filter which assignments' eligible students are returned. If not provided, all assignments in the course are considered."),
@@ -9256,7 +10346,13 @@ async def list_gradeable_students_for_assignments(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Assignment Overrides",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_assignment_overrides(
     course_id: str = Field(..., description="The ID of the course containing the assignment overrides to retrieve."),
     assignment_overrides_id: list[str] = Field(..., alias="assignment_overridesid", description="Array of override IDs to retrieve. The order and count of IDs should correspond with the assignment IDs provided in assignment_overrides[assignment_id]."),
@@ -9303,7 +10399,12 @@ async def retrieve_assignment_overrides(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Create Assignment Overrides",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_assignment_overrides(
     course_id: str = Field(..., description="The unique identifier of the course where assignment overrides will be created."),
     assignment_overrides: list[_models.AssignmentOverride] = Field(..., description="Array of override configurations to create. Each override must specify exactly one of: student_ids (most specific), group_id, or course_section_id. If multiple are provided, only the most specific is used. Overrides are processed in order and all succeed or all fail together."),
@@ -9346,7 +10447,13 @@ async def create_assignment_overrides(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Update Assignment Overrides",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_assignment_overrides(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignments to update."),
     assignment_overrides: list[_models.AssignmentOverride] = Field(..., description="An array of assignment override objects to update. Each override must include all currently overridden attributes to retain them; omitted attributes will revert to non-overridden state. For ad-hoc overrides, supply student_ids to modify the target set; for group and section overrides, the target set cannot be changed. Errors are returned per input in an errors array."),
@@ -9382,13 +10489,20 @@ async def update_assignment_overrides(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Check Provisional Grade Status (Anonymous)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_provisional_grade_status_anonymous(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment to check provisional grade status for."),
@@ -9431,7 +10545,13 @@ async def check_provisional_grade_status_anonymous(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Gradeable Students",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gradeable_students(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to list gradeable students."),
@@ -9474,7 +10594,13 @@ async def list_gradeable_students(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="List Moderated Students",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_moderated_students(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to list moderated students."),
@@ -9517,7 +10643,12 @@ async def list_moderated_students(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Select Moderation Students",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def select_moderation_students(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which students will be selected for moderation."),
@@ -9561,7 +10692,13 @@ async def select_moderation_students(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Overrides",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_overrides(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve overrides."),
@@ -9604,7 +10741,12 @@ async def list_assignment_overrides(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Create Assignment Override",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_assignment_override(
     course_id: str = Field(..., description="The ID of the course containing the assignment."),
     assignment_id: str = Field(..., description="The ID of the assignment to override."),
@@ -9657,7 +10799,13 @@ async def create_assignment_override(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment Override",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment_override(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the override."),
@@ -9697,7 +10845,13 @@ async def get_assignment_override(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Update Assignment Override",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_assignment_override(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment to override."),
@@ -9739,13 +10893,20 @@ async def update_assignment_override(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Remove Assignment Override",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_assignment_override(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which the override is being removed."),
@@ -9785,7 +10946,13 @@ async def remove_assignment_override(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="List Peer Reviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_peer_reviews(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve peer reviews."),
@@ -9831,7 +10998,13 @@ async def list_peer_reviews(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Finalize Provisional Grades",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def finalize_provisional_grades(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which provisional grades are being finalized."),
@@ -9870,7 +11043,12 @@ async def finalize_provisional_grades(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Publish Assignment Grades",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_assignment_grades(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which provisional grades will be published."),
@@ -9909,7 +11087,13 @@ async def publish_assignment_grades(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Check Provisional Grade Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_provisional_grade_status(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment to check provisional grade status for."),
@@ -9954,7 +11138,12 @@ async def check_provisional_grade_status(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Copy Provisional Grade to Final Mark",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_provisional_grade_to_final_mark(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the provisional grade."),
@@ -9994,7 +11183,12 @@ async def copy_provisional_grade_to_final_mark(
     return _response_data
 
 # Tags: moderated_grading
-@mcp.tool()
+@mcp.tool(
+    title="Finalize Provisional Grade",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def finalize_provisional_grade(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which the provisional grade is being finalized."),
@@ -10034,7 +11228,13 @@ async def finalize_provisional_grade(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment Submission Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment_submission_summary(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submission statistics."),
@@ -10077,7 +11277,13 @@ async def get_assignment_submission_summary(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Submissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_submissions(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submissions."),
@@ -10125,7 +11331,12 @@ async def list_assignment_submissions(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Submit Assignment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_assignment(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment to submit."),
@@ -10174,7 +11385,13 @@ async def submit_assignment(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Grade Submissions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def grade_submissions(
     course_id: str = Field(..., description="The ID of the course containing the assignment."),
     assignment_id: str = Field(..., description="The ID of the assignment to grade submissions for."),
@@ -10230,7 +11447,13 @@ async def grade_submissions(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="List Peer Reviews for Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_peer_reviews_submission(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment containing the submission."),
@@ -10277,7 +11500,12 @@ async def list_peer_reviews_submission(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="Assign Peer Reviewer",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_peer_reviewer(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which the peer review is being created."),
@@ -10324,7 +11552,13 @@ async def assign_peer_reviewer(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="Remove Peer Review",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_peer_review(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
@@ -10370,7 +11604,13 @@ async def remove_peer_review(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Submission by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_submission_by_user(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the submission."),
@@ -10417,7 +11657,12 @@ async def get_submission_by_user(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Grade Submission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grade_submission(
     course_id: str = Field(..., description="The course containing the assignment."),
     assignment_id: str = Field(..., description="The assignment for which the submission is being graded."),
@@ -10474,7 +11719,12 @@ async def grade_submission(
     return _response_data
 
 # Tags: submission_comments
-@mcp.tool()
+@mcp.tool(
+    title="Upload Submission Comment File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_submission_comment_file(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
@@ -10514,7 +11764,12 @@ async def upload_submission_comment_file(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Upload Submission File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_submission_file(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
@@ -10554,7 +11809,13 @@ async def upload_submission_file(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Mark Submission as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_submission_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
@@ -10594,7 +11855,13 @@ async def mark_submission_as_read(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Mark Submission as Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_submission_as_unread(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment within the course."),
@@ -10634,7 +11901,13 @@ async def mark_submission_as_unread(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     id_: str = Field(..., alias="id", description="The unique identifier of the assignment to retrieve."),
@@ -10683,7 +11956,13 @@ async def get_assignment(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Update Assignment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_assignment(
     course_id: str = Field(..., description="The ID of the course containing the assignment."),
     id_: str = Field(..., alias="id", description="The ID of the assignment to update."),
@@ -10774,13 +12053,20 @@ async def update_assignment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Assignment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_assignment(
     course_id: str = Field(..., description="The unique identifier of the course containing the assignment."),
     id_: str = Field(..., alias="id", description="The unique identifier of the assignment to delete."),
@@ -10819,7 +12105,13 @@ async def delete_assignment(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_subscriptions(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve blueprint subscriptions.")) -> dict[str, Any] | ToolResult:
     """Retrieves all blueprint subscriptions for a specified course. A course can have at most one active blueprint subscription."""
 
@@ -10855,7 +12147,13 @@ async def list_blueprint_subscriptions(course_id: str = Field(..., description="
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Imports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_imports(
     course_id: str = Field(..., description="The ID of the course to retrieve blueprint imports for."),
     subscription_id: str = Field(..., description="The ID of the blueprint subscription. Use 'default' to reference the currently active blueprint subscription."),
@@ -10898,7 +12196,13 @@ async def list_blueprint_imports(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Blueprint Import",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_blueprint_import(
     course_id: str = Field(..., description="The ID of the course receiving the blueprint import."),
     subscription_id: str = Field(..., description="The ID of the blueprint subscription linking the course to the blueprint."),
@@ -10938,7 +12242,13 @@ async def get_blueprint_import(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Migration Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_migration_details(
     course_id: str = Field(..., description="The ID of the course that received the blueprint migration."),
     subscription_id: str = Field(..., description="The ID of the blueprint subscription linking the course to its blueprint template."),
@@ -10978,7 +12288,13 @@ async def list_blueprint_migration_details(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Blueprint Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_blueprint_template(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template. Use 'default' for the standard template associated with the course."),
@@ -11017,7 +12333,13 @@ async def get_blueprint_template(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Associated Courses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_associated_courses(
     course_id: str = Field(..., description="The unique identifier of the course that contains the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template for which to retrieve associated courses."),
@@ -11056,7 +12378,13 @@ async def list_blueprint_associated_courses(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Migrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_migrations(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template for which to retrieve migrations."),
@@ -11099,7 +12427,12 @@ async def list_blueprint_migrations(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="Push Blueprint to Associated Courses",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def push_blueprint_to_associated_courses(
     course_id: str = Field(..., description="The ID of the course containing the blueprint template."),
     template_id: str = Field(..., description="The ID of the blueprint template to migrate."),
@@ -11138,13 +12471,20 @@ async def push_blueprint_to_associated_courses(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Blueprint Migration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_blueprint_migration(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template associated with the migration."),
@@ -11184,7 +12524,13 @@ async def get_blueprint_migration(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Migration Changes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_migration_changes(
     course_id: str = Field(..., description="The ID of the course that contains the blueprint template."),
     template_id: str = Field(..., description="The ID of the blueprint template associated with the migration."),
@@ -11224,7 +12570,13 @@ async def list_blueprint_migration_changes(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="Update Blueprint Object Restrictions",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_blueprint_object_restrictions(
     course_id: str = Field(..., description="The ID of the course containing the blueprint template."),
     template_id: str = Field(..., description="The ID of the blueprint template."),
@@ -11266,13 +12618,20 @@ async def update_blueprint_object_restrictions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="List Blueprint Unsynced Changes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_blueprint_unsynced_changes(
     course_id: str = Field(..., description="The unique identifier of the course containing the blueprint template."),
     template_id: str = Field(..., description="The unique identifier of the blueprint template to check for unsynced changes."),
@@ -11311,7 +12670,13 @@ async def list_blueprint_unsynced_changes(
     return _response_data
 
 # Tags: blueprint_courses
-@mcp.tool()
+@mcp.tool(
+    title="Update Blueprint Template Associations",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_blueprint_template_associations(
     course_id: str = Field(..., description="The ID of the blueprint course that contains the template."),
     template_id: str = Field(..., description="The ID of the blueprint template whose associations will be updated."),
@@ -11349,13 +12714,20 @@ async def update_blueprint_template_associations(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Timetable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_timetable(course_id: str = Field(..., description="The unique identifier of the course whose timetable should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current timetable for a course, returning the most recently configured calendar events schedule."""
 
@@ -11391,7 +12763,13 @@ async def get_course_timetable(course_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Schedule Course Timetable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def schedule_course_timetable(
     course_id: str = Field(..., description="The unique identifier of the course for which to set the timetable."),
     timetables_course_section_id_end_time: list[str] | None = Field(None, description="End time for each timetable event, specified in 12-hour or 24-hour format (e.g., '2:00 pm' or '14:00'). Must be provided alongside start_time if specified."),
@@ -11437,7 +12815,13 @@ async def schedule_course_timetable(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Timetable Events",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_timetable_events(
     course_id: str = Field(..., description="The unique identifier of the course for which timetable events will be created or updated."),
     course_section_id: str | None = Field(None, description="The unique identifier of a specific course section. If provided, events will be created for this section only; otherwise, events are created for the entire course."),
@@ -11481,7 +12865,13 @@ async def create_or_update_timetable_events(
     return _response_data
 
 # Tags: collaborations
-@mcp.tool()
+@mcp.tool(
+    title="List Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collaborations(
     course_id: str = Field(..., description="The unique identifier of the course containing the collaborations."),
     per_page: int | None = Field(None, description="The number of collaboration records to return per page.", ge=1, le=100),
@@ -11523,7 +12913,13 @@ async def list_collaborations(
     return _response_data
 
 # Tags: conferences
-@mcp.tool()
+@mcp.tool(
+    title="List Conferences",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conferences(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve conferences."),
     per_page: int | None = Field(None, description="The maximum number of conferences to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -11565,7 +12961,13 @@ async def list_conferences(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Content Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_exports(
     course_id: str = Field(..., description="The unique identifier of the course for which to list content exports."),
     per_page: int | None = Field(None, description="The number of exports to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -11607,7 +13009,12 @@ async def list_content_exports(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Course Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_course_export(
     course_id: str = Field(..., description="The unique identifier of the course to export content from."),
     export_type: Literal["common_cartridge", "qti", "zip"] = Field(..., description="The format for the exported content. Common Cartridge exports course contents as .imscc, QTI exports quizzes, and zip exports files."),
@@ -11666,7 +13073,13 @@ async def initiate_course_export(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_export(
     course_id: str = Field(..., description="The unique identifier of the course containing the content export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content export to retrieve."),
@@ -11705,7 +13118,13 @@ async def get_content_export(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Content Licenses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_licenses(
     course_id: str = Field(..., description="The unique identifier of the course for which to list available licenses."),
     per_page: int | None = Field(None, description="The maximum number of licenses to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -11747,7 +13166,13 @@ async def list_content_licenses(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Content Migrations for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_migrations_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to list content migrations."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page.", ge=1, le=100),
@@ -11789,7 +13214,13 @@ async def list_content_migrations_course(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Content Migration for Course",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def initiate_content_migration_course(
     course_id: str = Field(..., description="The Canvas course ID where content will be migrated to."),
     migration_type: str = Field(..., description="The migration source type. Query the available migrators endpoint to see all supported types for your instance."),
@@ -11849,7 +13280,13 @@ async def initiate_content_migration_course(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Systems Courses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_systems_course(course_id: str = Field(..., description="The unique identifier of the course for which to list available migration systems.")) -> dict[str, Any] | ToolResult:
     """Retrieves the currently available migration system types for a course. The list of available migration systems may change over time."""
 
@@ -11885,7 +13322,13 @@ async def list_migration_systems_course(course_id: str = Field(..., description=
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Issues for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_issues_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
@@ -11928,7 +13371,13 @@ async def list_migration_issues_course(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Issue in Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_issue_in_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration job associated with this migration issue."),
@@ -11968,7 +13417,13 @@ async def get_migration_issue_in_course(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Migration Issue Course",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def resolve_migration_issue_course(
     course_id: str = Field(..., description="The ID of the course containing the content migration."),
     content_migration_id: str = Field(..., description="The ID of the content migration associated with this issue."),
@@ -12006,13 +13461,20 @@ async def resolve_migration_issue_course(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Migration Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_migration_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
@@ -12051,7 +13513,13 @@ async def get_content_migration_course(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Content Migration Course",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_content_migration_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to update."),
@@ -12090,7 +13558,12 @@ async def update_content_migration_course(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Course Content",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_course_content(
     course_id: str = Field(..., description="The ID of the destination course where content will be copied into."),
     source_course: str | None = Field(None, description="The ID or SIS-ID of the source course to copy content from. If not specified, content is copied from the course making the request."),
@@ -12133,7 +13606,13 @@ async def duplicate_course_content(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="Update Gradebook Column Data",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gradebook_column_data(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook columns."),
     column_data: list[list[dict[str, Any]]] = Field(..., description="Array of column data entries to update. Each entry specifies a column, student, and content value. Set content to an empty string to delete the data entry. Order of entries does not affect the operation."),
@@ -12169,13 +13648,20 @@ async def update_gradebook_column_data(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Gradebook Columns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_gradebook_columns(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook columns."),
     include_hidden: bool | None = Field(None, description="Whether to include hidden custom gradebook columns in the results. When false (default), only visible columns are returned."),
@@ -12218,7 +13704,12 @@ async def list_custom_gradebook_columns(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="Create Gradebook Column",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_gradebook_column(
     course_id: str = Field(..., description="The unique identifier of the course where the custom gradebook column will be created."),
     column_title: str = Field(..., description="The display name of the custom gradebook column."),
@@ -12267,7 +13758,13 @@ async def create_gradebook_column(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Custom Columns",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def reorder_custom_columns(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook columns to reorder."),
     order: list[int] = Field(..., description="An ordered array of custom column IDs specifying the new sequence. The order of IDs in this array determines the final column arrangement in the gradebook."),
@@ -12310,7 +13807,13 @@ async def reorder_custom_columns(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="Update Gradebook Column",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gradebook_column(
     course_id: str = Field(..., description="The unique identifier of the course containing the gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column to update."),
@@ -12349,7 +13852,13 @@ async def update_gradebook_column(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="Delete Gradebook Column",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_gradebook_column(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column to delete."),
@@ -12388,7 +13897,13 @@ async def delete_gradebook_column(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="List Column Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_column_entries(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column for which to retrieve entries."),
@@ -12431,7 +13946,13 @@ async def list_column_entries(
     return _response_data
 
 # Tags: custom_gradebook_columns
-@mcp.tool()
+@mcp.tool(
+    title="Set Gradebook Column Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_gradebook_column_entry(
     course_id: str = Field(..., description="The unique identifier of the course containing the custom gradebook column."),
     id_: str = Field(..., alias="id", description="The unique identifier of the custom gradebook column to update."),
@@ -12469,13 +13990,20 @@ async def set_gradebook_column_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_topics(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topics."),
     include: list[Literal["all_dates", "sections", "sections_user_count", "overrides"]] | None = Field(None, description="Additional metadata to include in the response. Pass 'all_dates' to include assignment dates for graded discussions, 'sections' to include associated course sections, 'sections_user_count' to include user counts per section or in total, and 'overrides' to include assignment overrides."),
@@ -12526,7 +14054,12 @@ async def list_discussion_topics(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Discussion Topic",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course where the discussion topic will be created."),
     allow_rating: bool | None = Field(None, description="Allow users to rate entries in this discussion topic."),
@@ -12587,7 +14120,13 @@ async def create_discussion_topic(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Pinned Discussion Topics",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def reorder_pinned_discussion_topics(
     course_id: str = Field(..., description="The unique identifier of the course containing the pinned discussion topics to reorder."),
     order: list[int] = Field(..., description="An ordered array of pinned discussion topic IDs in the desired sequence. The order of IDs in this array determines the final display order of the topics."),
@@ -12630,7 +14169,13 @@ async def reorder_pinned_discussion_topics(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Get Discussion Topic",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
@@ -12676,7 +14221,13 @@ async def get_discussion_topic(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Update Discussion Topic",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to update."),
@@ -12739,13 +14290,20 @@ async def update_discussion_topic(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Discussion Topic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to delete."),
@@ -12784,7 +14342,13 @@ async def delete_discussion_topic(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_entries(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve entries from."),
@@ -12827,7 +14391,12 @@ async def list_discussion_entries(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Discussion Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_discussion_entry(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic where the entry will be posted."),
@@ -12872,7 +14441,12 @@ async def create_discussion_entry(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Rate Discussion Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rate_discussion_entry(
     course_id: str = Field(..., description="The ID of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The ID of the discussion topic containing the entry to rate."),
@@ -12919,7 +14493,13 @@ async def rate_discussion_entry(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Entry as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_entry_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -12957,13 +14537,20 @@ async def mark_discussion_entry_as_read(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Entry Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_entry_unread(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -13007,7 +14594,13 @@ async def mark_discussion_entry_unread(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Replies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_replies(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -13051,7 +14644,12 @@ async def list_discussion_replies(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Discussion Reply",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_discussion_reply(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -13097,7 +14695,12 @@ async def create_discussion_reply(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Update Discussion Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_discussion_entry(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -13135,13 +14738,20 @@ async def update_discussion_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Discussion Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_discussion_entry(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry to delete."),
@@ -13181,7 +14791,13 @@ async def delete_discussion_entry(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Entries by IDs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_entries_by_ids(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entries."),
@@ -13228,7 +14844,13 @@ async def list_discussion_entries_by_ids(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Topic as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_topic_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as read."),
@@ -13267,7 +14889,13 @@ async def mark_discussion_topic_as_read(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Topic as Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unread_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as unread."),
@@ -13306,7 +14934,13 @@ async def unread_discussion_topic(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark All Discussion Entries as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_all_discussion_entries_as_read(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as read."),
@@ -13343,13 +14977,20 @@ async def mark_all_discussion_entries_as_read(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Entries as Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_entries_as_unread(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as unread."),
@@ -13392,7 +15033,13 @@ async def mark_discussion_entries_as_unread(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Subscribe to Discussion Topic",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def subscribe_to_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to subscribe to."),
@@ -13431,7 +15078,13 @@ async def subscribe_to_discussion_topic(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Unsubscribe from Discussion Topic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unsubscribe_from_discussion_topic(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to unsubscribe from."),
@@ -13470,7 +15123,13 @@ async def unsubscribe_from_discussion_topic(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Get Discussion Topic View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_discussion_topic_view(
     course_id: str = Field(..., description="The unique identifier of the course containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
@@ -13509,7 +15168,13 @@ async def get_discussion_topic_view(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Due Dates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_due_dates(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve assignment due dates."),
     assignment_ids: list[str] | None = Field(None, description="Optional list of assignment IDs to filter results. If not provided, effective due dates for all assignments in the course will be returned. Order is not significant."),
@@ -13554,7 +15219,13 @@ async def list_assignment_due_dates(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="List Enrollments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enrollments(
     course_id: str = Field(..., description="The course ID for which to retrieve enrollments."),
     state: list[Literal["active", "invited", "creation_pending", "deleted", "rejected", "completed", "inactive"]] | None = Field(None, description="Filter enrollments by state. If omitted, returns active and invited enrollments. When querying user enrollments, supports synthetic states for filtering by current, future, or concluded statuses."),
@@ -13609,7 +15280,12 @@ async def list_enrollments(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Enroll User in Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enroll_user_in_course(
     course_id: str = Field(..., description="The unique identifier of the course in which to enroll the user."),
     enrollment_type: Literal["StudentEnrollment", "TeacherEnrollment", "TaEnrollment", "ObserverEnrollment", "DesignerEnrollment"] = Field(..., description="The role type for the enrollment. Determines the user's permissions and capabilities in the course."),
@@ -13661,7 +15337,13 @@ async def enroll_user_in_course(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Modify Enrollment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def modify_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course containing the enrollment."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment to modify."),
@@ -13704,7 +15386,12 @@ async def modify_enrollment(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Accept Course Enrollment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def accept_course_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course for which the enrollment invitation is being accepted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment record representing the pending course invitation."),
@@ -13743,7 +15430,12 @@ async def accept_course_enrollment(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Reactivate Enrollment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reactivate_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course containing the enrollment to reactivate."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment record to reactivate."),
@@ -13782,7 +15474,13 @@ async def reactivate_enrollment(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Reject Enrollment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reject_enrollment(
     course_id: str = Field(..., description="The unique identifier of the course from which to reject the enrollment invitation."),
     id_: str = Field(..., alias="id", description="The unique identifier of the enrollment invitation to reject."),
@@ -13821,7 +15519,12 @@ async def reject_enrollment(
     return _response_data
 
 # Tags: e_pub_exports
-@mcp.tool()
+@mcp.tool(
+    title="Initiate EPUB Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_epub_export(course_id: str = Field(..., description="The unique identifier of the course to export as ePub format.")) -> dict[str, Any] | ToolResult:
     """Initiate an ePub export for a course. Track progress using the Progress API endpoint linked in the response, then retrieve the download URL once the export completes."""
 
@@ -13857,7 +15560,13 @@ async def initiate_epub_export(course_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: e_pub_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get EPUB Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_epub_export(
     course_id: str = Field(..., description="The unique identifier of the course containing the ePub export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the ePub export to retrieve."),
@@ -13896,7 +15605,13 @@ async def get_epub_export(
     return _response_data
 
 # Tags: announcement_external_feeds
-@mcp.tool()
+@mcp.tool(
+    title="List External Feeds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_feeds(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve external feeds."),
     per_page: int | None = Field(None, description="The maximum number of external feeds to return per page. Defaults to 10 items.", ge=1, le=100),
@@ -13938,7 +15653,12 @@ async def list_external_feeds(
     return _response_data
 
 # Tags: announcement_external_feeds
-@mcp.tool()
+@mcp.tool(
+    title="Create External Feed",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_feed(
     course_id: str = Field(..., description="The unique identifier of the course where the external feed will be created."),
     url: str = Field(..., description="The URL of the external RSS or Atom feed to import from."),
@@ -13983,7 +15703,13 @@ async def create_external_feed(
     return _response_data
 
 # Tags: announcement_external_feeds
-@mcp.tool()
+@mcp.tool(
+    title="Remove External Feed",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_external_feed(
     course_id: str = Field(..., description="The unique identifier of the course containing the external feed to be deleted."),
     external_feed_id: str = Field(..., description="The unique identifier of the external feed to be removed from the course."),
@@ -14022,7 +15748,13 @@ async def remove_external_feed(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="List External Tools for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_tools_course(
     course_id: str = Field(..., description="The unique identifier of the course."),
     search_term: str | None = Field(None, description="Filter tools by partial name match. Returns only tools whose names contain this term."),
@@ -14067,7 +15799,12 @@ async def list_external_tools_course(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Create External Tool for Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course where the external tool will be created."),
     consumer_key: str = Field(..., description="The OAuth consumer key used to authenticate requests between Canvas and the external tool."),
@@ -14134,7 +15871,13 @@ async def create_external_tool_course(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Get External Tool Sessionless Launch URL for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_tool_sessionless_launch_url_course(
     course_id: str = Field(..., description="The Canvas course ID where the external tool is configured."),
     id_: str | None = Field(None, alias="id", description="The Canvas ID of the external tool to launch. Required unless launch_type is 'assessment' or 'module_item', or unless url is provided."),
@@ -14180,7 +15923,13 @@ async def get_external_tool_sessionless_launch_url_course(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Get External Tool Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the external tool."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to retrieve."),
@@ -14219,7 +15968,13 @@ async def get_external_tool_course(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Update External Tool Course",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the external tool to update."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to update."),
@@ -14258,7 +16013,13 @@ async def update_external_tool_course(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="Remove External Tool from Course",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_external_tool_course(
     course_id: str = Field(..., description="The unique identifier of the course from which the external tool will be removed."),
     external_tool_id: str = Field(..., description="The unique identifier of the external tool to be deleted."),
@@ -14297,7 +16058,13 @@ async def remove_external_tool_course(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Course Features",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_features(
     course_id: str = Field(..., description="The unique identifier of the course for which to list features."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows pagination control over the result set.", ge=1, le=100),
@@ -14339,7 +16106,13 @@ async def list_course_features(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the feature flag."),
     feature: str = Field(..., description="The unique identifier of the feature flag to retrieve."),
@@ -14378,7 +16151,13 @@ async def get_feature_flag_course(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Course Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_files(
     course_id: str = Field(..., description="The unique identifier of the course containing the files to list."),
     content_types: list[str] | None = Field(None, description="Filter results by MIME content types. Accepts type/subtype pairs (e.g., 'image/jpeg') or type wildcards (e.g., 'image' to match all image types). Specify as an array of content type strings."),
@@ -14429,7 +16208,13 @@ async def list_course_files(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Storage Quota",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_storage_quota(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve storage quota information.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total and used storage quota for a course. Use this to monitor storage consumption and availability."""
 
@@ -14465,7 +16250,13 @@ async def get_course_storage_quota(course_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the file."),
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
@@ -14511,7 +16302,13 @@ async def get_file_course(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Folders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folders(
     course_id: str = Field(..., description="The unique identifier of the course containing the folders to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of folders to return per page. Valid range is 1 to 100 items.", ge=1, le=100),
@@ -14553,7 +16350,12 @@ async def list_folders(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder(
     course_id: str = Field(..., description="The unique identifier of the course where the folder will be created."),
     name: str = Field(..., description="The display name for the folder."),
@@ -14601,7 +16403,13 @@ async def create_folder(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Path",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_path(course_id: str = Field(..., description="The unique identifier of the course containing the folder path to resolve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the folder hierarchy for a given path within a course. Returns all folders from the root to the specified folder, or just the root folder if an empty path is provided."""
 
@@ -14637,7 +16445,13 @@ async def get_folder_path(course_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder(
     course_id: str = Field(..., description="The unique identifier of the course containing the folder."),
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to retrieve. Use 'root' to access the course's root folder."),
@@ -14676,7 +16490,13 @@ async def get_folder(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Front Page",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_front_page(course_id: str = Field(..., description="The unique identifier of the course whose front page content should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the front page content for a specific course. The front page typically contains course overview, announcements, and key information displayed to students upon course entry."""
 
@@ -14712,7 +16532,13 @@ async def get_course_front_page(course_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Course Front Page",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_course_front_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the front page."),
     wiki_page_body: str | None = Field(None, description="The HTML or text content to display on the front page."),
@@ -14752,13 +16578,20 @@ async def update_course_front_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: gradebook_history
-@mcp.tool()
+@mcp.tool(
+    title="List Gradebook History Days",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gradebook_history_days(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve gradebook history dates.")) -> dict[str, Any] | ToolResult:
     """Retrieves a map of dates when gradebook changes occurred for a course, organized by grader and assignment groups. Use this to understand the timeline of gradebook modifications."""
 
@@ -14796,7 +16629,13 @@ async def list_gradebook_history_days(course_id: str = Field(..., description="T
     return _response_data
 
 # Tags: gradebook_history
-@mcp.tool()
+@mcp.tool(
+    title="List Submission Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_submission_versions(
     course_id: str = Field(..., description="The ID of the course containing the submissions to retrieve."),
     assignment_id: str | None = Field(None, description="Filter results to a specific assignment. If omitted, submission versions from all assignments in the course are included."),
@@ -14843,7 +16682,13 @@ async def list_submission_versions(
     return _response_data
 
 # Tags: gradebook_history
-@mcp.tool()
+@mcp.tool(
+    title="List Gradebook History Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gradebook_history_details(
     course_id: str = Field(..., description="The ID of the course for which to retrieve gradebook history details."),
     date: str = Field(..., description="The date for which to retrieve gradebook history details. Specify in ISO 8601 format (YYYY-MM-DD)."),
@@ -14884,7 +16729,13 @@ async def list_gradebook_history_details(
     return _response_data
 
 # Tags: gradebook_history
-@mcp.tool()
+@mcp.tool(
+    title="List Submission Versions by Grader",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_submission_versions_by_grader(
     course_id: str = Field(..., description="The unique identifier of the course containing the submissions and gradebook history."),
     date: str = Field(..., description="The specific date for which to retrieve submission versions. Use ISO 8601 format (YYYY-MM-DD)."),
@@ -14929,7 +16780,13 @@ async def list_submission_versions_by_grader(
     return _response_data
 
 # Tags: grading_periods
-@mcp.tool()
+@mcp.tool(
+    title="List Grading Periods for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grading_periods_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve grading periods."),
     per_page: int | None = Field(None, description="The maximum number of grading periods to return per page.", ge=1, le=100),
@@ -14971,7 +16828,13 @@ async def list_grading_periods_course(
     return _response_data
 
 # Tags: grading_periods
-@mcp.tool()
+@mcp.tool(
+    title="Get Grading Period",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_grading_period(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading period."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to retrieve."),
@@ -15010,12 +16873,18 @@ async def get_grading_period(
     return _response_data
 
 # Tags: grading_periods
-@mcp.tool()
+@mcp.tool(
+    title="Update Grading Period",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_grading_period(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading period."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to update."),
-    grading_periods_end_date: list[str] = Field(..., description="The date when the grading period ends. Provided as an array where the first element is the end date."),
-    grading_periods_start_date: list[str] = Field(..., description="The date when the grading period starts. Provided as an array where the first element is the start date."),
+    grading_periods_end_date: list[Annotated[str, Field(json_schema_extra={'format': 'date'})]] = Field(..., description="The date when the grading period ends. Provided as an array where the first element is the end date."),
+    grading_periods_start_date: list[Annotated[str, Field(json_schema_extra={'format': 'date'})]] = Field(..., description="The date when the grading period starts. Provided as an array where the first element is the start date."),
     grading_periods_weight: list[float] | None = Field(None, description="A numeric weight value that determines how much assignments in this grading period contribute to the total course grade relative to other periods in the grading period set. Provided as an array where the first element is the weight value."),
 ) -> dict[str, Any] | ToolResult:
     """Update an existing grading period for a course, including its date range and optional weight contribution to the overall grade calculation."""
@@ -15049,13 +16918,20 @@ async def update_grading_period(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: grading_periods
-@mcp.tool()
+@mcp.tool(
+    title="Delete Grading Period Course",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_grading_period_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading period to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the grading period to delete."),
@@ -15094,7 +16970,13 @@ async def delete_grading_period_course(
     return _response_data
 
 # Tags: grading_standards
-@mcp.tool()
+@mcp.tool(
+    title="List Grading Standards for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_grading_standards_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve grading standards."),
     per_page: int | None = Field(None, description="The number of grading standards to return per page for pagination.", ge=1, le=100),
@@ -15136,7 +17018,12 @@ async def list_grading_standards_course(
     return _response_data
 
 # Tags: grading_standards
-@mcp.tool()
+@mcp.tool(
+    title="Create Grading Standard for Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_grading_standard_course(
     course_id: str = Field(..., description="The unique identifier of the course where the grading standard will be created."),
     grading_scheme_entry_name: list[str] = Field(..., description="Array of grade names corresponding to each grading scale entry (e.g., 'A', 'B+', 'C-'). The order and count must match the grading_scheme_entry_value array."),
@@ -15181,7 +17068,13 @@ async def create_grading_standard_course(
     return _response_data
 
 # Tags: grading_standards
-@mcp.tool()
+@mcp.tool(
+    title="Get Grading Standard in Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_grading_standard_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the grading standard."),
     grading_standard_id: str = Field(..., description="The unique identifier of the grading standard to retrieve."),
@@ -15220,7 +17113,13 @@ async def get_grading_standard_course(
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="List Group Categories for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_categories_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the group categories to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of group categories to return per page. Allows pagination control for large result sets.", ge=1, le=100),
@@ -15262,7 +17161,12 @@ async def list_group_categories_course(
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="Create Group Category Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group_category_course(
     course_id: str = Field(..., description="The unique identifier of the course where the group category will be created."),
     name: str = Field(..., description="The display name for this group category."),
@@ -15313,7 +17217,13 @@ async def create_group_category_course(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups in Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups_in_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the groups to list."),
     only_own_groups: bool | None = Field(None, description="When enabled, restricts results to only groups that the user is a member of."),
@@ -15360,7 +17270,13 @@ async def list_groups_in_course(
     return _response_data
 
 # Tags: live_assessments
-@mcp.tool()
+@mcp.tool(
+    title="List Assessments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assessments(
     course_id: str = Field(..., description="The unique identifier of the course containing the live assessments."),
     per_page: int | None = Field(None, description="The maximum number of assessments to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -15402,7 +17318,13 @@ async def list_assessments(
     return _response_data
 
 # Tags: live_assessments
-@mcp.tool()
+@mcp.tool(
+    title="Create or Find Live Assessment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_find_live_assessment(course_id: str = Field(..., description="The unique identifier of the course where the live assessment will be created or found.")) -> dict[str, Any] | ToolResult:
     """Creates a new live assessment or retrieves an existing one by key, then aligns it with a linked learning outcome. Use this operation to ensure a live assessment exists for a course and is properly mapped to course outcomes."""
 
@@ -15438,7 +17360,13 @@ async def create_or_find_live_assessment(course_id: str = Field(..., description
     return _response_data
 
 # Tags: live_assessments
-@mcp.tool()
+@mcp.tool(
+    title="List Assessment Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assessment_results(
     course_id: str = Field(..., description="The unique identifier of the course containing the assessment."),
     assessment_id: str = Field(..., description="The unique identifier of the live assessment to retrieve results for."),
@@ -15481,7 +17409,12 @@ async def list_assessment_results(
     return _response_data
 
 # Tags: live_assessments
-@mcp.tool()
+@mcp.tool(
+    title="Submit Live Assessment Result",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_live_assessment_result(
     course_id: str = Field(..., description="The unique identifier of the course containing the live assessment."),
     assessment_id: str = Field(..., description="The unique identifier of the live assessment for which results are being submitted."),
@@ -15520,7 +17453,13 @@ async def submit_live_assessment_result(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Get Module Item Sequence",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_module_item_sequence(
     course_id: str = Field(..., description="The unique identifier of the course containing the module item sequence."),
     asset_type: Literal["ModuleItem", "File", "Page", "Discussion", "Assignment", "Quiz", "ExternalTool"] | None = Field(None, description="The type of asset to locate within the module sequence. Specify ModuleItem when known to avoid ambiguity if the asset appears multiple times in the sequence."),
@@ -15565,7 +17504,13 @@ async def get_module_item_sequence(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="List Modules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_modules(
     course_id: str = Field(..., description="The unique identifier of the course containing the modules to list."),
     include: list[Literal["items", "content_details"]] | None = Field(None, description="Specify which additional data to include in the response. Use 'items' to return module items inline within each module object, avoiding separate API calls. Use 'content_details' (requires 'items') to include additional details and lock information for each module item."),
@@ -15613,7 +17558,12 @@ async def list_modules(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Create Module",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_module(
     course_id: str = Field(..., description="The unique identifier of the course where the module will be created."),
     module_name: str = Field(..., description="The display name for the module."),
@@ -15663,7 +17613,13 @@ async def create_module(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Get Module",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_module(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module to retrieve."),
@@ -15710,7 +17666,13 @@ async def get_module(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Update Module",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_module(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module to update."),
@@ -15755,13 +17717,20 @@ async def update_module(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Delete Module",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_module(
     course_id: str = Field(..., description="The unique identifier of the course containing the module to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module to delete."),
@@ -15800,7 +17769,12 @@ async def delete_module(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Relock Module Progressions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def relock_module_progressions(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     id_: str = Field(..., alias="id", description="The unique identifier of the module whose progressions should be reset and relocked."),
@@ -15839,7 +17813,13 @@ async def relock_module_progressions(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="List Module Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_module_items(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     module_id: str = Field(..., description="The unique identifier of the module whose items should be listed."),
@@ -15888,7 +17868,12 @@ async def list_module_items(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Add Module Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_module_item(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     module_id: str = Field(..., description="The unique identifier of the module where the item will be added."),
@@ -15945,7 +17930,13 @@ async def add_module_item(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Get Module Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_module_item(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item."),
@@ -15993,7 +17984,13 @@ async def get_module_item(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Update Module Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_module_item(
     course_id: str = Field(..., description="The unique identifier of the course containing the module item."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item to update."),
@@ -16043,13 +18040,20 @@ async def update_module_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Delete Module Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_module_item(
     course_id: str = Field(..., description="The unique identifier of the course containing the module."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item to delete."),
@@ -16089,7 +18093,13 @@ async def delete_module_item(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Toggle Module Item Completion",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def toggle_module_item_completion(
     course_id: str = Field(..., description="The unique identifier of the course containing the module item."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item."),
@@ -16129,7 +18139,13 @@ async def toggle_module_item_completion(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Mark Module Item as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_module_item_read(
     course_id: str = Field(..., description="The Canvas course ID containing the module item."),
     module_id: str = Field(..., description="The Canvas module ID containing the item to mark as read."),
@@ -16169,7 +18185,12 @@ async def mark_module_item_read(
     return _response_data
 
 # Tags: modules
-@mcp.tool()
+@mcp.tool(
+    title="Assign Mastery Path",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_mastery_path(
     course_id: str = Field(..., description="The unique identifier of the course containing the module item."),
     module_id: str = Field(..., description="The unique identifier of the module containing the item with mastery paths."),
@@ -16215,7 +18236,13 @@ async def assign_mastery_path(
     return _response_data
 
 # Tags: outcomes
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Aligned Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_aligned_assignments(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome alignments."),
     student_id: str | None = Field(None, description="The unique identifier of the student to filter assignments for. When omitted, returns all assignments aligned to the outcome for the entire course."),
@@ -16260,7 +18287,13 @@ async def list_outcome_aligned_assignments(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Links for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_links_course(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve outcome links."),
     outcome_style: str | None = Field(None, description="Controls the detail level of outcomes in the response. Use 'abbrev' for basic information or 'full' for comprehensive details."),
@@ -16303,7 +18336,13 @@ async def list_outcome_links_course(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Groups for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_groups_course(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve outcome groups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all outcome groups associated with a specific course. Outcome groups organize learning outcomes within a course context."""
 
@@ -16339,7 +18378,13 @@ async def list_outcome_groups_course(course_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Outcome Group Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outcome_group_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve."),
@@ -16378,7 +18423,13 @@ async def get_outcome_group_course(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Outcome Group Course",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_outcome_group_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to update."),
@@ -16420,13 +18471,20 @@ async def update_outcome_group_course(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Outcome Group Course",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_outcome_group_course(
     course_id: str = Field(..., description="The ID of the course containing the outcome group to delete."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to delete."),
@@ -16465,7 +18523,12 @@ async def delete_outcome_group_course(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Import Outcome Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_outcome_group(
     course_id: str = Field(..., description="The ID of the course where the outcome group will be imported."),
     id_: str = Field(..., alias="id", description="The ID of the destination outcome group where the source group will be imported as a subgroup."),
@@ -16512,7 +18575,13 @@ async def import_outcome_group(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcomes in Course Outcome Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcomes_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group whose linked outcomes should be retrieved."),
@@ -16556,7 +18625,12 @@ async def list_outcomes_course(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Link Outcome to Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_outcome_course(
     course_id: str = Field(..., description="The ID of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to link the outcome into."),
@@ -16613,7 +18687,13 @@ async def link_outcome_course(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Link Outcome to Course",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def link_outcome_course_existing(
     course_id: str = Field(..., description="The ID of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The ID of the outcome group to link the outcome into."),
@@ -16663,13 +18743,20 @@ async def link_outcome_course_existing(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove Outcome from Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_outcome_from_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group from which the outcome will be removed."),
@@ -16709,7 +18796,13 @@ async def remove_outcome_from_group(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Subgroups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_subgroups(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group whose immediate children you want to retrieve."),
@@ -16752,7 +18845,12 @@ async def list_outcome_subgroups(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Outcome Subgroup Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_outcome_subgroup_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome group."),
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group under which the subgroup will be created."),
@@ -16798,7 +18896,12 @@ async def create_outcome_subgroup_course(
     return _response_data
 
 # Tags: outcome_imports
-@mcp.tool()
+@mcp.tool(
+    title="Import Outcomes Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_outcomes_course(
     course_id: str = Field(..., description="The Canvas course ID where outcomes will be imported."),
     attachment: str | None = Field(None, description="The outcome data file for multipart form-encoded uploads. Required when using application/x-www-form-urlencoded style posts; omit when using raw POST requests with Content-Type headers."),
@@ -16843,7 +18946,13 @@ async def import_outcomes_course(
     return _response_data
 
 # Tags: outcome_imports
-@mcp.tool()
+@mcp.tool(
+    title="Get Outcome Import Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outcome_import_status_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the outcome import."),
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome import, or 'latest' to retrieve the most recent import for this course."),
@@ -16882,7 +18991,13 @@ async def get_outcome_import_status_course(
     return _response_data
 
 # Tags: outcome_results
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_results(
     course_id: str = Field(..., description="The course ID for which to retrieve outcome results."),
     user_ids: list[int] | None = Field(None, description="Filter results to include only specified users. Accepts Canvas user IDs or SIS user IDs prefixed with 'sis_user_id:'. All specified users must be enrolled as students in the course."),
@@ -16932,7 +19047,13 @@ async def list_outcome_results(
     return _response_data
 
 # Tags: outcome_results
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Rollups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_rollups(
     course_id: str = Field(..., description="The course ID for which to retrieve outcome rollups."),
     aggregate: Literal["course"] | None = Field(None, description="Combines all user rollups into a single course-level rollup containing aggregated scores for each outcome."),
@@ -16990,7 +19111,13 @@ async def list_outcome_rollups(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="List Course Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_pages(
     course_id: str = Field(..., description="The unique identifier of the course containing the pages to list."),
     sort: Literal["title", "created_at", "updated_at"] | None = Field(None, description="Field to sort results by. Defaults to creation order if not specified."),
@@ -17036,7 +19163,12 @@ async def list_course_pages(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Wiki Page",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_wiki_page(
     course_id: str = Field(..., description="The unique identifier of the course where the wiki page will be created."),
     wiki_page_title: str = Field(..., description="The display title for the wiki page."),
@@ -17084,7 +19216,13 @@ async def create_wiki_page(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Page",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the wiki page."),
     url: str = Field(..., description="The URL path or identifier of the wiki page to retrieve."),
@@ -17123,7 +19261,13 @@ async def get_course_page(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Wiki Page",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_wiki_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the wiki page."),
     url: str = Field(..., description="The URL identifier of the wiki page to update or create."),
@@ -17165,13 +19309,20 @@ async def update_wiki_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Page",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the page to delete."),
     url: str = Field(..., description="The URL or unique identifier of the wiki page to delete."),
@@ -17210,7 +19361,12 @@ async def delete_page(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Page",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_page(
     course_id: str = Field(..., description="The unique identifier of the course containing the page to duplicate."),
     url: str = Field(..., description="The URL path or identifier of the wiki page to duplicate."),
@@ -17249,7 +19405,13 @@ async def duplicate_page(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="List Page Revisions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_page_revisions(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL identifier of the page whose revisions you want to list."),
@@ -17292,7 +19454,13 @@ async def list_page_revisions(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Page Revision",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_revision_latest(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page whose latest revision should be retrieved."),
@@ -17335,7 +19503,13 @@ async def get_page_revision_latest(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Page Revision",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_revision(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page within the course."),
@@ -17379,7 +19553,12 @@ async def get_page_revision(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Revert Page to Revision",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def revert_page_to_revision(
     course_id: str = Field(..., description="The unique identifier of the course containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page to revert."),
@@ -17421,7 +19600,13 @@ async def revert_page_to_revision(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Check Course Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_course_permissions(
     course_id: str = Field(..., description="The unique identifier of the course for which to retrieve permission information."),
     permissions: list[str] | None = Field(None, description="Optional list of specific permission names to validate against the authenticated user. Permission names follow the same format as those documented in role creation endpoints. Order is not significant."),
@@ -17466,7 +19651,13 @@ async def check_course_permissions(
     return _response_data
 
 # Tags: collaborations
-@mcp.tool()
+@mcp.tool(
+    title="List Course Collaborators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_collaborators(
     course_id: str = Field(..., description="The unique identifier of the course for which to list potential collaborators."),
     per_page: int | None = Field(None, description="The maximum number of collaborators to return per page. Allows pagination control over the results.", ge=1, le=100),
@@ -17508,7 +19699,12 @@ async def list_course_collaborators(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Preview Course HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def preview_course_html(
     course_id: str = Field(..., description="The unique identifier of the course for which to preview the processed HTML."),
     html: str | None = Field(None, description="The HTML content to process and preview. If not provided, the operation will preview using default or previously stored content for the course."),
@@ -17551,7 +19747,12 @@ async def preview_course_html(
     return _response_data
 
 # Tags: course_quiz_extensions
-@mcp.tool()
+@mcp.tool(
+    title="Grant Quiz Extensions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_quiz_extensions(
     course_id: str = Field(..., description="The course ID where the quiz extension is being granted."),
     user_id: str = Field(..., description="The ID of the student receiving the quiz extension."),
@@ -17605,7 +19806,13 @@ async def grant_quiz_extensions(
     return _response_data
 
 # Tags: quizzes
-@mcp.tool()
+@mcp.tool(
+    title="List Quizzes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quizzes(
     course_id: str = Field(..., description="The unique identifier of the course containing the quizzes."),
     search_term: str | None = Field(None, description="Filter quizzes by partial title match. Returns only quizzes whose titles contain this search term."),
@@ -17648,7 +19855,12 @@ async def list_quizzes(
     return _response_data
 
 # Tags: quizzes
-@mcp.tool()
+@mcp.tool(
+    title="Create Quiz",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_quiz(
     course_id: str = Field(..., description="The unique identifier of the course where the quiz will be created."),
     quiz_title: str = Field(..., description="The display name of the quiz shown to students in the course."),
@@ -17717,7 +19929,13 @@ async def create_quiz(
     return _response_data
 
 # Tags: quiz_assignment_overrides
-@mcp.tool()
+@mcp.tool(
+    title="List Quiz Override Dates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quiz_override_dates(
     course_id: str = Field(..., description="The ID of the course containing the quizzes."),
     quiz_assignment_overrides_0__quiz_ids: list[int] | None = Field(None, alias="quiz_assignment_overrides0quiz_ids", description="An optional array of quiz IDs to filter results. If omitted, overrides for all quizzes available to the current user will be returned."),
@@ -17762,7 +19980,13 @@ async def list_quiz_override_dates(
     return _response_data
 
 # Tags: quizzes
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to retrieve."),
@@ -17801,7 +20025,13 @@ async def get_quiz(
     return _response_data
 
 # Tags: quizzes
-@mcp.tool()
+@mcp.tool(
+    title="Update Quiz",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to be updated."),
@@ -17838,13 +20068,20 @@ async def update_quiz(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: quizzes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Quiz",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to delete."),
@@ -17883,7 +20120,12 @@ async def delete_quiz(
     return _response_data
 
 # Tags: quizzes
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Quiz Questions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_quiz_questions(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to reorder."),
@@ -17927,7 +20169,13 @@ async def reorder_quiz_questions(
     return _response_data
 
 # Tags: quiz_submission_user_list
-@mcp.tool()
+@mcp.tool(
+    title="Send Quiz Message to Users",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def send_quiz_message_to_users(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     id_: str = Field(..., alias="id", description="The unique identifier of the quiz to send the message about."),
@@ -17971,7 +20219,12 @@ async def send_quiz_message_to_users(
     return _response_data
 
 # Tags: quiz_extensions
-@mcp.tool()
+@mcp.tool(
+    title="Grant Quiz Extensions for Student",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_quiz_extensions_specific(
     course_id: str = Field(..., description="The course ID containing the quiz."),
     quiz_id: str = Field(..., description="The quiz ID for which extensions are being granted."),
@@ -18020,7 +20273,12 @@ async def grant_quiz_extensions_specific(
     return _response_data
 
 # Tags: quiz_question_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Question Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_question_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz to which this question group will be added."),
@@ -18067,7 +20325,13 @@ async def create_question_group(
     return _response_data
 
 # Tags: quiz_question_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the group."),
@@ -18107,7 +20371,13 @@ async def get_quiz_group(
     return _response_data
 
 # Tags: quiz_question_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Question Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_question_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question group."),
@@ -18147,13 +20417,20 @@ async def update_question_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: quiz_question_groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Question Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_question_group(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question group."),
@@ -18193,7 +20470,12 @@ async def delete_question_group(
     return _response_data
 
 # Tags: quiz_question_groups
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Question Groups",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_question_groups(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question group."),
@@ -18238,7 +20520,13 @@ async def reorder_question_groups(
     return _response_data
 
 # Tags: quiz_ip_filters
-@mcp.tool()
+@mcp.tool(
+    title="List Quiz IP Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quiz_ip_filters(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve IP filters."),
@@ -18277,7 +20565,13 @@ async def list_quiz_ip_filters(
     return _response_data
 
 # Tags: quiz_questions
-@mcp.tool()
+@mcp.tool(
+    title="List Quiz Questions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quiz_questions(
     course_id: str = Field(..., description="The ID of the course containing the quiz."),
     quiz_id: str = Field(..., description="The ID of the quiz to retrieve questions from."),
@@ -18323,7 +20617,12 @@ async def list_quiz_questions(
     return _response_data
 
 # Tags: quiz_questions
-@mcp.tool()
+@mcp.tool(
+    title="Create Quiz Question",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_quiz_question(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz to which the question will be added."),
@@ -18380,7 +20679,13 @@ async def create_quiz_question(
     return _response_data
 
 # Tags: quiz_questions
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz Question",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz_question(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question."),
@@ -18422,7 +20727,13 @@ async def get_quiz_question(
     return _response_data
 
 # Tags: quiz_questions
-@mcp.tool()
+@mcp.tool(
+    title="Update Quiz Question",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_quiz_question(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question to update."),
@@ -18475,13 +20786,20 @@ async def update_quiz_question(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: quiz_questions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Quiz Question",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_quiz_question(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz containing the question to delete."),
@@ -18524,7 +20842,13 @@ async def remove_quiz_question(
     return _response_data
 
 # Tags: quiz_reports
-@mcp.tool()
+@mcp.tool(
+    title="List Quiz Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quiz_reports(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve reports."),
@@ -18567,7 +20891,12 @@ async def list_quiz_reports(
     return _response_data
 
 # Tags: quiz_reports
-@mcp.tool()
+@mcp.tool(
+    title="Generate Quiz Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_quiz_report(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to generate the report."),
@@ -18613,7 +20942,13 @@ async def generate_quiz_report(
     return _response_data
 
 # Tags: quiz_reports
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz_report(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve the report."),
@@ -18657,7 +20992,13 @@ async def get_quiz_report(
     return _response_data
 
 # Tags: quiz_reports
-@mcp.tool()
+@mcp.tool(
+    title="Cancel or Delete Quiz Report",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_or_delete_quiz_report(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which the report is being generated or has been generated."),
@@ -18697,7 +21038,13 @@ async def cancel_or_delete_quiz_report(
     return _response_data
 
 # Tags: quiz_statistics
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz_statistics(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve statistics."),
@@ -18740,7 +21087,13 @@ async def get_quiz_statistics(
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz_submission(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve the submission."),
@@ -18786,7 +21139,13 @@ async def get_quiz_submission(
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Quiz Submissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quiz_submissions(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve submissions."),
@@ -18832,7 +21191,12 @@ async def list_quiz_submissions(
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Start Quiz Submission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_quiz_submission(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz to start taking."),
@@ -18876,7 +21240,12 @@ async def start_quiz_submission(
     return _response_data
 
 # Tags: quiz_submission_files
-@mcp.tool()
+@mcp.tool(
+    title="Upload Quiz Submission File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_quiz_submission_file(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz to which the file will be submitted."),
@@ -18921,7 +21290,13 @@ async def upload_quiz_submission_file(
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Quiz Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_quiz_submission(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz within the course."),
@@ -18968,7 +21343,13 @@ async def retrieve_quiz_submission(
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Grade Quiz Submission",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def grade_quiz_submission(
     course_id: str = Field(..., description="The course ID containing the quiz."),
     quiz_id: str = Field(..., description="The quiz ID for which to grade the submission."),
@@ -19008,13 +21389,20 @@ async def grade_quiz_submission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Submit Quiz",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def submit_quiz(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz to submit."),
@@ -19062,7 +21450,13 @@ async def submit_quiz(
     return _response_data
 
 # Tags: quiz_submission_events
-@mcp.tool()
+@mcp.tool(
+    title="List Submission Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_submission_events(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz within the course."),
@@ -19108,7 +21502,12 @@ async def list_submission_events(
     return _response_data
 
 # Tags: quiz_submission_events
-@mcp.tool()
+@mcp.tool(
+    title="Record Quiz Submission Events",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def record_quiz_submission_events(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which events are being recorded."),
@@ -19153,7 +21552,13 @@ async def record_quiz_submission_events(
     return _response_data
 
 # Tags: quiz_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Quiz Submission Time",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_quiz_submission_time(
     course_id: str = Field(..., description="The unique identifier of the course containing the quiz."),
     quiz_id: str = Field(..., description="The unique identifier of the quiz for which to retrieve submission timing data."),
@@ -19193,7 +21598,13 @@ async def get_quiz_submission_time(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Students by Recent Login",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_students_by_recent_login(
     course_id: str = Field(..., description="The unique identifier of the course to retrieve student login activity for."),
     per_page: int | None = Field(None, description="The maximum number of student records to return per page. Allows pagination through large result sets.", ge=1, le=100),
@@ -19235,7 +21646,13 @@ async def list_students_by_recent_login(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Reset Course Content",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_course(course_id: str = Field(..., description="The unique identifier of the course to reset.")) -> dict[str, Any] | ToolResult:
     """Reset a course by deleting its current content and creating a new equivalent course with all sections and users preserved. The course structure remains intact while all course materials are removed."""
 
@@ -19271,7 +21688,13 @@ async def reset_course(course_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Root Outcome Group for Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_root_outcome_group_course(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the root outcome group.")) -> dict[str, Any] | ToolResult:
     """Retrieve the root outcome group for a specific course. This operation redirects to the root outcome group's URL for the given course context."""
 
@@ -19307,7 +21730,13 @@ async def get_root_outcome_group_course(course_id: str = Field(..., description=
     return _response_data
 
 # Tags: rubrics
-@mcp.tool()
+@mcp.tool(
+    title="List Course Rubrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rubrics_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the rubrics to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of rubrics to return per page. Allows control over result set size for pagination.", ge=1, le=100),
@@ -19349,7 +21778,13 @@ async def list_rubrics_course(
     return _response_data
 
 # Tags: rubrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Rubric Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rubric_course(
     course_id: str = Field(..., description="The unique identifier of the course containing the rubric."),
     id_: str = Field(..., alias="id", description="The unique identifier of the rubric to retrieve."),
@@ -19393,7 +21828,13 @@ async def get_rubric_course(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Search Course Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_course_users(
     course_id: str = Field(..., description="The unique identifier of the course."),
     search_term: str | None = Field(None, description="Filter users by partial name match or exact user ID. Only users matching this term will be returned in results."),
@@ -19444,7 +21885,13 @@ async def search_course_users(
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="List Sections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sections(
     course_id: str = Field(..., description="The unique identifier of the course."),
     include: list[Literal["students", "avatar_url", "enrollments", "total_students", "passback_status"]] | None = Field(None, description="Optional associations to include in the response. Select 'students' to include student data (requires permission to view users or grades), 'avatar_url' to include student profile images, 'enrollments' to include section enrollment details for each student (requires 'students' to also be selected), 'total_students' to return counts of active and invited students, or 'passback_status' to include grade passback information."),
@@ -19490,7 +21937,12 @@ async def list_sections(
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Create Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_section(
     course_id: str = Field(..., description="The unique identifier of the course to which this section will be added."),
     course_section_end_at: str | None = Field(None, description="The date and time when this section ends. Enrollments can be restricted to occur only within the section's start and end dates."),
@@ -19539,7 +21991,13 @@ async def create_section(
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Get Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_section(
     course_id: str = Field(..., description="The unique identifier of the course containing the section."),
     id_: str = Field(..., alias="id", description="The unique identifier of the section to retrieve."),
@@ -19585,7 +22043,13 @@ async def get_section(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_settings(course_id: str = Field(..., description="The unique identifier of the course whose settings you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration settings for a specific course. Returns key settings that control course behavior and properties."""
 
@@ -19621,7 +22085,13 @@ async def get_course_settings(course_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Submissions for Multiple Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_submissions(
     course_id: str = Field(..., description="The course identifier for which to retrieve submissions."),
     student_ids: list[str] | None = Field(None, description="Filter submissions to specific students by their IDs. Omit to return submissions for the calling user only. Use the special value 'all' to include all students in the course or section. Students can only view their own submissions; observers can only view associated students' submissions."),
@@ -19683,7 +22153,13 @@ async def list_submissions(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Grade Submissions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_grade_submissions(
     course_id: str = Field(..., description="The course ID containing the submissions to grade."),
     grade_data_student_id_assignment_id: str | None = Field(None, description="The assignment ID to grade. Required when not using assignment-specific endpoints."),
@@ -19738,7 +22214,13 @@ async def bulk_grade_submissions(
     return _response_data
 
 # Tags: tabs
-@mcp.tool()
+@mcp.tool(
+    title="List Course Tabs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_tabs(
     course_id: str = Field(..., description="The unique identifier of the course or group."),
     include: list[Literal["external"]] | None = Field(None, description="Optionally include external tool tabs in the returned list. Only applies to courses, not groups. Specify as an array with the value 'external' to include external tools."),
@@ -19784,7 +22266,13 @@ async def list_course_tabs(
     return _response_data
 
 # Tags: tabs
-@mcp.tool()
+@mcp.tool(
+    title="Update Course Tab",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_course_tab(
     course_id: str = Field(..., description="The unique identifier of the course containing the tab to update."),
     tab_id: str = Field(..., description="The unique identifier of the tab to update."),
@@ -19824,13 +22312,20 @@ async def update_course_tab(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Course To-Do Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_todos(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve todo items.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current user's todo items for a specific course. Returns a list of pending tasks and assignments associated with the course."""
 
@@ -19866,7 +22361,13 @@ async def list_course_todos(course_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Set File Usage Rights",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_file_usage_rights(
     course_id: str = Field(..., description="The unique identifier of the course containing the files."),
     file_ids: list[str] = Field(..., description="List of file IDs to apply usage rights to. Order is not significant."),
@@ -19905,13 +22406,20 @@ async def set_file_usage_rights(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Usage Rights",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_usage_rights(
     course_id: str = Field(..., description="The unique identifier of the course containing the files."),
     file_ids: list[str] = Field(..., description="List of file IDs from which to remove usage rights. At least one of file_ids or folder_ids must be provided."),
@@ -19958,7 +22466,13 @@ async def remove_file_usage_rights(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Course Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_users(
     course_id: str = Field(..., description="The unique identifier of the course."),
     per_page: int | None = Field(None, description="Number of users to return per page.", ge=1, le=100),
@@ -20009,7 +22523,13 @@ async def list_course_users(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(
     course_id: str = Field(..., description="The unique identifier of the course containing the user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve."),
@@ -20048,7 +22568,13 @@ async def get_user(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Update Student Last Attended Date",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_student_last_attended_date(
     course_id: str = Field(..., description="The unique identifier of the course in which to update the student's last attended date."),
     user_id: str = Field(..., description="The unique identifier of the student whose last attended date should be updated."),
@@ -20087,7 +22613,13 @@ async def update_student_last_attended_date(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Get Course",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the course to retrieve."),
     include: list[Literal["needs_grading_count", "syllabus_body", "public_description", "total_scores", "current_grading_period_scores", "term", "account", "course_progress", "sections", "storage_quota_used_mb", "total_students", "passback_status", "favorites", "teachers", "observed_users", "all_courses", "permissions", "course_image"]] | None = Field(None, description="Optional array of additional data to include in the response. Use 'all_courses' to include recently deleted courses, 'permissions' to include the current user's course permissions, 'observed_users' to include observed users in enrollments, and 'course_image' to include course image data when available and enabled."),
@@ -20132,7 +22664,13 @@ async def get_course(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Update Course",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the course to update."),
     course_account_id: str | None = Field(None, description="Move the course to a different account by specifying the target account's unique ID."),
@@ -20206,13 +22744,20 @@ async def update_course(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="Conclude or Delete Course",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def conclude_or_delete_course(
     id_: str = Field(..., alias="id", description="The unique identifier of the course to delete or conclude."),
     event: Literal["delete", "conclude"] = Field(..., description="The action to perform on the course: delete to permanently remove it, or conclude to mark it as completed."),
@@ -20254,7 +22799,13 @@ async def conclude_or_delete_course(
     return _response_data
 
 # Tags: late_policy
-@mcp.tool()
+@mcp.tool(
+    title="Get Late Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_late_policy(id_: str = Field(..., alias="id", description="The unique identifier of the course for which to retrieve the late policy.")) -> dict[str, Any] | ToolResult:
     """Retrieves the late policy configuration for a specific course, including any penalties or submission deadlines."""
 
@@ -20290,7 +22841,12 @@ async def get_late_policy(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: late_policy
-@mcp.tool()
+@mcp.tool(
+    title="Create Late Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_late_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the course for which to create the late policy."),
     late_policy_late_submission_deduction: float | None = Field(None, description="The percentage point deduction applied per late submission interval when late submission deduction is enabled."),
@@ -20339,7 +22895,13 @@ async def create_late_policy(
     return _response_data
 
 # Tags: late_policy
-@mcp.tool()
+@mcp.tool(
+    title="Update Course Late Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_course_late_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the course whose late policy should be updated."),
     late_policy_late_submission_deduction: float | None = Field(None, description="The percentage point deduction applied per late submission interval. Specify as a numeric value representing the deduction amount."),
@@ -20388,7 +22950,13 @@ async def update_course_late_policy(
     return _response_data
 
 # Tags: e_pub_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Courses with Latest EPUB Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_courses_with_latest_epub_export() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all courses the user is actively participating in, along with the latest ePub export for each course. This allows users to access their course materials in ePub format."""
 
@@ -20415,7 +22983,12 @@ async def list_courses_with_latest_epub_export() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: error_reports
-@mcp.tool()
+@mcp.tool(
+    title="Submit Error Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_error_report(
     error_subject: str = Field(..., description="Brief summary or title of the problem being reported."),
     error_comments: str | None = Field(None, description="Detailed description of the problem experienced, providing context and specifics about the issue."),
@@ -20459,7 +23032,13 @@ async def submit_error_report(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
     include: list[Literal["user"]] | None = Field(None, description="Optional array of additional information to include in the response. Specify 'user' to include uploader and last editor details, or 'usage_rights' to include copyright and license information."),
@@ -20504,7 +23083,13 @@ async def get_file(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Update File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to update."),
     hidden: bool | None = Field(None, description="Mark the file as hidden to exclude it from standard listings and views."),
@@ -20543,13 +23128,20 @@ async def update_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to delete."),
     replace: bool | None = Field(None, description="When true, replaces the file contents with a generic 'file has been removed' message and destroys all generated previews instead of completely deleting the file. Requires manage files and become other users permissions."),
@@ -20591,7 +23183,13 @@ async def delete_file(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Preview URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_preview_url(
     id_: str = Field(..., alias="id", description="The unique identifier of the file to preview."),
     submission_id: str | None = Field(None, description="The ID of the submission associated with the file. Provide this to access files submitted to an assignment; Canvas will verify the file belongs to the submission and you have permission to view it."),
@@ -20635,7 +23233,12 @@ async def get_file_preview_url(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Copy File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_file(
     dest_folder_id: str = Field(..., description="The ID of the destination folder where the file will be copied."),
     source_file_id: str = Field(..., description="The ID of the source file to be copied."),
@@ -20679,7 +23282,12 @@ async def copy_file(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Copy Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_folder(
     dest_folder_id: str = Field(..., description="The ID of the destination folder where the source folder will be copied."),
     source_folder_id: str = Field(..., description="The ID of the source folder to be copied, including all of its contents."),
@@ -20722,7 +23330,12 @@ async def copy_folder(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Upload File to Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(folder_id: str = Field(..., description="The unique identifier of the folder where the file will be uploaded. You must have 'Manage Files' permission on the course or group containing this folder.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a specified folder. This is the first step in the file upload workflow; refer to the File Upload Documentation for complete workflow details."""
 
@@ -20758,7 +23371,12 @@ async def upload_file(folder_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Create Nested Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder_nested(
     folder_id: str = Field(..., description="The ID of the parent folder where the new folder will be created."),
     name: str = Field(..., description="The display name for the new folder."),
@@ -20806,7 +23424,13 @@ async def create_folder_nested(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Nested Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_nested(id_: str = Field(..., alias="id", description="The folder identifier. Use 'root' to retrieve the root folder for a context.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific folder by ID. Use 'root' as the ID to get the root folder for a context (e.g., course root folder)."""
 
@@ -20842,7 +23466,13 @@ async def get_folder_nested(id_: str = Field(..., alias="id", description="The f
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Update Folder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_folder(
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to update."),
     hidden: bool | None = Field(None, description="Hide or show the folder in the user interface."),
@@ -20883,13 +23513,20 @@ async def update_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Delete Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_folder(
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to delete."),
     force: bool | None = Field(None, description="Set to true to allow deletion of a folder that contains items. When false or omitted, only empty folders can be deleted."),
@@ -20931,7 +23568,13 @@ async def delete_folder(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_files(
     id_: str = Field(..., alias="id", description="The unique identifier of the folder or course containing the files."),
     content_types: list[str] | None = Field(None, description="Filter results by content type using type/subtype pairs (e.g., 'image/jpeg') or type wildcards (e.g., 'image' matches all image subtypes). Specify multiple types as an array to match any of them."),
@@ -20982,7 +23625,13 @@ async def list_files(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Subfolders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_subfolders(
     id_: str = Field(..., alias="id", description="The unique identifier of the parent folder whose subfolders you want to list."),
     per_page: int | None = Field(None, description="The maximum number of subfolders to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -21024,7 +23673,13 @@ async def list_subfolders(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Outcome Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outcome_group(id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific outcome group by its ID. Returns detailed information about the outcome group configuration and settings."""
 
@@ -21060,7 +23715,13 @@ async def get_outcome_group(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Global Outcome Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_outcome_group_global(
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to update."),
     description: str | None = Field(None, description="The new description for the outcome group."),
@@ -21101,13 +23762,20 @@ async def update_outcome_group_global(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Outcome Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_outcome_group(id_: str = Field(..., alias="id", description="The unique identifier of the outcome group to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an outcome group and its descendant groups. Linked outcomes are only deleted if all their links are removed; deletion fails if any aligned outcomes would have no remaining links."""
 
@@ -21143,7 +23811,12 @@ async def delete_outcome_group(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Import Outcome Group Global",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_outcome_group_global(
     id_: str = Field(..., alias="id", description="The ID of the outcome group where the import will be performed."),
     source_outcome_group_id: str = Field(..., description="The ID of the source outcome group to import from. The source must be global, from the same context, or from an associated account, and cannot be a root outcome group."),
@@ -21189,7 +23862,13 @@ async def import_outcome_group_global(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcomes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcomes(
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome group whose linked outcomes should be retrieved."),
     outcome_style: str | None = Field(None, description="Controls the detail level of returned outcomes. Use 'abbrev' for basic information or 'full' for comprehensive details."),
@@ -21232,7 +23911,12 @@ async def list_outcomes(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Link Outcome to Global Outcome Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_outcome_global(
     id_: str = Field(..., alias="id", description="The ID of the outcome group where the outcome will be linked."),
     calculation_int: str | None = Field(None, description="The calculation interval for decaying average or n-mastery calculation methods. Only applies when calculation_method is 'decaying_average' or 'n_mastery'."),
@@ -21288,7 +23972,13 @@ async def link_outcome_global(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Link Outcome to Global Outcome Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def link_outcome_global_existing(
     id_: str = Field(..., alias="id", description="The ID of the outcome group where the outcome will be linked."),
     outcome_id: str = Field(..., description="The ID of an existing outcome to link. The outcome must be owned by this group's context, an associated account, or be a global outcome."),
@@ -21337,13 +24027,20 @@ async def link_outcome_global_existing(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Unlink Outcome from Global Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unlink_outcome_global(
     id_: str = Field(..., alias="id", description="The ID of the outcome group from which to unlink the outcome."),
     outcome_id: str = Field(..., description="The ID of the outcome to unlink from the group."),
@@ -21382,7 +24079,13 @@ async def unlink_outcome_global(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Outcome Subgroups Global",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outcome_subgroups_global(
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group whose child subgroups should be listed."),
     per_page: int | None = Field(None, description="The maximum number of subgroups to return per page. Allows control over response size for pagination.", ge=1, le=100),
@@ -21424,7 +24127,12 @@ async def list_outcome_subgroups_global(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Outcome Subgroup Global",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_outcome_subgroup_global(
     id_: str = Field(..., alias="id", description="The unique identifier of the parent outcome group under which the subgroup will be created."),
     title: str = Field(..., description="The name or label for the new subgroup."),
@@ -21469,7 +24177,13 @@ async def create_outcome_subgroup_global(
     return _response_data
 
 # Tags: outcome_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Root Outcome Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_root_outcome_group() -> dict[str, Any] | ToolResult:
     """Retrieve the root outcome group for the global context. This is a convenience endpoint that redirects to the root outcome group's URL."""
 
@@ -21496,7 +24210,13 @@ async def get_root_outcome_group() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_category(group_category_id: str = Field(..., description="The unique identifier of the group category to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific group category by its ID. Returns a 401 error if the caller lacks permission to access the requested category."""
 
@@ -21532,7 +24252,13 @@ async def get_group_category(group_category_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Category",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_category(
     group_category_id: str = Field(..., description="The unique identifier of the group category to update."),
     auto_leader: Literal["first", "random"] | None = Field(None, description="Determines how group leaders are assigned when students are allocated to groups. Choose 'first' to assign the first allocated student as leader, or 'random' to randomly select a leader from all group members."),
@@ -21576,13 +24302,20 @@ async def update_group_category(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group_category(group_category_id: str = Field(..., description="The unique identifier of the group category to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group category and all groups contained within it. Note that protected group categories such as 'communities' and 'student_organized' cannot be deleted."""
 
@@ -21618,7 +24351,12 @@ async def delete_group_category(group_category_id: str = Field(..., description=
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="Distribute Unassigned Members",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def distribute_unassigned_members(
     group_category_id: str = Field(..., description="The unique identifier of the group category containing the student groups and unassigned members to distribute."),
     sync: bool | None = Field(None, description="Set to true to perform the distribution synchronously and wait for completion. By default, the distribution runs asynchronously in the background."),
@@ -21661,7 +24399,12 @@ async def distribute_unassigned_members(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group in Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group_in_category(
     group_category_id: str = Field(..., description="The ID of the group category in which to create the group."),
     description: str | None = Field(None, description="A description of the group's purpose or content."),
@@ -21711,7 +24454,13 @@ async def create_group_in_category(
     return _response_data
 
 # Tags: group_categories
-@mcp.tool()
+@mcp.tool(
+    title="List Group Category Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_category_users(
     group_category_id: str = Field(..., description="The unique identifier of the group category to retrieve users from."),
     search_term: str | None = Field(None, description="Filter users by partial name match or exact user ID. Minimum 3 characters required."),
@@ -21755,7 +24504,12 @@ async def list_group_category_users(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(
     description: str | None = Field(None, description="A brief description of the group's purpose or content."),
     is_public: bool | None = Field(None, description="Whether the group is publicly visible and discoverable. Only applies to community groups."),
@@ -21803,7 +24557,13 @@ async def create_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(
     group_id: str = Field(..., description="The unique identifier of the group to retrieve."),
     include: list[Literal["permissions", "tabs"]] | None = Field(None, description="Optional list of related data to include in the response. Use 'permissions' to include the current user's permissions for this group, or 'tabs' to include the list of configured tabs for the group."),
@@ -21848,7 +24608,13 @@ async def get_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group(
     group_id: str = Field(..., description="The unique identifier of the group to modify."),
     avatar_id: str | None = Field(None, description="The ID of a previously uploaded attachment to use as the group's avatar image."),
@@ -21894,13 +24660,20 @@ async def update_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(group_id: str = Field(..., description="The unique identifier of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group and removes all associated members. This action cannot be undone."""
 
@@ -21936,7 +24709,13 @@ async def delete_group(group_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Activities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_activities(
     group_id: str = Field(..., description="The unique identifier of the group whose activity stream you want to retrieve."),
     per_page: int | None = Field(None, description="The number of activity items to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -21978,7 +24757,13 @@ async def list_group_activities(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Activity Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_activity_summary(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve the activity stream summary.")) -> dict[str, Any] | ToolResult:
     """Retrieves a summary of the current user's activity stream within a specific group. This provides an overview of recent group-related activities."""
 
@@ -22014,7 +24799,13 @@ async def get_group_activity_summary(group_id: str = Field(..., description="The
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment Override for Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment_override_for_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve the assignment override."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the group override."),
@@ -22053,7 +24844,13 @@ async def get_assignment_override_for_group(
     return _response_data
 
 # Tags: collaborations
-@mcp.tool()
+@mcp.tool(
+    title="List Group Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_collaborations(
     group_id: str = Field(..., description="The unique identifier of the group for which to list collaborations."),
     per_page: int | None = Field(None, description="The maximum number of collaboration items to return per page.", ge=1, le=100),
@@ -22095,7 +24892,13 @@ async def list_group_collaborations(
     return _response_data
 
 # Tags: conferences
-@mcp.tool()
+@mcp.tool(
+    title="List Group Conferences",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conferences_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve conferences."),
     per_page: int | None = Field(None, description="The maximum number of conferences to return per page. Allows control over result set size for pagination.", ge=1, le=100),
@@ -22137,7 +24940,13 @@ async def list_conferences_group(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Content Exports for Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_exports_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to list content exports."),
     per_page: int | None = Field(None, description="The maximum number of content exports to return per page.", ge=1, le=100),
@@ -22179,7 +24988,12 @@ async def list_content_exports_group(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Group Content Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_group_content_export(
     group_id: str = Field(..., description="The unique identifier of the group for which to export content."),
     export_type: Literal["common_cartridge", "qti", "zip"] = Field(..., description="The format in which to export the group content. Common Cartridge (.imscc) for standard course content, QTI for quiz data, or ZIP for file archives."),
@@ -22238,7 +25052,13 @@ async def initiate_group_content_export(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Export Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_export_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content export to retrieve."),
@@ -22277,7 +25097,13 @@ async def get_content_export_group(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Content Licenses Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_licenses_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve available licenses."),
     per_page: int | None = Field(None, description="The number of license items to return per page. Allows control over result set size for pagination.", ge=1, le=100),
@@ -22319,7 +25145,13 @@ async def list_content_licenses_group(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Content Migrations for Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_migrations_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to list content migrations."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
@@ -22361,7 +25193,12 @@ async def list_content_migrations_group(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Content Migration Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_content_migration_group(
     group_id: str = Field(..., description="The ID of the group where the content migration will be created."),
     migration_type: str = Field(..., description="The migration type determining how content is processed. Available types include canvas_cartridge_importer, common_cartridge_importer, course_copy_importer, zip_file_importer, qti_converter, and moodle_converter."),
@@ -22421,7 +25258,13 @@ async def initiate_content_migration_group(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Systems Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_systems_group(group_id: str = Field(..., description="The unique identifier of the group for which to list available migration systems.")) -> dict[str, Any] | ToolResult:
     """Retrieve the currently available migration system types for a specific group. The list of available migration types may change over time."""
 
@@ -22457,7 +25300,13 @@ async def list_migration_systems_group(group_id: str = Field(..., description="T
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Issues Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_issues_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
@@ -22500,7 +25349,13 @@ async def list_migration_issues_group(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Issue in Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_issue_in_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration that contains the migration issue."),
@@ -22540,7 +25395,13 @@ async def get_migration_issue_in_group(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Migration Issue Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def resolve_migration_issue_group(
     group_id: str = Field(..., description="The ID of the group containing the content migration."),
     content_migration_id: str = Field(..., description="The ID of the content migration that contains the migration issue."),
@@ -22578,13 +25439,20 @@ async def resolve_migration_issue_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Migration Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_migration_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
@@ -22623,7 +25491,13 @@ async def get_content_migration_group(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Content Migration Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_content_migration_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to update."),
@@ -22662,7 +25536,13 @@ async def update_content_migration_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Topics in Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_topics_group(
     group_id: str = Field(..., description="The unique identifier of the group."),
     include: list[Literal["all_dates", "sections", "sections_user_count", "overrides"]] | None = Field(None, description="Additional data to include in the response. Pass 'all_dates' to include assignment dates for graded discussions, 'sections' to include associated course sections, 'sections_user_count' to include user counts per section or in total, and 'overrides' to include assignment overrides."),
@@ -22713,7 +25593,12 @@ async def list_discussion_topics_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Discussion Topic Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_discussion_topic_group(
     group_id: str = Field(..., description="The ID of the group where the discussion topic will be created."),
     allow_rating: bool | None = Field(None, description="Allow users to rate entries in this discussion topic."),
@@ -22774,7 +25659,13 @@ async def create_discussion_topic_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Pinned Discussion Topics Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def reorder_pinned_discussion_topics_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the pinned discussion topics to reorder."),
     order: list[int] = Field(..., description="An ordered array of pinned discussion topic IDs in the desired sequence. All pinned topics for the group must be included, specified as comma-separated IDs."),
@@ -22817,7 +25708,13 @@ async def reorder_pinned_discussion_topics_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Get Discussion Topic Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
@@ -22863,7 +25760,13 @@ async def get_discussion_topic_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Update Discussion Topic Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to update."),
@@ -22917,13 +25820,20 @@ async def update_discussion_topic_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Discussion Topic Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to delete."),
@@ -22962,7 +25872,13 @@ async def delete_discussion_topic_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Entries Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_entries_group(
     group_id: str = Field(..., description="The ID of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The ID of the discussion topic to retrieve entries from."),
@@ -23005,7 +25921,12 @@ async def list_discussion_entries_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Discussion Entry Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_discussion_entry_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic where the entry will be posted."),
@@ -23050,7 +25971,12 @@ async def create_discussion_entry_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Rate Discussion Entry Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rate_discussion_entry_group(
     group_id: str = Field(..., description="The ID of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The ID of the discussion topic containing the entry to rate."),
@@ -23097,7 +26023,13 @@ async def rate_discussion_entry_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Entry as Read in Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_entry_as_read_in_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -23135,13 +26067,20 @@ async def mark_discussion_entry_as_read_in_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Entry Unread in Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_entry_unread_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -23185,7 +26124,13 @@ async def mark_discussion_entry_unread_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Replies Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_replies_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -23229,7 +26174,12 @@ async def list_discussion_replies_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Discussion Reply Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_discussion_reply_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -23275,7 +26225,13 @@ async def create_discussion_reply_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Update Discussion Entry Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_discussion_entry_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic containing the entry."),
@@ -23313,13 +26269,20 @@ async def update_discussion_entry_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Discussion Entry Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_discussion_entry_group(
     group_id: str = Field(..., description="The ID of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The ID of the discussion topic containing the entry to delete."),
@@ -23359,7 +26322,13 @@ async def delete_discussion_entry_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="List Discussion Entries by Group and Topic IDs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_discussion_entries_group_by_ids(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic from which to retrieve entries."),
@@ -23406,7 +26375,13 @@ async def list_discussion_entries_group_by_ids(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Topic as Read in Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_topic_as_read_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as read."),
@@ -23445,7 +26420,13 @@ async def mark_discussion_topic_as_read_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Topic Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_topic_unread(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to mark as unread."),
@@ -23484,7 +26465,13 @@ async def mark_discussion_topic_unread(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark Discussion Entries as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_discussion_entries_as_read(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as read."),
@@ -23521,13 +26508,20 @@ async def mark_discussion_entries_as_read(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Mark All Discussion Entries as Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_all_discussion_entries_as_unread(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic whose entries should be marked as unread."),
@@ -23570,7 +26564,13 @@ async def mark_all_discussion_entries_as_unread(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Subscribe to Discussion Topic Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def subscribe_to_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to subscribe to."),
@@ -23609,7 +26609,13 @@ async def subscribe_to_discussion_topic_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Unsubscribe from Discussion Topic Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unsubscribe_from_discussion_topic_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to unsubscribe from."),
@@ -23648,7 +26654,13 @@ async def unsubscribe_from_discussion_topic_group(
     return _response_data
 
 # Tags: discussion_topics
-@mcp.tool()
+@mcp.tool(
+    title="Get Discussion Topic Group View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_discussion_topic_group_view(
     group_id: str = Field(..., description="The unique identifier of the group containing the discussion topic."),
     topic_id: str = Field(..., description="The unique identifier of the discussion topic to retrieve."),
@@ -23687,7 +26699,13 @@ async def get_discussion_topic_group_view(
     return _response_data
 
 # Tags: announcement_external_feeds
-@mcp.tool()
+@mcp.tool(
+    title="List External Feeds Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_feeds_group(
     group_id: str = Field(..., description="The unique identifier of the group or course for which to retrieve external feeds."),
     per_page: int | None = Field(None, description="The maximum number of external feeds to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -23729,7 +26747,12 @@ async def list_external_feeds_group(
     return _response_data
 
 # Tags: announcement_external_feeds
-@mcp.tool()
+@mcp.tool(
+    title="Create External Feed Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_feed_group(
     group_id: str = Field(..., description="The unique identifier of the group or course where the external feed will be created."),
     url: str = Field(..., description="The URL of the external RSS or Atom feed to subscribe to."),
@@ -23774,7 +26797,13 @@ async def create_external_feed_group(
     return _response_data
 
 # Tags: announcement_external_feeds
-@mcp.tool()
+@mcp.tool(
+    title="Delete External Feed",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_external_feed(
     group_id: str = Field(..., description="The unique identifier of the group containing the external feed."),
     external_feed_id: str = Field(..., description="The unique identifier of the external feed to delete."),
@@ -23813,7 +26842,13 @@ async def delete_external_feed(
     return _response_data
 
 # Tags: external_tools
-@mcp.tool()
+@mcp.tool(
+    title="List External Tools Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_tools_group(
     group_id: str = Field(..., description="The unique identifier of the group for which to list external tools."),
     search_term: str | None = Field(None, description="Filter tools by partial name match. Returns only tools whose names contain this search term."),
@@ -23858,7 +26893,12 @@ async def list_external_tools_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Upload File to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file_group(group_id: str = Field(..., description="The unique identifier of the group where the file will be uploaded.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a group. This initiates the file upload workflow; refer to the File Upload Documentation for complete details on multi-step uploads."""
 
@@ -23894,7 +26934,13 @@ async def upload_file_group(group_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Quota Information",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_quota(group_id: str = Field(..., description="The unique identifier of the group for which to retrieve quota information.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total and used storage quota for a group. Use this to monitor storage consumption and capacity limits."""
 
@@ -23930,7 +26976,13 @@ async def get_group_quota(group_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the file."),
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
@@ -23976,7 +27028,13 @@ async def get_file_group(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Folders in Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folders_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the folders to list."),
     per_page: int | None = Field(None, description="The maximum number of folders to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -24018,7 +27076,12 @@ async def list_folders_group(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder_group(
     group_id: str = Field(..., description="The unique identifier of the group where the folder will be created."),
     name: str = Field(..., description="The display name for the folder."),
@@ -24066,7 +27129,13 @@ async def create_folder_group(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Path Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_path_group(group_id: str = Field(..., description="The unique identifier of the group containing the folder path to resolve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete folder hierarchy for a given path within a group. Returns all folders from the root to the specified folder, or just the root folder if an empty path is provided."""
 
@@ -24102,7 +27171,13 @@ async def list_folder_path_group(group_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the folder."),
     id_: str = Field(..., alias="id", description="The unique identifier of the folder to retrieve. Use 'root' to get the root folder for the group."),
@@ -24141,7 +27216,13 @@ async def get_folder_group(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Front Page",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_front_page(group_id: str = Field(..., description="The unique identifier of the group whose front page content should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the front page content for a specific group. Returns the formatted front page display for the given group."""
 
@@ -24177,7 +27258,13 @@ async def get_group_front_page(group_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Front Page",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_front_page(
     group_id: str = Field(..., description="The unique identifier of the group whose front page will be updated."),
     wiki_page_body: str | None = Field(None, description="The content body for the front page in wiki format."),
@@ -24217,13 +27304,19 @@ async def update_group_front_page(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Send Group Invitations",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_group_invitations(
     group_id: str = Field(..., description="The unique identifier of the group to which invitations will be sent."),
     invitees: list[str] = Field(..., description="A list of email addresses to receive group invitations. Order is not significant. Each entry must be a valid email address."),
@@ -24266,7 +27359,13 @@ async def send_group_invitations(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to list."),
     filter_states: list[Literal["accepted", "invited", "requested"]] | None = Field(None, description="Filter results to only include memberships with specific workflow states. When omitted, all membership states are returned."),
@@ -24312,7 +27411,12 @@ async def list_group_members(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Join Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def join_group(group_id: str = Field(..., description="The unique identifier of the group to join or request membership for.")) -> dict[str, Any] | ToolResult:
     """Join a group or request membership depending on the group's join settings. If a membership or join request already exists, it is returned without modification."""
 
@@ -24348,7 +27452,13 @@ async def join_group(group_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_membership(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership."),
     membership_id: str = Field(..., description="The unique identifier of the membership record to retrieve."),
@@ -24387,7 +27497,13 @@ async def get_group_membership(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_membership(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership."),
     membership_id: str = Field(..., description="The unique identifier of the membership record to update."),
@@ -24425,13 +27541,20 @@ async def update_group_membership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Leave Group Membership",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def leave_group(
     group_id: str = Field(..., description="The unique identifier of the group to leave."),
     membership_id: str = Field(..., description="The unique identifier of the membership record to remove, or use 'self' to reference your own membership."),
@@ -24470,7 +27593,13 @@ async def leave_group(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="List Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pages(
     group_id: str = Field(..., description="The unique identifier of the group or course containing the pages."),
     sort: Literal["title", "created_at", "updated_at"] | None = Field(None, description="Field to sort results by. Defaults to sorting by title if not specified."),
@@ -24516,7 +27645,12 @@ async def list_pages(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Wiki Page Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_wiki_page_group(
     group_id: str = Field(..., description="The unique identifier of the group where the wiki page will be created."),
     wiki_page_title: str = Field(..., description="The display title for the wiki page."),
@@ -24564,7 +27698,13 @@ async def create_wiki_page_group(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Page",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page(
     group_id: str = Field(..., description="The unique identifier of the group containing the wiki page."),
     url: str = Field(..., description="The URL path or identifier of the wiki page to retrieve."),
@@ -24603,7 +27743,13 @@ async def get_page(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Wiki Page Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_wiki_page_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the wiki page."),
     url: str = Field(..., description="The URL identifier of the wiki page to update or create."),
@@ -24645,13 +27791,20 @@ async def update_wiki_page_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Wiki Page",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_wiki_page(
     group_id: str = Field(..., description="The unique identifier of the group containing the wiki page to delete."),
     url: str = Field(..., description="The URL or path identifier of the wiki page to delete."),
@@ -24690,7 +27843,13 @@ async def delete_wiki_page(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="List Page Revisions Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_page_revisions_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL or path identifier of the page whose revisions you want to list."),
@@ -24733,7 +27892,13 @@ async def list_page_revisions_group(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Page Revision Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_revision_latest_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL or path identifier of the page whose latest revision should be retrieved."),
@@ -24776,7 +27941,13 @@ async def get_page_revision_latest_group(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Page Revision Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_page_revision_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page."),
@@ -24820,7 +27991,12 @@ async def get_page_revision_group(
     return _response_data
 
 # Tags: pages
-@mcp.tool()
+@mcp.tool(
+    title="Revert Page to Revision Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def revert_page_to_revision_group(
     group_id: str = Field(..., description="The unique identifier of the group containing the page."),
     url: str = Field(..., description="The URL path or identifier of the page to revert."),
@@ -24862,7 +28038,13 @@ async def revert_page_to_revision_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Check Group Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_group_permissions(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve permission information."),
     permissions: list[str] | None = Field(None, description="Optional list of specific permission names to validate against the authenticated user's role in the group. Permission names correspond to those defined in role creation. Order is not significant."),
@@ -24907,7 +28089,13 @@ async def check_group_permissions(
     return _response_data
 
 # Tags: collaborations
-@mcp.tool()
+@mcp.tool(
+    title="List Potential Collaborators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_potential_collaborators(
     group_id: str = Field(..., description="The unique identifier of the group for which to retrieve potential collaborators."),
     per_page: int | None = Field(None, description="The maximum number of items to return per page. Defaults to 10 if not specified.", ge=1, le=100),
@@ -24949,7 +28137,12 @@ async def list_potential_collaborators(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Preview Group HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def preview_group_html(
     group_id: str = Field(..., description="The unique identifier of the group whose processing rules should be applied to the HTML content."),
     html: str | None = Field(None, description="The HTML content to process and preview. If not provided, an empty or default preview will be returned."),
@@ -24992,7 +28185,13 @@ async def preview_group_html(
     return _response_data
 
 # Tags: tabs
-@mcp.tool()
+@mcp.tool(
+    title="List Group Tabs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_tabs(
     group_id: str = Field(..., description="The unique identifier of the group."),
     include: list[Literal["external"]] | None = Field(None, description="Optionally include external tool tabs in the returned list. Note: This parameter only affects courses, not groups."),
@@ -25038,7 +28237,13 @@ async def list_group_tabs(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Assign File Usage Rights",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_file_usage_rights(
     group_id: str = Field(..., description="The group ID that owns the files or folders."),
     file_ids: list[str] = Field(..., description="List of file IDs to assign usage rights to. Order is not significant."),
@@ -25077,13 +28282,20 @@ async def assign_file_usage_rights(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Remove Usage Rights Groups",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_usage_rights(
     group_id: str = Field(..., description="The unique identifier of the group containing the files and folders from which usage rights will be removed."),
     file_ids: list[str] = Field(..., description="List of file identifiers from which to remove usage rights. At least one file_id or folder_id must be provided."),
@@ -25130,7 +28342,13 @@ async def remove_usage_rights(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_users(
     group_id: str = Field(..., description="The unique identifier of the group."),
     search_term: str | None = Field(None, description="Filter users by partial name match or exact user ID. Minimum 3 characters required."),
@@ -25177,7 +28395,13 @@ async def list_group_users(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Membership User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_membership_user(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership."),
     user_id: str = Field(..., description="The unique identifier of the user whose membership in the group should be retrieved."),
@@ -25216,7 +28440,13 @@ async def get_group_membership_user(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Membership User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_membership_user(
     group_id: str = Field(..., description="The unique identifier of the group."),
     user_id: str = Field(..., description="The unique identifier of the user whose membership is being updated."),
@@ -25254,13 +28484,20 @@ async def update_group_membership_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove User from Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_group(
     group_id: str = Field(..., description="The unique identifier of the group from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to remove from the group. Use 'self' to refer to the currently authenticated user."),
@@ -25299,7 +28536,13 @@ async def remove_user_from_group(
     return _response_data
 
 # Tags: outcomes
-@mcp.tool()
+@mcp.tool(
+    title="Get Outcome",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outcome(id_: str = Field(..., alias="id", description="The unique identifier of the outcome to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific outcome by its ID. Returns comprehensive information about the requested outcome."""
 
@@ -25335,7 +28578,13 @@ async def get_outcome(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: outcomes
-@mcp.tool()
+@mcp.tool(
+    title="Update Outcome",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_outcome(
     id_: str = Field(..., alias="id", description="The unique identifier of the outcome to update."),
     calculation_int: str | None = Field(None, description="The calculation parameter for decaying average or n-mastery calculation methods. Only applies when calculation_method is set to 'decaying_average' or 'n_mastery'."),
@@ -25380,13 +28629,20 @@ async def update_outcome(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: planner
-@mcp.tool()
+@mcp.tool(
+    title="List Planner Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_planner_items(
     context_codes: list[str] | None = Field(None, description="Filter results by specific course and group contexts. Specify as context type followed by underscore and ID (e.g., course_42, group_123). If omitted, returns items from all contexts associated with the current user. Concluded courses are excluded unless included in the request."),
     per_page: int | None = Field(None, description="Number of items to return per page for pagination.", ge=1, le=100),
@@ -25430,7 +28686,13 @@ async def list_planner_items(
     return _response_data
 
 # Tags: planner_override
-@mcp.tool()
+@mcp.tool(
+    title="List Planner Overrides",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_planner_overrides() -> dict[str, Any] | ToolResult:
     """Retrieve all planner overrides configured for the current user. Planner overrides allow customization of planning behavior and preferences."""
 
@@ -25457,7 +28719,12 @@ async def list_planner_overrides() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: planner_override
-@mcp.tool()
+@mcp.tool(
+    title="Override Planner Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def override_planner_item(
     dismissed: bool | None = Field(None, description="Hide the item from the opportunities list when set to true."),
     marked_complete: bool | None = Field(None, description="Mark the item as completed in the planner when set to true."),
@@ -25503,7 +28770,13 @@ async def override_planner_item(
     return _response_data
 
 # Tags: planner_override
-@mcp.tool()
+@mcp.tool(
+    title="Get Planner Override",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_planner_override(id_: str = Field(..., alias="id", description="The unique identifier of the planner override to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific planner override by ID for the current user. Use this to view details of an existing override configuration."""
 
@@ -25539,7 +28812,13 @@ async def get_planner_override(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: planner_override
-@mcp.tool()
+@mcp.tool(
+    title="Update Planner Override",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_planner_override(
     id_: str = Field(..., alias="id", description="The unique identifier of the planner override to update."),
     dismissed: str | None = Field(None, description="Controls whether the planner item appears in the opportunities list. Set to true to hide the item from view."),
@@ -25576,13 +28855,20 @@ async def update_planner_override(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: planner_override
-@mcp.tool()
+@mcp.tool(
+    title="Delete Override",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_override(id_: str = Field(..., alias="id", description="The unique identifier of the planner override to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a planner override for the current user. This removes any custom scheduling rules or exceptions previously set for the specified override."""
 
@@ -25618,7 +28904,13 @@ async def delete_override(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: planner_note
-@mcp.tool()
+@mcp.tool(
+    title="List Notes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notes(
     context_codes: list[str] | None = Field(None, description="Filter notes by one or more context codes. Each code specifies a context type (course, user, etc.) and its ID using the format: type_id. If omitted, returns notes from all contexts the user has access to. Including the user's own context code will include personal notes not tied to any course."),
     per_page: int | None = Field(None, description="Number of notes to return per page for pagination. Must be between 1 and 100.", ge=1, le=100),
@@ -25662,7 +28954,12 @@ async def list_notes(
     return _response_data
 
 # Tags: planner_note
-@mcp.tool()
+@mcp.tool(
+    title="Create Planner Note",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_planner_note(
     course_id: str | None = Field(None, description="The ID of the course to associate with the planner note. Required if linking to a learning object. The caller must have permission to view the course."),
     details: str | None = Field(None, description="The text content of the planner note."),
@@ -25711,7 +29008,13 @@ async def create_planner_note(
     return _response_data
 
 # Tags: planner_note
-@mcp.tool()
+@mcp.tool(
+    title="Get Planner Note",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_planner_note(id_: str = Field(..., alias="id", description="The unique identifier of the planner note to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific planner note by ID for the current user. Returns the full details of the requested planner note."""
 
@@ -25747,7 +29050,13 @@ async def get_planner_note(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: planner_note
-@mcp.tool()
+@mcp.tool(
+    title="Update Planner Note",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_planner_note(
     id_: str = Field(..., alias="id", description="The unique identifier of the planner note to update."),
     course_id: str | None = Field(None, description="The ID of the course to associate with this planner note. The course must be accessible to the current user. Pass null or an empty value to remove the course association. Note: course_id cannot be changed if the planner note is linked to a learning object."),
@@ -25788,13 +29097,20 @@ async def update_planner_note(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: planner_note
-@mcp.tool()
+@mcp.tool(
+    title="Delete Note",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_note(id_: str = Field(..., alias="id", description="The unique identifier of the planner note to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a planner note for the current user. Permanently removes the specified note from the planner."""
 
@@ -25830,7 +29146,13 @@ async def delete_note(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="List Closed Poll Sessions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_closed_poll_sessions() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all closed poll sessions that the current user has access to. This operation allows you to view historical poll sessions that are no longer active."""
 
@@ -25857,7 +29179,13 @@ async def list_closed_poll_sessions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="List Opened Poll Sessions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_poll_sessions() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all opened poll sessions available to the current user. Use this to discover active polls that can be participated in."""
 
@@ -25884,7 +29212,13 @@ async def list_poll_sessions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: polls
-@mcp.tool()
+@mcp.tool(
+    title="List Polls",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_polls() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of polls for the current user. Use this to display available polls or iterate through all polls with pagination support."""
 
@@ -25911,7 +29245,12 @@ async def list_polls() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: polls
-@mcp.tool()
+@mcp.tool(
+    title="Create Poll",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_poll(
     polls_question: list[str] = Field(..., description="The question or title for the poll. This is the main prompt that poll respondents will answer."),
     polls_description: list[str] | None = Field(None, description="A brief description or instructions for the poll. Provide context or guidance for poll respondents."),
@@ -25953,7 +29292,13 @@ async def create_poll(
     return _response_data
 
 # Tags: polls
-@mcp.tool()
+@mcp.tool(
+    title="Get Poll",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_poll(id_: str = Field(..., alias="id", description="The unique identifier of the poll to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific poll by its unique identifier. Returns the complete poll object including all associated metadata."""
 
@@ -25989,7 +29334,13 @@ async def get_poll(id_: str = Field(..., alias="id", description="The unique ide
     return _response_data
 
 # Tags: polls
-@mcp.tool()
+@mcp.tool(
+    title="Update Poll",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_poll(
     id_: str = Field(..., alias="id", description="The unique identifier of the poll to update."),
     polls_question: list[str] = Field(..., description="The main question or title of the poll that respondents will answer."),
@@ -26026,13 +29377,20 @@ async def update_poll(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: polls
-@mcp.tool()
+@mcp.tool(
+    title="Delete Poll",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_poll(id_: str = Field(..., alias="id", description="The unique identifier of the poll to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a poll by its ID. Returns a 204 No Content response on successful deletion."""
 
@@ -26068,7 +29426,13 @@ async def delete_poll(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: poll_choices
-@mcp.tool()
+@mcp.tool(
+    title="List Poll Choices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_poll_choices(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choices to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of poll choices to return per page. Allows you to control result set size for pagination.", ge=1, le=100),
@@ -26110,7 +29474,12 @@ async def list_poll_choices(
     return _response_data
 
 # Tags: poll_choices
-@mcp.tool()
+@mcp.tool(
+    title="Add Poll Choice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_poll_choice(
     poll_id: str = Field(..., description="The unique identifier of the poll to which this choice will be added."),
     poll_choices_text: list[str] = Field(..., description="The text content displayed for this poll choice to respondents."),
@@ -26155,7 +29524,13 @@ async def add_poll_choice(
     return _response_data
 
 # Tags: poll_choices
-@mcp.tool()
+@mcp.tool(
+    title="Get Poll Choice",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_poll_choice(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choice."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll choice to retrieve."),
@@ -26194,7 +29569,13 @@ async def get_poll_choice(
     return _response_data
 
 # Tags: poll_choices
-@mcp.tool()
+@mcp.tool(
+    title="Update Poll Choice",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_poll_choice(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choice to update."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll choice to update."),
@@ -26233,13 +29614,20 @@ async def update_poll_choice(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: poll_choices
-@mcp.tool()
+@mcp.tool(
+    title="Delete Poll Choice",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_poll_choice(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the choice to delete."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll choice to delete."),
@@ -26278,7 +29666,13 @@ async def delete_poll_choice(
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="List Poll Sessions by Poll",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_poll_sessions_by_poll(
     poll_id: str = Field(..., description="The unique identifier of the poll for which to retrieve sessions."),
     per_page: int | None = Field(None, description="The maximum number of poll sessions to return per page. Allows control over result set size for pagination.", ge=1, le=100),
@@ -26320,7 +29714,12 @@ async def list_poll_sessions_by_poll(
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="Create Poll Session",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll for which to create a session."),
     poll_sessions_course_id: list[int] = Field(..., description="The ID(s) of the course(s) this poll session is associated with. Provided as an array to support multi-course associations."),
@@ -26365,7 +29764,13 @@ async def create_poll_session(
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="Get Poll Session Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_poll_session_results(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to retrieve results for."),
@@ -26404,7 +29809,13 @@ async def get_poll_session_results(
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="Update Poll Session",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the session to update."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to update."),
@@ -26443,13 +29854,20 @@ async def update_poll_session(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Poll Session",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to delete."),
@@ -26488,7 +29906,13 @@ async def delete_poll_session(
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="Close Poll Session",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def close_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session to be closed."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to close."),
@@ -26527,7 +29951,13 @@ async def close_poll_session(
     return _response_data
 
 # Tags: poll_sessions
-@mcp.tool()
+@mcp.tool(
+    title="Open Poll Session",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def open_poll_session(
     poll_id: str = Field(..., description="The unique identifier of the poll that contains the session to be opened."),
     id_: str = Field(..., alias="id", description="The unique identifier of the poll session to open."),
@@ -26566,7 +29996,12 @@ async def open_poll_session(
     return _response_data
 
 # Tags: poll_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Submit Poll Response",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_poll_response(
     poll_id: str = Field(..., description="The unique identifier of the poll to which the submission belongs."),
     poll_session_id: str = Field(..., description="The unique identifier of the poll session for which the submission is being made."),
@@ -26610,7 +30045,13 @@ async def submit_poll_response(
     return _response_data
 
 # Tags: poll_submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Poll Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_poll_submission(
     poll_id: str = Field(..., description="The unique identifier of the poll containing the submission."),
     poll_session_id: str = Field(..., description="The unique identifier of the poll session associated with the submission."),
@@ -26650,7 +30091,13 @@ async def get_poll_submission(
     return _response_data
 
 # Tags: progress
-@mcp.tool()
+@mcp.tool(
+    title="Get Job Progress",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_job_progress(id_: str = Field(..., alias="id", description="The unique identifier of the asynchronous job to query.")) -> dict[str, Any] | ToolResult:
     """Retrieve completion status and progress information for an asynchronous job. Returns current progress metrics and job state."""
 
@@ -26686,7 +30133,13 @@ async def get_job_progress(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: quiz_submission_questions
-@mcp.tool()
+@mcp.tool(
+    title="List Quiz Submission Questions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_quiz_submission_questions(
     quiz_submission_id: str = Field(..., description="The unique identifier of the quiz submission containing the questions to retrieve."),
     include: list[Literal["quiz_question"]] | None = Field(None, description="Optional list of related associations to include in the response. Order and format depend on available association types for quiz submission questions."),
@@ -26731,7 +30184,12 @@ async def list_quiz_submission_questions(
     return _response_data
 
 # Tags: quiz_submission_questions
-@mcp.tool()
+@mcp.tool(
+    title="Submit Quiz Answers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_quiz_answers(
     quiz_submission_id: str = Field(..., description="The unique identifier of the quiz submission being answered."),
     attempt: str = Field(..., description="The attempt number of the quiz submission. Must be the latest attempt index, as earlier attempts cannot be modified."),
@@ -26778,7 +30236,12 @@ async def submit_quiz_answers(
     return _response_data
 
 # Tags: quiz_submission_questions
-@mcp.tool()
+@mcp.tool(
+    title="Flag Question",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def flag_question(
     quiz_submission_id: str = Field(..., description="The unique identifier of the quiz submission being taken."),
     id_: str = Field(..., alias="id", description="The unique identifier of the question within the quiz to flag."),
@@ -26818,13 +30281,20 @@ async def flag_question(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: quiz_submission_questions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Question Flag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_question_flag(
     quiz_submission_id: str = Field(..., description="The unique identifier of the quiz submission containing the question to unflag."),
     id_: str = Field(..., alias="id", description="The unique identifier of the question to unflag within the quiz submission."),
@@ -26864,13 +30334,20 @@ async def remove_question_flag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Courses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_courses(
     search: str | None = Field(None, description="Search terms for matching courses by name, description, or related metadata. Multiple terms separated by whitespace will return only courses matching all terms."),
     public_only: bool | None = Field(None, description="Filter to return only courses with public content visibility."),
@@ -26913,7 +30390,13 @@ async def search_courses(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Recipients",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_recipients(
     search: str | None = Field(None, description="Search terms for matching recipients by name or identifier. Multiple terms separated by whitespace will return only results matching all terms."),
     context: str | None = Field(None, description="Limit search results to a specific course or group context using the format course_ID or group_ID."),
@@ -26960,7 +30443,13 @@ async def search_recipients(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="Get Assignment Override for Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_assignment_override_for_section(
     course_section_id: str = Field(..., description="The unique identifier of the course section for which to retrieve the assignment override."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the section-specific override."),
@@ -26999,7 +30488,13 @@ async def get_assignment_override_for_section(
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Get Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_section_standalone(
     id_: str = Field(..., alias="id", description="The unique identifier of the section to retrieve."),
     include: list[Literal["students", "avatar_url", "enrollments", "total_students", "passback_status"]] | None = Field(None, description="Optional associations to include in the response. Select 'students' to include student roster (requires user or grade viewing permissions), 'avatar_url' to include student profile images, 'enrollments' to include enrollment details for each student (requires 'students' to also be selected), 'total_students' to include active and invited student counts, or 'passback_status' to include grade passback status information."),
@@ -27044,7 +30539,13 @@ async def get_section_standalone(
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Update Section",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_section(
     id_: str = Field(..., alias="id", description="The unique identifier of the section to update."),
     course_section_end_at: str | None = Field(None, description="The date and time when the section ends. Enrollments and access can be restricted to this date if enrollment date restrictions are enabled."),
@@ -27085,13 +30586,20 @@ async def update_section(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Delete Section",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_section(id_: str = Field(..., alias="id", description="The unique identifier of the section to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing section and return the deleted section object. This operation permanently removes the section from the system."""
 
@@ -27127,7 +30635,13 @@ async def delete_section(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Remove Section Crosslist",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_section_crosslist(id_: str = Field(..., alias="id", description="The unique identifier of the section to remove from cross-listing.")) -> dict[str, Any] | ToolResult:
     """Remove cross-listing from a section, restoring it to its original course. This operation undoes a previous cross-listing assignment."""
 
@@ -27163,7 +30677,12 @@ async def remove_section_crosslist(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: sections
-@mcp.tool()
+@mcp.tool(
+    title="Move Section to Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_section_to_course(
     id_: str = Field(..., alias="id", description="The ID of the section to be moved."),
     new_course_id: str = Field(..., description="The ID of the destination course where the section will be moved. Must be within the same root account as the current section."),
@@ -27202,7 +30721,13 @@ async def move_section_to_course(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="List Peer Reviews for Section Assignment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_peer_reviews_section(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve peer reviews."),
@@ -27248,7 +30773,13 @@ async def list_peer_reviews_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Submission Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_submission_summary(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submission statistics."),
@@ -27291,7 +30822,13 @@ async def get_submission_summary(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Assignment Submissions for Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignment_submissions_section(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve submissions."),
@@ -27339,7 +30876,12 @@ async def list_assignment_submissions_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Submit Assignment Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_assignment_section(
     section_id: str = Field(..., description="The unique identifier of the course section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment being submitted."),
@@ -27388,7 +30930,12 @@ async def submit_assignment_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Grade Submissions in Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grade_submissions_section(
     section_id: str = Field(..., description="The section ID containing the assignment."),
     assignment_id: str = Field(..., description="The assignment ID for which submissions are being graded."),
@@ -27444,7 +30991,13 @@ async def grade_submissions_section(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="List Peer Reviews for Submission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_peer_reviews_section_submission(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve peer reviews."),
@@ -27491,7 +31044,12 @@ async def list_peer_reviews_section_submission(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="Assign Peer Reviewer Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_peer_reviewer_section(
     section_id: str = Field(..., description="The section ID that contains the assignment."),
     assignment_id: str = Field(..., description="The assignment ID for which the peer review is being created."),
@@ -27538,7 +31096,13 @@ async def assign_peer_reviewer_section(
     return _response_data
 
 # Tags: peer_reviews
-@mcp.tool()
+@mcp.tool(
+    title="Remove Peer Review Section",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_peer_review_section(
     section_id: str = Field(..., description="The section identifier that contains the assignment."),
     assignment_id: str = Field(..., description="The assignment identifier for which the peer review is being removed."),
@@ -27584,7 +31148,13 @@ async def remove_peer_review_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Get Submission by User and Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_submission_by_user_section(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment for which to retrieve the submission."),
@@ -27631,7 +31201,12 @@ async def get_submission_by_user_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Grade Submission Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grade_submission_section(
     section_id: str = Field(..., description="The section ID containing the assignment."),
     assignment_id: str = Field(..., description="The assignment ID for which the submission is being graded."),
@@ -27683,13 +31258,19 @@ async def grade_submission_section(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Upload Submission File Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_submission_file_section(
     section_id: str = Field(..., description="The section ID that contains the assignment."),
     assignment_id: str = Field(..., description="The assignment ID where the file is being submitted."),
@@ -27729,7 +31310,13 @@ async def upload_submission_file_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Mark Submission as Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_submission_as_read_section(
     section_id: str = Field(..., description="The unique identifier for the course section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier for the assignment within the section."),
@@ -27769,7 +31356,13 @@ async def mark_submission_as_read_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Mark Submission as Unread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_submission_unread(
     section_id: str = Field(..., description="The unique identifier of the section containing the assignment."),
     assignment_id: str = Field(..., description="The unique identifier of the assignment whose submission should be marked as unread."),
@@ -27809,7 +31402,13 @@ async def mark_submission_unread(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="List Section Enrollments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_section_enrollments(
     section_id: int = Field(..., description="The section ID for which to retrieve enrollments."),
     per_page: int | None = Field(None, description="Number of enrollment records to return per page.", ge=1, le=100),
@@ -27864,7 +31463,12 @@ async def list_section_enrollments(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="Enroll User in Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enroll_user_in_section(
     section_id: str = Field(..., description="The unique identifier of the section where the user will be enrolled."),
     enrollment_type: Literal["StudentEnrollment", "TeacherEnrollment", "TaEnrollment", "ObserverEnrollment", "DesignerEnrollment"] = Field(..., description="The role type for the enrollment. Determines the user's permissions and capabilities in the course. Defaults to StudentEnrollment if not specified."),
@@ -27916,7 +31520,13 @@ async def enroll_user_in_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="List Submissions for Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_submissions_section(
     section_id: str = Field(..., description="The section identifier for which to retrieve submissions."),
     student_ids: list[str] | None = Field(None, description="Filter submissions to specific students by their IDs. Use the special value 'all' to include all students in the section. If omitted, returns submissions for the authenticated user only."),
@@ -27978,7 +31588,13 @@ async def list_submissions_section(
     return _response_data
 
 # Tags: submissions
-@mcp.tool()
+@mcp.tool(
+    title="Update Submission Grades",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_submission_grades(
     section_id: str = Field(..., description="The section ID where the submissions are located."),
     grade_data_student_id_assignment_id: str | None = Field(None, description="The assignment ID to grade. Required when using this bulk endpoint to specify which assignment the grades apply to."),
@@ -28033,7 +31649,12 @@ async def update_submission_grades(
     return _response_data
 
 # Tags: services
-@mcp.tool()
+@mcp.tool(
+    title="Create Kaltura Session",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_kaltura_session() -> dict[str, Any] | ToolResult:
     """Initiate a new Kaltura session to enable media recording and uploading to your Canvas instance's Kaltura integration. This session must be created before any media operations can be performed."""
 
@@ -28060,7 +31681,13 @@ async def create_kaltura_session() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: shared_brand_configs
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Brand Config Share",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_brand_config_share(id_: str = Field(..., alias="id", description="The unique identifier of the shared brand config to revoke access to.")) -> dict[str, Any] | ToolResult:
     """Revoke sharing of a brand config theme by deleting the shared configuration. This removes the theme from the shared options for you and all account members."""
 
@@ -28096,7 +31723,13 @@ async def revoke_brand_config_share(id_: str = Field(..., alias="id", descriptio
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Activity Stream",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_activity_stream(
     only_active_courses: bool | None = Field(None, description="Limit results to courses where the user is actively participating. When enabled, excludes archived or inactive courses from the activity stream."),
     per_page: int | None = Field(None, description="Number of activity stream items to return per page. Supports pagination for managing large result sets.", ge=1, le=100),
@@ -28137,7 +31770,13 @@ async def list_activity_stream(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Current User Activity Stream",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_activity_stream_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the current user's global activity stream with paginated results. Returns a variety of activity types including discussions, announcements, conversations, messages, submissions, conferences, collaborations, and assessment requests, each with shared and type-specific attributes."""
 
@@ -28164,7 +31803,13 @@ async def list_activity_stream_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Hide All Activity Stream Items",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def hide_all_activity_stream_items() -> dict[str, Any] | ToolResult:
     """Hide all activity stream items for the authenticated user. This action removes all items from the user's activity stream view."""
 
@@ -28191,7 +31836,13 @@ async def hide_all_activity_stream_items() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Activity Stream Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_activity_stream_summary() -> dict[str, Any] | ToolResult:
     """Retrieves a summary of the current user's global activity stream, providing an overview of recent activities across all connected resources and applications."""
 
@@ -28218,7 +31869,13 @@ async def get_activity_stream_summary() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Hide Activity Stream Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def hide_activity_stream_item(id_: str = Field(..., alias="id", description="The unique identifier of the activity stream item to hide.")) -> dict[str, Any] | ToolResult:
     """Hide a specific item from the user's activity stream. Hidden items will no longer appear in the activity stream view."""
 
@@ -28254,7 +31911,13 @@ async def hide_activity_stream_item(id_: str = Field(..., alias="id", descriptio
     return _response_data
 
 # Tags: bookmarks
-@mcp.tool()
+@mcp.tool(
+    title="List Bookmarks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bookmarks() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all bookmarks for the authenticated user. Results are returned in pages for efficient browsing and navigation."""
 
@@ -28281,7 +31944,12 @@ async def list_bookmarks() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: bookmarks
-@mcp.tool()
+@mcp.tool(
+    title="Create Bookmark",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_bookmark(
     data: str | None = Field(None, description="Custom data or metadata to associate with the bookmark for reference or organizational purposes."),
     name: str | None = Field(None, description="A human-readable name or title for the bookmark to help identify it in your collection."),
@@ -28327,7 +31995,13 @@ async def create_bookmark(
     return _response_data
 
 # Tags: bookmarks
-@mcp.tool()
+@mcp.tool(
+    title="Get Bookmark",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bookmark(id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific bookmark by its ID. Returns the bookmark's metadata and associated content."""
 
@@ -28363,7 +32037,13 @@ async def get_bookmark(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: bookmarks
-@mcp.tool()
+@mcp.tool(
+    title="Update Bookmark",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_bookmark(
     id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to update."),
     data: str | None = Field(None, description="Custom data or metadata associated with the bookmark for storage and retrieval."),
@@ -28404,13 +32084,20 @@ async def update_bookmark(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: bookmarks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Bookmark",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_bookmark(id_: str = Field(..., alias="id", description="The unique identifier of the bookmark to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a bookmark by its ID. This action cannot be undone."""
 
@@ -28446,7 +32133,13 @@ async def delete_bookmark(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: communication_channels
-@mcp.tool()
+@mcp.tool(
+    title="Delete Push Notification Endpoint",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_push_notification_endpoint() -> dict[str, Any] | ToolResult:
     """Remove the user's push notification endpoint, disabling push notifications for this device or application. This operation targets the authenticated user's push communication channel."""
 
@@ -28473,7 +32166,13 @@ async def delete_push_notification_endpoint() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: notification_preferences
-@mcp.tool()
+@mcp.tool(
+    title="Update Notification Preference",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_notification_preference(
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel (e.g., email address, phone number) for which to update the notification preference."),
     notification: str = Field(..., description="The unique identifier of the notification type whose preference should be updated."),
@@ -28510,13 +32209,20 @@ async def update_notification_preference(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Course Nicknames",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_course_nicknames() -> dict[str, Any] | ToolResult:
     """Retrieve all course nicknames you have created. Returns a list of custom names you've assigned to your courses for easier identification."""
 
@@ -28543,7 +32249,13 @@ async def list_course_nicknames() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Course Nicknames",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_course_nicknames() -> dict[str, Any] | ToolResult:
     """Remove all stored course nicknames for the authenticated user. This operation clears any custom names previously assigned to courses."""
 
@@ -28570,7 +32282,13 @@ async def delete_course_nicknames() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Course Nickname",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_course_nickname(course_id: str = Field(..., description="The unique identifier of the course for which to retrieve the nickname.")) -> dict[str, Any] | ToolResult:
     """Retrieves the custom nickname assigned to a specific course. Returns the nickname if one has been set for the course."""
 
@@ -28606,7 +32324,13 @@ async def get_course_nickname(course_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Set Course Nickname",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_course_nickname(
     course_id: str = Field(..., description="The unique identifier of the course to nickname."),
     nickname: str = Field(..., description="The custom nickname to assign to the course. Must be non-empty and shorter than 60 characters."),
@@ -28642,13 +32366,20 @@ async def set_course_nickname(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Course Nickname",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_course_nickname(course_id: str = Field(..., description="The unique identifier of the course whose nickname should be removed.")) -> dict[str, Any] | ToolResult:
     """Remove the custom nickname for a course, reverting to the course's actual name in subsequent API calls."""
 
@@ -28684,7 +32415,13 @@ async def delete_course_nickname(course_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="List Favorite Courses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_favorite_courses(
     exclude_blueprint_courses: bool | None = Field(None, description="Exclude courses that are configured as blueprint courses from the results."),
     per_page: int | None = Field(None, description="Number of courses to return per page for pagination.", ge=1, le=100),
@@ -28725,7 +32462,13 @@ async def list_favorite_courses(
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="Reset Course Favorites",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_course_favorites() -> dict[str, Any] | ToolResult:
     """Reset the current user's course favorites to the default automatically generated list based on their enrolled courses. This removes any custom favorite selections and restores the system-generated defaults."""
 
@@ -28752,7 +32495,12 @@ async def reset_course_favorites() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="Favorite Course",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def favorite_course(id_: str = Field(..., alias="id", description="The course ID or SIS ID to add to favorites. The current user must be registered in the course.")) -> dict[str, Any] | ToolResult:
     """Add a course to the current user's favorites. The operation is idempotent—if the course is already favorited, no change occurs."""
 
@@ -28788,7 +32536,13 @@ async def favorite_course(id_: str = Field(..., alias="id", description="The cou
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="Unfavorite Course",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unfavorite_course(id_: str = Field(..., alias="id", description="The unique identifier of the course to remove from favorites. Can be either the Canvas course ID or the SIS ID.")) -> dict[str, Any] | ToolResult:
     """Remove a course from the current user's favorites list. This operation allows users to unfavorite courses they previously marked as favorites."""
 
@@ -28824,7 +32578,13 @@ async def unfavorite_course(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="List Favorite Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_favorite_groups() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of favorite groups for the current user. If no favorites have been selected, returns a default selection of groups the user is a member of."""
 
@@ -28851,7 +32611,13 @@ async def list_favorite_groups() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="Clear Group Favorites",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def clear_group_favorites() -> dict[str, Any] | ToolResult:
     """Clear the current user's group favorites and restore them to the default automatically generated list based on enrolled groups."""
 
@@ -28878,7 +32644,12 @@ async def clear_group_favorites() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="Favorite Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def favorite_group(id_: str = Field(..., alias="id", description="The ID or SIS ID of the group to add to favorites. The current user must be a member of this group.")) -> dict[str, Any] | ToolResult:
     """Add a group to the current user's favorites. The user must be a member of the group; if already favorited, the operation has no effect."""
 
@@ -28914,7 +32685,13 @@ async def favorite_group(id_: str = Field(..., alias="id", description="The ID o
     return _response_data
 
 # Tags: favorites
-@mcp.tool()
+@mcp.tool(
+    title="Unfavorite Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unfavorite_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to remove from favorites. Can be either the group's ID or its SIS ID.")) -> dict[str, Any] | ToolResult:
     """Remove a group from the current user's favorites list. The group will no longer appear in the user's favorited groups."""
 
@@ -28950,7 +32727,13 @@ async def unfavorite_group(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(
     context_type: Literal["Account", "Course"] | None = Field(None, description="Filter groups to only those within a specific context type. Use 'Account' for account-level groups or 'Course' for course-level groups."),
     include: list[Literal["tabs"]] | None = Field(None, description="Specify additional data to include with each group. Use 'tabs' to include the list of tabs configured for each group."),
@@ -28995,7 +32778,13 @@ async def list_groups(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Todo Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_todos(
     include: list[Literal["ungraded_quizzes"]] | None = Field(None, description="Optionally include ungraded quizzes such as practice quizzes and surveys in the results. When included, these items are returned under a quiz key instead of an assignment key."),
     per_page: int | None = Field(None, description="The number of TODO items to return per page.", ge=1, le=100),
@@ -29039,7 +32828,13 @@ async def list_todos(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Todo Item Counts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_todo_item_counts(include: list[Literal["ungraded_quizzes"]] | None = Field(None, description="Optionally include ungraded quizzes (such as practice quizzes and surveys) in the counts. When included, quiz data is returned under a quiz key instead of an assignment key.")) -> dict[str, Any] | ToolResult:
     """Retrieve counts of pending todo items for the authenticated user, including assignments needing grading or submission. Note: counts are based on the first 100 todo items; if the user has more than 100 items, counts may be unreliable and capped at 100."""
 
@@ -29080,7 +32875,13 @@ async def get_todo_item_counts(include: list[Literal["ungraded_quizzes"]] | None
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Upcoming Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_upcoming_events() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of the current user's upcoming assignments and calendar events in chronological order."""
 
@@ -29107,7 +32908,13 @@ async def list_upcoming_events() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_permissions(id_: str = Field(..., alias="id", description="The unique identifier of the user whose details should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific user, including their profile data and a non-comprehensive list of permissions."""
 
@@ -29143,7 +32950,13 @@ async def get_user_permissions(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to update."),
     user_avatar_token: str | None = Field(None, description="A token representing the avatar to assign to the user. Obtain this token from the user avatars endpoint. Takes precedence over avatar URL if both are provided."),
@@ -29186,13 +32999,20 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List User Colors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_colors(id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom colors should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all custom colors that have been saved for a specific user. Returns a complete list of the user's color preferences and customizations."""
 
@@ -29228,7 +33048,13 @@ async def list_user_colors(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Color",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_color(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom colors are being retrieved."),
     asset_string: str = Field(..., description="The context identifier in the format 'context_id' that specifies where the custom colors apply (e.g., 'course_42' for a course context)."),
@@ -29267,7 +33093,13 @@ async def get_custom_color(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Set Custom Color",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_custom_color(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose custom color is being updated."),
     asset_string: str = Field(..., description="The context identifier in the format 'context_id' (e.g., 'course_42') that specifies where the custom color applies."),
@@ -29304,13 +33136,20 @@ async def set_custom_color(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Merge User Into Another User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_user_into_another_user(
     id_: str = Field(..., alias="id", description="The ID of the user to be merged and deleted."),
     destination_account_id: str = Field(..., description="The ID or domain of the account containing the destination user. Required when finding users by SIS IDs across different accounts."),
@@ -29350,7 +33189,13 @@ async def merge_user_into_another_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Merge User Into Another User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_user(
     id_: str = Field(..., alias="id", description="The ID of the user to be merged and deleted."),
     destination_user_id: str = Field(..., description="The ID of the destination user that will receive all data from the merged user."),
@@ -29389,7 +33234,13 @@ async def merge_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Split User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def split_user(id_: str = Field(..., alias="id", description="The ID of the merged user to split into separate users. The caller must have permissions to manage all user logins associated with this user.")) -> dict[str, Any] | ToolResult:
     """Split a previously merged user back into separate user accounts. This operation attempts to restore users to their pre-merge state within 180 days of the original merge, though some data may not be fully recoverable."""
 
@@ -29425,7 +33276,13 @@ async def split_user(id_: str = Field(..., alias="id", description="The ID of th
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Avatar Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_avatars(
     user_id: str = Field(..., description="The unique identifier of the user whose avatar options to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of avatar records to return per page.", ge=1, le=100),
@@ -29467,7 +33324,13 @@ async def list_avatars(
     return _response_data
 
 # Tags: calendar_events
-@mcp.tool()
+@mcp.tool(
+    title="List Calendar Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_calendar_events(
     user_id: str = Field(..., description="The unique identifier of the user whose calendar events you want to retrieve."),
     context_codes: list[str] | None = Field(None, description="Optional list of context codes to filter events by specific courses, groups, or users. Use format: context_type_context_id (e.g., course_42). Limited to 10 codes; additional codes are ignored. If omitted, defaults to the current user's personal calendar only."),
@@ -29515,7 +33378,13 @@ async def list_calendar_events(
     return _response_data
 
 # Tags: communication_channels
-@mcp.tool()
+@mcp.tool(
+    title="List Communication Channels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_communication_channels(
     user_id: str = Field(..., description="The unique identifier of the user whose communication channels you want to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of communication channels to return per page. Useful for controlling response size and implementing pagination.", ge=1, le=100),
@@ -29557,7 +33426,12 @@ async def list_communication_channels(
     return _response_data
 
 # Tags: communication_channels
-@mcp.tool()
+@mcp.tool(
+    title="Add Communication Channel",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_communication_channel(
     user_id: str = Field(..., description="The unique identifier of the user for whom the communication channel is being created."),
     communication_channel_address: str = Field(..., description="The destination address for the communication channel. Provide an email address for email channels or a phone number for SMS channels. Not required for push notification channels."),
@@ -29603,7 +33477,13 @@ async def add_communication_channel(
     return _response_data
 
 # Tags: notification_preferences
-@mcp.tool()
+@mcp.tool(
+    title="List Notification Preference Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notification_preference_categories(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preferences are being queried."),
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel (e.g., email, SMS, push) for which to fetch preference categories."),
@@ -29642,7 +33522,13 @@ async def list_notification_preference_categories(
     return _response_data
 
 # Tags: notification_preferences
-@mcp.tool()
+@mcp.tool(
+    title="List Notification Preferences",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notification_preferences(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preferences you want to retrieve."),
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel for which to fetch notification preferences."),
@@ -29681,7 +33567,13 @@ async def list_notification_preferences(
     return _response_data
 
 # Tags: notification_preferences
-@mcp.tool()
+@mcp.tool(
+    title="Get Notification Preference",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notification_preference(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preference is being retrieved."),
     communication_channel_id: str = Field(..., description="The unique identifier of the communication channel (e.g., email, SMS, push notification) for which the preference applies."),
@@ -29721,7 +33613,13 @@ async def get_notification_preference(
     return _response_data
 
 # Tags: communication_channels
-@mcp.tool()
+@mcp.tool(
+    title="Delete Communication Channel",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_communication_channel(
     user_id: str = Field(..., description="The unique identifier of the user who owns the communication channel."),
     id_: str = Field(..., alias="id", description="The unique identifier of the communication channel to delete."),
@@ -29760,7 +33658,13 @@ async def delete_communication_channel(
     return _response_data
 
 # Tags: communication_channels
-@mcp.tool()
+@mcp.tool(
+    title="Delete Communication Channel by Address",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_communication_channel_by_address(
     user_id: str = Field(..., description="The unique identifier of the user whose communication channel will be deleted."),
     type_: str = Field(..., alias="type", description="The type of communication channel to delete (e.g., email, phone, SMS)."),
@@ -29800,7 +33704,13 @@ async def delete_communication_channel_by_address(
     return _response_data
 
 # Tags: notification_preferences
-@mcp.tool()
+@mcp.tool(
+    title="List Notification Preferences by Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notification_preferences_by_type(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preferences are being retrieved."),
     type_: str = Field(..., alias="type", description="The type of communication channel (e.g., email, SMS, push). Specifies which channel category's preferences to fetch."),
@@ -29840,7 +33750,13 @@ async def list_notification_preferences_by_type(
     return _response_data
 
 # Tags: notification_preferences
-@mcp.tool()
+@mcp.tool(
+    title="Get Notification Preference by Address",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notification_preference_by_address(
     user_id: str = Field(..., description="The unique identifier of the user whose notification preference is being retrieved."),
     type_: str = Field(..., alias="type", description="The type of communication channel (e.g., email, SMS, push notification)."),
@@ -29881,7 +33797,13 @@ async def get_notification_preference_by_address(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="List User Content Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_exports_user(
     user_id: str = Field(..., description="The unique identifier of the user whose content exports should be listed."),
     per_page: int | None = Field(None, description="The maximum number of content exports to return per page.", ge=1, le=100),
@@ -29923,7 +33845,12 @@ async def list_content_exports_user(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Content Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_content_export(
     user_id: str = Field(..., description="The unique identifier of the user whose content will be exported."),
     export_type: Literal["common_cartridge", "qti", "zip"] = Field(..., description="The format for the exported content. Common Cartridge exports all content types, QTI exports quizzes only, and ZIP exports files and folders."),
@@ -29968,7 +33895,13 @@ async def initiate_content_export(
     return _response_data
 
 # Tags: content_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Export User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_export_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content export."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content export to retrieve."),
@@ -30007,7 +33940,13 @@ async def get_content_export_user(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Content Licenses for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_licenses_user(
     user_id: str = Field(..., description="The unique identifier of the user whose content licenses you want to retrieve."),
     per_page: int | None = Field(None, description="The number of license items to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -30049,7 +33988,13 @@ async def list_content_licenses_user(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List User Content Migrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_migrations_user(
     user_id: str = Field(..., description="The unique identifier of the user whose content migrations should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of content migrations to return per page. Allows control over result set size for pagination.", ge=1, le=100),
@@ -30091,7 +34036,12 @@ async def list_content_migrations_user(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Content Migration for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_content_migration_user(
     user_id: str = Field(..., description="The ID of the user for whom the content migration is being created."),
     migration_type: str = Field(..., description="The type of content migration to perform. Available types include canvas_cartridge_importer, common_cartridge_importer, course_copy_importer, zip_file_importer, qti_converter, and moodle_converter."),
@@ -30151,7 +34101,13 @@ async def initiate_content_migration_user(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Systems Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_systems_user(user_id: str = Field(..., description="The unique identifier of the user whose available migration systems should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves the currently available migration system types for a user. The list of available migration types may change over time."""
 
@@ -30187,7 +34143,13 @@ async def list_migration_systems_user(user_id: str = Field(..., description="The
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="List Migration Issues for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_migration_issues_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration to retrieve issues for."),
@@ -30230,7 +34192,13 @@ async def list_migration_issues_user(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Issue in User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_migration_issue_in_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     content_migration_id: str = Field(..., description="The unique identifier of the content migration job that contains the migration issue."),
@@ -30270,7 +34238,12 @@ async def get_migration_issue_in_user(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Migration Issue User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resolve_migration_issue_user(
     user_id: str = Field(..., description="The ID of the user who owns the content migration."),
     content_migration_id: str = Field(..., description="The ID of the content migration that contains the issue."),
@@ -30308,13 +34281,20 @@ async def resolve_migration_issue_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Migration User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_migration_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to retrieve."),
@@ -30353,7 +34333,13 @@ async def get_content_migration_user(
     return _response_data
 
 # Tags: content_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Content Migration User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_content_migration_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the content migration."),
     id_: str = Field(..., alias="id", description="The unique identifier of the content migration to update."),
@@ -30392,7 +34378,13 @@ async def update_content_migration_user(
     return _response_data
 
 # Tags: courses
-@mcp.tool()
+@mcp.tool(
+    title="List Courses by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_courses_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose courses to retrieve."),
     include: list[Literal["needs_grading_count", "syllabus_body", "public_description", "total_scores", "current_grading_period_scores", "term", "account", "course_progress", "sections", "storage_quota_used_mb", "total_students", "passback_status", "favorites", "teachers", "observed_users", "course_image"]] | None = Field(None, description="Optional course attributes to include in the response. Select from: needs_grading_count (submissions awaiting grading), syllabus_body (course syllabus HTML), public_description (course description), total_scores (enrollment score fields), current_grading_period_scores (grading period-specific scores), term (enrollment term details), account (account information), course_progress (module completion tracking), sections (section enrollment data), storage_quota_used_mb (course file storage usage), total_students (active and invited student count), passback_status (grade passback status), favorites (user's favorite course indicator), teachers (instructor information), observed_users (data for observed users), tabs (course tab configuration), or course_image (course image data)."),
@@ -30441,7 +34433,13 @@ async def list_courses_by_user(
     return _response_data
 
 # Tags: assignments
-@mcp.tool()
+@mcp.tool(
+    title="List Assignments by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignments_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose assignments to retrieve."),
     course_id: str = Field(..., description="The unique identifier of the course containing the assignments."),
@@ -30495,7 +34493,13 @@ async def list_assignments_by_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Custom Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_custom_data(
     user_id: str = Field(..., description="The unique identifier of the user whose custom data should be retrieved."),
     ns: str = Field(..., description="The namespace scope from which to retrieve the data. Use a reverse DNS format or other unique identifier to avoid conflicts with other Canvas applications."),
@@ -30537,7 +34541,13 @@ async def retrieve_custom_data(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Store Custom Data",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def store_custom_data(
     user_id: str = Field(..., description="The Canvas user ID or 'self' to reference the authenticated user. Requires account administrator permissions to access another user's custom data."),
     data: Any = Field(..., description="The data to store at the specified scope. Can be a string, number, boolean, null, array, or nested JSON object. Content-Type determines supported data types: application/x-www-form-urlencoded supports strings only; application/json supports all JSON types."),
@@ -30574,13 +34584,20 @@ async def store_custom_data(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Data",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_data(
     user_id: str = Field(..., description="The unique identifier of the user whose custom data should be deleted."),
     ns: str = Field(..., description="The namespace identifying the data scope to delete from. Should be a unique identifier such as a reverse DNS (e.g., com.organization.app-name) to avoid conflicts with other Canvas applications."),
@@ -30622,7 +34639,13 @@ async def delete_custom_data(
     return _response_data
 
 # Tags: enrollments
-@mcp.tool()
+@mcp.tool(
+    title="List User Enrollments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_enrollments(
     user_id: str = Field(..., description="The user ID to retrieve enrollments for. Use the current user's ID to check enrollment status independent of roster permissions."),
     state: list[Literal["active", "invited", "creation_pending", "deleted", "rejected", "completed", "inactive"]] | None = Field(None, description="Filter results by enrollment state. Defaults to 'active' and 'invited' if omitted. When querying user enrollments, supports synthetic states for combined filtering across time periods."),
@@ -30677,7 +34700,13 @@ async def list_user_enrollments(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List User Features",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_features(
     user_id: str = Field(..., description="The unique identifier of the user whose features you want to retrieve."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -30719,7 +34748,13 @@ async def list_user_features(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Enabled Features for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_enabled_features_user(
     user_id: str = Field(..., description="The unique identifier of the user whose enabled features should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of features to return per page. Allows pagination through large result sets.", ge=1, le=100),
@@ -30761,7 +34796,13 @@ async def list_enabled_features_user(
     return _response_data
 
 # Tags: feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_user(
     user_id: str = Field(..., description="The unique identifier of the user for which to retrieve the feature flag."),
     feature: str = Field(..., description="The unique identifier of the feature flag to retrieve."),
@@ -30800,7 +34841,12 @@ async def get_feature_flag_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Upload File to Personal Files",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file_personal(user_id: str = Field(..., description="The ID of the user whose files section will receive the upload. Use the special value 'self' to refer to the current authenticated user.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a user's personal files section. This is the first step in the file upload workflow; refer to the File Upload Documentation for complete details on multi-step uploads and supported file types."""
 
@@ -30836,7 +34882,13 @@ async def upload_file_personal(user_id: str = Field(..., description="The ID of 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get User Storage Quota",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_storage_quota(user_id: str = Field(..., description="The unique identifier of the user whose quota information should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total and used storage quota for a specific user. Returns quota information including storage limits and current usage."""
 
@@ -30872,7 +34924,13 @@ async def get_user_storage_quota(user_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get File User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns or has access to the file."),
     id_: str = Field(..., alias="id", description="The unique identifier of the file to retrieve."),
@@ -30918,7 +34976,13 @@ async def get_file_user(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List User Folders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folders_user(
     user_id: str = Field(..., description="The unique identifier of the user whose folders should be retrieved."),
     per_page: int | None = Field(None, description="The maximum number of folders to return per page. Valid range is 1 to 100 items.", ge=1, le=100),
@@ -30960,7 +35024,12 @@ async def list_folders_user(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder_user(
     user_id: str = Field(..., description="The unique identifier of the user who owns the folder."),
     name: str = Field(..., description="The display name for the folder."),
@@ -31008,7 +35077,13 @@ async def create_folder_user(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder Path for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_path_user(user_id: str = Field(..., description="The unique identifier of the user whose folder structure should be resolved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete folder hierarchy for a given path, starting from the root folder and ending at the requested folder. Returns all intermediate folders in the path hierarchy."""
 
@@ -31044,7 +35119,13 @@ async def get_folder_path_user(user_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder_user(
     user_id: str = Field(..., description="The ID of the user who owns or has access to the folder."),
     id_: str = Field(..., alias="id", description="The ID of the folder to retrieve. Use 'root' to get the root folder for the user's context."),
@@ -31083,7 +35164,13 @@ async def get_folder_user(
     return _response_data
 
 # Tags: logins
-@mcp.tool()
+@mcp.tool(
+    title="List User Logins",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_logins_user(
     user_id: str = Field(..., description="The unique identifier of the user whose login history you want to retrieve."),
     per_page: int | None = Field(None, description="Number of login records to return per page. Allows you to control pagination size.", ge=1, le=100),
@@ -31125,7 +35212,13 @@ async def list_logins_user(
     return _response_data
 
 # Tags: logins
-@mcp.tool()
+@mcp.tool(
+    title="Delete Login",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_login(
     user_id: str = Field(..., description="The unique identifier of the user who owns the login to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the login record to delete."),
@@ -31164,7 +35257,13 @@ async def delete_login(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Overdue Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_overdue_assignments(
     user_id: str = Field(..., description="The unique identifier of the student whose missing submissions should be retrieved."),
     include: list[Literal["planner_overrides", "course"]] | None = Field(None, description="Optional fields to include in the response. Specify 'planner_overrides' to include the student's planner override for each assignment, or 'course' to include the assignment's course information."),
@@ -31210,7 +35309,13 @@ async def list_overdue_assignments(
     return _response_data
 
 # Tags: user_observees
-@mcp.tool()
+@mcp.tool(
+    title="List Observees",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_observees(
     user_id: str = Field(..., description="The unique identifier of the user whose observees should be listed."),
     include: list[Literal["avatar_url"]] | None = Field(None, description="Optional attributes to include in the response. Specify 'avatar_url' to include the avatar URL for each observee."),
@@ -31256,7 +35361,12 @@ async def list_observees(
     return _response_data
 
 # Tags: user_observees
-@mcp.tool()
+@mcp.tool(
+    title="Create Observee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_observee(
     user_id: str = Field(..., description="The ID of the user who will be observing another user."),
     access_token: str | None = Field(None, description="The access token of the user to be observed. Required unless observee credentials or pairing code are provided."),
@@ -31296,13 +35406,20 @@ async def create_observee(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: user_observees
-@mcp.tool()
+@mcp.tool(
+    title="Get Observee",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_observee(
     user_id: str = Field(..., description="The ID of the user whose observee relationship is being queried."),
     observee_id: str = Field(..., description="The ID of the observed user whose information is being retrieved."),
@@ -31341,7 +35458,13 @@ async def get_observee(
     return _response_data
 
 # Tags: user_observees
-@mcp.tool()
+@mcp.tool(
+    title="Create Observation Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_observation_link(
     user_id: str = Field(..., description="The unique identifier of the user who will be observing."),
     observee_id: str = Field(..., description="The unique identifier of the user to be observed."),
@@ -31380,13 +35503,20 @@ async def create_observation_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: user_observees
-@mcp.tool()
+@mcp.tool(
+    title="Unobserve User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unobserve_user(
     user_id: str = Field(..., description="The ID of the user who is observing (the observer)."),
     observee_id: str = Field(..., description="The ID of the user to stop observing (the observee)."),
@@ -31431,7 +35561,13 @@ async def unobserve_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Page Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_page_views(
     user_id: str = Field(..., description="The unique identifier of the user whose page views you want to retrieve."),
     start_time: str | None = Field(None, description="Filter results to include only page views on or after this timestamp. Use ISO 8601 date-time format."),
@@ -31475,7 +35611,13 @@ async def list_page_views(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_profile(user_id: str = Field(..., description="The unique identifier of the user whose profile should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve a user's profile information including name and profile picture. When requesting your own profile, additional data such as calendar feed URL and LTI user ID are included."""
 
@@ -31511,7 +35653,13 @@ async def get_user_profile(user_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Assign Usage Rights",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_usage_rights(
     user_id: str = Field(..., description="The unique identifier of the user performing the operation."),
     file_ids: list[str] = Field(..., description="List of file IDs to assign usage rights to. Order is not significant."),
@@ -31550,13 +35698,20 @@ async def assign_usage_rights(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Usage Rights User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_usage_rights_user(
     user_id: str = Field(..., description="The unique identifier of the user whose files' usage rights will be removed."),
     file_ids: list[str] = Field(..., description="List of file identifiers from which to remove usage rights. Order is not significant."),

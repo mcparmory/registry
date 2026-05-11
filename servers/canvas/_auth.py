@@ -1,7 +1,7 @@
 """
 Authentication module for Canvas MCP server.
 
-Generated: 2026-05-05 14:35:11 UTC
+Generated: 2026-05-11 19:36:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
