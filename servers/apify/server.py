@@ -5,7 +5,7 @@ Apify MCP Server
 API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0.html)
 
-Generated: 2026-05-05 14:12:50 UTC
+Generated: 2026-05-11 22:59:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -42,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.apify.com/v2")
 SERVER_NAME = "Apify"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1003,6 +1033,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1027,6 +1059,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1243,7 +1277,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Apify", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Actors
-@mcp.tool()
+@mcp.tool(
+    title="List Actors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actors(
     my: bool | None = Field(None, description="When set to true, restricts the results to only Actors owned by the authenticated user, excluding Actors they have used but not created."),
     offset: float | None = Field(None, description="Number of records to skip from the beginning of the result set, used for paginating through large lists. Defaults to 0."),
@@ -1288,7 +1328,12 @@ async def list_actors(
     return _response_data
 
 # Tags: Actors
-@mcp.tool()
+@mcp.tool(
+    title="Create Actor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_actor(
     name: str | None = Field(None, description="Unique identifier name for the Actor, used in URLs and API references."),
     description: str | None = Field(None, description="Short human-readable description of what the Actor does, displayed in Apify Store and the Actor detail page."),
@@ -1352,13 +1397,20 @@ async def create_actor(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors
-@mcp.tool()
+@mcp.tool(
+    title="Get Actor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actor(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to retrieve, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details for a specific Actor, including its configuration, settings, and metadata. Use this to inspect an Actor before running it or to verify its current state."""
 
@@ -1397,7 +1449,13 @@ async def get_actor(actor_id: str = Field(..., alias="actorId", description="The
     return _response_data
 
 # Tags: Actors
-@mcp.tool()
+@mcp.tool(
+    title="Update Actor",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_actor(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated string combining the owner's username and Actor name."),
     name: str | None = Field(None, description="The internal name identifier for the Actor."),
@@ -1466,13 +1524,20 @@ async def update_actor(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Actor",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_actor(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to delete, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes the specified Actor and all associated data. This action is irreversible."""
 
@@ -1511,7 +1576,13 @@ async def delete_actor(actor_id: str = Field(..., alias="actorId", description="
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actor_versions(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any] | ToolResult:
     """Retrieves all versions of a specific Actor, returning a list of Version objects with basic information about each version."""
 
@@ -1550,7 +1621,12 @@ async def list_actor_versions(actor_id: str = Field(..., alias="actorId", descri
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Create Actor Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_actor_version(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str | None = Field(None, alias="versionNumber", description="The semantic version number to assign to this Actor version, following a major.minor format."),
@@ -1597,13 +1673,20 @@ async def create_actor_version(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Get Actor Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actor_version(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to retrieve, following a major.minor versioning format."),
@@ -1645,7 +1728,13 @@ async def get_actor_version(
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Update Actor Version",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_actor_version(
     actor_id: str = Field(..., alias="actorId", description="The Actor's unique ID or a tilde-separated combination of the owner's username and Actor name identifying which Actor to update."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to update, following major.minor versioning format."),
@@ -1692,13 +1781,20 @@ async def update_actor_version(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Actor Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_actor_version(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to delete, following major.minor versioning format."),
@@ -1740,7 +1836,13 @@ async def delete_actor_version(
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Version Environment Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actor_version_env_vars(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor whose environment variables should be retrieved, following major.minor versioning format."),
@@ -1782,7 +1884,12 @@ async def list_actor_version_env_vars(
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Create Actor Version Environment Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_actor_env_var(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to which the environment variable will be added."),
@@ -1824,13 +1931,20 @@ async def create_actor_env_var(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Get Actor Version Environment Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actor_env_var(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to retrieve the environment variable from, following major.minor versioning format."),
@@ -1873,7 +1987,13 @@ async def get_actor_env_var(
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Update Actor Environment Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_actor_env_var(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor whose environment variable you want to update, in major.minor format."),
@@ -1916,13 +2036,20 @@ async def update_actor_env_var(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor versions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Actor Version Environment Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_actor_version_env_var(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor from which the environment variable will be deleted, following major.minor versioning format."),
@@ -1965,7 +2092,13 @@ async def delete_actor_version_env_var(
     return _response_data
 
 # Tags: Actors/Webhook collection
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actor_webhooks(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     offset: float | None = Field(None, description="Number of webhooks to skip from the beginning of the result set, used for paginating through records. Defaults to 0."),
@@ -2010,7 +2143,13 @@ async def list_actor_webhooks(
     return _response_data
 
 # Tags: Actors/Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Builds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actor_builds(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a plain Actor ID or in tilde-separated format combining the owner's username and Actor name."),
     offset: float | None = Field(None, description="Number of build records to skip from the beginning of the result set, used for paginating through results. Defaults to 0."),
@@ -2055,7 +2194,12 @@ async def list_actor_builds(
     return _response_data
 
 # Tags: Actors/Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="Build Actor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def build_actor(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated string combining the owner's username and Actor name."),
     version: str = Field(..., description="The Actor version number to build, corresponding to a version defined in the Actor's configuration."),
@@ -2102,7 +2246,13 @@ async def build_actor(
     return _response_data
 
 # Tags: Actors/Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="Get Default Actor Build",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_default_actor_build(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Maximum number of seconds the server will wait for the build to finish before returning; if the build completes within this window the response will reflect a terminal status (e.g. SUCCEEDED), otherwise a transitional status (e.g. RUNNING) is returned. Accepts values from 0 (default, no wait) up to 60."),
@@ -2145,7 +2295,13 @@ async def get_default_actor_build(
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actor_runs_by_actor(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     offset: float | None = Field(None, description="Number of runs to skip from the beginning of the result set, used for paginating through results."),
@@ -2193,7 +2349,12 @@ async def list_actor_runs_by_actor(
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Run Actor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_actor(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated combination of the owner's username and Actor name."),
     timeout: float | None = Field(None, description="Maximum duration the run is allowed to execute before being stopped, in seconds. Overrides the timeout configured in the Actor's settings."),
@@ -2247,13 +2408,20 @@ async def run_actor(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Run Actor Synchronously",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def run_actor_sync_no_input(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to run, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     output_record_key: str | None = Field(None, alias="outputRecordKey", description="The key of the record from the run's default key-value store to return in the response. Defaults to OUTPUT if not specified."),
@@ -2307,7 +2475,12 @@ async def run_actor_sync_no_input(
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Run Actor Synchronously",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_actor_sync(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to run, either as an Actor ID or a tilde-separated owner username and Actor name combination."),
     output_record_key: str | None = Field(None, alias="outputRecordKey", description="The key of the record from the run's default key-value store to return in the response. Defaults to OUTPUT if not specified."),
@@ -2360,13 +2533,20 @@ async def run_actor_sync(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Run Actor Synchronously and Get Dataset Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def run_actor_sync_get_dataset_items(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to run, either as an internal Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     timeout: float | None = Field(None, description="Maximum duration the Actor run is allowed to execute before being forcibly stopped, in seconds. Overrides the timeout defined in the Actor's saved configuration."),
@@ -2437,7 +2617,12 @@ async def run_actor_sync_get_dataset_items(
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Run Actor Synchronously and Get Dataset Items",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_actor_sync_get_dataset_items_with_input(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated combination of the owner's username and Actor name."),
     timeout: float | None = Field(None, description="Maximum duration the Actor run is allowed to execute before being terminated, in seconds. Defaults to the timeout configured on the Actor itself."),
@@ -2503,13 +2688,19 @@ async def run_actor_sync_get_dataset_items_with_input(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Resurrect Actor Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resurrect_actor_run(
     actor_id: str = Field(..., alias="actorId", description="The Actor's unique ID or a tilde-separated combination of the owner's username and Actor name identifying which Actor the run belongs to."),
     run_id: str = Field(..., alias="runId", description="The unique ID of the finished Actor run to resurrect."),
@@ -2556,7 +2747,13 @@ async def resurrect_actor_run(
     return _response_data
 
 # Tags: Actors/Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Actor Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_actor_run(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated combination of the owner's username and Actor name."),
     status: str | None = Field(None, description="Filters the result to only return the last run matching the specified status, ensuring you retrieve a run in a particular state (e.g. only succeeded runs)."),
@@ -2599,7 +2796,13 @@ async def get_last_actor_run(
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tasks(
     offset: float | None = Field(None, description="Number of tasks to skip from the beginning of the result set, used for paginating through large lists."),
     limit: float | None = Field(None, description="Maximum number of tasks to return in a single response, up to a maximum of 1000."),
@@ -2642,7 +2845,12 @@ async def list_tasks(
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task(body: _models.ActorTasksPostBody | None = Field(None, description="JSON object defining the new task's configuration, including the actor to run, the task name, and execution options such as build version, timeout, and memory allocation.")) -> dict[str, Any] | ToolResult:
     """Creates a new actor task with the specified configuration, including the target actor, build version, timeout, and memory settings. Returns the full task object upon successful creation."""
 
@@ -2678,13 +2886,20 @@ async def create_task(body: _models.ActorTasksPostBody | None = Field(None, desc
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to retrieve, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name.")) -> dict[str, Any] | ToolResult:
     """Retrieve full details of a specific actor task, including its configuration, settings, and metadata. Use this to inspect an existing task before running or modifying it."""
 
@@ -2723,7 +2938,13 @@ async def get_task(actor_task_id: str = Field(..., alias="actorTaskId", descript
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to update, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     name: str | None = Field(None, description="The URL-friendly name of the task, used to identify it within the owner's account."),
@@ -2779,13 +3000,20 @@ async def update_task(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to delete, either as a standalone task ID or as a tilde-separated combination of the owner's username and task name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes the specified actor task and all associated configuration. This action is irreversible and removes the task from the account."""
 
@@ -2824,7 +3052,13 @@ async def delete_task(actor_task_id: str = Field(..., alias="actorTaskId", descr
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Input",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_input(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name.")) -> dict[str, Any] | ToolResult:
     """Retrieves the input configuration for a specified actor task. Returns the input object that defines the parameters passed to the actor when the task runs."""
 
@@ -2863,7 +3097,13 @@ async def get_task_input(actor_task_id: str = Field(..., alias="actorTaskId", de
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task Input",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task_input(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task to update, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name."),
     body: dict[str, Any] | None = Field(None, description="A JSON object containing the input fields to update on the task. Only the specified properties will be modified; any properties not included will remain unchanged."),
@@ -2903,13 +3143,20 @@ async def update_task_input(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Task Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_webhooks(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the Actor task, either as a plain task ID or in tilde-separated format combining the owner's username and task name."),
     offset: float | None = Field(None, description="Number of webhooks to skip from the beginning of the result set, used for paginating through records. Defaults to 0."),
@@ -2954,7 +3201,13 @@ async def list_task_webhooks(
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Task Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_runs(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     offset: float | None = Field(None, description="Number of runs to skip from the beginning of the result set, used for paginating through results. Defaults to 0."),
@@ -3000,7 +3253,12 @@ async def list_task_runs(
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Run Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_task(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to run, either as a task ID or a tilde-separated string combining the owner's username and task name."),
     timeout: float | None = Field(None, description="Maximum duration the run is allowed to execute before being terminated, in seconds. Overrides the timeout defined in the task's configuration."),
@@ -3053,13 +3311,20 @@ async def run_task(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Run Task Synchronously",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def run_task_sync_get(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to run, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     timeout: float | None = Field(None, description="Maximum duration in seconds the run is allowed to execute before being timed out. If omitted, the timeout defined in the task's saved configuration is used."),
@@ -3111,7 +3376,12 @@ async def run_task_sync_get(
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Run Task Synchronously",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_task_sync(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the Actor task to run, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     timeout: float | None = Field(None, description="Maximum duration the run is allowed to execute before being timed out, in seconds. Overrides the timeout defined in the task's configuration."),
@@ -3164,13 +3434,20 @@ async def run_task_sync(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Run Task Synchronously and Get Dataset Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def run_task_sync_and_get_dataset_items(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task to run, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     timeout: float | None = Field(None, description="Maximum duration in seconds the run is allowed to execute before being timed out. If omitted, the timeout defined in the task's saved configuration is used."),
@@ -3239,7 +3516,12 @@ async def run_task_sync_and_get_dataset_items(
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Run Task Synchronously and Get Dataset Items",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_task_sync_get_dataset_items(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the Actor task to run, either as a task ID or a tilde-separated string combining the owner's username and task name."),
     timeout: float | None = Field(None, description="Maximum duration in seconds the run is allowed to execute before being timed out. If not provided, the timeout defined in the task configuration is used."),
@@ -3300,13 +3582,20 @@ async def run_task_sync_get_dataset_items(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Task Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_task_run(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     status: str | None = Field(None, description="Restricts the result to the last run matching the specified status, ensuring runs in other states are ignored."),
@@ -3349,7 +3638,13 @@ async def get_last_task_run(
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actor_runs(
     offset: float | None = Field(None, description="Number of runs to skip from the beginning of the result set, used for pagination."),
     limit: float | None = Field(None, description="Maximum number of runs to return per request; cannot exceed 1000."),
@@ -3395,7 +3690,13 @@ async def list_actor_runs(
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Get Actor Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actor_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to retrieve."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Maximum number of seconds the server will wait for the run to reach a terminal status before responding. Accepts values from 0 to 60; if the run finishes within the specified time the response will reflect its final status, otherwise it will reflect the current transitional status."),
@@ -3438,7 +3739,13 @@ async def get_actor_run(
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Update Actor Run",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to update."),
     body: _models.ActorRunPutBody | None = Field(None, description="Request body containing the fields to update on the run. Supports setting a status message (with an optional terminal flag indicating it is the final message) and/or the general resource access level, which controls anonymous or restricted visibility of the run and its default storages and logs. Allowed access values are: FOLLOW_USER_SETTING, ANYONE_WITH_ID_CAN_READ, or RESTRICTED."),
@@ -3478,13 +3785,20 @@ async def update_run(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Actor Run",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_actor_run(run_id: str = Field(..., alias="runId", description="The unique identifier of the actor run to delete. The run must be in a finished state before it can be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a finished actor run. Only completed runs can be deleted, and only by the user or organization that initiated the run."""
 
@@ -3523,7 +3837,13 @@ async def delete_actor_run(run_id: str = Field(..., alias="runId", description="
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Abort Run",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def abort_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to abort."),
     gracefully: bool | None = Field(None, description="When true, the run is aborted gracefully by sending 'aborting' and 'persistState' events before force-stopping after 30 seconds, which is useful if you intend to resurrect the run later."),
@@ -3566,7 +3886,12 @@ async def abort_run(
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Metamorph Actor Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def metamorph_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to be transformed."),
     target_actor_id: str = Field(..., alias="targetActorId", description="The unique identifier of the target Actor that this run should be transformed into."),
@@ -3610,7 +3935,12 @@ async def metamorph_run(
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Reboot Actor Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reboot_actor_run(run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to reboot. The run must currently have a RUNNING status.")) -> dict[str, Any] | ToolResult:
     """Reboots a currently running Actor run by restarting its container, returning the updated run details. Only runs with a RUNNING status can be rebooted; any data not persisted to a key-value store, dataset, or request queue will be lost."""
 
@@ -3649,7 +3979,12 @@ async def reboot_actor_run(run_id: str = Field(..., alias="runId", description="
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Resurrect Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resurrect_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to resurrect."),
     build: str | None = Field(None, description="The Actor build to use for the resurrected run, specified as a build tag (e.g. 'latest') or a build number. If omitted, the run restarts with the exact build version it originally executed, even if a tag like 'latest' now points to a newer build."),
@@ -3697,7 +4032,12 @@ async def resurrect_run(
     return _response_data
 
 # Tags: Actor runs
-@mcp.tool()
+@mcp.tool(
+    title="Charge Run Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def charge_run_event(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to charge events against."),
     event_name: str = Field(..., alias="eventName", description="The name of the billing event to charge for, which must exactly match one of the events configured in the Actor's pay-per-event settings."),
@@ -3737,13 +4077,20 @@ async def charge_run_event(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="List Actor Builds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_builds(
     offset: float | None = Field(None, description="Number of builds to skip from the beginning of the result set, used for paginating through large result sets."),
     limit: float | None = Field(None, description="Maximum number of builds to return in a single response, capped at 1000 records."),
@@ -3786,7 +4133,13 @@ async def list_builds(
     return _response_data
 
 # Tags: Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="Get Actor Build",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_actor_build(
     build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to retrieve."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Maximum number of seconds the server will wait for the build to reach a terminal status before responding. Accepts values from 0 (default, return immediately) to 60. If the build finishes within the timeout, the response will reflect a terminal status such as SUCCEEDED; otherwise a transitional status such as RUNNING is returned."),
@@ -3829,7 +4182,13 @@ async def get_actor_build(
     return _response_data
 
 # Tags: Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="Delete Build",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_build(build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to delete, found in the build's Info tab.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific Actor build by its ID. The current default build for an Actor cannot be deleted; only users with build permissions for the Actor may perform this action."""
 
@@ -3868,7 +4227,13 @@ async def delete_build(build_id: str = Field(..., alias="buildId", description="
     return _response_data
 
 # Tags: Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="Abort Build",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def abort_build(build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to abort, available in the build's Info tab.")) -> dict[str, Any] | ToolResult:
     """Aborts a running or starting Actor build, immediately halting execution and returning the build's full details. Builds already in a terminal state (FINISHED, FAILED, ABORTING, TIMED-OUT) are unaffected by this call."""
 
@@ -3907,7 +4272,13 @@ async def abort_build(build_id: str = Field(..., alias="buildId", description="T
     return _response_data
 
 # Tags: Actor builds
-@mcp.tool()
+@mcp.tool(
+    title="Get Build Log",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_build_log(
     build_id: str = Field(..., alias="buildId", description="The unique identifier of the actor build whose log you want to retrieve."),
     stream: bool | None = Field(None, description="When set to true, the response will stream log output continuously as long as the build is still running, rather than returning a static snapshot."),
@@ -3950,7 +4321,13 @@ async def get_build_log(
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="List Key-Value Stores",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_key_value_stores(
     offset: float | None = Field(None, description="Number of stores to skip from the beginning of the result set, used for paginating through results."),
     limit: float | None = Field(None, description="Maximum number of stores to return in a single response. Accepts values up to 1000."),
@@ -3995,7 +4372,12 @@ async def list_key_value_stores(
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Create Key-Value Store",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_key_value_store(name: str | None = Field(None, description="Optional unique name for the store, making it easy to identify and retrieve later. If omitted, an unnamed store is created and subject to the platform's data retention policy.")) -> dict[str, Any] | ToolResult:
     """Creates a new key-value store and returns its store object. If a store with the specified name already exists, the existing store is returned instead of creating a duplicate."""
 
@@ -4034,7 +4416,13 @@ async def create_key_value_store(name: str | None = Field(None, description="Opt
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Get Key-Value Store",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_key_value_store(store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to retrieve, either as a store ID or in the format username~store-name.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details about a specific key-value store, including its configuration and metadata. Use this to inspect store properties before reading or writing data."""
 
@@ -4073,7 +4461,13 @@ async def get_key_value_store(store_id: str = Field(..., alias="storeId", descri
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Update Key-Value Store",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_key_value_store(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to update, either as a store ID or in the format username~store-name."),
     name: str | None = Field(None, description="The new name to assign to the key-value store."),
@@ -4113,13 +4507,20 @@ async def update_key_value_store(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Delete Key-Value Store",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_key_value_store(store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to delete, either as a store ID or in the format username~store-name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a key-value store and all of its contents. This action is irreversible and removes the store along with all stored key-value pairs."""
 
@@ -4158,7 +4559,13 @@ async def delete_key_value_store(store_id: str = Field(..., alias="storeId", des
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="List Key-Value Store Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_key_value_store_keys(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     exclusive_start_key: str | None = Field(None, alias="exclusiveStartKey", description="Pagination cursor — all keys up to and including this key are excluded from the results, allowing you to retrieve the next page of keys."),
@@ -4204,7 +4611,13 @@ async def list_key_value_store_keys(
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Get Key-Value Store Record",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_key_value_store_record(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key under which the record is stored in the key-value store."),
@@ -4248,7 +4661,13 @@ async def get_key_value_store_record(
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Put Store Record",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def put_store_record(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key under which the value will be stored; must be unique within the store and is used to retrieve the record later."),
@@ -4289,13 +4708,20 @@ async def put_store_record(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Delete Key-Value Store Record",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_key_value_store_record(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key identifying the specific record to delete within the store."),
@@ -4337,7 +4763,13 @@ async def delete_key_value_store_record(
     return _response_data
 
 # Tags: Storage/Key-value stores
-@mcp.tool()
+@mcp.tool(
+    title="Check Key-Value Store Record Exists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_key_value_store_record_exists(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key identifying the record to check for existence within the key-value store."),
@@ -4379,7 +4811,13 @@ async def check_key_value_store_record_exists(
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="List Datasets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_datasets(
     offset: float | None = Field(None, description="Number of datasets to skip from the beginning of the result set, used for pagination. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of datasets to return in a single response. Accepts values up to 1000, which is also the default."),
@@ -4424,7 +4862,12 @@ async def list_datasets(
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="Create Dataset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dataset(name: str | None = Field(None, description="Optional unique human-readable name for the dataset, allowing easy identification and retrieval in the future. If omitted, the dataset is unnamed and subject to the platform's data retention policy.")) -> dict[str, Any] | ToolResult:
     """Creates a new dataset for storing structured data and returns its object. If a name is provided and a dataset with that name already exists, the existing dataset object is returned instead."""
 
@@ -4463,7 +4906,13 @@ async def create_dataset(name: str | None = Field(None, description="Optional un
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="Get Dataset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dataset(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a standalone dataset ID or in the combined username~dataset-name format.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and storage information for a specific dataset by its ID. Note that item count fields may lag up to 5 seconds behind actual data; use the list dataset items endpoint to retrieve the dataset's contents."""
 
@@ -4502,7 +4951,13 @@ async def get_dataset(dataset_id: str = Field(..., alias="datasetId", descriptio
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="Update Dataset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dataset(
     dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset to update, either as a standalone dataset ID or in the format username~dataset-name."),
     name: str | None = Field(None, description="The new display name to assign to the dataset."),
@@ -4542,13 +4997,20 @@ async def update_dataset(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dataset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dataset(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset to delete, accepted either as a standalone dataset ID or as a combined username and dataset name in the format `username~dataset-name`.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific dataset and its associated data. This action is irreversible and removes the dataset from the account."""
 
@@ -4587,7 +5049,13 @@ async def delete_dataset(dataset_id: str = Field(..., alias="datasetId", descrip
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="List Dataset Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dataset_items(
     dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a dataset ID or in the format `username~dataset-name`."),
     format_: str | None = Field(None, alias="format", description="Output format for the response. Structured formats (`json`, `jsonl`, `xml`) return raw item objects; tabular formats (`html`, `csv`, `xlsx`) return rows and columns limited to 2000 columns with column names up to 200 characters; `rss` returns an RSS feed. Defaults to `json`."),
@@ -4644,7 +5112,12 @@ async def list_dataset_items(
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="Append Dataset Items",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_dataset_items(
     dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the target dataset, either as a dataset ID or in the format username~dataset-name."),
     body: list[_models.PutItemsRequest] | None = Field(None, description="A single JSON object or an array of JSON objects to append to the dataset in order; total payload must not exceed 5 MB, so split larger arrays into smaller batches."),
@@ -4684,13 +5157,20 @@ async def append_dataset_items(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Datasets
-@mcp.tool()
+@mcp.tool(
+    title="Get Dataset Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dataset_statistics(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a dataset ID or in the format username~dataset-name.")) -> dict[str, Any] | ToolResult:
     """Retrieves field-level statistics for a specified dataset. Returns aggregated metrics such as value counts, null rates, and type distributions for each field in the dataset."""
 
@@ -4729,7 +5209,13 @@ async def get_dataset_statistics(dataset_id: str = Field(..., alias="datasetId",
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="List Request Queues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_request_queues(
     offset: float | None = Field(None, description="Number of queues to skip from the beginning of the result set, used for pagination. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of queues to return in a single response. Accepts values up to 1000, which is also the default."),
@@ -4774,7 +5260,12 @@ async def list_request_queues(
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="Create Request Queue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_request_queue(name: str | None = Field(None, description="Optional unique name for the request queue, allowing easy identification and retrieval in the future. If omitted, an unnamed queue is created and subject to data retention limits.")) -> dict[str, Any] | ToolResult:
     """Creates a new request queue and returns its object, or returns the existing queue object if a queue with the given name already exists. Unnamed queues are subject to the platform's data retention policy."""
 
@@ -4813,7 +5304,13 @@ async def create_request_queue(name: str | None = Field(None, description="Optio
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="Get Request Queue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_request_queue(queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to retrieve. Accepts either the queue's ID or a combined username and queue name in the format username~queue-name.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and configuration details for a specific request queue. Returns the full queue object including its properties and current state."""
 
@@ -4852,7 +5349,13 @@ async def get_request_queue(queue_id: str = Field(..., alias="queueId", descript
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="Update Request Queue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_request_queue(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to update, either as a queue ID or in the format username~queue-name."),
     body: _models.RequestQueuePutBody | None = Field(None, description="JSON object containing the fields to update on the request queue, such as its name or general resource access level."),
@@ -4892,13 +5395,20 @@ async def update_request_queue(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="Delete Request Queue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_request_queue(queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to delete, either as a queue ID or in the format username~queue-name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a request queue and all its associated data. This action is irreversible and removes the queue identified by its ID or name."""
 
@@ -4937,7 +5447,12 @@ async def delete_request_queue(queue_id: str = Field(..., alias="queueId", descr
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="Batch Add Requests",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def batch_add_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the target request queue, either as a queue ID or in the format username~queue-name."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the calling client, used to detect whether the queue is being accessed by multiple clients simultaneously. Omitting this value causes the system to treat the call as originating from a new client."),
@@ -4980,13 +5495,20 @@ async def batch_add_requests(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Request queues
-@mcp.tool()
+@mcp.tool(
+    title="Batch Delete Queue Requests",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def batch_delete_queue_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be set to application/json."),
@@ -5030,13 +5552,19 @@ async def batch_delete_queue_requests(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Request queues/Requests locks
-@mcp.tool()
+@mcp.tool(
+    title="Unlock Queue Requests",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unlock_queue_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the client accessing the queue, used to track whether multiple clients have accessed the same queue. If omitted, the system treats the request as originating from a new client."),
@@ -5079,7 +5607,13 @@ async def unlock_queue_requests(
     return _response_data
 
 # Tags: Storage/Request queues/Requests
-@mcp.tool()
+@mcp.tool(
+    title="List Queue Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_queue_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     exclusive_start_id: str | None = Field(None, alias="exclusiveStartId", description="Cursor for pagination — all requests up to and including this request ID are excluded from the results, returning only subsequent requests."),
@@ -5123,7 +5657,12 @@ async def list_queue_requests(
     return _response_data
 
 # Tags: Storage/Request queues/Requests
-@mcp.tool()
+@mcp.tool(
+    title="Add Queue Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_queue_request(
     queue_id: str = Field(..., alias="queueId", description="The ID of the target request queue, or a combined identifier in the format username~queue-name."),
     unique_key: str = Field(..., alias="uniqueKey", description="A unique key used to deduplicate requests — requests sharing the same uniqueKey are treated as identical and will not be added twice."),
@@ -5167,13 +5706,20 @@ async def add_queue_request(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Request queues/Requests
-@mcp.tool()
+@mcp.tool(
+    title="Get Queue Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_queue_request(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     request_id: str = Field(..., alias="requestId", description="The unique identifier of the request to retrieve from the specified queue."),
@@ -5215,7 +5761,13 @@ async def get_queue_request(
     return _response_data
 
 # Tags: Storage/Request queues/Requests
-@mcp.tool()
+@mcp.tool(
+    title="Update Queue Request",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_queue_request(
     queue_id: str = Field(..., alias="queueId", description="The ID of the request queue, either as a direct queue ID or in the format `username~queue-name`."),
     request_id: str = Field(..., alias="requestId", description="The unique ID of the request to update within the queue."),
@@ -5267,13 +5819,20 @@ async def update_queue_request(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Storage/Request queues/Requests
-@mcp.tool()
+@mcp.tool(
+    title="Delete Queue Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_queue_request(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     request_id: str = Field(..., alias="requestId", description="The unique identifier of the request to delete from the queue."),
@@ -5317,7 +5876,13 @@ async def delete_queue_request(
     return _response_data
 
 # Tags: Storage/Request queues/Requests locks
-@mcp.tool()
+@mcp.tool(
+    title="Get Request Queue Head",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_request_queue_head(
     queue_id: str = Field(..., alias="queueId", description="The unique ID of the request queue, or a combined identifier in the format `username~queue-name`."),
     limit: float | None = Field(None, description="The maximum number of requests to return from the head of the queue. If omitted, a default limit is applied."),
@@ -5361,7 +5926,12 @@ async def get_request_queue_head(
     return _response_data
 
 # Tags: Storage/Request queues/Requests locks
-@mcp.tool()
+@mcp.tool(
+    title="Lock Queue Head Requests",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def lock_queue_head_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     lock_secs: float = Field(..., alias="lockSecs", description="The duration in seconds for which the retrieved requests will be locked and unavailable to other clients or runs."),
@@ -5406,7 +5976,12 @@ async def lock_queue_head_requests(
     return _response_data
 
 # Tags: Storage/Request queues/Requests locks
-@mcp.tool()
+@mcp.tool(
+    title="Prolong Request Lock",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def prolong_request_lock(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     request_id: str = Field(..., alias="requestId", description="The unique identifier of the request whose lock you want to prolong."),
@@ -5452,7 +6027,13 @@ async def prolong_request_lock(
     return _response_data
 
 # Tags: Storage/Request queues/Requests locks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Request Lock",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_request_lock(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     request_id: str = Field(..., alias="requestId", description="The unique identifier of the request whose lock should be deleted."),
@@ -5499,7 +6080,13 @@ async def delete_request_lock(
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(
     offset: float | None = Field(None, description="Number of records to skip from the beginning of the result set, used for paginating through results."),
     limit: float | None = Field(None, description="Maximum number of webhook records to return in a single request, with an upper bound of 1000."),
@@ -5542,7 +6129,12 @@ async def list_webhooks(
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Create Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook(
     event_types: list[Literal["ACTOR.BUILD.ABORTED", "ACTOR.BUILD.CREATED", "ACTOR.BUILD.FAILED", "ACTOR.BUILD.SUCCEEDED", "ACTOR.BUILD.TIMED_OUT", "ACTOR.RUN.ABORTED", "ACTOR.RUN.CREATED", "ACTOR.RUN.FAILED", "ACTOR.RUN.RESURRECTED", "ACTOR.RUN.SUCCEEDED", "ACTOR.RUN.TIMED_OUT", "TEST"]] = Field(..., alias="eventTypes", description="List of event types that will trigger this webhook. Each item must be a valid Apify event string (e.g., ACTOR.RUN.SUCCEEDED, ACTOR.RUN.FAILED, ACTOR.RUN.ABORTED). Order is not significant."),
     request_url: str = Field(..., alias="requestUrl", description="The target URL to which webhook event data is sent as an HTTP POST request with a JSON payload. Must be a valid absolute URI."),
@@ -5592,13 +6184,20 @@ async def create_webhook(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details of a specific webhook by its unique identifier. Returns all webhook configuration and metadata."""
 
@@ -5637,7 +6236,13 @@ async def get_webhook(webhook_id: str = Field(..., alias="webhookId", descriptio
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook(
     webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to update."),
     is_ad_hoc: bool | None = Field(None, alias="isAdHoc", description="Indicates whether the webhook is ad hoc (created for a single run) rather than a persistent webhook."),
@@ -5688,13 +6293,20 @@ async def update_webhook(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook by its unique identifier. This action is irreversible and will stop all event notifications associated with the webhook."""
 
@@ -5733,7 +6345,12 @@ async def delete_webhook(webhook_id: str = Field(..., alias="webhookId", descrip
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Test Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def test_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to test.")) -> dict[str, Any] | ToolResult:
     """Sends a test dispatch to the specified webhook using a dummy payload. Useful for verifying that the webhook endpoint is correctly configured and reachable."""
 
@@ -5772,7 +6389,13 @@ async def test_webhook(webhook_id: str = Field(..., alias="webhookId", descripti
     return _response_data
 
 # Tags: Webhooks/Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Dispatches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_dispatches_by_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook whose dispatch history you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of dispatch records for a specific webhook, showing its delivery history and execution events."""
 
@@ -5811,7 +6434,13 @@ async def list_webhook_dispatches_by_webhook(webhook_id: str = Field(..., alias=
     return _response_data
 
 # Tags: Webhooks/Webhook dispatches
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Dispatches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_dispatches(
     offset: float | None = Field(None, description="Number of records to skip from the beginning of the result set, used for paginating through results. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of webhook dispatch records to return in a single response. Accepts values up to 1000, which is also the default."),
@@ -5854,7 +6483,13 @@ async def list_webhook_dispatches(
     return _response_data
 
 # Tags: Webhooks/Webhook dispatches
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Dispatch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_dispatch(dispatch_id: str = Field(..., alias="dispatchId", description="The unique identifier of the webhook dispatch record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a webhook dispatch record by its unique ID, returning full details about the dispatch event, status, and payload."""
 
@@ -5893,7 +6528,13 @@ async def get_webhook_dispatch(dispatch_id: str = Field(..., alias="dispatchId",
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="List Schedules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedules(
     offset: float | None = Field(None, description="Number of schedules to skip from the beginning of the result set, used for paginating through records."),
     limit: float | None = Field(None, description="Maximum number of schedules to return in a single request, capped at 1000."),
@@ -5936,7 +6577,12 @@ async def list_schedules(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Create Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schedule(
     name: str | None = Field(None, description="Unique identifier name for the schedule, used to reference it programmatically."),
     is_enabled: bool | None = Field(None, alias="isEnabled", description="Controls whether the schedule is active and will trigger at its configured times. Set to false to create the schedule in a paused state."),
@@ -5980,13 +6626,20 @@ async def create_schedule(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a schedule object with all associated details by its unique identifier. Use this to inspect scheduling configuration, timing, and related metadata for a specific schedule."""
 
@@ -6025,7 +6678,13 @@ async def get_schedule(schedule_id: str = Field(..., alias="scheduleId", descrip
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule(
     schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to update."),
     name: str | None = Field(None, description="A short machine-friendly identifier for the schedule, typically used for referencing it programmatically."),
@@ -6071,13 +6730,20 @@ async def update_schedule(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a schedule by its unique identifier. This action cannot be undone."""
 
@@ -6116,7 +6782,13 @@ async def delete_schedule(schedule_id: str = Field(..., alias="scheduleId", desc
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule Log",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule_log(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule whose invocation log you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the execution log for a specific schedule, returning a JSON array of up to 1000 recent invocation records. Useful for auditing schedule activity and diagnosing execution history."""
 
@@ -6155,7 +6827,13 @@ async def get_schedule_log(schedule_id: str = Field(..., alias="scheduleId", des
     return _response_data
 
 # Tags: Store
-@mcp.tool()
+@mcp.tool(
+    title="List Store Actors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_store_actors(
     limit: float | None = Field(None, description="Maximum number of Actors to return in a single response. Accepts values up to 1,000."),
     offset: float | None = Field(None, description="Number of Actors to skip from the beginning of the result set, used for paginating through results."),
@@ -6203,7 +6881,13 @@ async def list_store_actors(
     return _response_data
 
 # Tags: Logs
-@mcp.tool()
+@mcp.tool(
+    title="Get Run Log",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_run_log(
     build_or_run_id: str = Field(..., alias="buildOrRunId", description="The unique identifier of the Actor build or run whose logs you want to retrieve."),
     stream: bool | None = Field(None, description="When set to true, the response streams log output continuously while the build or run is still active, rather than returning a static snapshot."),
@@ -6247,7 +6931,13 @@ async def get_run_log(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(user_id: str = Field(..., alias="userId", description="The unique identifier or username of the user whose public profile data should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves public profile information for a specific user account, equivalent to what is visible on their public profile page. No authentication is required to call this endpoint."""
 
@@ -6286,7 +6976,13 @@ async def get_user(user_id: str = Field(..., alias="userId", description="The un
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves both public and private profile data for the authenticated user account identified by the provided token. Note that plan, email, and profile fields are excluded when accessed from within an Actor run."""
 
@@ -6316,7 +7012,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Monthly Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monthly_usage(date: str | None = Field(None, description="The date within the billing cycle you want to retrieve usage for, in YYYY-MM-DD format. If omitted, the current billing cycle is returned.")) -> dict[str, Any] | ToolResult:
     """Retrieves a complete summary of your usage for the current or a specified billing cycle, including storage, data transfer, and request queue usage with both an overall total and a daily breakdown."""
 
@@ -6355,7 +7057,13 @@ async def get_monthly_usage(date: str | None = Field(None, description="The date
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Limits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_limits() -> dict[str, Any] | ToolResult:
     """Retrieves a complete summary of the authenticated account's limits, current usage cycle, and usage statistics, equivalent to the Limits page in the Apify console."""
 

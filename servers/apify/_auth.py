@@ -1,7 +1,7 @@
 """
 Authentication module for Apify MCP server.
 
-Generated: 2026-05-05 14:12:50 UTC
+Generated: 2026-05-11 22:59:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

@@ -5,7 +5,7 @@ Base URL: https://api.apify.com/v2
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 112 |
+| **Tools** | 110 |
 | **Auth** | Bearer Token, API Key |
 
 ## API Info
@@ -59,6 +59,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BEARER_TOKEN` — Bearer token
 - `API_KEY` — API Key Authentication (token)
+
 Do not commit credentials to version control.
 
 ---
