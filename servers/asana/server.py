@@ -7,7 +7,7 @@ API Info:
 - Contact: Asana Support (https://asana.com/support)
 - Terms of Service: https://asana.com/terms
 
-Generated: 2026-05-05 14:16:23 UTC
+Generated: 2026-05-11 23:03:37 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -43,11 +44,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.asana.com/api/1.0")
 SERVER_NAME = "Asana"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -988,6 +1019,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1012,6 +1045,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1228,7 +1263,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Asana", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Access requests
-@mcp.tool()
+@mcp.tool(
+    title="List Access Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_access_requests(
     target: str = Field(..., description="The globally unique identifier of the target object for which to retrieve pending access requests."),
     user: str | None = Field(None, description="Filters results to access requests submitted by a specific user. Accepts the literal string 'me' for the authenticated user, a user's email address, or a user's globally unique identifier."),
@@ -1269,7 +1310,12 @@ async def list_access_requests(
     return _response_data
 
 # Tags: Access requests
-@mcp.tool()
+@mcp.tool(
+    title="Request Access",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_access(
     target: str = Field(..., description="The unique global ID (gid) of the private object you are requesting access to. Supports projects and portfolios."),
     message: str | None = Field(None, description="An optional message to accompany the access request, allowing the requester to provide context or justification for why access is needed."),
@@ -1304,13 +1350,19 @@ async def request_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Access requests
-@mcp.tool()
+@mcp.tool(
+    title="Approve Access Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_access_request(access_request_gid: str = Field(..., description="The globally unique identifier of the access request to approve.")) -> dict[str, Any] | ToolResult:
     """Approves a pending access request, granting the requester access to the associated target object. Use this to fulfill access requests that have been reviewed and authorized."""
 
@@ -1346,7 +1398,13 @@ async def approve_access_request(access_request_gid: str = Field(..., descriptio
     return _response_data
 
 # Tags: Access requests
-@mcp.tool()
+@mcp.tool(
+    title="Reject Access Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reject_access_request(access_request_gid: str = Field(..., description="The globally unique identifier of the access request to reject.")) -> dict[str, Any] | ToolResult:
     """Rejects a pending access request for a target object, denying the requester permission to access the resource. Use this to explicitly decline access requests that should not be granted."""
 
@@ -1382,7 +1440,13 @@ async def reject_access_request(access_request_gid: str = Field(..., description
     return _response_data
 
 # Tags: Allocations
-@mcp.tool()
+@mcp.tool(
+    title="Get Allocation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_allocation(allocation_gid: str = Field(..., description="The globally unique identifier for the allocation you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single allocation, including all associated details and metadata. Use this to fetch full information about a specific allocation by its unique identifier."""
 
@@ -1418,7 +1482,13 @@ async def get_allocation(allocation_gid: str = Field(..., description="The globa
     return _response_data
 
 # Tags: Allocations
-@mcp.tool()
+@mcp.tool(
+    title="Update Allocation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_allocation(
     allocation_gid: str = Field(..., description="The globally unique identifier of the allocation to update."),
     data: _models.AllocationRequest | None = Field(None, description="An object containing the allocation fields to update; only the fields included will be modified, all other fields will retain their current values."),
@@ -1454,13 +1524,20 @@ async def update_allocation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Allocations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Allocation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_allocation(allocation_gid: str = Field(..., description="The globally unique identifier of the allocation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing allocation by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -1496,7 +1573,13 @@ async def delete_allocation(allocation_gid: str = Field(..., description="The gl
     return _response_data
 
 # Tags: Allocations
-@mcp.tool()
+@mcp.tool(
+    title="List Allocations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_allocations(
     parent: str | None = Field(None, description="The unique identifier of the project to filter allocations by, returning only allocations associated with that project."),
     assignee: str | None = Field(None, description="The unique identifier of the user or placeholder to filter allocations by, returning only allocations assigned to that individual or placeholder resource."),
@@ -1538,7 +1621,12 @@ async def list_allocations(
     return _response_data
 
 # Tags: Allocations
-@mcp.tool()
+@mcp.tool(
+    title="Create Allocation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_allocation(data: _models.CreateAllocationBodyData | None = Field(None, description="The allocation data to create, including all relevant fields for the new allocation record.")) -> dict[str, Any] | ToolResult:
     """Creates a new allocation and returns the full record of the newly created allocation."""
 
@@ -1570,13 +1658,20 @@ async def create_allocation(data: _models.CreateAllocationBodyData | None = Fiel
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Get Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_attachment(attachment_gid: str = Field(..., description="The globally unique identifier of the attachment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a single attachment, including its metadata and download URL. Requires the attachments:read scope."""
 
@@ -1612,7 +1707,13 @@ async def get_attachment(attachment_gid: str = Field(..., description="The globa
     return _response_data
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attachment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attachment(attachment_gid: str = Field(..., description="The globally unique identifier (GID) of the attachment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific attachment by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -1648,7 +1749,13 @@ async def delete_attachment(attachment_gid: str = Field(..., description="The gl
     return _response_data
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="List Attachments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_attachments(parent: str = Field(..., description="The globally unique identifier (GID) of the parent object whose attachments you want to retrieve. Must reference a project, project brief, or task.")) -> dict[str, Any] | ToolResult:
     """Retrieves all attachments associated with a specified project, project brief, or task. For projects, this returns files in the 'Key resources' section; for tasks, this includes all associated files including inline images."""
 
@@ -1686,10 +1793,15 @@ async def list_attachments(parent: str = Field(..., description="The globally un
     return _response_data
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Upload Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_attachment(
     resource_subtype: Literal["asana", "external"] | None = Field(None, description="Specifies the attachment type. Use 'asana' for direct file uploads or 'external' for linking an external URL resource. When set to 'external', the 'parent', 'name', and 'url' fields are also required."),
-    file_: str | None = Field(None, alias="file", description="The binary file content to upload. Required when 'resource_subtype' is 'asana' (direct file upload). Files from third-party services such as Dropbox, Box, Vimeo, or Google Drive cannot be attached via the API."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. The binary file content to upload. Required when 'resource_subtype' is 'asana' (direct file upload). Files from third-party services such as Dropbox, Box, Vimeo, or Google Drive cannot be attached via the API.", json_schema_extra={'format': 'byte'}),
     parent: str | None = Field(None, description="The unique identifier (GID) of the parent object to attach to — must be a task, project, or project brief. Required for all attachment types."),
     url: str | None = Field(None, description="The publicly accessible URL of the external resource to attach. Required when 'resource_subtype' is 'external'."),
     name: str | None = Field(None, description="A display name for the external resource being attached. Required when 'resource_subtype' is 'external'."),
@@ -1733,7 +1845,13 @@ async def upload_attachment(
     return _response_data
 
 # Tags: Audit log API
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Log Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_log_events(
     workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization whose audit log events you want to retrieve."),
     start_at: str | None = Field(None, description="Restricts results to events created at or after this timestamp. Must be provided in ISO 8601 date-time format. Note that events before October 8th, 2021 are not available."),
@@ -1781,7 +1899,13 @@ async def list_audit_log_events(
     return _response_data
 
 # Tags: Budgets
-@mcp.tool()
+@mcp.tool(
+    title="List Budgets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_budgets(parent: str = Field(..., description="The globally unique identifier of the parent object whose budgets should be retrieved. Currently only project identifiers are supported as valid parents.")) -> dict[str, Any] | ToolResult:
     """Retrieves all budgets associated with a given parent object. Returns at most one budget per parent, which must be a project."""
 
@@ -1819,7 +1943,12 @@ async def list_budgets(parent: str = Field(..., description="The globally unique
     return _response_data
 
 # Tags: Budgets
-@mcp.tool()
+@mcp.tool(
+    title="Create Budget",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_budget(data: _models.BudgetRequest | None = Field(None, description="The budget object containing all required fields to define the new budget, such as name, amount, currency, and associated scope or time period.")) -> dict[str, Any] | ToolResult:
     """Creates a new budget with the specified configuration. Use this to define spending limits and tracking parameters for a project, team, or time period."""
 
@@ -1851,13 +1980,20 @@ async def create_budget(data: _models.BudgetRequest | None = Field(None, descrip
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Budgets
-@mcp.tool()
+@mcp.tool(
+    title="Get Budget",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_budget(budget_gid: str = Field(..., description="The globally unique identifier of the budget to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single budget, including all associated details and metadata. Use this to inspect a specific budget by its unique identifier."""
 
@@ -1893,7 +2029,13 @@ async def get_budget(budget_gid: str = Field(..., description="The globally uniq
     return _response_data
 
 # Tags: Budgets
-@mcp.tool()
+@mcp.tool(
+    title="Update Budget",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_budget(
     budget_gid: str = Field(..., description="The globally unique identifier of the budget to update."),
     data: _models.BudgetRequest | None = Field(None, description="An object containing the budget fields to update; only the fields included will be modified, all others will retain their current values."),
@@ -1929,13 +2071,20 @@ async def update_budget(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Budgets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Budget",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_budget(budget_gid: str = Field(..., description="The globally unique identifier of the budget to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing budget by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -1971,7 +2120,13 @@ async def delete_budget(budget_gid: str = Field(..., description="The globally u
     return _response_data
 
 # Tags: Custom field settings
-@mcp.tool()
+@mcp.tool(
+    title="List Project Custom Field Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_custom_field_settings(
     project_gid: str = Field(..., description="The globally unique identifier of the project whose custom field settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field settings to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -2013,7 +2168,13 @@ async def list_project_custom_field_settings(
     return _response_data
 
 # Tags: Custom field settings
-@mcp.tool()
+@mcp.tool(
+    title="List Portfolio Custom Field Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_portfolio_custom_field_settings(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio whose custom field settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field setting objects to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -2055,7 +2216,13 @@ async def list_portfolio_custom_field_settings(
     return _response_data
 
 # Tags: Custom field settings
-@mcp.tool()
+@mcp.tool(
+    title="List Goal Custom Field Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goal_custom_field_settings(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal whose custom field settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field settings to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -2097,7 +2264,13 @@ async def list_goal_custom_field_settings(
     return _response_data
 
 # Tags: Custom field settings
-@mcp.tool()
+@mcp.tool(
+    title="List Team Custom Field Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_custom_field_settings(team_gid: str = Field(..., description="The globally unique identifier for the team whose custom field settings you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all custom field settings associated with a specific team, returned in compact form. Use opt_fields to request additional field data beyond the default compact representation."""
 
@@ -2133,7 +2306,12 @@ async def list_team_custom_field_settings(team_gid: str = Field(..., description
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Create Custom Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_custom_field(data: _models.CustomFieldCreateRequest | None = Field(None, description="The request body containing the custom field definition, including required properties such as workspace, name, and type (one of: text, enum, multi_enum, number, date, or people).")) -> dict[str, Any] | ToolResult:
     """Creates a new custom field within a specified workspace, supporting types such as text, enum, multi_enum, number, date, or people. The field name must be unique within the workspace and cannot conflict with existing task property names."""
 
@@ -2165,13 +2343,20 @@ async def create_custom_field(data: _models.CustomFieldCreateRequest | None = Fi
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_field(custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete metadata definition for a specific custom field, including type-specific properties such as enum options, validation rules, and display settings."""
 
@@ -2207,7 +2392,13 @@ async def get_custom_field(custom_field_gid: str = Field(..., description="The g
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_field(
     custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to update."),
     data: _models.CustomFieldRequest | None = Field(None, description="An object containing only the custom field properties you wish to update; omitted fields retain their current values."),
@@ -2243,13 +2434,20 @@ async def update_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_field(custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing custom field by its unique identifier. Note that locked custom fields can only be deleted by the user who originally locked the field."""
 
@@ -2285,7 +2483,13 @@ async def delete_custom_field(custom_field_gid: str = Field(..., description="Th
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_custom_fields(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose custom fields you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field records to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -2327,7 +2531,12 @@ async def list_workspace_custom_fields(
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Create Enum Option",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_enum_option(
     custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to which the new enum option will be added."),
     data: _models.EnumOptionRequest | None = Field(None, description="The payload defining the new enum option's properties, such as its name, color, and enabled state."),
@@ -2363,13 +2572,19 @@ async def create_enum_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Enum Option",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_enum_option(
     custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field whose enum options are being reordered."),
     enum_option: str | None = Field(None, description="The unique identifier of the enum option to move to a new position within the custom field."),
@@ -2407,13 +2622,20 @@ async def reorder_enum_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom fields
-@mcp.tool()
+@mcp.tool(
+    title="Update Enum Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_enum_option(
     enum_option_gid: str = Field(..., description="The globally unique identifier of the enum option to update."),
     name: str | None = Field(None, description="The display name of the enum option as it appears in the custom field."),
@@ -2451,13 +2673,20 @@ async def update_enum_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom types
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_types(
     project: str = Field(..., description="The globally unique identifier of the project whose associated custom types you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom types to return per page. Accepts values between 1 and 100 inclusive.", ge=1, le=100),
@@ -2498,7 +2727,13 @@ async def list_custom_types(
     return _response_data
 
 # Tags: Custom types
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_type(custom_type_gid: str = Field(..., description="The globally unique identifier of the custom type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single custom type by its unique identifier. Use this to inspect the full definition and configuration of a specific custom type."""
 
@@ -2534,7 +2769,13 @@ async def get_custom_type(custom_type_gid: str = Field(..., description="The glo
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Resource Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_resource_events(
     resource: str = Field(..., description="The unique ID of the resource (task, project, or goal) whose events you want to retrieve."),
     sync: str | None = Field(None, description="A sync token from a previous response used to fetch only new events since that point in time. Omit on the first request to receive a fresh sync token; if the token has expired (HTTP 412), use the new token returned in that error response to resume."),
@@ -2575,7 +2816,12 @@ async def list_resource_events(
     return _response_data
 
 # Tags: Exports
-@mcp.tool()
+@mcp.tool(
+    title="Export Graph",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_graph(parent: str | None = Field(None, description="The globally unique ID of the parent object (goal, project, portfolio, or team) whose graph data should be exported.")) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous graph export job for a goal, team, portfolio, or project. Use the jobs endpoint to monitor progress; exports exceeding 1,000 tasks are cached for 4 hours, with subsequent requests returning the cached result."""
 
@@ -2607,13 +2853,19 @@ async def export_graph(parent: str | None = Field(None, description="The globall
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Exports
-@mcp.tool()
+@mcp.tool(
+    title="Create Resource Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_resource_export(
     workspace: str | None = Field(None, description="The GID of the workspace whose resources will be exported. Only one in-progress export is permitted per workspace at a time."),
     export_request_parameters: list[_models.ResourceExportRequestParameter] | None = Field(None, description="An array of export request parameter objects, where each object specifies a resource GID and its associated export options (such as filters and fields). Providing multiple entries for the same resource type achieves a disjunctive filter but may produce duplicate results. Order is not significant."),
@@ -2648,13 +2900,20 @@ async def create_resource_export(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goal relationships
-@mcp.tool()
+@mcp.tool(
+    title="Get Goal Relationship",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_goal_relationship(goal_relationship_gid: str = Field(..., description="The unique identifier of the goal relationship to retrieve. This ID is returned when a goal relationship is created or listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single goal relationship, including details about how two goals are linked. Use this to inspect the nature and status of a specific goal-to-goal connection."""
 
@@ -2690,7 +2949,13 @@ async def get_goal_relationship(goal_relationship_gid: str = Field(..., descript
     return _response_data
 
 # Tags: Goal relationships
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal Relationship",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal_relationship(
     goal_relationship_gid: str = Field(..., description="The globally unique identifier of the goal relationship to update."),
     data: _models.GoalRelationshipRequest | None = Field(None, description="The fields to update on the goal relationship; only provided fields will be modified, all others remain unchanged."),
@@ -2726,13 +2991,20 @@ async def update_goal_relationship(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goal relationships
-@mcp.tool()
+@mcp.tool(
+    title="List Goal Relationships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goal_relationships(
     supported_goal: str = Field(..., description="The globally unique identifier of the supported goal whose relationships you want to retrieve. This is a required field that scopes the results to a specific goal."),
     limit: int | None = Field(None, description="The maximum number of goal relationship records to return per page, between 1 and 100.", ge=1, le=100),
@@ -2774,7 +3046,12 @@ async def list_goal_relationships(
     return _response_data
 
 # Tags: Goal relationships
-@mcp.tool()
+@mcp.tool(
+    title="Add Goal Supporting Relationship",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_goal_supporting_relationship(
     goal_gid: str = Field(..., description="The unique identifier of the parent goal to which the supporting resource will be linked."),
     supporting_resource: str = Field(..., description="The unique identifier of the resource to add as a supporting relationship to the parent goal. Must be the GID of a goal, project, task, or portfolio."),
@@ -2813,13 +3090,20 @@ async def add_goal_supporting_relationship(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goal relationships
-@mcp.tool()
+@mcp.tool(
+    title="Remove Goal Supporting Relationship",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_goal_supporting_relationship(
     goal_gid: str = Field(..., description="The unique identifier of the parent goal from which the supporting relationship will be removed."),
     supporting_resource: str = Field(..., description="The unique identifier of the supporting resource to unlink from the parent goal; must be the identifier of a goal, project, task, or portfolio."),
@@ -2855,13 +3139,20 @@ async def remove_goal_supporting_relationship(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Get Goal",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_goal(goal_gid: str = Field(..., description="The globally unique identifier of the goal to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single goal, including all associated fields and metadata. Requires the goals:read scope, with additional time_periods:read scope needed to access the time_period field."""
 
@@ -2897,7 +3188,13 @@ async def get_goal(goal_gid: str = Field(..., description="The globally unique i
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal to update."),
     data: _models.GoalUpdateRequest | None = Field(None, description="An object containing the goal fields to update; only the fields included will be modified, all unspecified fields retain their current values."),
@@ -2933,13 +3230,20 @@ async def update_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Delete Goal",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_goal(goal_gid: str = Field(..., description="The globally unique identifier of the goal to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing goal by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -2975,7 +3279,13 @@ async def delete_goal(goal_gid: str = Field(..., description="The globally uniqu
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="List Goals",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goals(
     portfolio: str | None = Field(None, description="The globally unique identifier of a portfolio to filter goals that support it."),
     project: str | None = Field(None, description="The globally unique identifier of a project to filter goals that support it."),
@@ -3021,7 +3331,12 @@ async def list_goals(
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Create Goal",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_goal(data: _models.GoalRequest | None = Field(None, description="The goal object containing the details for the new goal, such as name, owner, due date, and associated workspace or team.")) -> dict[str, Any] | ToolResult:
     """Creates a new goal within a specified workspace or team. Returns the full record of the newly created goal."""
 
@@ -3053,13 +3368,20 @@ async def create_goal(data: _models.GoalRequest | None = Field(None, description
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Set Goal Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_goal_metric(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal to which the metric will be attached."),
     precision: int | None = Field(None, description="Only applicable for metrics of type Number. Specifies the number of decimal places to display, where 0 means integer values, 1 rounds to the nearest tenth, and so on. Must be between 0 and 6 inclusive. Note: for percentage format, the precision applies to the raw decimal value before conversion to a percentage display."),
@@ -3102,13 +3424,20 @@ async def set_goal_metric(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal Metric Value",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal_metric_value(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal whose metric value you want to update."),
     current_number_value: float | None = Field(None, description="The new current value to record for the goal's numeric metric, reflecting the latest progress toward the goal's target."),
@@ -3144,13 +3473,19 @@ async def update_goal_metric_value(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Add Goal Followers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_goal_followers(
     goal_gid: str = Field(..., description="The unique identifier of the goal to which followers will be added."),
     followers: list[str] = Field(..., description="A list of users to add as followers to the goal. Each item can be the string 'me' to reference the authenticated user, a user's email address, or a user's GID. Order is not significant."),
@@ -3186,13 +3521,20 @@ async def add_goal_followers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Remove Goal Followers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_goal_followers(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal from which followers will be removed."),
     followers: list[str] = Field(..., description="A list of users to remove as followers from the goal. Each item can be the string 'me' to reference the authenticated user, a user's email address, or a user's globally unique identifier (gid). Order is not significant."),
@@ -3228,13 +3570,20 @@ async def remove_goal_followers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="List Parent Goals",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_parent_goals(goal_gid: str = Field(..., description="The globally unique identifier of the goal whose parent goals you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of all parent goals associated with a specified goal. Useful for traversing goal hierarchies and understanding how a goal rolls up into broader objectives."""
 
@@ -3270,7 +3619,12 @@ async def list_parent_goals(goal_gid: str = Field(..., description="The globally
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Add Custom Field to Goal",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_custom_field_to_goal(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal to which the custom field setting will be added."),
     custom_field: str | _models.CustomFieldCreateRequest = Field(..., description="The globally unique identifier of the custom field to associate with the goal."),
@@ -3309,13 +3663,20 @@ async def add_custom_field_to_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Remove Custom Field from Goal",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_custom_field_from_goal(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal from which the custom field setting will be removed."),
     custom_field: str = Field(..., description="The globally unique identifier of the custom field to remove from the goal."),
@@ -3351,13 +3712,20 @@ async def remove_custom_field_from_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Jobs
-@mcp.tool()
+@mcp.tool(
+    title="Get Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_job(job_gid: str = Field(..., description="The globally unique identifier of the job to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a specific asynchronous job by its unique identifier. Useful for polling job status and accessing output resources such as new tasks, projects, portfolios, or templates created by the job."""
 
@@ -3393,7 +3761,13 @@ async def get_job(job_gid: str = Field(..., description="The globally unique ide
     return _response_data
 
 # Tags: Memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_memberships(
     parent: str | None = Field(None, description="The globally unique identifier of the parent resource to retrieve memberships for; accepted parent types are goal, project, portfolio, custom_type, or custom_field. Optional when both member and resource_subtype are provided together."),
     member: str | None = Field(None, description="The globally unique identifier of a user or team to filter memberships by; when combined with resource_subtype and no parent is specified, returns all memberships of that subtype for this member."),
@@ -3435,7 +3809,12 @@ async def list_memberships(
     return _response_data
 
 # Tags: Memberships
-@mcp.tool()
+@mcp.tool(
+    title="Create Membership",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_membership(data: _models.CreateMembershipRequest | None = Field(None, description="The membership details including the resource to join (goal, project, portfolio, custom type, or custom field) and the member to add (Team or User).")) -> dict[str, Any] | ToolResult:
     """Creates a new membership linking a Team or User to a goal, project, portfolio, custom type, or custom field. Returns the full record of the newly created membership."""
 
@@ -3467,13 +3846,20 @@ async def create_membership(data: _models.CreateMembershipRequest | None = Field
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_membership(membership_gid: str = Field(..., description="The globally unique identifier of the membership record to retrieve, applicable across all membership types (project, goal, portfolio, custom type, or custom field).")) -> dict[str, Any] | ToolResult:
     """Retrieves a single membership record by its unique identifier, returning details for any supported membership type including project, goal, portfolio, custom type, or custom field memberships."""
 
@@ -3509,7 +3895,13 @@ async def get_membership(membership_gid: str = Field(..., description="The globa
     return _response_data
 
 # Tags: Memberships
-@mcp.tool()
+@mcp.tool(
+    title="Update Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_membership(
     membership_gid: str = Field(..., description="The globally unique identifier of the membership to update."),
     access_level: str | None = Field(None, description="The access level to assign to the member. Valid values vary by resource type: goals support 'viewer', 'commenter', 'editor', or 'admin'; projects support 'admin', 'editor', or 'commenter'; portfolios support 'admin', 'editor', or 'viewer'; custom fields support 'admin', 'editor', or 'user'."),
@@ -3545,13 +3937,20 @@ async def update_membership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Memberships
-@mcp.tool()
+@mcp.tool(
+    title="Delete Membership",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_membership(membership_gid: str = Field(..., description="The globally unique identifier of the membership to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes an existing membership from a goal, project, portfolio, custom type, or custom field. Returns an empty data record upon successful deletion."""
 
@@ -3587,7 +3986,12 @@ async def delete_membership(membership_gid: str = Field(..., description="The gl
     return _response_data
 
 # Tags: Organization exports
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization_export(organization: str | None = Field(None, description="The globally unique identifier of the workspace or organization to export.")) -> dict[str, Any] | ToolResult:
     """Initiates an export request for an entire Asana organization. Asana processes and completes the export asynchronously after the request is submitted."""
 
@@ -3619,13 +4023,20 @@ async def create_organization_export(organization: str | None = Field(None, desc
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Organization exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_export(organization_export_gid: str = Field(..., description="The globally unique identifier of the organization export request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status and details of a previously requested organization export. Use this to check export progress or access the resulting download URL once complete."""
 
@@ -3661,7 +4072,13 @@ async def get_organization_export(organization_export_gid: str = Field(..., desc
     return _response_data
 
 # Tags: Portfolio memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Portfolio Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_portfolio_memberships(
     portfolio: str | None = Field(None, description="The unique identifier of the portfolio to filter memberships by. Required unless filtering by workspace and user."),
     workspace: str | None = Field(None, description="The unique identifier of the workspace to filter memberships by. Must be combined with a user identifier when specified."),
@@ -3704,7 +4121,13 @@ async def list_portfolio_memberships(
     return _response_data
 
 # Tags: Portfolio memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Portfolio Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_portfolio_membership(portfolio_membership_gid: str = Field(..., description="The unique identifier (GID) of the portfolio membership to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete details of a single portfolio membership record. Use this to inspect a specific user's membership relationship within a portfolio."""
 
@@ -3740,7 +4163,13 @@ async def get_portfolio_membership(portfolio_membership_gid: str = Field(..., de
     return _response_data
 
 # Tags: Portfolio memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Portfolio Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_portfolio_memberships_for_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio whose memberships you want to retrieve."),
     user: str | None = Field(None, description="Filters memberships to a specific user. Accepts the string 'me' for the authenticated user, a user's email address, or a user's globally unique identifier."),
@@ -3783,7 +4212,13 @@ async def list_portfolio_memberships_for_portfolio(
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="List Portfolios",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_portfolios(
     workspace: str = Field(..., description="The unique identifier of the workspace or organization used to filter the returned portfolios."),
     owner: str | None = Field(None, description="The unique identifier of the user whose portfolios should be returned. Standard API users are limited to their own portfolios; Service Accounts may specify any user or omit this parameter to retrieve all portfolios in the workspace."),
@@ -3824,7 +4259,12 @@ async def list_portfolios(
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Create Portfolio",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_portfolio(data: _models.PortfolioRequest | None = Field(None, description="Request body containing the portfolio details, including the name and workspace to create the portfolio in.")) -> dict[str, Any] | ToolResult:
     """Creates a new portfolio in a specified workspace with a given name. Note that portfolios created via the API will not include default UI state (such as the 'Priority' custom field) to allow integrations to define their own initial configuration."""
 
@@ -3856,13 +4296,20 @@ async def create_portfolio(data: _models.PortfolioRequest | None = Field(None, d
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Get Portfolio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_portfolio(portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single portfolio, including all associated metadata. Requires the portfolios:read scope."""
 
@@ -3898,7 +4345,13 @@ async def get_portfolio(portfolio_gid: str = Field(..., description="The globall
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Update Portfolio",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to update."),
     data: _models.PortfolioUpdateRequest | None = Field(None, description="An object containing the portfolio fields to update; only the fields included will be modified, all unspecified fields retain their current values."),
@@ -3934,13 +4387,20 @@ async def update_portfolio(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Delete Portfolio",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_portfolio(portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing portfolio by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -3976,7 +4436,13 @@ async def delete_portfolio(portfolio_gid: str = Field(..., description="The glob
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="List Portfolio Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_portfolio_items(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio whose items you want to retrieve."),
     limit: int | None = Field(None, description="The number of items to return per page, allowing pagination through large portfolios. Must be between 1 and 100.", ge=1, le=100),
@@ -4018,7 +4484,12 @@ async def list_portfolio_items(
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Add Portfolio Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_portfolio_item(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to which the item will be added."),
     item: str = Field(..., description="The globally unique identifier of the project or item to add to the portfolio."),
@@ -4056,13 +4527,20 @@ async def add_portfolio_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Remove Portfolio Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_portfolio_item(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio from which the item will be removed."),
     item: str = Field(..., description="The globally unique identifier of the item to remove from the portfolio."),
@@ -4098,13 +4576,19 @@ async def remove_portfolio_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Add Custom Field to Portfolio",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_custom_field_to_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to which the custom field setting will be added."),
     custom_field: str | _models.CustomFieldCreateRequest = Field(..., description="The globally unique identifier (GID) of the custom field to associate with the portfolio."),
@@ -4143,13 +4627,20 @@ async def add_custom_field_to_portfolio(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Remove Portfolio Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_portfolio_custom_field(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio from which the custom field setting will be removed."),
     custom_field: str = Field(..., description="The globally unique identifier of the custom field to detach from the portfolio."),
@@ -4185,13 +4676,19 @@ async def remove_portfolio_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Add Portfolio Members",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_portfolio_members(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to which members will be added."),
     members: str = Field(..., description="A comma-separated list of user identifiers to add as portfolio members; each identifier can be the string 'me', a user's email address, or a user's globally unique identifier (gid). Order is not significant."),
@@ -4227,13 +4724,20 @@ async def add_portfolio_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Remove Portfolio Members",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_portfolio_members(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio from which members will be removed."),
     members: str = Field(..., description="A comma-separated list of user identifiers to remove from the portfolio. Each identifier can be the string 'me' (current user), a user's email address, or a user's globally unique identifier (gid)."),
@@ -4269,13 +4773,19 @@ async def remove_portfolio_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Portfolios
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Portfolio",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to duplicate."),
     name: str | None = Field(None, description="The display name to assign to the newly duplicated portfolio."),
@@ -4312,13 +4822,20 @@ async def duplicate_portfolio(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project briefs
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Brief",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_brief(project_brief_gid: str = Field(..., description="The globally unique identifier for the project brief to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a specific project brief, including its title, description, and associated project details."""
 
@@ -4354,7 +4871,13 @@ async def get_project_brief(project_brief_gid: str = Field(..., description="The
     return _response_data
 
 # Tags: Project briefs
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Brief",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_brief(
     project_brief_gid: str = Field(..., description="The globally unique identifier of the project brief to update."),
     data: _models.ProjectBriefRequest | None = Field(None, description="An object containing the project brief fields to update; only the fields included will be modified, all omitted fields retain their current values."),
@@ -4390,13 +4913,20 @@ async def update_project_brief(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project briefs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Brief",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_brief(project_brief_gid: str = Field(..., description="The globally unique identifier of the project brief to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing project brief by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -4432,7 +4962,12 @@ async def delete_project_brief(project_brief_gid: str = Field(..., description="
     return _response_data
 
 # Tags: Project briefs
-@mcp.tool()
+@mcp.tool(
+    title="Create Project Brief",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_brief(
     project_gid: str = Field(..., description="The globally unique identifier of the project for which the brief will be created."),
     data: _models.ProjectBriefRequest | None = Field(None, description="The request body containing the fields and values for the new project brief to be created."),
@@ -4468,13 +5003,20 @@ async def create_project_brief(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_membership(project_membership_gid: str = Field(..., description="The unique identifier (GID) of the project membership record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete details of a single project membership record, including the member's role and access level within the project."""
 
@@ -4510,7 +5052,13 @@ async def get_project_membership(project_membership_gid: str = Field(..., descri
     return _response_data
 
 # Tags: Project memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Project Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_memberships(
     project_gid: str = Field(..., description="The globally unique identifier of the project whose memberships you want to retrieve."),
     user: str | None = Field(None, description="Filter memberships to a specific user, identified by their GID, email address, or the keyword 'me' to refer to the authenticated user."),
@@ -4553,7 +5101,13 @@ async def list_project_memberships(
     return _response_data
 
 # Tags: Project portfolio settings
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Portfolio Setting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_portfolio_setting(project_portfolio_setting_gid: str = Field(..., description="The globally unique identifier of the project portfolio setting to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project portfolio setting. Requires the `project_portfolio_settings:read` scope."""
 
@@ -4589,7 +5143,13 @@ async def get_project_portfolio_setting(project_portfolio_setting_gid: str = Fie
     return _response_data
 
 # Tags: Project portfolio settings
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Portfolio Setting",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_portfolio_setting(
     project_portfolio_setting_gid: str = Field(..., description="The globally unique identifier of the project portfolio setting to update."),
     is_access_control_inherited: bool | None = Field(None, description="Controls whether portfolio members automatically inherit access to the associated project; when true, portfolio membership grants project access."),
@@ -4625,13 +5185,20 @@ async def update_project_portfolio_setting(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project portfolio settings
-@mcp.tool()
+@mcp.tool(
+    title="List Project Portfolio Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_portfolio_settings(
     project_gid: str = Field(..., description="The globally unique identifier of the project whose portfolio settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of portfolio settings to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -4673,7 +5240,13 @@ async def list_project_portfolio_settings(
     return _response_data
 
 # Tags: Project statuses
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_status(project_status_gid: str = Field(..., description="The unique global identifier of the project status update to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project status update by its unique identifier. Note: this endpoint is deprecated; new integrations should use the `/status_updates/{status_gid}` route instead."""
 
@@ -4709,7 +5282,13 @@ async def get_project_status(project_status_gid: str = Field(..., description="T
     return _response_data
 
 # Tags: Project statuses
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Status",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_status(project_status_gid: str = Field(..., description="The unique identifier of the project status update to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific project status update by its unique identifier. Note: this endpoint is deprecated; new integrations should use the status updates route instead."""
 
@@ -4745,7 +5324,13 @@ async def delete_project_status(project_status_gid: str = Field(..., description
     return _response_data
 
 # Tags: Project statuses
-@mcp.tool()
+@mcp.tool(
+    title="List Project Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_statuses(project_gid: str = Field(..., description="Globally unique identifier for the project.")) -> dict[str, Any] | ToolResult:
     """Retrieves all compact project status update records for a given project. Note: this endpoint is deprecated — new integrations should use the `/status_updates` route instead."""
 
@@ -4781,7 +5366,12 @@ async def list_project_statuses(project_gid: str = Field(..., description="Globa
     return _response_data
 
 # Tags: Project statuses
-@mcp.tool()
+@mcp.tool(
+    title="Create Project Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_status(
     project_gid: str = Field(..., description="The globally unique identifier of the project on which to create the status update."),
     data: _models.ProjectStatusBase | None = Field(None, description="The request body containing the status update fields, such as title, text, color, and other relevant status details."),
@@ -4817,13 +5407,20 @@ async def create_project_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_template(project_template_gid: str = Field(..., description="The globally unique identifier of the project template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project template, including all its configuration and metadata. Requires the project_templates:read scope."""
 
@@ -4859,7 +5456,13 @@ async def get_project_template(project_template_gid: str = Field(..., descriptio
     return _response_data
 
 # Tags: Project templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_template(project_template_gid: str = Field(..., description="The globally unique identifier of the project template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing project template by its unique identifier. This action is irreversible and returns an empty data record upon success."""
 
@@ -4895,7 +5498,13 @@ async def delete_project_template(project_template_gid: str = Field(..., descrip
     return _response_data
 
 # Tags: Project templates
-@mcp.tool()
+@mcp.tool(
+    title="List Project Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_templates(
     team: str | None = Field(None, description="The team to filter projects on."),
     workspace: str | None = Field(None, description="The workspace to filter results on."),
@@ -4936,7 +5545,13 @@ async def list_project_templates(
     return _response_data
 
 # Tags: Project templates
-@mcp.tool()
+@mcp.tool(
+    title="List Team Project Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_project_templates(team_gid: str = Field(..., description="Globally unique identifier for the team.")) -> dict[str, Any] | ToolResult:
     """Retrieves all project templates belonging to a specified team, returning compact template records. Useful for discovering reusable project structures available within a team."""
 
@@ -4972,7 +5587,12 @@ async def list_team_project_templates(team_gid: str = Field(..., description="Gl
     return _response_data
 
 # Tags: Project templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Project from Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_from_template(
     project_template_gid: str = Field(..., description="The globally unique identifier of the project template to instantiate. Retrieve this value from the get project template endpoint."),
     name: str | None = Field(None, description="The display name to assign to the newly created project."),
@@ -5012,13 +5632,20 @@ async def create_project_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects(
     workspace: str | None = Field(None, description="The GID of the workspace or organization used to filter the returned projects. Providing this filter is recommended to prevent request timeouts on large domains."),
     archived: bool | None = Field(None, description="When provided, filters results to only include projects whose archived status matches this value. Set to true to return only archived projects, or false to return only active projects."),
@@ -5059,7 +5686,12 @@ async def list_projects(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(data: _models.ProjectRequest | None = Field(None, description="The request body containing project details such as name, workspace, team, and privacy settings required to create the project.")) -> dict[str, Any] | ToolResult:
     """Creates a new project within a specified workspace or organization, optionally associating it with a team. Returns the full record of the newly created project."""
 
@@ -5091,13 +5723,20 @@ async def create_project(data: _models.ProjectRequest | None = Field(None, descr
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project, including all available fields and metadata. Requires the `projects:read` scope; accessing the `team` field additionally requires `teams:read`."""
 
@@ -5133,7 +5772,13 @@ async def get_project(project_gid: str = Field(..., description="The globally un
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to update."),
     data: _models.ProjectUpdateRequest | None = Field(None, description="An object containing only the project fields you wish to update; omit any fields that should remain unchanged to avoid overwriting concurrent edits. Note: updating the `team` field is deprecated — use `POST /memberships` instead to share a project with a team."),
@@ -5169,13 +5814,20 @@ async def update_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing project by its unique identifier. This action is irreversible and returns an empty data record upon success."""
 
@@ -5211,7 +5863,12 @@ async def delete_project(project_gid: str = Field(..., description="The globally
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_project(
     project_gid: str = Field(..., description="The globally unique identifier (GID) of the source project to duplicate."),
     name: str | None = Field(None, description="The display name to assign to the newly created duplicate project."),
@@ -5253,13 +5910,20 @@ async def duplicate_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Task Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_projects(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose associated projects you want to retrieve."),
     limit: int | None = Field(None, description="The number of project records to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -5301,7 +5965,12 @@ async def list_task_projects(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Team Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team_project(
     team_gid: str = Field(..., description="The globally unique identifier of the team with which the new project will be shared."),
     data: _models.ProjectRequest | None = Field(None, description="The project details and configuration to use when creating the new team project."),
@@ -5337,13 +6006,20 @@ async def create_team_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_projects(
     workspace_gid: str = Field(..., description="Globally unique identifier for the workspace or organization."),
     archived: bool | None = Field(None, description="Filters results to only include projects matching the specified archived status. When set to true, only archived projects are returned; when false, only active projects are returned."),
@@ -5385,7 +6061,12 @@ async def list_workspace_projects(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project in Workspace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_in_workspace(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which to create the project."),
     data: _models.ProjectRequest | None = Field(None, description="The project details to use when creating the new project, such as name, team, and other project attributes."),
@@ -5421,13 +6102,20 @@ async def create_project_in_workspace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Search Projects in Workspace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_projects(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization to search within."),
     text: str | None = Field(None, description="Full-text search string matched against project names to narrow results."),
@@ -5495,7 +6183,12 @@ async def search_projects(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Custom Field to Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_custom_field_to_project(
     project_gid: str = Field(..., description="The unique identifier of the project to which the custom field will be added."),
     custom_field: str | _models.CustomFieldCreateRequest = Field(..., description="The globally unique identifier (GID) of the custom field to associate with the project."),
@@ -5534,13 +6227,20 @@ async def add_custom_field_to_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Remove Custom Field from Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_custom_field_from_project(
     project_gid: str = Field(..., description="The globally unique identifier of the project from which the custom field setting will be removed."),
     custom_field: str = Field(..., description="The globally unique identifier of the custom field to detach from the project."),
@@ -5576,13 +6276,20 @@ async def remove_custom_field_from_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Task Counts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_task_counts(project_gid: str = Field(..., description="The globally unique identifier of the project whose task counts you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves task count statistics for a specific project, including total, incomplete, and completed task counts (milestones are included). All fields are excluded by default and must be explicitly requested using opt_fields."""
 
@@ -5618,7 +6325,12 @@ async def get_project_task_counts(project_gid: str = Field(..., description="The
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Members",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_project_members(
     project_gid: str = Field(..., description="The globally unique identifier of the project to which members will be added."),
     members: str = Field(..., description="A comma-separated list of user identifiers to add as project members. Each identifier can be the string 'me', a user's email address, or a user's globally unique identifier (gid)."),
@@ -5654,13 +6366,20 @@ async def add_project_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Remove Project Members",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_project_members(
     project_gid: str = Field(..., description="The globally unique identifier of the project from which members will be removed."),
     members: str = Field(..., description="A comma-separated list of users to remove from the project, where each user can be identified by their GID, email address, or the literal string 'me' to reference the authenticated user."),
@@ -5696,13 +6415,19 @@ async def remove_project_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Followers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_project_followers(
     project_gid: str = Field(..., description="The unique identifier of the project to which followers will be added."),
     followers: str = Field(..., description="A comma-separated list of user identifiers to add as followers; each identifier can be the string 'me', a user's email address, or a user's GID."),
@@ -5738,13 +6463,20 @@ async def add_project_followers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Remove Project Followers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_project_followers(
     project_gid: str = Field(..., description="The globally unique identifier of the project from which followers will be removed."),
     followers: str = Field(..., description="A comma-separated list of users to remove as followers. Each user can be identified by their GID, email address, or the string 'me' to reference the authenticated user."),
@@ -5780,13 +6512,19 @@ async def remove_project_followers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Save Project as Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def save_project_as_template(
     project_gid: str = Field(..., description="The unique identifier of the project to convert into a template."),
     name: str = Field(..., description="The display name to assign to the newly created project template."),
@@ -5825,13 +6563,20 @@ async def save_project_as_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Rates
-@mcp.tool()
+@mcp.tool(
+    title="List Rates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rates(
     parent: str | None = Field(None, description="The globally unique identifier of the parent project whose rates should be retrieved."),
     resource: str | None = Field(None, description="The globally unique identifier of a user or placeholder to filter rates down to a single specific resource."),
@@ -5872,7 +6617,12 @@ async def list_rates(
     return _response_data
 
 # Tags: Rates
-@mcp.tool()
+@mcp.tool(
+    title="Create Rate",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_rate(
     parent: str = Field(..., description="The globally unique ID of the parent project to which this rate will be assigned."),
     resource: str = Field(..., description="The globally unique ID of the resource (user or placeholder) for whom the rate is being set."),
@@ -5908,13 +6658,20 @@ async def create_rate(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Rates
-@mcp.tool()
+@mcp.tool(
+    title="Get Rate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rate(rate_gid: str = Field(..., description="The globally unique identifier for the rate to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single rate, including all associated pricing details and metadata."""
 
@@ -5950,7 +6707,13 @@ async def get_rate(rate_gid: str = Field(..., description="The globally unique i
     return _response_data
 
 # Tags: Rates
-@mcp.tool()
+@mcp.tool(
+    title="Update Rate",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_rate(
     rate_gid: str = Field(..., description="The globally unique identifier of the rate record to update."),
     rate: float | None = Field(None, description="The new monetary value to assign to the rate. Must be a valid numeric amount."),
@@ -5986,13 +6749,20 @@ async def update_rate(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Rates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Rate",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_rate(rate_gid: str = Field(..., description="The globally unique identifier of the rate to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a rate by its unique identifier. This action cannot be undone."""
 
@@ -6028,7 +6798,13 @@ async def delete_rate(rate_gid: str = Field(..., description="The globally uniqu
     return _response_data
 
 # Tags: Reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_reactions(
     target: str = Field(..., description="The globally unique identifier (GID) of the object to fetch reactions from. Must reference a valid status update or story."),
     emoji_base: str = Field(..., description="Filters results to only include reactions that use this emoji base character. Only reactions matching this exact emoji will be returned."),
@@ -6070,7 +6846,13 @@ async def list_reactions(
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="Get Section",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_section(section_gid: str = Field(..., description="The globally unique identifier (GID) of the section to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete details for a single section by its unique identifier. Useful for inspecting section metadata such as its name, project association, and ordering."""
 
@@ -6106,7 +6888,13 @@ async def get_section(section_gid: str = Field(..., description="The globally un
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="Update Section",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_section(
     section_gid: str = Field(..., description="The globally unique identifier of the section to update."),
     name: str | None = Field(None, description="The new display name for the section. Must be a non-empty string."),
@@ -6144,13 +6932,20 @@ async def update_section(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="Delete Section",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_section(section_gid: str = Field(..., description="The globally unique identifier (GID) of the section to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing section by its unique identifier. The section must be empty and cannot be the last remaining section in the project."""
 
@@ -6186,7 +6981,13 @@ async def delete_section(section_gid: str = Field(..., description="The globally
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="List Project Sections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_sections(project_gid: str = Field(..., description="Globally unique identifier for the project.")) -> dict[str, Any] | ToolResult:
     """Retrieves all sections within a specified project, returning compact records for each. Useful for understanding a project's organizational structure before creating or moving tasks."""
 
@@ -6222,7 +7023,12 @@ async def list_project_sections(project_gid: str = Field(..., description="Globa
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="Create Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_section(
     project_gid: str = Field(..., description="The unique identifier of the project in which the new section will be created."),
     name: str | None = Field(None, description="The display name for the new section. Must be a non-empty string."),
@@ -6260,13 +7066,19 @@ async def create_section(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="Add Task to Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_to_section(
     section_gid: str = Field(..., description="The unique identifier of the section to which the task will be added."),
     task: str | None = Field(None, description="The unique identifier of the task to add to the section. Note: tasks with a resource_subtype of 'section' (separators) are not supported."),
@@ -6304,13 +7116,19 @@ async def add_task_to_section(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Sections
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Section",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_section(
     project_gid: str = Field(..., description="The unique identifier of the project that contains the sections being reordered."),
     section: str | None = Field(None, description="The unique identifier of the section you want to move to a new position within the project."),
@@ -6348,13 +7166,20 @@ async def reorder_section(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status updates
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Update",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_update(status_update_gid: str = Field(..., description="The unique identifier of the status update to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single status update by its unique identifier. Useful for fetching the full details of a specific project or task status update."""
 
@@ -6390,7 +7215,13 @@ async def get_status_update(status_update_gid: str = Field(..., description="The
     return _response_data
 
 # Tags: Status updates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Status Update",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_status_update(status_update_gid: str = Field(..., description="The unique identifier of the status update to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific status update by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -6426,7 +7257,13 @@ async def delete_status_update(status_update_gid: str = Field(..., description="
     return _response_data
 
 # Tags: Status updates
-@mcp.tool()
+@mcp.tool(
+    title="List Status Updates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_updates(
     parent: str = Field(..., description="The globally unique identifier (GID) of the object whose status updates should be retrieved. Must reference a project, portfolio, or goal."),
     limit: int | None = Field(None, description="The maximum number of status update records to return per page, between 1 and 100.", ge=1, le=100),
@@ -6468,7 +7305,12 @@ async def list_status_updates(
     return _response_data
 
 # Tags: Status updates
-@mcp.tool()
+@mcp.tool(
+    title="Create Status Update",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_status_update(
     limit: int | None = Field(None, description="The number of results to return per page, must be between 1 and 100.", ge=1, le=100),
     data: _models.StatusUpdateRequest | None = Field(None, description="The payload containing the status update details to be created on the target object."),
@@ -6506,13 +7348,20 @@ async def create_status_update(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Stories
-@mcp.tool()
+@mcp.tool(
+    title="Get Story",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_story(story_gid: str = Field(..., description="The globally unique identifier (GID) of the story to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a single story by its unique identifier. Requires the stories:read scope, with additional attachments:read scope needed to access previews and attachments fields."""
 
@@ -6548,7 +7397,13 @@ async def get_story(story_gid: str = Field(..., description="The globally unique
     return _response_data
 
 # Tags: Stories
-@mcp.tool()
+@mcp.tool(
+    title="Update Story",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_story(
     story_gid: str = Field(..., description="The globally unique identifier of the story to update."),
     text: str | None = Field(None, description="The plain text content of the comment story to set. Cannot be used together with html_text; only one may be specified per request."),
@@ -6586,13 +7441,20 @@ async def update_story(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Stories
-@mcp.tool()
+@mcp.tool(
+    title="Delete Story",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_story(story_gid: str = Field(..., description="The globally unique identifier of the story to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a story by its unique identifier. Only the story's creator can delete it; returns an empty data record on success."""
 
@@ -6628,7 +7490,13 @@ async def delete_story(story_gid: str = Field(..., description="The globally uni
     return _response_data
 
 # Tags: Stories
-@mcp.tool()
+@mcp.tool(
+    title="List Task Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_stories(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any] | ToolResult:
     """Retrieves all stories (comments, activity, and system events) associated with a specific task. Returns compact story records in chronological order."""
 
@@ -6664,7 +7532,12 @@ async def list_task_stories(task_gid: str = Field(..., description="The task to 
     return _response_data
 
 # Tags: Stories
-@mcp.tool()
+@mcp.tool(
+    title="Add Task Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_comment(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to which the story will be added."),
     text: str | None = Field(None, description="The plain text content of the comment to post on the task. Cannot be used together with html_text."),
@@ -6702,13 +7575,20 @@ async def add_task_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags(workspace: str | None = Field(None, description="The unique identifier of the workspace used to filter the returned tags to only those belonging to that workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of compact tag records, optionally filtered by workspace. Requires the 'tags:read' scope."""
 
@@ -6746,7 +7626,12 @@ async def list_tags(workspace: str | None = Field(None, description="The unique 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(data: _models.TagCreateRequest | None = Field(None, description="The request body containing the tag details, including the required workspace or organization identifier and any additional tag properties such as name and color.")) -> dict[str, Any] | ToolResult:
     """Creates a new tag within a specified workspace or organization, returning the full record of the newly created tag. Requires the tags:write scope, and the tag's workspace association is permanent once set."""
 
@@ -6778,13 +7663,20 @@ async def create_tag(data: _models.TagCreateRequest | None = Field(None, descrip
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag(tag_gid: str = Field(..., description="The globally unique identifier (GID) of the tag to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single tag, including its name, color, and associated metadata. Requires the tags:read scope."""
 
@@ -6820,7 +7712,13 @@ async def get_tag(tag_gid: str = Field(..., description="The globally unique ide
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Update Tag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tag(
     tag_gid: str = Field(..., description="The globally unique identifier of the tag to update."),
     data: _models.TagBase | None = Field(None, description="An object containing the tag fields to update. Only include fields you wish to change to avoid overwriting concurrent updates from other users."),
@@ -6856,13 +7754,20 @@ async def update_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag(tag_gid: str = Field(..., description="The globally unique identifier of the tag to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing tag by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -6898,7 +7803,13 @@ async def delete_tag(tag_gid: str = Field(..., description="The globally unique 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Task Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_tags(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose tags you want to retrieve."),
     limit: int | None = Field(None, description="The number of tag results to return per page, must be between 1 and 100.", ge=1, le=100),
@@ -6940,7 +7851,13 @@ async def list_task_tags(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_tags(workspace_gid: str = Field(..., description="Globally unique identifier for the workspace or organization.")) -> dict[str, Any] | ToolResult:
     """Retrieves compact tag records for all tags within a specified workspace. Useful for discovering and filtering available tags to organize and categorize work items."""
 
@@ -6976,7 +7893,12 @@ async def list_workspace_tags(workspace_gid: str = Field(..., description="Globa
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag in Workspace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag_in_workspace(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which to create the tag."),
     data: _models.TagCreateTagForWorkspaceRequest | None = Field(None, description="The tag details to create, including properties such as name, color, and any other supported tag fields."),
@@ -7012,13 +7934,20 @@ async def create_tag_in_workspace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task templates
-@mcp.tool()
+@mcp.tool(
+    title="List Task Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_templates(project: str | None = Field(None, description="The unique identifier of the project whose task templates should be returned. This filter is required to scope results to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of compact task template records for a specified project. A project must be provided to filter and return the relevant task templates."""
 
@@ -7056,7 +7985,13 @@ async def list_task_templates(project: str | None = Field(None, description="The
     return _response_data
 
 # Tags: Task templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_template(task_template_gid: str = Field(..., description="The globally unique identifier (GID) of the task template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single task template, including all its fields and configuration. Requires the task_templates:read scope."""
 
@@ -7092,7 +8027,13 @@ async def get_task_template(task_template_gid: str = Field(..., description="The
     return _response_data
 
 # Tags: Task templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task_template(task_template_gid: str = Field(..., description="The globally unique identifier of the task template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing task template by its unique identifier. This action is irreversible and returns an empty data record upon success."""
 
@@ -7128,7 +8069,12 @@ async def delete_task_template(task_template_gid: str = Field(..., description="
     return _response_data
 
 # Tags: Task templates
-@mcp.tool()
+@mcp.tool(
+    title="Instantiate Task from Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def instantiate_task_from_template(
     task_template_gid: str = Field(..., description="The globally unique identifier of the task template to instantiate a new task from."),
     name: str | None = Field(None, description="The display name for the newly created task. If omitted, the task inherits the name defined in the source task template."),
@@ -7164,13 +8110,20 @@ async def instantiate_task_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tasks(
     assignee: str | None = Field(None, description="Filter tasks by the GID of the assigned user. To find unassigned tasks, use assignee.any = null. Requires workspace to also be specified."),
     project: str | None = Field(None, description="Filter tasks belonging to the specified project GID."),
@@ -7215,7 +8168,12 @@ async def list_tasks(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task(data: _models.TaskRequest | None = Field(None, description="The task fields to set on the new task, such as name, workspace, projects, assignee, due date, and other task attributes. A workspace must be determinable either directly or via an associated project or parent task.")) -> dict[str, Any] | ToolResult:
     """Creates a new task in a specified workspace, project, or as a child of a parent task. Any fields not explicitly provided will be assigned their default values."""
 
@@ -7247,13 +8205,20 @@ async def create_task(data: _models.TaskRequest | None = Field(None, description
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(task_gid: str = Field(..., description="The unique global identifier (GID) of the task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single task, including all fields and metadata. Note that accessing memberships requires projects:read and project_sections:read scopes, and actual_time_minutes requires time_tracking_entries:read scope."""
 
@@ -7289,7 +8254,13 @@ async def get_task(task_gid: str = Field(..., description="The unique global ide
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to update."),
     data: _models.TaskRequest | None = Field(None, description="An object containing only the task fields you wish to update; omitted fields will retain their current values."),
@@ -7325,13 +8296,20 @@ async def update_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(task_gid: str = Field(..., description="The unique global identifier (GID) of the task to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific task by moving it to the requesting user's trash, where it can be recovered within 30 days before being completely removed from the system."""
 
@@ -7367,7 +8345,12 @@ async def delete_task(task_gid: str = Field(..., description="The unique global 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_task(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to duplicate."),
     name: str | None = Field(None, description="The name to assign to the newly duplicated task."),
@@ -7404,13 +8387,20 @@ async def duplicate_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Project Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_tasks(
     project_gid: str = Field(..., description="The globally unique identifier (GID) of the project whose tasks you want to retrieve."),
     completed_since: str | None = Field(None, description="Filters results to include only incomplete tasks or tasks completed after this point in time. Accepts an ISO 8601 date-time string or the keyword 'now' to filter relative to the current moment."),
@@ -7453,7 +8443,13 @@ async def list_project_tasks(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Section Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_section_tasks(
     section_gid: str = Field(..., description="The globally unique identifier of the section whose tasks you want to retrieve."),
     limit: int | None = Field(None, description="Number of task records to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -7496,7 +8492,13 @@ async def list_section_tasks(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Tasks by Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tasks_by_tag(
     tag_gid: str = Field(..., description="The globally unique identifier of the tag whose associated tasks you want to retrieve."),
     limit: int | None = Field(None, description="The number of task records to return per page, must be between 1 and 100.", ge=1, le=100),
@@ -7538,7 +8540,13 @@ async def list_tasks_by_tag(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List User Task List Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_task_list_tasks(
     user_task_list_gid: str = Field(..., description="The globally unique identifier for the user task list whose tasks you want to retrieve."),
     completed_since: str | None = Field(None, description="Filters results to only include tasks that are incomplete or were completed on or after this point in time. Accepts an ISO 8601 date-time string or the keyword 'now' to return only currently incomplete tasks."),
@@ -7581,7 +8589,13 @@ async def list_user_task_list_tasks(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Subtasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_subtasks(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of all subtasks belonging to a specified task. Useful for exploring task hierarchies and understanding nested work breakdowns."""
 
@@ -7617,7 +8631,12 @@ async def list_subtasks(task_gid: str = Field(..., description="The task to oper
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Subtask",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_subtask(
     task_gid: str = Field(..., description="The unique identifier (GID) of the parent task to which the new subtask will be added."),
     data: _models.TaskRequest | None = Field(None, description="The subtask details to create, including fields such as name, assignee, due date, and notes."),
@@ -7653,13 +8672,20 @@ async def create_subtask(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Set Task Parent",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_task_parent(
     task_gid: str = Field(..., description="The unique identifier of the task whose parent relationship will be updated."),
     parent: str = Field(..., description="The unique identifier of the task to set as the new parent, or null to remove the existing parent and make the task top-level."),
@@ -7697,13 +8723,20 @@ async def set_task_parent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Task Dependencies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_dependencies(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose dependencies you want to retrieve."),
     limit: int | None = Field(None, description="The number of dependency records to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -7745,7 +8778,12 @@ async def list_task_dependencies(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Add Task Dependencies",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_dependencies(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to which dependencies will be added."),
     dependencies: list[str] | None = Field(None, description="An array of task GIDs to mark as dependencies of the specified task; order is not significant and each item should be a valid task GID string."),
@@ -7781,13 +8819,20 @@ async def add_task_dependencies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task Dependencies",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_dependencies(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task from which dependencies will be removed."),
     dependencies: list[str] | None = Field(None, description="An array of task GIDs representing the dependency tasks to unlink from the specified task. Order is not significant; each item should be a valid task GID string."),
@@ -7823,13 +8868,20 @@ async def remove_task_dependencies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Task Dependents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_dependents(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose dependents you want to retrieve."),
     limit: int | None = Field(None, description="The number of dependent task records to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -7871,7 +8923,12 @@ async def list_task_dependents(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Add Task Dependents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_dependents(
     task_gid: str = Field(..., description="The unique identifier of the task that will become the dependency (i.e., the task that others will depend on)."),
     dependents: list[str] | None = Field(None, description="An array of task GIDs to mark as dependents of the specified task. Order is not significant; each item should be a valid task GID string."),
@@ -7907,13 +8964,20 @@ async def add_task_dependents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task Dependents",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_dependents(
     task_gid: str = Field(..., description="The unique identifier of the task from which dependents will be unlinked."),
     dependents: list[str] | None = Field(None, description="An array of task GIDs representing the dependent tasks to unlink from the specified task. Order is not significant."),
@@ -7949,13 +9013,19 @@ async def remove_task_dependents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Add Task to Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_to_project(
     task_gid: str = Field(..., description="The unique identifier of the task to add to the project."),
     project: str = Field(..., description="The unique identifier of the project to add the task to."),
@@ -7994,13 +9064,20 @@ async def add_task_to_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task from Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_from_project(
     task_gid: str = Field(..., description="The unique identifier of the task to be removed from the project."),
     project: str = Field(..., description="The unique identifier of the project from which the task should be removed."),
@@ -8036,13 +9113,19 @@ async def remove_task_from_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Add Tag to Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_tag(
     task_gid: str = Field(..., description="The unique global identifier (GID) of the task to which the tag will be added."),
     tag: str = Field(..., description="The unique global identifier (GID) of the tag to attach to the task."),
@@ -8078,13 +9161,20 @@ async def add_task_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_tag(
     task_gid: str = Field(..., description="The unique global identifier (GID) of the task from which the tag will be removed."),
     tag: str = Field(..., description="The unique global identifier (GID) of the tag to remove from the task."),
@@ -8120,13 +9210,19 @@ async def remove_task_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Add Task Followers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_followers(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to which followers will be added."),
     followers: list[str] = Field(..., description="A list of users to add as followers, where each entry can be the string 'me', a user's email address, or a user's GID. Order is not significant."),
@@ -8162,13 +9258,20 @@ async def add_task_followers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task Followers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_followers(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task from which followers will be removed."),
     followers: list[str] = Field(..., description="A list of users to remove as followers from the task. Each item can be the string 'me', a user's email address, or a user's GID. Order is not significant."),
@@ -8204,13 +9307,20 @@ async def remove_task_followers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task by Custom ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_by_custom_id(
     workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization in which to search for the task."),
     custom_id: str = Field(..., description="The custom ID shortcode assigned to the task, typically formatted as a prefix followed by a number (e.g., a project code and sequence number)."),
@@ -8249,7 +9359,13 @@ async def get_task_by_custom_id(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Search Tasks in Workspace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_tasks(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization to search within."),
     text: str | None = Field(None, description="Full-text search string matched against both task name and description."),
@@ -8343,7 +9459,13 @@ async def search_tasks(
     return _response_data
 
 # Tags: Team memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_membership(team_membership_gid: str = Field(..., description="The unique identifier (GID) of the team membership record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete membership record for a single team membership, including details about the member and their associated team. Requires the `team_memberships:read` scope, with additional `teams:read` scope needed to access team details."""
 
@@ -8379,7 +9501,13 @@ async def get_team_membership(team_membership_gid: str = Field(..., description=
     return _response_data
 
 # Tags: Team memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Team Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_memberships(
     limit: int | None = Field(None, description="The number of team membership records to return per page, between 1 and 100.", ge=1, le=100),
     team: str | None = Field(None, description="The globally unique identifier (GID) of the team whose memberships should be returned."),
@@ -8422,7 +9550,13 @@ async def list_team_memberships(
     return _response_data
 
 # Tags: Team memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Team Memberships for Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_memberships_for_team(
     team_gid: str = Field(..., description="The globally unique identifier of the team whose memberships you want to retrieve."),
     limit: int | None = Field(None, description="The number of membership records to return per page, accepting values between 1 and 100.", ge=1, le=100),
@@ -8464,7 +9598,13 @@ async def list_team_memberships_for_team(
     return _response_data
 
 # Tags: Team memberships
-@mcp.tool()
+@mcp.tool(
+    title="List User Team Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_team_memberships(
     user_gid: str = Field(..., description="The unique identifier for the user whose team memberships will be retrieved. Accepts the string 'me' for the authenticated user, a user's email address, or a user's global ID (gid)."),
     workspace: str = Field(..., description="The globally unique identifier (gid) of the workspace used to scope the team membership results to a specific organization or workspace."),
@@ -8507,7 +9647,12 @@ async def list_user_team_memberships(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(data: _models.TeamRequest | None = Field(None, description="The configuration details for the new team, such as name and settings.")) -> dict[str, Any] | ToolResult:
     """Creates a new team within the current workspace. Use this to organize members and resources under a named group."""
 
@@ -8539,13 +9684,20 @@ async def create_team(data: _models.TeamRequest | None = Field(None, description
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(team_gid: str = Field(..., description="The globally unique identifier (GID) for the team to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details for a single team by its unique identifier. Requires the teams:read scope."""
 
@@ -8581,7 +9733,13 @@ async def get_team(team_gid: str = Field(..., description="The globally unique i
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     team_gid: str = Field(..., description="The globally unique identifier for the team to be updated."),
     data: _models.TeamRequest | None = Field(None, description="The team fields to update, provided as a data object containing the properties and their new values."),
@@ -8617,13 +9775,20 @@ async def update_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_teams(
     workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization whose teams you want to retrieve."),
     limit: int | None = Field(None, description="The number of team records to return per page. Must be between 1 and 100.", ge=1, le=100),
@@ -8665,7 +9830,13 @@ async def list_workspace_teams(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List User Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_teams(
     user_gid: str = Field(..., description="The unique identifier for the user whose teams you want to retrieve. Accepts the literal string 'me' for the authenticated user, a user's email address, or a numeric user GID."),
     organization: str = Field(..., description="The GID of the workspace or organization used to filter the returned teams, ensuring only teams within that context are included."),
@@ -8708,7 +9879,12 @@ async def list_user_teams(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Add Team Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_team_member(
     team_gid: str = Field(..., description="The unique identifier of the team to which the user will be added."),
     user: str | None = Field(None, description="The identifier of the user to add to the team — accepts the literal string 'me' for the current user, a user's email address, or a user's globally unique identifier (GID)."),
@@ -8744,13 +9920,20 @@ async def add_team_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_member(
     team_gid: str = Field(..., description="The globally unique identifier of the team from which the user will be removed."),
     user: str | None = Field(None, description="The identifier of the user to remove, accepted as the string 'me' (for the requesting user), an email address, or a user GID."),
@@ -8786,13 +9969,20 @@ async def remove_team_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time periods
-@mcp.tool()
+@mcp.tool(
+    title="Get Time Period",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_time_period(time_period_gid: str = Field(..., description="The globally unique identifier of the time period to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific time period by its unique identifier. Useful for accessing goal-tracking intervals such as fiscal quarters or annual periods."""
 
@@ -8828,7 +10018,13 @@ async def get_time_period(time_period_gid: str = Field(..., description="The glo
     return _response_data
 
 # Tags: Time periods
-@mcp.tool()
+@mcp.tool(
+    title="List Time Periods",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_periods(
     workspace: str = Field(..., description="The globally unique identifier of the workspace whose time periods should be retrieved."),
     limit: int | None = Field(None, description="The number of time period records to return per page, between 1 and 100.", ge=1, le=100),
@@ -8871,7 +10067,13 @@ async def list_time_periods(
     return _response_data
 
 # Tags: Time tracking entries
-@mcp.tool()
+@mcp.tool(
+    title="List Task Time Tracking Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_time_tracking_entries(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any] | ToolResult:
     """Retrieves all time tracking entries logged against a specific task. Requires the time_tracking_entries:read scope."""
 
@@ -8907,7 +10109,12 @@ async def list_task_time_tracking_entries(task_gid: str = Field(..., description
     return _response_data
 
 # Tags: Time tracking entries
-@mcp.tool()
+@mcp.tool(
+    title="Create Time Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_time_entry(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task on which the time tracking entry will be created."),
     duration_minutes: int | None = Field(None, description="The amount of time to log for this entry, expressed in whole minutes. Must be greater than 0."),
@@ -8947,13 +10154,20 @@ async def create_time_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time tracking entries
-@mcp.tool()
+@mcp.tool(
+    title="Get Time Tracking Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_time_tracking_entry(time_tracking_entry_gid: str = Field(..., description="The globally unique identifier (GID) of the time tracking entry to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single time tracking entry. Requires the time_tracking_entries:read scope."""
 
@@ -8989,7 +10203,13 @@ async def get_time_tracking_entry(time_tracking_entry_gid: str = Field(..., desc
     return _response_data
 
 # Tags: Time tracking entries
-@mcp.tool()
+@mcp.tool(
+    title="Update Time Tracking Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_time_tracking_entry(
     time_tracking_entry_gid: str = Field(..., description="The globally unique identifier of the time tracking entry to update."),
     duration_minutes: int | None = Field(None, description="The amount of time to log for this entry, expressed in whole minutes."),
@@ -9029,13 +10249,20 @@ async def update_time_tracking_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time tracking entries
-@mcp.tool()
+@mcp.tool(
+    title="Delete Time Tracking Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_time_tracking_entry(time_tracking_entry_gid: str = Field(..., description="The globally unique identifier (GID) of the time tracking entry to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific time tracking entry by its unique identifier. Returns an empty data record upon successful deletion."""
 
@@ -9071,7 +10298,13 @@ async def delete_time_tracking_entry(time_tracking_entry_gid: str = Field(..., d
     return _response_data
 
 # Tags: Time tracking entries
-@mcp.tool()
+@mcp.tool(
+    title="List Time Tracking Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_tracking_entries(
     task: str | None = Field(None, description="The globally unique identifier of the task to scope results to only time tracking entries associated with that task."),
     attributable_to: str | None = Field(None, description="The globally unique identifier of the project to scope results to only time tracking entries attributed to that project."),
@@ -9118,7 +10351,13 @@ async def list_time_tracking_entries(
     return _response_data
 
 # Tags: Timesheet approval statuses
-@mcp.tool()
+@mcp.tool(
+    title="Get Timesheet Approval Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_timesheet_approval_status(timesheet_approval_status_gid: str = Field(..., description="The globally unique identifier (GID) of the timesheet approval status record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single timesheet approval status, including its current state and associated metadata. Requires the timesheet_approval_statuses:read scope."""
 
@@ -9154,7 +10393,12 @@ async def get_timesheet_approval_status(timesheet_approval_status_gid: str = Fie
     return _response_data
 
 # Tags: Timesheet approval statuses
-@mcp.tool()
+@mcp.tool(
+    title="Update Timesheet Approval Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_timesheet_approval_status(
     timesheet_approval_status_gid: str = Field(..., description="The globally unique identifier of the timesheet approval status record to update."),
     approval_status: Literal["submitted", "draft", "approved", "rejected"] = Field(..., description="The target approval state to transition to. Valid values are 'submitted' (submit for review), 'draft' (recall a submission), 'approved' (approve the timesheet), or 'rejected' (reject the timesheet). Allowed transitions depend on the current state of the record."),
@@ -9191,13 +10435,20 @@ async def update_timesheet_approval_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Timesheet approval statuses
-@mcp.tool()
+@mcp.tool(
+    title="List Timesheet Approval Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_timesheet_approval_statuses(
     workspace: str = Field(..., description="The globally unique identifier of the workspace whose timesheet approval statuses should be retrieved."),
     user: str | None = Field(None, description="The globally unique identifier of a specific user to narrow results to only their timesheet approval statuses."),
@@ -9241,7 +10492,12 @@ async def list_timesheet_approval_statuses(
     return _response_data
 
 # Tags: Timesheet approval statuses
-@mcp.tool()
+@mcp.tool(
+    title="Create Timesheet Approval Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_timesheet_approval_status(
     user: str = Field(..., description="The globally unique identifier of the user whose timesheet approval status is being created."),
     workspace: str = Field(..., description="The globally unique identifier of the workspace in which the timesheet exists."),
@@ -9278,13 +10534,20 @@ async def create_timesheet_approval_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Typeahead
-@mcp.tool()
+@mcp.tool(
+    title="Search Workspace Typeahead",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_workspace_typeahead(
     workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization to search within."),
     resource_type: Literal["custom_field", "goal", "project", "project_template", "portfolio", "tag", "task", "team", "user"] = Field(..., description="The type of resource to search for. Accepts a single type from the supported set: custom_field, goal, project, project_template, portfolio, tag, task, team, or user. Multiple types are not supported."),
@@ -9328,7 +10591,13 @@ async def search_workspace_typeahead(
     return _response_data
 
 # Tags: User task lists
-@mcp.tool()
+@mcp.tool(
+    title="Get User Task List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_task_list(user_task_list_gid: str = Field(..., description="The globally unique identifier for the user task list to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a specific user task list, including all associated metadata. Requires the tasks:read scope."""
 
@@ -9364,7 +10633,13 @@ async def get_user_task_list(user_task_list_gid: str = Field(..., description="T
     return _response_data
 
 # Tags: User task lists
-@mcp.tool()
+@mcp.tool(
+    title="Get User Task List by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_task_list_by_user(
     user_gid: str = Field(..., description="The unique identifier for the user whose task list you want to retrieve. Accepts the literal string 'me' for the authenticated user, a user's email address, or a user's global ID (gid)."),
     workspace: str = Field(..., description="The global ID (gid) of the workspace in which to look up the user's task list. Each user has one task list per workspace."),
@@ -9406,7 +10681,13 @@ async def get_user_task_list_by_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     workspace: str | None = Field(None, description="The unique ID of a workspace or organization to restrict results to only users belonging to that workspace or organization."),
     team: str | None = Field(None, description="The unique ID of a team to restrict results to only users belonging to that team."),
@@ -9448,7 +10729,13 @@ async def list_users(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(
     user_gid: str = Field(..., description="The unique identifier for the user to retrieve. Accepts a user GID, an email address, or the string 'me' to reference the currently authenticated user."),
     workspace: str | None = Field(None, description="The GID of a workspace used to filter the user results, useful when a user belongs to multiple workspaces."),
@@ -9490,7 +10777,13 @@ async def get_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     user_gid: str = Field(..., description="The unique identifier for the target user, which can be the literal string 'me' to reference the authenticated user, a user's email address, or a numeric user GID."),
     workspace: str | None = Field(None, description="Filters the operation to a specific workspace by its GID, useful when a user belongs to multiple workspaces."),
@@ -9530,13 +10823,20 @@ async def update_user(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Favorites",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_favorites(
     user_gid: str = Field(..., description="The unique identifier of the user whose favorites to retrieve. Accepts the literal string 'me' to reference the authenticated user, a user's email address, or a user's GID."),
     resource_type: Literal["portfolio", "project", "tag", "task", "user", "project_template"] = Field(..., description="The type of Asana resource to filter favorites by. Must be one of the supported resource types: portfolio, project, tag, task, user, or project_template."),
@@ -9580,7 +10880,13 @@ async def list_user_favorites(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Team Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_members(team_gid: str = Field(..., description="The globally unique identifier of the team whose members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all users who are members of a specified team, returned as compact records sorted alphabetically. Limited to 2000 results; use the users endpoint for larger result sets."""
 
@@ -9616,7 +10922,13 @@ async def list_team_members(team_gid: str = Field(..., description="The globally
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_users(workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose users you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of all users in the specified workspace or organization, sorted alphabetically. Results are capped at 2000 users; use the /users endpoint for larger result sets."""
 
@@ -9652,7 +10964,13 @@ async def list_workspace_users(workspace_gid: str = Field(..., description="The 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_user(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which to look up the user."),
     user_gid: str = Field(..., description="The identifier for the target user — accepts the literal string \"me\" (for the authenticated user), a user's email address, or a user's globally unique identifier (GID)."),
@@ -9691,7 +11009,13 @@ async def get_workspace_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace_user(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which the user will be updated."),
     user_gid: str = Field(..., description="The identifier of the user to update, which can be the string 'me' to reference the authenticated user, a user's email address, or a user's globally unique identifier (GID)."),
@@ -9728,13 +11052,20 @@ async def update_workspace_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(webhook_gid: str = Field(..., description="The globally unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific webhook by its unique identifier. Requires the webhooks:read scope."""
 
@@ -9770,7 +11101,13 @@ async def get_webhook(webhook_gid: str = Field(..., description="The globally un
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_gid: str = Field(..., description="The globally unique identifier of the webhook to permanently delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook, stopping all future event deliveries to its target URL. Note that in-flight requests sent before deletion may still arrive, but no new requests will be issued."""
 
@@ -9806,7 +11143,13 @@ async def delete_webhook(webhook_gid: str = Field(..., description="The globally
     return _response_data
 
 # Tags: Workspace memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_membership(workspace_membership_gid: str = Field(..., description="The unique identifier (GID) of the workspace membership to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete membership record for a single workspace membership, including details about the member and their role within the workspace."""
 
@@ -9842,7 +11185,13 @@ async def get_workspace_membership(workspace_membership_gid: str = Field(..., de
     return _response_data
 
 # Tags: Workspace memberships
-@mcp.tool()
+@mcp.tool(
+    title="List User Workspace Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_workspace_memberships(
     user_gid: str = Field(..., description="The unique identifier for the user whose workspace memberships to retrieve. Accepts the literal string 'me' for the authenticated user, a registered email address, or a numeric user GID."),
     limit: int | None = Field(None, description="The number of membership records to return per page. Must be between 1 and 100 inclusive; use pagination to retrieve additional results beyond the first page.", ge=1, le=100),
@@ -9884,7 +11233,13 @@ async def list_user_workspace_memberships(
     return _response_data
 
 # Tags: Workspace memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_memberships(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose memberships you want to retrieve."),
     user: str | None = Field(None, description="Filter memberships to a specific user, identified by the string 'me' (current user), an email address, or a user GID."),
@@ -9927,7 +11282,13 @@ async def list_workspace_memberships(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspaces(limit: int | None = Field(None, description="Number of workspace records to return per page. Must be between 1 and 100.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieves all workspaces visible to the authorized user. Returns compact records for each workspace, requiring the workspaces:read scope."""
 
@@ -9965,7 +11326,13 @@ async def list_workspaces(limit: int | None = Field(None, description="Number of
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace(workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a single workspace or organization. Requires the workspace's unique identifier to return its complete record."""
 
@@ -10001,7 +11368,13 @@ async def get_workspace(workspace_gid: str = Field(..., description="The globall
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization to update."),
     name: str | None = Field(None, description="The new display name to assign to the workspace."),
@@ -10037,13 +11410,19 @@ async def update_workspace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Add Workspace User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_workspace_user(
     workspace_gid: str = Field(..., description="The unique identifier of the workspace or organization to which the user will be added."),
     user: str | None = Field(None, description="The identifier of the user to add, accepted as the literal string 'me' (current user), an email address, or a user GID."),
@@ -10079,13 +11458,20 @@ async def add_workspace_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Remove Workspace User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_workspace_user(
     workspace_gid: str = Field(..., description="The unique identifier of the workspace or organization from which the user will be removed."),
     user: str | None = Field(None, description="The identifier of the user to remove, which can be the literal string 'me', an email address, or a user's globally unique ID."),
@@ -10121,13 +11507,20 @@ async def remove_workspace_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_events(
     workspace_gid: str = Field(..., description="The globally unique identifier for the target workspace or organization whose events should be retrieved."),
     sync: str | None = Field(None, description="A sync token from a previous response used to fetch only events that occurred after that token was issued; omit this parameter on the first request to receive a fresh token. If the token has expired, the API returns a 412 error along with a new valid sync token to use going forward."),

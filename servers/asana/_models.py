@@ -1,7 +1,7 @@
 """
 Asana MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:16:23 UTC
+Generated: 2026-05-11 23:03:37 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -373,7 +373,7 @@ When uploading PDFs with curl, force the content-type to be pdf by
 appending the content type to the file path: `--form
 "file=@file.pdf;type=application/pdf"`."""
     resource_subtype: Literal["asana", "external"] | None = Field(default=None, description="Specifies the attachment type. Use 'asana' for direct file uploads or 'external' for linking an external URL resource. When set to 'external', the 'parent', 'name', and 'url' fields are also required.")
-    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="The binary file content to upload. Required when 'resource_subtype' is 'asana' (direct file upload). Files from third-party services such as Dropbox, Box, Vimeo, or Google Drive cannot be attached via the API.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file content to upload. Required when 'resource_subtype' is 'asana' (direct file upload). Files from third-party services such as Dropbox, Box, Vimeo, or Google Drive cannot be attached via the API.", json_schema_extra={'format': 'byte'})
     parent: str | None = Field(default=None, description="The unique identifier (GID) of the parent object to attach to — must be a task, project, or project brief. Required for all attachment types.")
     url: str | None = Field(default=None, description="The publicly accessible URL of the external resource to attach. Required when 'resource_subtype' is 'external'.")
     name: str | None = Field(default=None, description="A display name for the external resource being attached. Required when 'resource_subtype' is 'external'.")

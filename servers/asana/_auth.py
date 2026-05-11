@@ -1,7 +1,7 @@
 """
 Authentication module for Asana MCP server.
 
-Generated: 2026-05-05 14:16:23 UTC
+Generated: 2026-05-11 23:03:37 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
