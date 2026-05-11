@@ -1,7 +1,7 @@
 """
 Builtwith MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:31:31 UTC
+Generated: 2026-05-11 23:13:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

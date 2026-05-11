@@ -6,7 +6,7 @@ API Info:
 - Contact: BuiltWith Support <support@builtwith.com> (https://builtwith.com/contact)
 - Terms of Service: https://builtwith.com/terms
 
-Generated: 2026-05-05 14:31:31 UTC
+Generated: 2026-05-11 23:13:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.builtwith.com")
 SERVER_NAME = "BuiltWith"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -987,6 +1018,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1011,6 +1044,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1218,7 +1253,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("BuiltWith", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Domain API
-@mcp.tool()
+@mcp.tool(
+    title="Detect Technologies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def detect_technologies(
     lookup: str = Field(..., alias="LOOKUP", description="Single domain or comma-separated list of up to 16 domains to analyze (e.g., example.com or example.com,other.com,another.com)."),
     liveonly: Literal["yes"] | None = Field(None, alias="LIVEONLY", description="Filter results to only include technologies currently active on the domain."),
@@ -1263,7 +1304,13 @@ async def detect_technologies(
     return _response_data
 
 # Tags: Domain API
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Technologies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_technologies(
     lookup: str = Field(..., alias="LOOKUP", description="A single root domain or comma-separated list of up to 16 domains to analyze for technology detection."),
     liveonly: Literal["yes"] | None = Field(None, alias="LIVEONLY", description="When enabled, returns only technologies currently active on the domain, filtering out historical or inactive detections."),
@@ -1308,7 +1355,13 @@ async def get_domain_technologies(
     return _response_data
 
 # Tags: Domain API
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Technologies CSV",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_technologies_csv(
     lookup: str = Field(..., alias="LOOKUP", description="A single root domain or comma-separated list of up to 16 domains to analyze for technology detection."),
     liveonly: Literal["yes"] | None = Field(None, alias="LIVEONLY", description="When set to 'yes', returns only technologies currently active on the domain, excluding deprecated or historical detections."),
@@ -1350,7 +1403,12 @@ async def get_domain_technologies_csv(
     return _response_data
 
 # Tags: Domain API
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Lookup Domains",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def bulk_lookup_domains(
     lookups: list[str] = Field(..., description="Array of root domains to analyze. Each item should be a valid domain name. Order is preserved in results."),
     no_meta: bool | None = Field(None, alias="noMeta", description="Exclude metadata from the response to reduce payload size and improve performance."),
@@ -1373,6 +1431,7 @@ async def bulk_lookup_domains(
     _http_path = "/v22/domain/bulk"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("bulk_lookup_domains")
@@ -1389,12 +1448,19 @@ async def bulk_lookup_domains(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Domain API
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Domain Job Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_domain_job_status(job_id: str = Field(..., description="The unique identifier of the bulk job, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of a bulk domain lookup job. Use this to check progress and retrieve completed domain information."""
 
@@ -1430,7 +1496,13 @@ async def get_bulk_domain_job_status(job_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: Domain API
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Bulk Domain Job Result",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_bulk_domain_job_result(job_id: str = Field(..., description="The unique identifier of the bulk job, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the results of a completed bulk domain lookup job. Note that results are automatically deleted after the first access, so this is a one-time download operation."""
 
@@ -1466,7 +1538,13 @@ async def retrieve_bulk_domain_job_result(job_id: str = Field(..., description="
     return _response_data
 
 # Tags: Free API
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Technology Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_technology_summary(lookup: str = Field(..., alias="LOOKUP", description="The domain to analyze. Provide only the root domain (e.g., hotelscombined.com); subdomains will automatically resolve to their root domain.")) -> dict[str, Any] | ToolResult:
     """Retrieve technology stack metadata for a domain, including last updated timestamp and counts of active and inactive technologies organized by group and category."""
 
@@ -1502,7 +1580,13 @@ async def get_domain_technology_summary(lookup: str = Field(..., alias="LOOKUP",
     return _response_data
 
 # Tags: Free API
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Technology Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOKUP", description="The domain to analyze. Only root domain results are returned; subdomains are automatically resolved to their root domain.")) -> dict[str, Any] | ToolResult:
     """Retrieve technology group and category metadata for a domain, including last updated timestamp and counts of active and inactive technologies."""
 
@@ -1538,7 +1622,13 @@ async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOK
     return _response_data
 
 # Tags: Relationships API
-@mcp.tool()
+@mcp.tool(
+    title="List Website Relationships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_website_relationships(
     lookup: str = Field(..., alias="LOOKUP", description="One or more domains to analyze for relationships. Accepts individual domains, subdomains, or up to 16 domains as comma-separated values for batch lookups."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include website IP address data in the results, which significantly expands the relationship data returned."),
@@ -1577,7 +1667,13 @@ async def list_website_relationships(
     return _response_data
 
 # Tags: Relationships API
-@mcp.tool()
+@mcp.tool(
+    title="List Website Relationships (XML)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_website_relationships_xml(
     lookup: str = Field(..., alias="LOOKUP", description="One or more domains to analyze for relationships. Accepts individual domains, subdomains, or up to 16 domains as comma-separated values for batch lookups."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include IP address data for the websites in the response."),
@@ -1616,7 +1712,13 @@ async def list_website_relationships_xml(
     return _response_data
 
 # Tags: Relationships API
-@mcp.tool()
+@mcp.tool(
+    title="List Website Relationships as CSV",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_website_relationships_csv(
     lookup: str = Field(..., alias="LOOKUP", description="The domain name to lookup and analyze for relationships. Specify a single domain (e.g., builtwith.com) to retrieve all linked websites."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include IP address data for the websites in the results. Set to 'yes' to enable IP data retrieval."),
@@ -1655,7 +1757,13 @@ async def list_website_relationships_csv(
     return _response_data
 
 # Tags: Relationships API
-@mcp.tool()
+@mcp.tool(
+    title="List Website Relationships as TSV",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_website_relationships_tsv(
     lookup: str = Field(..., alias="LOOKUP", description="The domain or domains to analyze for relationship data. Specify one or more domains to discover their linking relationships with other websites."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include IP address information for the websites in the results. Set to 'yes' to retrieve IP data alongside relationship data."),
@@ -1694,7 +1802,13 @@ async def list_website_relationships_tsv(
     return _response_data
 
 # Tags: Lists API
-@mcp.tool()
+@mcp.tool(
+    title="List Websites by Technology",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_websites_by_technology(
     tech: str = Field(..., alias="TECH", description="The name of the web technology to search for, with spaces replaced by dashes (e.g., 'Shopify' becomes 'Shopify'). This is the core search parameter."),
     meta: Literal["yes"] | None = Field(None, alias="META", description="Include enriched metadata with results such as company names, titles, social media links, addresses, email addresses, phone numbers, and traffic rankings."),
@@ -1734,7 +1848,13 @@ async def list_websites_by_technology(
     return _response_data
 
 # Tags: Lists API
-@mcp.tool()
+@mcp.tool(
+    title="List Websites by Technology (XML)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_websites_by_technology_xml(
     tech: str = Field(..., alias="TECH", description="The name of the web technology to search for. Replace spaces with dashes in the technology name (e.g., 'Magento' or 'Google-Analytics')."),
     meta: Literal["yes"] | None = Field(None, alias="META", description="Include detailed metadata with results such as company names, titles, social media links, addresses, email addresses, phone numbers, and traffic rankings."),
@@ -1774,7 +1894,13 @@ async def list_websites_by_technology_xml(
     return _response_data
 
 # Tags: Company to URL API
-@mcp.tool()
+@mcp.tool(
+    title="Lookup Company Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def lookup_company_domains(company: str = Field(..., alias="COMPANY", description="One or more company names to look up, provided as a single name or as a comma-separated list of names (URL encoded).")) -> dict[str, Any] | ToolResult:
     """Retrieve domain names and websites associated with one or more company names, ordered by relevance to help identify official web presences."""
 
@@ -1810,7 +1936,13 @@ async def lookup_company_domains(company: str = Field(..., alias="COMPANY", desc
     return _response_data
 
 # Tags: Company to URL API
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Company Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def resolve_company_domains(company: str = Field(..., alias="COMPANY", description="A single company name or comma-separated list of company names to look up. Each company name should be URL encoded if containing special characters.")) -> dict[str, Any] | ToolResult:
     """Resolve domain names and websites for one or more company names. Supply a single company name or a comma-separated list of company names to retrieve associated domain information in XML format."""
 
@@ -1846,7 +1978,13 @@ async def resolve_company_domains(company: str = Field(..., alias="COMPANY", des
     return _response_data
 
 # Tags: Tags API
-@mcp.tool()
+@mcp.tool(
+    title="List Domains by Attribute",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_domains_by_attribute(
     lookup: str = Field(..., alias="LOOKUP", description="The attribute to search for, specified in ATTRIBUTE-TYPE-CODE format (e.g., IP-98.158.194.127 or CA-PUB-1894893914772263). You can provide up to 16 comma-separated values to lookup multiple attributes in a single request."),
     types: bool | None = Field(None, alias="TYPES", description="Set to true to retrieve the list of available attribute types that can be used in lookups instead of searching for domains."),
@@ -1885,7 +2023,13 @@ async def list_domains_by_attribute(
     return _response_data
 
 # Tags: Tags API
-@mcp.tool()
+@mcp.tool(
+    title="List Domains by Attribute",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_domains_by_attribute_xml(
     lookup: str = Field(..., alias="LOOKUP", description="The attribute to search for, specified in ATTRIBUTE-TYPE-CODE format (e.g., IP-98.158.194.127 for IP addresses or CA-PUB-1894893914772263 for Google Analytics tags). You can provide up to 16 comma-separated values to search for multiple attributes at once."),
     types: bool | None = Field(None, alias="TYPES", description="Set to true to retrieve the list of available attribute types that can be used for lookups instead of searching for domains."),
@@ -1924,7 +2068,13 @@ async def list_domains_by_attribute_xml(
     return _response_data
 
 # Tags: Recommendations API
-@mcp.tool()
+@mcp.tool(
+    title="Get Technology Recommendations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_technology_recommendations(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze, provided as a single domain or comma-separated list of up to 16 domains. Only alphanumeric characters, dots, hyphens, and commas are allowed.", pattern="^[a-zA-Z0-9.,-]+$")) -> dict[str, Any] | ToolResult:
     """Retrieve technology recommendations for websites based on analysis of similar technology profiles. Accepts one or more domains to identify recommended technologies used by comparable sites."""
 
@@ -1960,7 +2110,13 @@ async def get_technology_recommendations(lookup: str = Field(..., alias="LOOKUP"
     return _response_data
 
 # Tags: Recommendations API
-@mcp.tool()
+@mcp.tool(
+    title="Get Technology Recommendations XML",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_technology_recommendations_xml(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze, provided as a single domain or comma-separated list of up to 16 domains. Only alphanumeric characters, dots, hyphens, and commas are allowed.", pattern="^[a-zA-Z0-9.,-]+$")) -> dict[str, Any] | ToolResult:
     """Retrieve technology stack recommendations for websites based on analysis of similar technology profiles. Returns results in XML format."""
 
@@ -1996,7 +2152,13 @@ async def get_technology_recommendations_xml(lookup: str = Field(..., alias="LOO
     return _response_data
 
 # Tags: Redirects API
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Redirects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_redirects(lookup: str = Field(..., alias="LOOKUP", description="The root domain to look up (e.g., hotelscombined.com). Only root domains are supported; internal pages and subdomains are not valid.")) -> dict[str, Any] | ToolResult:
     """Retrieve live and historical redirect information for a domain, including both inbound and outbound redirects in JSON format."""
 
@@ -2032,7 +2194,13 @@ async def get_domain_redirects(lookup: str = Field(..., alias="LOOKUP", descript
     return _response_data
 
 # Tags: Redirects API
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain Redirects (XML)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain_redirects_xml(lookup: str = Field(..., alias="LOOKUP", description="The root domain to look up redirects for. Only root domains are supported (e.g., builtwith.com); internal pages and subdomains are not accepted.")) -> dict[str, Any] | ToolResult:
     """Retrieve live and historical redirect information for a domain in XML format. Returns both inbound and outbound redirects that point to or from the specified domain."""
 
@@ -2068,7 +2236,13 @@ async def get_domain_redirects_xml(lookup: str = Field(..., alias="LOOKUP", desc
     return _response_data
 
 # Tags: Keywords API
-@mcp.tool()
+@mcp.tool(
+    title="List Domain Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_domain_keywords(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze (e.g., cnn.com). Use comma-separated values to look up multiple domains at once, up to 16 domains maximum. Only root domains are supported; subdomains and internal page URLs will not work.")) -> dict[str, Any] | ToolResult:
     """Retrieve keywords found on one or more domains. Useful for understanding the primary topics and content focus of websites."""
 
@@ -2104,7 +2278,13 @@ async def list_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descript
     return _response_data
 
 # Tags: Keywords API
-@mcp.tool()
+@mcp.tool(
+    title="Extract Domain Keywords",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze for keywords. Provide a single domain (e.g., hotelscombined.com) or multiple domains in comma-separated format for batch lookup of up to 16 domains. Subdomains and internal page URLs are not supported.")) -> dict[str, Any] | ToolResult:
     """Extract keywords found on one or more domains and return the results in XML format. Useful for SEO analysis and understanding domain content focus."""
 
@@ -2140,7 +2320,13 @@ async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descr
     return _response_data
 
 # Tags: Keyword Search API
-@mcp.tool()
+@mcp.tool(
+    title="Search Websites by Keyword",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_websites_by_keyword(
     keyword: str = Field(..., alias="KEYWORD", description="The keyword to search for. Must be at least 4 letters long, contain only alphabetical characters, and cannot be a common stop word (e.g., 'the', 'and').", min_length=4),
     limit: int | None = Field(None, alias="LIMIT", description="Number of results to return, ranging from 16 to 1000 domains. Defaults to 100 results if not specified.", ge=16, le=1000),
@@ -2179,7 +2365,13 @@ async def search_websites_by_keyword(
     return _response_data
 
 # Tags: Keyword Search API
-@mcp.tool()
+@mcp.tool(
+    title="Search Websites by Keyword (CSV)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_websites_by_keyword_csv(
     keyword: str = Field(..., alias="KEYWORD", description="The keyword to search for. Must be at least 4 characters long, contain only alphabetical characters, and cannot be a common stop word.", min_length=4),
     limit: int | None = Field(None, alias="LIMIT", description="The number of results to return, ranging from 16 to 1000 results. Defaults to 100 if not specified.", ge=16, le=1000),
@@ -2218,7 +2410,13 @@ async def search_websites_by_keyword_csv(
     return _response_data
 
 # Tags: Vector Search API
-@mcp.tool()
+@mcp.tool(
+    title="Search Technologies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_technologies(
     query: str = Field(..., alias="QUERY", description="The search query describing the technologies or categories you want to find (e.g., 'react framework'). Use natural language to describe what you're looking for."),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of results to return in the response. Must be between 1 and 100 results; defaults to 10 if not specified.", ge=1, le=100),
@@ -2257,7 +2455,13 @@ async def search_technologies(
     return _response_data
 
 # Tags: Vector Search API
-@mcp.tool()
+@mcp.tool(
+    title="Search Technologies XML",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_technologies_xml(
     query: str = Field(..., alias="QUERY", description="The search query describing the technology or category you want to find (e.g., 'google analytics', 'web tracking', 'analytics platform')"),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of results to return, between 1 and 100 (defaults to 10 if not specified)", ge=1, le=100),
@@ -2296,7 +2500,13 @@ async def search_technologies_xml(
     return _response_data
 
 # Tags: Vector Search API
-@mcp.tool()
+@mcp.tool(
+    title="Search Technologies CSV",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_technologies_csv(
     query: str = Field(..., alias="QUERY", description="The search query describing the technologies or categories you want to find (e.g., 'ecommerce platform'). Use natural language to describe what you're looking for."),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of results to return in the response. Must be between 1 and 100 results; defaults to 10 if not specified.", ge=1, le=100),
@@ -2335,7 +2545,13 @@ async def search_technologies_csv(
     return _response_data
 
 # Tags: Trends API
-@mcp.tool()
+@mcp.tool(
+    title="Get Technology Trends",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_technology_trends(
     tech: str = Field(..., alias="TECH", description="The name of the technology to retrieve trends for. Use hyphens (-) instead of spaces in multi-word technology names (e.g., 'Magento')."),
     date: str | None = Field(None, alias="DATE", description="Optional date to retrieve historical trend totals. When provided, returns the trend data closest to the specified date in ISO 8601 format (YYYY-MM-DD)."),
@@ -2374,7 +2590,13 @@ async def get_technology_trends(
     return _response_data
 
 # Tags: Trends API
-@mcp.tool()
+@mcp.tool(
+    title="Get Technology Trends",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_technology_trends_xml(
     tech: str = Field(..., alias="TECH", description="The name of the technology to retrieve trends for. Use hyphens to replace spaces in multi-word technology names (e.g., 'Shopify' or 'Node-js')."),
     date: str | None = Field(None, alias="DATE", description="Optional date to retrieve historical trend data. When provided, returns trend totals closest to the specified date in ISO 8601 format (YYYY-MM-DD)."),
@@ -2413,7 +2635,13 @@ async def get_technology_trends_xml(
     return _response_data
 
 # Tags: Product API
-@mcp.tool()
+@mcp.tool(
+    title="Search Product Listings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_product_listings(
     query: str = Field(..., alias="QUERY", description="Search query for products or specific domains. Use 'dom:domain.com' format to find all products available at a particular website, or enter a product name or description to search across all shops."),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of shops to return in the results, ranging from 1 to 500. Defaults to 50 shops per request.", ge=1, le=500),
@@ -2453,7 +2681,13 @@ async def search_product_listings(
     return _response_data
 
 # Tags: Trust API
-@mcp.tool()
+@mcp.tool(
+    title="Assess Domain Trust",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def assess_domain_trust(
     lookup: str = Field(..., alias="LOOKUP", description="The domain, subdomain, or specific page URL to evaluate for trustworthiness. Supports both root domains and internal page paths."),
     live: Literal["yes", "no"] | None = Field(None, alias="LIVE", description="Enable real-time website verification for more accurate results. Live lookups take longer to complete but are required when the initial assessment indicates the site needs further investigation."),
@@ -2493,7 +2727,13 @@ async def assess_domain_trust(
     return _response_data
 
 # Tags: Trust API
-@mcp.tool()
+@mcp.tool(
+    title="Assess Domain Trust (XML)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def assess_domain_trust_xml(
     lookup: str = Field(..., alias="LOOKUP", description="The domain, subdomain, or internal page URL to evaluate. Supports subdomains and internal pages when using the live lookup feature."),
     live: Literal["yes", "no"] | None = Field(None, alias="LIVE", description="Enable live website lookup for real-time verification. Live lookups take longer to complete but are required when the initial assessment returns a 'needLive' status to determine if the website is genuinely suspect."),
