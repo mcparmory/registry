@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Alchemy NFT MCP Server
-Generated: 2026-05-05 14:06:54 UTC
+Generated: 2026-05-11 22:55:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,12 +38,13 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://eth-mainnet.g.alchemy.com/nft")
 BASE_URL_TEMPLATE = "https://{network}.g.alchemy.com/nft"
 SERVER_NAME = "Alchemy NFT"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -533,6 +535,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -540,6 +564,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -625,6 +651,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -634,18 +661,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -656,24 +681,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -983,6 +1014,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1007,6 +1040,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1214,7 +1249,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Alchemy NFT", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: NFT Ownership Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFTs by Owner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nfts_by_owner(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     owner: str = Field(..., description="The wallet address to query for NFT ownership. Accepts standard hex addresses or ENS names (Ethereum Mainnet only)."),
@@ -1261,7 +1302,13 @@ async def list_nfts_by_owner(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFTs for Contract",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nfts_for_contract(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Must be a valid ERC721 or ERC1155 contract address."),
@@ -1306,7 +1353,13 @@ async def list_nfts_for_contract(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFTs for Collection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nfts_for_collection(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     with_metadata: bool | None = Field(None, alias="withMetadata", description="When true, includes full NFT metadata in the response; when false, reduces payload size for faster queries. Defaults to true."),
@@ -1352,7 +1405,13 @@ async def list_nfts_for_collection(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get NFT Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nft_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Must be a valid ERC721 or ERC1155 contract address."),
@@ -1396,7 +1455,12 @@ async def get_nft_metadata(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Batch Retrieve NFT Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def batch_retrieve_nft_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     tokens: list[_models.GetNftMetadataBatchV3BodyTokensItem] = Field(..., description="Array of token objects to fetch metadata for, with a maximum of 100 items per request. Each token object should specify the contract address and token ID."),
@@ -1432,13 +1496,20 @@ async def batch_retrieve_nft_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get NFT Contract Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nft_contract_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract. Must be a valid contract address for ERC721 or ERC1155 token standards."),
@@ -1480,7 +1551,13 @@ async def get_nft_contract_metadata(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collection_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     collection_slug: str = Field(..., alias="collectionSlug", description="The OpenSea collection slug—a URL-friendly identifier for the NFT collection (e.g., 'boredapeyachtclub')."),
@@ -1522,7 +1599,12 @@ async def get_collection_metadata(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Batch Get Contract Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def batch_get_contract_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_addresses: list[str] | None = Field(None, alias="contractAddresses", description="Array of contract addresses to retrieve metadata for. Each address should be a valid Ethereum address format. If not provided, defaults to a sample set of addresses."),
@@ -1558,13 +1640,20 @@ async def batch_get_contract_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: NFT Ownership Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get NFT Owners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nft_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Must be a valid ERC721 or ERC1155 contract address."),
@@ -1607,7 +1696,13 @@ async def get_nft_owners(
     return _response_data
 
 # Tags: NFT Ownership Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFT Contract Owners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nft_contract_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract to query. Must be a valid ERC721 or ERC1155 contract address."),
@@ -1650,7 +1745,13 @@ async def list_nft_contract_owners(
     return _response_data
 
 # Tags: NFT Spam Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Spam Contracts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_spam_contracts(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
 ) -> dict[str, Any] | ToolResult:
@@ -1680,7 +1781,13 @@ async def list_spam_contracts(
     return _response_data
 
 # Tags: NFT Spam Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Check Spam Contract",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_spam_contract(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract to check. Supports ERC721 and ERC1155 contract standards."),
@@ -1722,7 +1829,13 @@ async def check_spam_contract(
     return _response_data
 
 # Tags: NFT Spam Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Check NFT Airdrop",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_nft_airdrop(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Supports both ERC721 and ERC1155 token standards."),
@@ -1765,7 +1878,13 @@ async def check_nft_airdrop(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get NFT Collection Attribute Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nft_collection_attribute_summary(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address for the NFT collection to analyze. Supports both ERC721 and ERC1155 token standards."),
@@ -1807,7 +1926,13 @@ async def get_nft_collection_attribute_summary(
     return _response_data
 
 # Tags: NFT Sales Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get NFT Collection Floor Prices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nft_collection_floor_prices(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection (supports both ERC721 and ERC1155 standards). This identifies which collection's floor prices to retrieve."),
@@ -1849,7 +1974,13 @@ async def get_nft_collection_floor_prices(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Search Contract Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_contract_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     query: str = Field(..., description="The search keyword or phrase to find within contract metadata fields."),
@@ -1891,7 +2022,13 @@ async def search_contract_metadata(
     return _response_data
 
 # Tags: NFT Ownership Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Check NFT Holder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_nft_holder(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     wallet: str = Field(..., description="The wallet address to check for NFT holdings from the specified contract."),
@@ -1934,7 +2071,13 @@ async def check_nft_holder(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Calculate NFT Attribute Rarity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_nft_attribute_rarity(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Supports both ERC721 and ERC1155 token standards."),
@@ -1977,7 +2120,13 @@ async def calculate_nft_attribute_rarity(
     return _response_data
 
 # Tags: NFT Sales Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFT Sales",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nft_sales(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     from_block: str | None = Field(None, alias="fromBlock", description="The starting block number for fetching NFT sales data. Accepts decimal integers, hexadecimal integers (prefixed with 0x), or 'latest'. Defaults to block 0."),
@@ -2025,7 +2174,13 @@ async def list_nft_sales(
     return _response_data
 
 # Tags: NFT Ownership Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFT Contracts by Owner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nft_contracts_by_owner(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     owner: str = Field(..., description="The wallet address to query for NFT contracts. Accepts standard Ethereum addresses or ENS names (on Ethereum Mainnet)."),
@@ -2071,7 +2226,13 @@ async def list_nft_contracts_by_owner(
     return _response_data
 
 # Tags: NFT Ownership Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List NFT Collections by Owner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nft_collections_by_owner(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     owner: str = Field(..., description="The wallet address to query for NFT collections. Accepts standard Ethereum addresses or ENS names (on Ethereum Mainnet only)."),
@@ -2115,7 +2276,13 @@ async def list_nft_collections_by_owner(
     return _response_data
 
 # Tags: NFT Spam Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Report Spam Address",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def report_spam_address(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     address: str = Field(..., description="The blockchain address to report, provided as a hexadecimal string (e.g., starting with 0x)."),
@@ -2158,7 +2325,12 @@ async def report_spam_address(
     return _response_data
 
 # Tags: NFT Metadata Endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Refresh NFT Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_nft_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection containing the token you want to refresh. Must be a valid Ethereum-format address."),
@@ -2195,13 +2367,20 @@ async def refresh_nft_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: NFT API V2 Methods (Older Version)
-@mcp.tool()
+@mcp.tool(
+    title="List NFTs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nfts(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     owner: str = Field(..., description="The wallet address to query for NFT ownership. Accepts standard Ethereum addresses or ENS names (on Ethereum Mainnet)."),
@@ -2248,7 +2427,13 @@ async def list_nfts(
     return _response_data
 
 # Tags: NFT API V2 Methods (Older Version)
-@mcp.tool()
+@mcp.tool(
+    title="Get Token Owners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_token_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address of the NFT collection. Must be a valid Ethereum address (e.g., ERC-721 or ERC-1155 contract)."),
@@ -2292,7 +2477,13 @@ async def get_token_owners(
     return _response_data
 
 # Tags: NFT API V2 Methods (Older Version)
-@mcp.tool()
+@mcp.tool(
+    title="List NFT Collection Owners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nft_collection_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address for the NFT collection. Supports both ERC721 and ERC1155 token standards."),
@@ -2335,7 +2526,13 @@ async def list_nft_collection_owners(
     return _response_data
 
 # Tags: NFT API V2 Methods (Older Version)
-@mcp.tool()
+@mcp.tool(
+    title="Check Token Airdrop",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_token_airdrop(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address for the NFT collection. Supports both ERC721 and ERC1155 token standards."),
@@ -2378,7 +2575,13 @@ async def check_token_airdrop(
     return _response_data
 
 # Tags: NFT API V2 Methods (Older Version)
-@mcp.tool()
+@mcp.tool(
+    title="Check Wallet NFT Collection Ownership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_wallet_nft_collection_ownership(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     wallet: str = Field(..., description="The wallet address to check for NFT ownership. Can be a standard hexadecimal address or an ENS name (Ethereum Mainnet only)."),

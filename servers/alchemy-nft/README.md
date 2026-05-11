@@ -5,7 +5,7 @@ Base URL: https://eth-mainnet.g.alchemy.com/nft
 | | |
 |---|---|
 | **Category** | Blockchain & Crypto |
-| **Tools** | 28 |
+| **Tools** | 27 |
 | **Auth** | API Key |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (Authorization)
+
 Do not commit credentials to version control.
 
 ---
