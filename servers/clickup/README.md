@@ -5,7 +5,7 @@ Base URL: https://api.clickup.com/api
 | | |
 |---|---|
 | **Category** | Productivity |
-| **Tools** | 134 |
+| **Tools** | 132 |
 | **Auth** | API Key, OAuth2 |
 
 ---
@@ -62,6 +62,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_ID` — OAuth2 client ID
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `API_KEY` — API Key Authentication (Authorization)
+
 Do not commit credentials to version control.
 
 ### OAuth2

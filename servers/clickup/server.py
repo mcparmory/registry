@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ClickUp MCP Server
-Generated: 2026-05-05 14:39:21 UTC
+Generated: 2026-05-11 19:39:54 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -21,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -38,11 +39,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.clickup.com/api")
 SERVER_NAME = "ClickUp"
-SERVER_VERSION = "1.0.3"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -533,6 +535,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -540,6 +564,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -625,6 +651,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -634,18 +661,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -656,24 +681,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1022,6 +1053,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1046,6 +1079,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1262,12 +1297,17 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("ClickUp", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Attachments
-@mcp.tool()
+@mcp.tool(
+    title="Upload Task Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_task_attachment(
     task_id: str = Field(..., description="The unique identifier of the task to which the file will be attached."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default system-generated task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when referencing a task by its custom task ID. Must be provided alongside custom_task_ids=true."),
-    attachment: list[Any] | None = Field(None, description="The file content to upload as a multipart/form-data attachment. Each item represents a part of the multipart payload for the file being attached."),
+    attachment: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, description="Base64-encoded file content for upload. The file content to upload as a multipart/form-data attachment. Each item represents a part of the multipart payload for the file being attached."),
 ) -> dict[str, Any] | ToolResult:
     """Upload a local file to a task as an attachment using multipart/form-data. Note that cloud-hosted files are not supported; only locally accessible files can be attached."""
 
@@ -1304,13 +1344,20 @@ async def upload_task_attachment(
         params=_http_query,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["attachment"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Authorization
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and account details of the currently authenticated ClickUp user. Useful for confirming identity, retrieving user ID, and accessing account-level information."""
 
@@ -1337,7 +1384,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspaces() -> dict[str, Any] | ToolResult:
     """Retrieves all workspaces accessible to the currently authenticated user. Use this to discover available workspaces before performing workspace-specific operations."""
 
@@ -1364,7 +1417,12 @@ async def list_workspaces() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Task Checklists
-@mcp.tool()
+@mcp.tool(
+    title="Create Checklist",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_checklist(
     task_id: str = Field(..., description="The unique identifier of the task to which the checklist will be added."),
     name: str = Field(..., description="The display name for the new checklist."),
@@ -1405,13 +1463,20 @@ async def create_checklist(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task Checklists
-@mcp.tool()
+@mcp.tool(
+    title="Update Checklist",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_checklist(
     checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist to update."),
     name: str | None = Field(None, description="The new display name for the checklist."),
@@ -1448,13 +1513,20 @@ async def update_checklist(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task Checklists
-@mcp.tool()
+@mcp.tool(
+    title="Delete Checklist",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_checklist(checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a checklist from a task. This action is irreversible and removes the checklist along with all its items."""
 
@@ -1490,7 +1562,12 @@ async def delete_checklist(checklist_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Task Checklists
-@mcp.tool()
+@mcp.tool(
+    title="Create Checklist Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_checklist_item(
     checklist_id: str = Field(..., description="The unique identifier of the checklist to which the new item will be added."),
     name: str | None = Field(None, description="The display name or label for the checklist item."),
@@ -1527,13 +1604,20 @@ async def create_checklist_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task Checklists
-@mcp.tool()
+@mcp.tool(
+    title="Update Checklist Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_checklist_item(
     checklist_id: str = Field(..., description="The unique identifier of the checklist that contains the item to be updated."),
     checklist_item_id: str = Field(..., description="The unique identifier of the specific checklist item to update."),
@@ -1573,13 +1657,20 @@ async def update_checklist_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task Checklists
-@mcp.tool()
+@mcp.tool(
+    title="Delete Checklist Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_checklist_item(
     checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist from which the item will be deleted."),
     checklist_item_id: str = Field(..., description="The unique identifier (UUID) of the specific checklist item to be deleted."),
@@ -1618,7 +1709,13 @@ async def delete_checklist_item(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List Task Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_comments(
     task_id: str = Field(..., description="The unique identifier of the task whose comments you want to retrieve."),
     custom_task_ids: bool | None = Field(None, description="Set to `true` if referencing the task by its custom task ID instead of the default ClickUp task ID."),
@@ -1661,7 +1758,12 @@ async def list_task_comments(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Add Task Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_comment(
     task_id: str = Field(..., description="The unique identifier of the task to which the comment will be added."),
     comment_text: str = Field(..., description="The text content of the comment to be added to the task."),
@@ -1705,13 +1807,20 @@ async def add_task_comment(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List Chat View Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_chat_view_comments(
     view_id: str = Field(..., description="The unique identifier of the Chat view whose comments you want to retrieve."),
     start: int | None = Field(None, description="The timestamp of a Chat view comment to paginate from, expressed as Unix time in milliseconds. Use the date of the oldest comment from the previous response to retrieve the next page of comments."),
@@ -1754,7 +1863,12 @@ async def list_chat_view_comments(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Create Chat View Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_chat_view_comment(
     view_id: str = Field(..., description="The unique identifier of the Chat view to which the comment will be added."),
     comment_text: str = Field(..., description="The text content of the comment to post on the Chat view."),
@@ -1791,13 +1905,20 @@ async def create_chat_view_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comments(
     list_id: float = Field(..., description="The unique identifier of the List whose comments you want to retrieve."),
     start: int | None = Field(None, description="The timestamp of the oldest comment from the previous page, used to paginate to the next set of 25 comments. Provide as Unix time in milliseconds."),
@@ -1840,7 +1961,12 @@ async def list_comments(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Add List Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_list_comment(
     list_id: float = Field(..., description="The unique identifier of the List to which the comment will be added."),
     comment_text: str = Field(..., description="The text content of the comment to be posted on the List."),
@@ -1878,13 +2004,20 @@ async def add_list_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Update Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_comment(
     comment_id: float = Field(..., description="The unique identifier of the comment to update."),
     comment_text: str = Field(..., description="The updated text content to replace the existing comment body."),
@@ -1923,13 +2056,20 @@ async def update_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_comment(comment_id: float = Field(..., description="The unique numeric identifier of the comment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific task comment by its unique identifier. This action is irreversible and removes the comment from the task."""
 
@@ -1965,7 +2105,13 @@ async def delete_comment(comment_id: float = Field(..., description="The unique 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List Comment Replies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comment_replies(comment_id: float = Field(..., description="The unique identifier of the parent comment whose threaded replies should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all threaded reply comments nested under a specified parent comment. The parent comment itself is excluded from the returned results."""
 
@@ -2001,7 +2147,12 @@ async def list_comment_replies(comment_id: float = Field(..., description="The u
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Reply to Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reply_to_comment(
     comment_id: float = Field(..., description="The unique identifier of the parent comment to reply to."),
     comment_text: str = Field(..., description="The text content of the threaded reply comment."),
@@ -2040,13 +2191,20 @@ async def reply_to_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_fields(
     list_id: float = Field(..., description="The unique numeric identifier of the List whose Custom Fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type format for the request, indicating the content format expected by the API."),
@@ -2086,7 +2244,13 @@ async def list_custom_fields(
     return _response_data
 
 # Tags: Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_custom_fields(
     folder_id: float = Field(..., description="The unique numeric identifier of the folder whose custom fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, used to indicate the format of the data being sent to the server."),
@@ -2126,7 +2290,13 @@ async def list_folder_custom_fields(
     return _response_data
 
 # Tags: Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="List Space Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_custom_fields(
     space_id: float = Field(..., description="The unique identifier of the Space whose Custom Fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, used to indicate the format of the data being sent."),
@@ -2166,7 +2336,13 @@ async def list_space_custom_fields(
     return _response_data
 
 # Tags: Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_custom_fields(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Workspace-level Custom Fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format of the request body sent to the API."),
@@ -2206,7 +2382,13 @@ async def list_workspace_custom_fields(
     return _response_data
 
 # Tags: Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Set Task Custom Field Value",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_task_custom_field_value(
     task_id: str = Field(..., description="The unique identifier of the task you want to update with a Custom Field value."),
     field_id: str = Field(..., description="The universally unique identifier (UUID) of the Custom Field you want to set. Retrieve this from the Get Accessible Custom Fields or Get Task endpoints."),
@@ -2249,13 +2431,20 @@ async def set_task_custom_field_value(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Clear Task Custom Field Value",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def clear_task_custom_field_value(
     task_id: str = Field(..., description="The unique identifier of the task from which the Custom Field value will be cleared."),
     field_id: str = Field(..., description="The UUID of the Custom Field whose value should be removed from the task."),
@@ -2299,7 +2488,12 @@ async def clear_task_custom_field_value(
     return _response_data
 
 # Tags: Task Relationships
-@mcp.tool()
+@mcp.tool(
+    title="Add Task Dependency",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_dependency(
     task_id: str = Field(..., description="The ID of the task for which the dependency relationship is being defined — either the task that is waiting on another task or the task that is blocking another task."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference tasks by their custom task IDs instead of their default system-generated IDs. Requires `team_id` to also be provided."),
@@ -2341,13 +2535,20 @@ async def add_task_dependency(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Task Relationships
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task Dependency",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task_dependency(
     task_id: str = Field(..., description="The unique identifier of the primary task whose dependency relationship is being removed."),
     depends_on: str = Field(..., description="The ID of the task that the primary task depends on — i.e., the prerequisite task to be unlinked."),
@@ -2392,7 +2593,12 @@ async def delete_task_dependency(
     return _response_data
 
 # Tags: Task Relationships
-@mcp.tool()
+@mcp.tool(
+    title="Link Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_task(
     task_id: str = Field(..., description="The ID of the task initiating the link (the source task)."),
     links_to: str = Field(..., description="The ID of the task to link to (the target task)."),
@@ -2436,7 +2642,13 @@ async def link_task(
     return _response_data
 
 # Tags: Task Relationships
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task_link(
     task_id: str = Field(..., description="The unique identifier of the source task from which the link will be removed."),
     links_to: str = Field(..., description="The unique identifier of the target task that is currently linked to the source task."),
@@ -2480,7 +2692,13 @@ async def delete_task_link(
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="List Folders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folders(
     space_id: float = Field(..., description="The unique identifier of the Space whose Folders you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, returns only archived Folders; when false or omitted, returns only active Folders."),
@@ -2522,7 +2740,12 @@ async def list_folders(
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder(
     space_id: float = Field(..., description="The unique identifier of the Space in which the new folder will be created."),
     name: str = Field(..., description="The display name for the new folder, used to identify it within the Space."),
@@ -2558,13 +2781,20 @@ async def create_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Get Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_folder(folder_id: float = Field(..., description="The unique numeric identifier of the folder to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a folder and the Lists contained within it. Use this to inspect the structure and contents of a specific folder."""
 
@@ -2600,7 +2830,13 @@ async def get_folder(folder_id: float = Field(..., description="The unique numer
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Rename Folder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rename_folder(
     folder_id: float = Field(..., description="The unique numeric identifier of the folder to rename."),
     name: str = Field(..., description="The new name to assign to the folder."),
@@ -2636,13 +2872,20 @@ async def rename_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Delete Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_folder(folder_id: float = Field(..., description="The unique numeric identifier of the folder to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a folder from your Workspace. This action cannot be undone, so ensure the correct folder ID is specified before proceeding."""
 
@@ -2678,7 +2921,13 @@ async def delete_folder(folder_id: float = Field(..., description="The unique nu
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="List Goals",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_goals(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Goals you want to retrieve."),
     include_completed: bool | None = Field(None, description="When set to true, completed Goals are included in the response alongside active ones; omitting this parameter or setting it to false returns only active Goals."),
@@ -2720,14 +2969,19 @@ async def list_goals(
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Create Goal",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_goal(
     team_id: float = Field(..., description="The unique identifier of the Workspace where the Goal will be created."),
     name: str = Field(..., description="The display name of the Goal."),
     due_date: int = Field(..., description="The deadline for the Goal expressed as a Unix timestamp in milliseconds."),
     description: str = Field(..., description="A detailed description providing context or additional information about the Goal."),
     multiple_owners: bool = Field(..., description="Set to true to allow multiple users to own this Goal simultaneously, or false to restrict to a single owner."),
-    owners: list[int] = Field(..., description="List of user IDs assigned as owners of the Goal. Order is not significant; each item should be a valid integer user ID."),
+    owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="List of user IDs assigned as owners of the Goal. Order is not significant; each item should be a valid integer user ID."),
     color: str = Field(..., description="A color used to visually identify the Goal in the UI, specified as a hex color code."),
 ) -> dict[str, Any] | ToolResult:
     """Creates a new Goal within a specified Workspace, allowing you to define objectives with ownership, due dates, and visual categorization."""
@@ -2761,13 +3015,20 @@ async def create_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Get Goal",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_goal(goal_id: str = Field(..., description="The unique UUID identifier of the goal to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific goal, including its associated targets and current progress. Use this to inspect a goal's configuration and status by its unique identifier."""
 
@@ -2803,14 +3064,20 @@ async def get_goal(goal_id: str = Field(..., description="The unique UUID identi
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Update Goal",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_goal(
     goal_id: str = Field(..., description="The unique identifier (UUID) of the Goal to update."),
     name: str = Field(..., description="The new display name for the Goal."),
     due_date: int = Field(..., description="The due date for the Goal, represented as a Unix timestamp in milliseconds."),
     description: str = Field(..., description="The full replacement description for the Goal. This overwrites the existing description entirely."),
-    rem_owners: list[int] = Field(..., description="List of user IDs to remove as owners of the Goal. Order is not significant; each item should be a valid user ID integer."),
-    add_owners: list[int] = Field(..., description="List of user IDs to add as owners of the Goal. Order is not significant; each item should be a valid user ID integer."),
+    rem_owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="List of user IDs to remove as owners of the Goal. Order is not significant; each item should be a valid user ID integer."),
+    add_owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="List of user IDs to add as owners of the Goal. Order is not significant; each item should be a valid user ID integer."),
     color: str = Field(..., description="The color to assign to the Goal, used for visual categorization in the UI. Provide a valid hex color code."),
 ) -> dict[str, Any] | ToolResult:
     """Update an existing Goal's properties, including its name, due date, description, color, and ownership. Use this to rename a Goal, adjust its deadline, modify its description, or add and remove assigned owners."""
@@ -2844,13 +3111,20 @@ async def update_goal(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Delete Goal",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_goal(
     goal_id: str = Field(..., description="The unique identifier (UUID) of the Goal to be deleted."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, used to indicate the format of the data being sent."),
@@ -2890,11 +3164,16 @@ async def delete_goal(
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Create Key Result",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_key_result(
     goal_id: str = Field(..., description="The unique identifier of the goal to which this key result will be added."),
     name: str = Field(..., description="The display name of the key result that describes the measurable target."),
-    owners: list[int] = Field(..., description="An array of user IDs representing the owners responsible for this key result. Order is not significant."),
+    owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="An array of user IDs representing the owners responsible for this key result. Order is not significant."),
     type_: str = Field(..., alias="type", description="The measurement type for this key result. Valid values are: `number` (numeric count), `currency` (monetary value), `boolean` (true/false completion), `percentage` (0–100 scale), or `automatic` (derived from linked tasks or lists)."),
     steps_start: int = Field(..., description="The starting value of the target range, representing the baseline or initial progress point."),
     steps_end: int = Field(..., description="The ending value of the target range, representing the goal completion threshold."),
@@ -2933,13 +3212,20 @@ async def create_key_result(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Update Key Result",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_key_result(
     key_result_id: str = Field(..., description="The unique identifier of the key result to update."),
     steps_current: int = Field(..., description="The current number of steps completed toward the key result target. Should reflect the latest progress value."),
@@ -2976,13 +3262,20 @@ async def update_key_result(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Goals
-@mcp.tool()
+@mcp.tool(
+    title="Delete Key Result",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_key_result(key_result_id: str = Field(..., description="The unique identifier (UUID) of the key result to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a key result (target) from a Goal. This action is irreversible and removes the specified key result and its associated data."""
 
@@ -3018,7 +3311,12 @@ async def delete_key_result(key_result_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Invite Workspace Guest",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invite_workspace_guest(
     team_id: float = Field(..., description="The unique identifier of the Workspace to which the guest will be invited."),
     email: str = Field(..., description="The email address of the guest to invite to the Workspace."),
@@ -3060,13 +3358,20 @@ async def invite_workspace_guest(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Get Guest",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_guest(
     team_id: float = Field(..., description="The unique identifier of the Workspace (team) containing the guest."),
     guest_id: float = Field(..., description="The unique identifier of the guest user to retrieve."),
@@ -3105,7 +3410,13 @@ async def get_guest(
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace Guest",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace_guest(
     team_id: float = Field(..., description="The unique identifier of the Workspace where the guest resides."),
     guest_id: float = Field(..., description="The unique identifier of the guest whose settings are being updated."),
@@ -3147,13 +3458,20 @@ async def update_workspace_guest(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Remove Workspace Guest",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_workspace_guest(
     team_id: float = Field(..., description="The unique identifier of the Workspace from which the guest will be removed."),
     guest_id: float = Field(..., description="The unique identifier of the guest whose Workspace access will be revoked."),
@@ -3192,7 +3510,12 @@ async def remove_workspace_guest(
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Add Guest to Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_guest_to_task(
     task_id: str = Field(..., description="The unique identifier of the task to share with the guest."),
     guest_id: float = Field(..., description="The unique numeric identifier of the guest user to add to the task."),
@@ -3233,13 +3556,20 @@ async def add_guest_to_task(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task Guest",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_guest(
     task_id: str = Field(..., description="The unique identifier of the task from which the guest's access will be revoked."),
     guest_id: float = Field(..., description="The numeric identifier of the guest user whose access to the task will be removed."),
@@ -3284,7 +3614,12 @@ async def remove_task_guest(
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Add Guest to List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_guest_to_list(
     list_id: float = Field(..., description="The unique identifier of the List to share with the guest."),
     guest_id: float = Field(..., description="The unique identifier of the guest user to add to the List."),
@@ -3325,13 +3660,20 @@ async def add_guest_to_list(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Remove List Guest",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_list_guest(
     list_id: float = Field(..., description="The unique identifier of the List from which the guest's access will be revoked."),
     guest_id: float = Field(..., description="The unique identifier of the guest whose access to the List will be removed."),
@@ -3374,7 +3716,12 @@ async def remove_list_guest(
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Add Guest to Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_guest_to_folder(
     folder_id: float = Field(..., description="The unique identifier of the folder to share with the guest."),
     guest_id: float = Field(..., description="The unique identifier of the guest user to whom folder access will be granted."),
@@ -3415,13 +3762,20 @@ async def add_guest_to_folder(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Guests
-@mcp.tool()
+@mcp.tool(
+    title="Remove Folder Guest",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_folder_guest(
     folder_id: float = Field(..., description="The unique numeric identifier of the Folder from which the guest's access will be revoked."),
     guest_id: float = Field(..., description="The unique numeric identifier of the guest whose access to the Folder will be removed."),
@@ -3464,7 +3818,13 @@ async def remove_folder_guest(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Lists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_lists(
     folder_id: float = Field(..., description="The unique identifier of the Folder whose Lists you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, includes archived Lists in the response alongside active ones. Defaults to false, returning only active Lists."),
@@ -3506,7 +3866,12 @@ async def list_folder_lists(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Create List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_list(
     folder_id: float = Field(..., description="The unique identifier of the Folder in which the new List will be created."),
     name: str = Field(..., description="The display name for the new List."),
@@ -3548,13 +3913,19 @@ async def create_list(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Folders
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder from Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder_from_template(
     space_id: str = Field(..., description="The unique identifier of the Space where the new Folder will be created."),
     template_id: str = Field(..., description="The unique identifier of the Folder template to apply, always prefixed with `t-`. Retrieve available template IDs using the Get Folder Templates endpoint."),
@@ -3622,13 +3993,20 @@ async def create_folder_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Folderless Lists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folderless_lists(
     space_id: float = Field(..., description="The unique identifier of the Space whose folderless Lists you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, includes archived Lists in the response alongside active ones."),
@@ -3670,7 +4048,12 @@ async def list_folderless_lists(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Create Folderless List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folderless_list(
     space_id: float = Field(..., description="The unique identifier of the Space in which the new List will be created."),
     name: str = Field(..., description="The display name for the new List."),
@@ -3712,13 +4095,20 @@ async def create_folderless_list(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Get List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_list(list_id: float = Field(..., description="The unique numeric identifier of the List to retrieve. To locate this ID, right-click the List in your Sidebar, select Copy link, and extract the last segment of the pasted URL.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific List, including its settings, members, and configuration. Use this to inspect or reference a List's properties by its unique ID."""
 
@@ -3754,7 +4144,13 @@ async def get_list(list_id: float = Field(..., description="The unique numeric i
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Update List",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_list(
     list_id: str = Field(..., description="The unique identifier of the List to update."),
     name: str = Field(..., description="The new display name for the List."),
@@ -3799,13 +4195,20 @@ async def update_list(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Delete List",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_list(
     list_id: float = Field(..., description="The unique numeric identifier of the List to be deleted."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, used to indicate the format of the data being sent."),
@@ -3845,7 +4248,12 @@ async def delete_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Add Task to List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_task_to_list(
     list_id: float = Field(..., description="The unique numeric identifier of the list to which the task will be added."),
     task_id: str = Field(..., description="The unique string identifier of the task to add to the specified list."),
@@ -3884,7 +4292,13 @@ async def add_task_to_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task from List",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_from_list(
     list_id: float = Field(..., description="The unique numeric identifier of the List from which the task should be removed. Must not be the task's home List."),
     task_id: str = Field(..., description="The unique string identifier of the task to remove from the specified List."),
@@ -3923,7 +4337,13 @@ async def remove_task_from_list(
     return _response_data
 
 # Tags: Members
-@mcp.tool()
+@mcp.tool(
+    title="List Task Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_members(task_id: str = Field(..., description="The unique identifier of the task whose explicit members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves Workspace members who have been explicitly granted direct access to a specific task. Note: this does not include members with access via a Team, List, Folder, or Space."""
 
@@ -3959,7 +4379,13 @@ async def list_task_members(task_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Members
-@mcp.tool()
+@mcp.tool(
+    title="List List Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_list_members(list_id: float = Field(..., description="The unique numeric identifier of the List whose explicit members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves Workspace members who have been explicitly granted access to a specific List. Note: this does not include members with inherited access via a Team, Folder, or Space."""
 
@@ -3995,7 +4421,13 @@ async def list_list_members(list_id: float = Field(..., description="The unique 
     return _response_data
 
 # Tags: Roles
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_roles(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Custom Roles you want to retrieve."),
     include_members: bool | None = Field(None, description="When set to true, the response will include the list of members assigned to each Custom Role."),
@@ -4037,7 +4469,13 @@ async def list_custom_roles(
     return _response_data
 
 # Tags: Shared Hierarchy
-@mcp.tool()
+@mcp.tool(
+    title="List Shared Hierarchy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_shared_hierarchy(team_id: float = Field(..., description="The unique identifier of the workspace whose shared content you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks, Lists, and Folders that have been shared with the authenticated user within a specified workspace. Useful for discovering shared content accessible to the current user."""
 
@@ -4073,7 +4511,13 @@ async def list_shared_hierarchy(team_id: float = Field(..., description="The uni
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="List Spaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_spaces(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Spaces you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, returns only archived Spaces; when false or omitted, returns only active Spaces."),
@@ -4115,7 +4559,12 @@ async def list_spaces(
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Create Space",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_space(
     team_id: float = Field(..., description="The unique identifier of the Workspace (team) in which the new Space will be created."),
     name: str = Field(..., description="The display name for the new Space."),
@@ -4175,13 +4624,20 @@ async def create_space(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Space",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_space(space_id: float = Field(..., description="The unique numeric identifier of the Space to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific Space within a Workspace, including its settings and configuration."""
 
@@ -4217,7 +4673,13 @@ async def get_space(space_id: float = Field(..., description="The unique numeric
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Update Space",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_space(
     space_id: float = Field(..., description="The unique identifier of the Space to update."),
     name: str = Field(..., description="The new display name for the Space."),
@@ -4280,13 +4742,20 @@ async def update_space(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Space",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_space(space_id: float = Field(..., description="The unique numeric identifier of the Space to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a Space from your Workspace. This action is irreversible and removes the Space along with its associated data."""
 
@@ -4322,7 +4791,13 @@ async def delete_space(space_id: float = Field(..., description="The unique nume
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Space Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_tags(
     space_id: float = Field(..., description="The unique identifier of the Space whose tags you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type format for the request, indicating the content should be sent as JSON."),
@@ -4362,7 +4837,12 @@ async def list_space_tags(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Space Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_space_tag(
     space_id: float = Field(..., description="The unique identifier of the Space where the new tag will be created."),
     name: str = Field(..., description="The display name of the tag as it will appear throughout the Space."),
@@ -4400,13 +4880,20 @@ async def create_space_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Update Space Tag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_space_tag(
     space_id: float = Field(..., description="The unique identifier of the space that contains the tag to be updated."),
     tag_name: str = Field(..., description="The current name of the tag to be edited, used to identify the tag within the space."),
@@ -4445,13 +4932,20 @@ async def update_space_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Space Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_space_tag(
     space_id: float = Field(..., description="The unique numeric identifier of the Space from which the tag will be deleted."),
     tag_name: str = Field(..., description="The URL path identifier of the tag to delete, typically matching the tag's display name."),
@@ -4490,13 +4984,19 @@ async def delete_space_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Add Tag to Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_tag_to_task(
     task_id: str = Field(..., description="The unique identifier of the task to which the tag will be added."),
     tag_name: str = Field(..., description="The name of the tag to add to the task. Must match an existing tag name exactly."),
@@ -4542,7 +5042,13 @@ async def add_tag_to_task(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Task Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_task_tag(
     task_id: str = Field(..., description="The unique identifier of the task from which the tag will be removed."),
     tag_name: str = Field(..., description="The name of the tag to remove from the task. Must match the tag name exactly as it exists in the Space."),
@@ -4588,7 +5094,13 @@ async def remove_task_tag(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tasks(
     list_id: float = Field(..., description="The unique numeric ID of the List whose tasks you want to retrieve. To find it, hover over the List in the Sidebar, click the ellipsis menu, select Copy link, and extract the number following '/li' in the URL."),
     archived: bool | None = Field(None, description="When true, includes archived tasks in the response. Archived tasks are excluded by default."),
@@ -4652,11 +5164,16 @@ async def list_tasks(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task(
     list_id: float = Field(..., description="The unique numeric ID of the list in which the task will be created."),
     name: str = Field(..., description="The display name of the task."),
-    assignees: list[int] | None = Field(None, description="List of user IDs to assign to the task. Order is not significant."),
+    assignees: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] | None = Field(None, description="List of user IDs to assign to the task. Order is not significant."),
     archived: bool | None = Field(None, description="Whether the task should be created in an archived state."),
     group_assignees: list[str] | None = Field(None, description="List of user group IDs to assign to the task. Order is not significant."),
     tags: list[str] | None = Field(None, description="List of tag names to apply to the task. Order is not significant."),
@@ -4707,13 +5224,20 @@ async def create_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(
     task_id: str = Field(..., description="The unique identifier of the task to retrieve. When using custom task IDs, set custom_task_ids to true and provide the team_id."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default ClickUp task ID. Must be used together with the team_id parameter."),
@@ -4759,13 +5283,19 @@ async def get_task(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task(
     task_id: str = Field(..., description="The unique identifier of the task to update."),
-    assignees_add: list[int] = Field(..., alias="assigneesAdd", description="List of user IDs to add as assignees to the task. Order is not significant."),
-    watchers_add: list[int] = Field(..., alias="watchersAdd", description="List of user IDs to add as watchers on the task. Order is not significant."),
-    assignees_rem: list[int] = Field(..., alias="assigneesRem", description="List of user IDs to remove from the task's assignees. Order is not significant."),
-    watchers_rem: list[int] = Field(..., alias="watchersRem", description="List of user IDs to remove from the task's watchers. Order is not significant."),
+    assignees_add: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., alias="assigneesAdd", description="List of user IDs to add as assignees to the task. Order is not significant."),
+    watchers_add: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., alias="watchersAdd", description="List of user IDs to add as watchers on the task. Order is not significant."),
+    assignees_rem: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., alias="assigneesRem", description="List of user IDs to remove from the task's assignees. Order is not significant."),
+    watchers_rem: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., alias="watchersRem", description="List of user IDs to remove from the task's watchers. Order is not significant."),
     custom_item_id: float | None = Field(None, description="The custom task type ID to assign to this task. Set to null to use the default 'Task' type. Retrieve available custom task type IDs using the Get Custom Task Types endpoint."),
     name: str | None = Field(None, description="The display name of the task."),
     markdown_content: str | None = Field(None, description="Markdown-formatted description for the task. Takes precedence over the plain-text description field if both are provided."),
@@ -4816,13 +5346,20 @@ async def update_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(
     task_id: str = Field(..., description="The unique identifier of the task to delete. Use the task's custom ID instead if the custom_task_ids parameter is set to true."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be set to indicate JSON-formatted content."),
@@ -4867,7 +5404,13 @@ async def delete_task(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Tasks by Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tasks_by_team(
     team_id: float = Field(..., alias="team_Id", description="The unique numeric ID of the Workspace (team) from which to retrieve tasks."),
     page: int | None = Field(None, description="Zero-based page number for paginated results; begin with 0 for the first page and increment to retrieve subsequent pages."),
@@ -4936,7 +5479,13 @@ async def list_tasks_by_team(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Merge Tasks",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_tasks(
     task_id: str = Field(..., description="The unique ID of the target task that all source tasks will be merged into. Must be a valid internal task ID; Custom Task IDs are not supported."),
     source_task_ids: list[str] = Field(..., description="An array of IDs representing the source tasks to merge into the target task. Order is not significant; all listed tasks will be merged. Custom Task IDs are not supported."),
@@ -4972,13 +5521,20 @@ async def merge_tasks(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Time in Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_time_in_status(
     task_id: str = Field(..., description="The unique identifier of the task for which to retrieve time-in-status data."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, used to indicate the format of the request body sent to the API."),
@@ -5023,7 +5579,13 @@ async def get_task_time_in_status(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Tasks Time in Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_tasks_time_in_status(
     task_ids: str = Field(..., description="One or more task IDs to query; include this parameter once per task ID, with a maximum of 100 task IDs per request."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload sent to the API."),
@@ -5067,7 +5629,13 @@ async def get_bulk_tasks_time_in_status(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Task Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_templates(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose task templates you want to retrieve."),
     page: int = Field(..., description="The zero-based page number for paginating through task template results, where 0 returns the first page."),
@@ -5111,7 +5679,13 @@ async def list_task_templates(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose List templates you want to retrieve."),
     page: int = Field(..., description="Zero-indexed page number for paginating through template results; start at 0 for the first page."),
@@ -5155,7 +5729,13 @@ async def list_templates(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_templates(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Folder templates you want to retrieve."),
     page: int = Field(..., description="Zero-indexed page number for paginating through Folder template results; start at 0 for the first page."),
@@ -5199,7 +5779,12 @@ async def list_folder_templates(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task From Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task_from_template(
     list_id: float = Field(..., description="The unique numeric identifier of the list where the new task will be created."),
     template_id: str = Field(..., description="The unique string identifier of the task template to use when creating the task."),
@@ -5236,13 +5821,19 @@ async def create_task_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Create List from Template in Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_list_from_template_in_folder(
     folder_id: str = Field(..., description="The ID of the Folder in which the new List will be created."),
     template_id: str = Field(..., description="The ID of the List template to apply. Template IDs include a 't-' prefix. Retrieve available template IDs using the Get List Templates endpoint."),
@@ -5310,13 +5901,19 @@ async def create_list_from_template_in_folder(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Create List from Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_list_from_template(
     space_id: str = Field(..., description="The unique identifier of the Space where the new List will be created."),
     template_id: str = Field(..., description="The unique identifier of the List template to apply, always prefixed with `t-`. Retrieve available template IDs using the Get List Templates endpoint."),
@@ -5384,13 +5981,20 @@ async def create_list_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Seats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_seats(team_id: str = Field(..., description="The unique identifier of the Workspace whose seat information you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves seat usage information for a Workspace, including the number of used, total, and available seats for both members and guests."""
 
@@ -5426,7 +6030,13 @@ async def get_workspace_seats(team_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace Plan",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_plan(team_id: str = Field(..., description="The unique identifier of the Workspace whose plan information you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current subscription plan details for the specified Workspace, including plan tier and associated features."""
 
@@ -5462,11 +6072,16 @@ async def get_workspace_plan(team_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: User Groups
-@mcp.tool()
+@mcp.tool(
+    title="Create User Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user_group(
     team_id: float = Field(..., description="The unique identifier of the Workspace (referred to as team_id in the API) where the User Group will be created."),
     name: str = Field(..., description="The display name for the new User Group, used to identify it within the Workspace."),
-    members: list[int] = Field(..., description="A list of user objects to include as members of the new User Group; order is not significant and each item should represent a user to be added."),
+    members: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="A list of user objects to include as members of the new User Group; order is not significant and each item should represent a user to be added."),
     handle: str | None = Field(None, description="An optional short identifier or alias for the User Group, typically used as a reference handle within the Workspace."),
 ) -> dict[str, Any] | ToolResult:
     """Creates a User Group within a Workspace to organize and manage users collectively. Note that adding a guest with view-only permissions automatically converts them to a paid guest, which may incur prorated charges if additional seats are needed."""
@@ -5500,13 +6115,20 @@ async def create_user_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Task Types
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Task Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_task_types(team_id: float = Field(..., description="The unique identifier of the Workspace whose custom task types you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all custom task types defined in a Workspace, allowing you to see available task type options for organizing and categorizing work."""
 
@@ -5542,11 +6164,17 @@ async def list_custom_task_types(team_id: float = Field(..., description="The un
     return _response_data
 
 # Tags: User Groups
-@mcp.tool()
+@mcp.tool(
+    title="Update User Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_group(
     group_id: str = Field(..., description="The unique identifier of the User Group to update."),
-    add: list[int] = Field(..., description="List of user IDs to add to the User Group. Each item should be a valid user ID string."),
-    rem: list[int] = Field(..., description="List of user IDs to remove from the User Group. Each item should be a valid user ID string."),
+    add: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="List of user IDs to add to the User Group. Each item should be a valid user ID string."),
+    rem: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(..., description="List of user IDs to remove from the User Group. Each item should be a valid user ID string."),
     name: str | None = Field(None, description="The new display name for the User Group."),
     handle: str | None = Field(None, description="The new handle (short identifier or alias) for the User Group."),
 ) -> dict[str, Any] | ToolResult:
@@ -5582,13 +6210,20 @@ async def update_user_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User Groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_group(group_id: str = Field(..., description="The unique identifier of the user group to delete from the Workspace.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a user group from the Workspace. Note that in the API, 'group_id' refers to a user group, while 'team_id' refers to the Workspace."""
 
@@ -5624,7 +6259,13 @@ async def delete_user_group(group_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: User Groups
-@mcp.tool()
+@mcp.tool(
+    title="List User Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_groups(
     team_id: float = Field(..., description="The unique ID of the Workspace whose User Groups you want to retrieve."),
     group_ids: list[str] | None = Field(None, description="An optional list of User Group IDs to filter results to specific groups; omit to return all User Groups in the Workspace. Each item should be a valid User Group ID string. Order is not significant."),
@@ -5665,7 +6306,13 @@ async def list_user_groups(
     return _response_data
 
 # Tags: Time Tracking (Legacy)
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Tracked Time",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_tracked_time(
     task_id: str = Field(..., description="The unique identifier of the task whose tracked time entries you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format of the data being sent."),
@@ -5710,7 +6357,12 @@ async def get_task_tracked_time(
     return _response_data
 
 # Tags: Time Tracking (Legacy)
-@mcp.tool()
+@mcp.tool(
+    title="Track Task Time",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def track_task_time(
     task_id: str = Field(..., description="The unique identifier of the task to log time against."),
     start: int = Field(..., description="The start time of the tracked time entry as a Unix timestamp in milliseconds."),
@@ -5753,13 +6405,20 @@ async def track_task_time(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking (Legacy)
-@mcp.tool()
+@mcp.tool(
+    title="Update Time Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_time_entry_legacy(
     task_id: str = Field(..., description="The unique identifier of the task containing the time interval to update."),
     interval_id: str = Field(..., description="The unique identifier of the specific time interval to edit."),
@@ -5803,13 +6462,20 @@ async def update_time_entry_legacy(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking (Legacy)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tracked Time Interval",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tracked_time_interval(
     task_id: str = Field(..., description="The unique identifier of the task from which the tracked time interval will be deleted."),
     interval_id: str = Field(..., description="The unique identifier of the tracked time interval to delete."),
@@ -5855,7 +6521,13 @@ async def delete_tracked_time_interval(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Time Entries Within Date Range",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_entries(
     team_id: float = Field(..., alias="team_Id", description="The unique identifier of the workspace from which to retrieve time entries."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, which must be set to indicate JSON content."),
@@ -5912,7 +6584,12 @@ async def list_time_entries(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Create Time Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_time_entry(
     team_id: float = Field(..., alias="team_Id", description="The unique identifier of the workspace where the time entry will be created."),
     start: int = Field(..., description="The start time of the time entry as a Unix timestamp in milliseconds."),
@@ -5960,13 +6637,20 @@ async def create_time_entry(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Time Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_time_entry(
     team_id: float = Field(..., description="The unique numeric ID of the workspace containing the time entry."),
     timer_id: str = Field(..., description="The unique ID of the time entry to retrieve. Time entry IDs can be obtained from the Get Time Entries Within a Date Range endpoint."),
@@ -6014,7 +6698,13 @@ async def get_time_entry(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Time Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_time_entry(
     team_id: float = Field(..., description="The unique identifier of the workspace containing the time entry."),
     timer_id: float = Field(..., description="The unique identifier of the time entry to update."),
@@ -6062,13 +6752,20 @@ async def update_time_entry(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Time Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_time_entry(
     team_id: float = Field(..., description="The unique identifier of the Workspace from which the time entries will be deleted."),
     timer_id: float = Field(..., description="The unique identifier of the time entry to delete. To delete multiple entries at once, provide a comma-separated list of timer IDs."),
@@ -6109,7 +6806,13 @@ async def delete_time_entry(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Time Entry History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_time_entry_history(
     team_id: float = Field(..., description="The unique numeric ID of the workspace containing the time entry."),
     timer_id: str = Field(..., description="The unique ID of the time entry whose history you want to retrieve. Can be obtained from the Get Time Entries Within a Date Range endpoint."),
@@ -6150,7 +6853,13 @@ async def get_time_entry_history(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Running Time Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_running_time_entry(
     team_id: float = Field(..., description="The unique identifier of the workspace in which to look up the running time entry."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format in which data is being sent to the API."),
@@ -6194,7 +6903,13 @@ async def get_running_time_entry(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Time Entry Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_time_entry_tags(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose time entry tags you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format in which data is being sent to the server."),
@@ -6234,7 +6949,12 @@ async def list_time_entry_tags(
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Add Tags to Time Entries",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_tags_to_time_entries(
     team_id: float = Field(..., description="The unique identifier of the workspace containing the time entries."),
     time_entry_ids: list[str] = Field(..., description="List of time entry IDs to which the tags will be applied. Order is not significant; each ID should be a valid time entry identifier within the workspace."),
@@ -6271,13 +6991,20 @@ async def add_tags_to_time_entries(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Rename Time Entry Tag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rename_time_entry_tag(
     team_id: float = Field(..., description="The unique identifier of the workspace containing the time entry tags to update."),
     name: str = Field(..., description="The current name of the tag to be renamed."),
@@ -6316,13 +7043,20 @@ async def rename_time_entry_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Remove Tags from Time Entries",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_tags_from_time_entries(
     team_id: float = Field(..., description="The unique identifier of the workspace containing the time entries."),
     time_entry_ids: list[str] = Field(..., description="List of time entry IDs from which the specified tags will be removed. Order is not significant."),
@@ -6359,13 +7093,19 @@ async def remove_tags_from_time_entries(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Start Time Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_time_entry(
     team_id: float = Field(..., alias="team_Id", description="The unique identifier of the workspace in which to start the time entry."),
     custom_task_ids: bool | None = Field(None, description="Set to true if the task is being referenced by its custom task ID rather than its default system-generated ID."),
@@ -6408,13 +7148,19 @@ async def start_time_entry(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Time Tracking
-@mcp.tool()
+@mcp.tool(
+    title="Stop Time Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def stop_time_entry(
     team_id: float = Field(..., description="The unique identifier of the workspace in which to stop the active time entry."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be set to indicate JSON formatting."),
@@ -6454,7 +7200,12 @@ async def stop_time_entry(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Invite Workspace Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invite_workspace_member(
     team_id: float = Field(..., description="The unique identifier of the Workspace to which the user will be invited."),
     email: str = Field(..., description="The email address of the person to invite to the Workspace."),
@@ -6492,13 +7243,20 @@ async def invite_workspace_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace_user(
     team_id: float = Field(..., description="The unique numeric ID of the Workspace (also referred to as a team) containing the user."),
     user_id: float = Field(..., description="The unique numeric ID of the user to retrieve within the specified Workspace."),
@@ -6541,7 +7299,13 @@ async def get_workspace_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace_user(
     team_id: float = Field(..., description="The unique identifier of the Workspace (team) in which the user will be updated."),
     user_id: float = Field(..., description="The unique identifier of the user to be updated within the specified Workspace."),
@@ -6580,13 +7344,20 @@ async def update_workspace_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Remove Workspace User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_workspace_user(
     team_id: float = Field(..., description="The unique identifier of the Workspace (team) from which the user will be removed."),
     user_id: float = Field(..., description="The unique identifier of the user to be deactivated and removed from the Workspace."),
@@ -6625,7 +7396,13 @@ async def remove_workspace_user(
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_views(team_id: float = Field(..., description="The unique identifier of the Workspace whose Everything-level views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all task and page views available at the Everything level of a Workspace, providing a top-level overview of all views across the entire Workspace."""
 
@@ -6661,7 +7438,12 @@ async def list_workspace_views(team_id: float = Field(..., description="The uniq
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create Workspace View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workspace_view(
     team_id: float = Field(..., description="The unique identifier of the Workspace in which to create the view."),
     name: str = Field(..., description="The display name for the new view."),
@@ -6731,13 +7513,20 @@ async def create_workspace_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List Space Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_views(space_id: float = Field(..., description="The unique identifier of the Space whose views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all task and page views available within a specific Space. Useful for discovering how work is organized and displayed within a Space."""
 
@@ -6773,7 +7562,12 @@ async def list_space_views(space_id: float = Field(..., description="The unique 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create Space View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_space_view(
     space_id: float = Field(..., description="The unique identifier of the Space where the new view will be created."),
     name: str = Field(..., description="The display name for the new view."),
@@ -6843,13 +7637,20 @@ async def create_space_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List Folder Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_views(folder_id: float = Field(..., description="The unique identifier of the Folder whose views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all task and page views available within a specific Folder. Use this to discover the views configured for organizing and displaying folder content."""
 
@@ -6885,7 +7686,12 @@ async def list_folder_views(folder_id: float = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder_view(
     folder_id: float = Field(..., description="The unique numeric identifier of the folder where the new view will be created."),
     name: str = Field(..., description="The display name for the new view."),
@@ -6955,13 +7761,20 @@ async def create_folder_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_views(list_id: float = Field(..., description="The unique identifier of the List whose views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all task and page views available for a specified List. Returns standard views and required views as separate response groups."""
 
@@ -6997,7 +7810,12 @@ async def list_views(list_id: float = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Create List View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_list_view(
     list_id: float = Field(..., description="The unique identifier of the List in which to create the new view."),
     name: str = Field(..., description="The display name for the new view."),
@@ -7067,13 +7885,20 @@ async def create_list_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Get View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_view(view_id: str = Field(..., description="The unique identifier of the view to retrieve. Corresponds to a specific task or page view within the workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and configuration details for a specific task or page view by its unique identifier. The fields returned vary depending on the view type."""
 
@@ -7109,7 +7934,13 @@ async def get_view(view_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Update View",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_view(
     view_id: str = Field(..., description="The unique identifier of the view to update."),
     name: str = Field(..., description="The new display name for the view."),
@@ -7182,13 +8013,20 @@ async def update_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="Delete View",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_view(view_id: str = Field(..., description="The unique identifier of the view to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specified view by its unique identifier. This action is irreversible and removes the view and its configuration from the system."""
 
@@ -7224,7 +8062,13 @@ async def delete_view(view_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: Views
-@mcp.tool()
+@mcp.tool(
+    title="List View Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_view_tasks(
     view_id: str = Field(..., description="The unique identifier of the view whose tasks you want to retrieve."),
     page: int = Field(..., description="The zero-based page number to retrieve for paginated results, where 0 returns the first page."),
@@ -7266,7 +8110,13 @@ async def list_view_tasks(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(team_id: float = Field(..., description="The unique identifier of the Workspace whose webhooks you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all webhooks created via the API for a specified Workspace. Only webhooks created by the authenticated user are returned."""
 
@@ -7302,7 +8152,13 @@ async def list_webhooks(team_id: float = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier (UUID) of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook, stopping all event monitoring and location tracking associated with it. This action cannot be undone."""
 

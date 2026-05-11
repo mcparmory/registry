@@ -1,7 +1,7 @@
 """
 Authentication module for ClickUp MCP server.
 
-Generated: 2026-05-05 14:39:21 UTC
+Generated: 2026-05-11 19:39:54 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

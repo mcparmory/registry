@@ -1,13 +1,13 @@
 """
 Clickup MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:39:21 UTC
+Generated: 2026-05-11 19:39:54 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -194,7 +194,7 @@ class CreateTaskAttachmentRequestQuery(StrictModel):
     custom_task_ids: bool | None = Field(default=None, description="Set to true to reference the task by its custom task ID instead of the default system-generated task ID.", examples=[True])
     team_id: float | None = Field(default=None, description="The Workspace ID required when referencing a task by its custom task ID. Must be provided alongside custom_task_ids=true.", json_schema_extra={'format': 'double', 'contentEncoding': 'double'}, examples=[123])
 class CreateTaskAttachmentRequestBody(StrictModel):
-    attachment: list[Any] | None = Field(default=None, description="The file content to upload as a multipart/form-data attachment. Each item represents a part of the multipart payload for the file being attached.")
+    attachment: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, description="Base64-encoded file content for upload. The file content to upload as a multipart/form-data attachment. Each item represents a part of the multipart payload for the file being attached.")
 class CreateTaskAttachmentRequest(StrictModel):
     """Upload a local file to a task as an attachment using multipart/form-data. Note that cloud-hosted files are not supported; only locally accessible files can be attached."""
     path: CreateTaskAttachmentRequestPath
@@ -565,7 +565,7 @@ class CreateGoalRequestBody(StrictModel):
     due_date: int = Field(default=..., description="The deadline for the Goal expressed as a Unix timestamp in milliseconds.", json_schema_extra={'format': 'int64', 'contentEncoding': 'int64'})
     description: str = Field(default=..., description="A detailed description providing context or additional information about the Goal.")
     multiple_owners: bool = Field(default=..., description="Set to true to allow multiple users to own this Goal simultaneously, or false to restrict to a single owner.")
-    owners: list[int] = Field(default=..., description="List of user IDs assigned as owners of the Goal. Order is not significant; each item should be a valid integer user ID.")
+    owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., description="List of user IDs assigned as owners of the Goal. Order is not significant; each item should be a valid integer user ID.")
     color: str = Field(default=..., description="A color used to visually identify the Goal in the UI, specified as a hex color code.")
 class CreateGoalRequest(StrictModel):
     """Creates a new Goal within a specified Workspace, allowing you to define objectives with ownership, due dates, and visual categorization."""
@@ -586,8 +586,8 @@ class UpdateGoalRequestBody(StrictModel):
     name: str = Field(default=..., description="The new display name for the Goal.")
     due_date: int = Field(default=..., description="The due date for the Goal, represented as a Unix timestamp in milliseconds.", json_schema_extra={'format': 'int64', 'contentEncoding': 'int64'})
     description: str = Field(default=..., description="The full replacement description for the Goal. This overwrites the existing description entirely.")
-    rem_owners: list[int] = Field(default=..., description="List of user IDs to remove as owners of the Goal. Order is not significant; each item should be a valid user ID integer.")
-    add_owners: list[int] = Field(default=..., description="List of user IDs to add as owners of the Goal. Order is not significant; each item should be a valid user ID integer.")
+    rem_owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., description="List of user IDs to remove as owners of the Goal. Order is not significant; each item should be a valid user ID integer.")
+    add_owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., description="List of user IDs to add as owners of the Goal. Order is not significant; each item should be a valid user ID integer.")
     color: str = Field(default=..., description="The color to assign to the Goal, used for visual categorization in the UI. Provide a valid hex color code.")
 class UpdateGoalRequest(StrictModel):
     """Update an existing Goal's properties, including its name, due date, description, color, and ownership. Use this to rename a Goal, adjust its deadline, modify its description, or add and remove assigned owners."""
@@ -609,7 +609,7 @@ class CreateKeyResultRequestPath(StrictModel):
     goal_id: str = Field(default=..., description="The unique identifier of the goal to which this key result will be added.", examples=['e53a033c'])
 class CreateKeyResultRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name of the key result that describes the measurable target.")
-    owners: list[int] = Field(default=..., description="An array of user IDs representing the owners responsible for this key result. Order is not significant.")
+    owners: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., description="An array of user IDs representing the owners responsible for this key result. Order is not significant.")
     type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The measurement type for this key result. Valid values are: `number` (numeric count), `currency` (monetary value), `boolean` (true/false completion), `percentage` (0–100 scale), or `automatic` (derived from linked tasks or lists).")
     steps_start: int = Field(default=..., description="The starting value of the target range, representing the baseline or initial progress point.", json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})
     steps_end: int = Field(default=..., description="The ending value of the target range, representing the goal completion threshold.", json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})
@@ -1175,7 +1175,7 @@ class CreateTaskRequestPath(StrictModel):
     list_id: float = Field(default=..., description="The unique numeric ID of the list in which the task will be created.", json_schema_extra={'format': 'double', 'contentEncoding': 'double'}, examples=[123])
 class CreateTaskRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name of the task.")
-    assignees: list[int] | None = Field(default=None, description="List of user IDs to assign to the task. Order is not significant.")
+    assignees: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] | None = Field(default=None, description="List of user IDs to assign to the task. Order is not significant.")
     archived: bool | None = Field(default=None, description="Whether the task should be created in an archived state.")
     group_assignees: list[str] | None = Field(default=None, description="List of user group IDs to assign to the task. Order is not significant.")
     tags: list[str] | None = Field(default=None, description="List of tag names to apply to the task. Order is not significant.")
@@ -1217,14 +1217,14 @@ class GetTaskRequest(StrictModel):
 class UpdateTaskRequestPath(StrictModel):
     task_id: str = Field(default=..., description="The unique identifier of the task to update.", examples=['9hx'])
 class UpdateTaskRequestBodyAssignees(StrictModel):
-    add: list[int] = Field(default=..., validation_alias="add", serialization_alias="add", description="List of user IDs to add as assignees to the task. Order is not significant.")
-    rem: list[int] = Field(default=..., validation_alias="rem", serialization_alias="rem", description="List of user IDs to remove from the task's assignees. Order is not significant.")
+    add: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., validation_alias="add", serialization_alias="add", description="List of user IDs to add as assignees to the task. Order is not significant.")
+    rem: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., validation_alias="rem", serialization_alias="rem", description="List of user IDs to remove from the task's assignees. Order is not significant.")
 class UpdateTaskRequestBodyGroupAssignees(StrictModel):
     add: list[str] | None = Field(default=None, validation_alias="add", serialization_alias="add", description="List of group (team) IDs to add as group assignees to the task. Order is not significant.")
     rem: list[str] | None = Field(default=None, validation_alias="rem", serialization_alias="rem", description="List of group (team) IDs to remove from the task's group assignees. Order is not significant.")
 class UpdateTaskRequestBodyWatchers(StrictModel):
-    add: list[int] = Field(default=..., validation_alias="add", serialization_alias="add", description="List of user IDs to add as watchers on the task. Order is not significant.")
-    rem: list[int] = Field(default=..., validation_alias="rem", serialization_alias="rem", description="List of user IDs to remove from the task's watchers. Order is not significant.")
+    add: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., validation_alias="add", serialization_alias="add", description="List of user IDs to add as watchers on the task. Order is not significant.")
+    rem: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., validation_alias="rem", serialization_alias="rem", description="List of user IDs to remove from the task's watchers. Order is not significant.")
 class UpdateTaskRequestBody(StrictModel):
     """***Note:** To update Custom Fields on a task, you must use the Set Custom Field endpoint.*"""
     custom_item_id: float | None = Field(default=None, description="The custom task type ID to assign to this task. Set to null to use the default 'Task' type. Retrieve available custom task type IDs using the Get Custom Task Types endpoint.")
@@ -1486,7 +1486,7 @@ class CreateUserGroupRequestPath(StrictModel):
 class CreateUserGroupRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name for the new User Group, used to identify it within the Workspace.")
     handle: str | None = Field(default=None, description="An optional short identifier or alias for the User Group, typically used as a reference handle within the Workspace.")
-    members: list[int] = Field(default=..., description="A list of user objects to include as members of the new User Group; order is not significant and each item should represent a user to be added.")
+    members: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., description="A list of user objects to include as members of the new User Group; order is not significant and each item should represent a user to be added.")
 class CreateUserGroupRequest(StrictModel):
     """Creates a User Group within a Workspace to organize and manage users collectively. Note that adding a guest with view-only permissions automatically converts them to a paid guest, which may incur prorated charges if additional seats are needed."""
     path: CreateUserGroupRequestPath
@@ -1503,8 +1503,8 @@ class GetCustomItemsRequest(StrictModel):
 class UpdateTeamRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the User Group to update.", examples=['C9C58BE9'])
 class UpdateTeamRequestBodyMembers(StrictModel):
-    add: list[int] = Field(default=..., validation_alias="add", serialization_alias="add", description="List of user IDs to add to the User Group. Each item should be a valid user ID string.")
-    rem: list[int] = Field(default=..., validation_alias="rem", serialization_alias="rem", description="List of user IDs to remove from the User Group. Each item should be a valid user ID string.")
+    add: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., validation_alias="add", serialization_alias="add", description="List of user IDs to add to the User Group. Each item should be a valid user ID string.")
+    rem: list[Annotated[int, Field(json_schema_extra={'format': 'int32', 'contentEncoding': 'int32'})]] = Field(default=..., validation_alias="rem", serialization_alias="rem", description="List of user IDs to remove from the User Group. Each item should be a valid user ID string.")
 class UpdateTeamRequestBody(StrictModel):
     """The group handle can be updated, which is used to @mention a User Group within the Workspace.\\
  \\
