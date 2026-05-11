@@ -5,7 +5,7 @@ Base URL: https://.atlassian.net
 | | |
 |---|---|
 | **Category** | Productivity |
-| **Tools** | 317 |
+| **Tools** | 295 |
 | **Auth** | HTTP Basic, OAuth2 |
 
 ## API Info
@@ -78,6 +78,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
 - `SERVER_YOUR_DOMAIN` — Your subdomain from the URL bar when logged in (the part before .atlassian.net).
+
 Do not commit credentials to version control.
 
 ### OAuth2

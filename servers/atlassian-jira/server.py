@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/
 
-Generated: 2026-05-05 14:20:37 UTC
+Generated: 2026-05-11 19:28:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -43,6 +44,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -51,7 +53,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{your_domain}.atlassian.net".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Atlassian Jira"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -542,6 +544,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -549,6 +573,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -634,6 +660,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -643,18 +670,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -665,24 +690,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1024,6 +1055,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1048,6 +1081,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1264,7 +1299,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Atlassian Jira", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Issue custom field values (apps)
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field Values",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_custom_field_values(
     generate_changelog: bool | None = Field(None, alias="generateChangelog", description="Whether to generate a changelog entry for this update. Defaults to true if not specified."),
     updates: list[_models.MultipleCustomFieldValuesUpdate] | None = Field(None, description="Array of custom field value updates to apply. Each entry specifies a custom field and the issue(s) to update with their new values. Order is not significant."),
@@ -1302,13 +1342,20 @@ async def update_custom_field_values(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue custom field values (apps)
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field Value",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_field_value(
     field_id_or_key: str = Field(..., alias="fieldIdOrKey", description="The ID or key of the custom field to update (e.g., customfield_10010)."),
     generate_changelog: bool | None = Field(None, alias="generateChangelog", description="Whether to generate a changelog entry for this update. Defaults to true if not specified."),
@@ -1348,13 +1395,20 @@ async def update_custom_field_value(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Download Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_attachment(
     id_: str = Field(..., alias="id", description="The unique identifier of the attachment to download."),
     redirect: bool | None = Field(None, description="Whether to follow HTTP redirects for the attachment download. Set to false if your client doesn't automatically follow redirects to avoid multiple requests. Defaults to true."),
@@ -1396,7 +1450,13 @@ async def download_attachment(
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Get Attachment Thumbnail",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_attachment_thumbnail(
     id_: str = Field(..., alias="id", description="The unique identifier of the attachment for which to retrieve the thumbnail."),
     redirect: bool | None = Field(None, description="Whether to return a redirect URL for the thumbnail instead of the image content directly. Set to false to avoid multiple requests if your client doesn't automatically follow redirects."),
@@ -1444,7 +1504,13 @@ async def get_attachment_thumbnail(
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Get Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment whose metadata you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for an attachment, including details like filename, size, and creation date. The attachment content itself is not returned by this operation."""
 
@@ -1480,7 +1546,13 @@ async def get_attachment(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Attachment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to delete.")) -> dict[str, Any] | ToolResult:
     """Removes an attachment from an issue. Requires either permission to delete your own attachments or permission to delete any attachment in the project."""
 
@@ -1516,7 +1588,13 @@ async def delete_attachment(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Get Attachment Metadata with Contents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_attachment_metadata_with_contents(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to retrieve metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve complete metadata for an attachment and its contents if it's an archive. Returns information about the attachment itself (ID, name) plus details about any files within supported archive formats like ZIP."""
 
@@ -1552,7 +1630,13 @@ async def get_attachment_metadata_with_contents(id_: str = Field(..., alias="id"
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Get Archive Contents Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_archive_contents_metadata(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to expand and retrieve contents metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for the contents of an archive attachment, such as files within a ZIP archive. Use this operation when processing attachment data programmatically without user presentation."""
 
@@ -1588,7 +1672,13 @@ async def get_archive_contents_metadata(id_: str = Field(..., alias="id", descri
     return _response_data
 
 # Tags: Avatars
-@mcp.tool()
+@mcp.tool(
+    title="List System Avatars",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_system_avatars(type_: Literal["issuetype", "project", "user", "priority"] = Field(..., alias="type", description="The category of avatars to retrieve. Must be one of: issuetype, project, user, or priority.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of system avatars filtered by type (issue type, project, user, or priority). This operation is publicly accessible and requires no authentication."""
 
@@ -1624,7 +1714,13 @@ async def list_system_avatars(type_: Literal["issuetype", "project", "user", "pr
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issues in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issues_bulk(
     selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to delete. Can include issues from different projects and types. Order is not significant."),
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send a bulk change notification email to users about the deletions. Enabled by default."),
@@ -1659,13 +1755,20 @@ async def delete_issues_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Editable Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_editable_fields(
     issue_ids_or_keys: str = Field(..., alias="issueIdsOrKeys", description="One or more issue IDs or keys to determine which fields are eligible for bulk editing. Provide as a comma-separated list or array of values."),
     search_text: str | None = Field(None, alias="searchText", description="Optional text to filter the returned editable fields by name or description."),
@@ -1706,7 +1809,13 @@ async def list_bulk_editable_fields(
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Edit Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_edit_issues(
     edited_fields_input: _models.SubmitBulkEditBodyEditedFieldsInput = Field(..., alias="editedFieldsInput", description="An object containing the new values for each field being edited. The structure varies by field type, and field IDs must correspond to those specified in selectedActions."),
     selected_actions: list[str] = Field(..., alias="selectedActions", description="List of field IDs to be modified in the bulk edit operation. Each ID must match a field in editedFieldsInput and corresponds to a specific issue attribute being updated. Obtain available field IDs from the Bulk Edit Get Fields API."),
@@ -1743,13 +1852,20 @@ async def bulk_edit_issues(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Move Issues in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def move_issues_bulk(
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send a bulk notification email to users when issues are moved. Defaults to true if not specified."),
     target_to_sources_mapping: dict[str, _models.TargetToSourcesMapping] | None = Field(None, alias="targetToSourcesMapping", description="Mapping of destination configurations to source issues. Each mapping key combines destination project (ID or key), issue type ID, and optional parent (ID or key) in comma-separated format. The mapping defines field transformations and status mappings required for the move. Duplicate keys will be silently ignored without failing the operation."),
@@ -1784,13 +1900,20 @@ async def move_issues_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Transitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_transitions(issue_ids_or_keys: str = Field(..., alias="issueIdsOrKeys", description="Comma-separated list of issue IDs or keys to retrieve available transitions for. Supports up to 1,000 issues per request.")) -> dict[str, Any] | ToolResult:
     """Retrieve available transitions for specified issues that can be used in bulk transition operations. Returns transitions organized by workflow, including only those common across all specified issues that don't require additional field updates."""
 
@@ -1828,7 +1951,12 @@ async def list_issue_transitions(issue_ids_or_keys: str = Field(..., alias="issu
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Transition Issues in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def transition_issues_bulk(
     bulk_transition_inputs: list[_models.BulkTransitionSubmitInput] = Field(..., alias="bulkTransitionInputs", description="Array of issue transition objects, each containing an issue identifier and its corresponding transition ID. Issues must share compatible workflows for their specified transitions. Maximum of 1,000 issues per request."),
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send bulk notification emails to affected users when issues are transitioned. Enabled by default."),
@@ -1863,13 +1991,20 @@ async def transition_issues_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Unwatch Issues in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unwatch_issues_bulk(selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to unwatch. You can include up to 1,000 issues from any projects or issue types in a single request.")) -> dict[str, Any] | ToolResult:
     """Remove your watch from multiple issues in a single operation. You can unwatch up to 1,000 issues across different projects and issue types."""
 
@@ -1901,13 +2036,19 @@ async def unwatch_issues_bulk(selected_issue_ids_or_keys: list[str] = Field(...,
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Watch Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def watch_issues(selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to watch, supporting up to 1,000 items per request. Issues can be from different projects and types. Provide either numeric IDs or string keys (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Add up to 1,000 issues to your watch list in a single bulk operation. Watched issues will appear in your notifications and dashboards."""
 
@@ -1939,13 +2080,20 @@ async def watch_issues(selected_issue_ids_or_keys: list[str] = Field(..., alias=
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Operation Progress",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_operation_progress(task_id: str = Field(..., alias="taskId", description="The unique identifier of the bulk operation task whose progress you want to check.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current progress and status of a bulk issue operation. Returns real-time progress metrics while running, or final results upon completion. Task progress data is available for up to 14 days after creation."""
 
@@ -1981,7 +2129,12 @@ async def get_bulk_operation_progress(task_id: str = Field(..., alias="taskId", 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Fetch Issue Changelogs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fetch_issue_changelogs(
     issue_ids_or_keys: list[str] = Field(..., alias="issueIdsOrKeys", description="List of issue identifiers (IDs or keys) to fetch changelogs for. You can request changelogs for up to 1000 issues. At least one issue identifier is required.", min_length=1, max_length=1000),
     field_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="fieldIds", description="Optional list of field IDs to narrow changelog results to specific fields. You can filter by up to 10 fields.", min_length=0, max_length=10),
@@ -2019,13 +2172,20 @@ async def fetch_issue_changelogs(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Classification levels
-@mcp.tool()
+@mcp.tool(
+    title="List Classification Levels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_classification_levels(
     status: Annotated[list[Literal["PUBLISHED", "ARCHIVED", "DRAFT"]], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional filter to return only classification levels matching the specified statuses. Provide as an array of status values."),
     order_by: Literal["rank", "-rank", "+rank"] | None = Field(None, alias="orderBy", description="Optional field to sort results by rank. Use 'rank' for ascending order, '+rank' for ascending, or '-rank' for descending order. If not specified, results are returned unsorted."),
@@ -2066,7 +2226,12 @@ async def list_classification_levels(
     return _response_data
 
 # Tags: Issue comments
-@mcp.tool()
+@mcp.tool(
+    title="List Comments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_comments(ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of comment IDs to retrieve. Specify up to 1000 IDs per request. Order is preserved in the response.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of comments by their IDs. Returns comments where you have appropriate project browse permissions and any required issue-level security or visibility group/role permissions."""
 
@@ -2098,13 +2263,20 @@ async def list_comments(ids: Annotated[list[int], AfterValidator(_check_unique_i
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue comment properties
-@mcp.tool()
+@mcp.tool(
+    title="List Comment Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comment_property_keys(comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment whose property keys you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys associated with a specific comment. Useful for discovering what custom properties have been set on a comment."""
 
@@ -2140,7 +2312,13 @@ async def list_comment_property_keys(comment_id: str = Field(..., alias="comment
     return _response_data
 
 # Tags: Issue comment properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_comment_property(
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment from which to retrieve the property."),
     property_key: str = Field(..., alias="propertyKey", description="The identifier of the property whose value should be retrieved from the comment."),
@@ -2179,7 +2357,13 @@ async def get_comment_property(
     return _response_data
 
 # Tags: Issue comment properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Comment Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_comment_property(
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment containing the property to delete."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the custom property to remove from the comment."),
@@ -2218,7 +2402,13 @@ async def delete_comment_property(
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="List Components",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_components(
     project_ids_or_keys: list[str] | None = Field(None, alias="projectIdsOrKeys", description="One or more project IDs or keys (case-sensitive) to filter components. If not provided, returns components from all accessible projects."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets. Defaults to 0 (first item)."),
@@ -2264,7 +2454,12 @@ async def list_components(
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="Create Component",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_component(
     assignee_type: Literal["PROJECT_DEFAULT", "COMPONENT_LEAD", "PROJECT_LEAD", "UNASSIGNED"] | None = Field(None, alias="assigneeType", description="Determines the default assignee for issues created with this component. Choose PROJECT_DEFAULT to use the project's default assignee, COMPONENT_LEAD to assign to the component lead, PROJECT_LEAD to assign to the project lead, or UNASSIGNED to leave issues unassigned. Defaults to PROJECT_DEFAULT if not specified."),
     description: str | None = Field(None, description="A brief text description of the component's purpose and scope. Optional and can be added or updated at any time."),
@@ -2303,13 +2498,20 @@ async def create_component(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="Get Component",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_component(id_: str = Field(..., alias="id", description="The unique identifier of the component to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific component by its ID. Requires Browse projects permission for the project containing the component."""
 
@@ -2345,7 +2547,13 @@ async def get_component(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="Update Component",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_component(
     id_: str = Field(..., alias="id", description="The unique identifier of the component to update."),
     assignee_type: Literal["PROJECT_DEFAULT", "COMPONENT_LEAD", "PROJECT_LEAD", "UNASSIGNED"] | None = Field(None, alias="assigneeType", description="Determines who is assigned to issues created with this component. Choose from: PROJECT_DEFAULT (project's default assignee), COMPONENT_LEAD (component lead), PROJECT_LEAD (project lead), or UNASSIGNED (no assignee). Defaults to PROJECT_DEFAULT if not specified."),
@@ -2382,13 +2590,20 @@ async def update_component(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="Delete Component",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_component(
     id_: str = Field(..., alias="id", description="The unique identifier of the component to delete."),
     move_issues_to: str | None = Field(None, alias="moveIssuesTo", description="The unique identifier of a component to replace the deleted one. If not provided, issues associated with the deleted component will not be reassigned."),
@@ -2430,7 +2645,13 @@ async def delete_component(
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="Get Component Issue Counts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_component_issue_counts(id_: str = Field(..., alias="id", description="The unique identifier of the component for which to retrieve issue counts.")) -> dict[str, Any] | ToolResult:
     """Retrieves the count of issues assigned to a specific component. This provides a summary of issue distribution for component management and reporting purposes."""
 
@@ -2466,7 +2687,13 @@ async def get_component_issue_counts(id_: str = Field(..., alias="id", descripti
     return _response_data
 
 # Tags: Issue custom field options
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Field Option",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_field_option(id_: str = Field(..., alias="id", description="The unique identifier of the custom field option to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a custom field option by ID, such as an option from a select list. This operation works only with options created in Jira or via the Issue custom field options API, and can be accessed anonymously with appropriate permissions."""
 
@@ -2502,7 +2729,13 @@ async def get_custom_field_option(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboards(
     filter_: Literal["my", "favourite"] | None = Field(None, alias="filter", description="Filter the dashboard list by ownership or favorite status. Use 'my' to show only dashboards you own, or 'favourite' to show only dashboards you've marked as favorites."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results. Defaults to 0 if not specified."),
@@ -2547,7 +2780,12 @@ async def list_dashboards(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Create Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dashboard(
     edit_permissions: list[_models.SharePermission] = Field(..., alias="editPermissions", description="Required array specifying which users or groups can edit the dashboard and their permission levels."),
     name: str = Field(..., description="Required name for the dashboard. Used as the primary identifier and display label."),
@@ -2584,13 +2822,20 @@ async def create_dashboard(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Update Dashboards",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboards_bulk(
     action: Literal["changeOwner", "changePermission", "addPermission", "removePermission"] = Field(..., description="The type of bulk operation to perform: change the dashboard owner, modify permissions, add new permissions, or remove existing permissions."),
     entity_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="entityIds", description="A list of dashboard IDs to be modified by the bulk operation. Maximum of 100 dashboard IDs per request."),
@@ -2627,13 +2872,20 @@ async def update_dashboards_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Gadgets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_gadgets() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all available gadgets that can be added to dashboards. No authentication required."""
 
@@ -2660,7 +2912,13 @@ async def list_dashboard_gadgets() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Search Dashboards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_dashboards(
     dashboard_name: str | None = Field(None, alias="dashboardName", description="Filter dashboards by name using case-insensitive partial matching."),
     project_id: str | None = Field(None, alias="projectId", description="Filter dashboards to only those shared with a specific project by its ID."),
@@ -2709,7 +2967,13 @@ async def search_dashboards(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard Gadget",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard_gadget(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the gadget. Must be a positive integer."),
     gadget_id: str = Field(..., alias="gadgetId", description="The unique identifier of the gadget to update. Must be a positive integer."),
@@ -2750,13 +3014,20 @@ async def update_dashboard_gadget(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Remove Gadget",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_gadget(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the gadget to remove. Must be a positive integer."),
     gadget_id: str = Field(..., alias="gadgetId", description="The unique identifier of the gadget to remove from the dashboard. Must be a positive integer."),
@@ -2798,7 +3069,13 @@ async def remove_gadget(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Item Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_item_property_keys(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the item."),
     item_id: str = Field(..., alias="itemId", description="The unique identifier of the dashboard item whose property keys you want to retrieve."),
@@ -2837,7 +3114,13 @@ async def list_dashboard_item_property_keys(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Dashboard Item Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dashboard_item_property(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the item."),
     item_id: str = Field(..., alias="itemId", description="The unique identifier of the dashboard item (gadget) whose property you want to retrieve."),
@@ -2877,7 +3160,13 @@ async def get_dashboard_item_property(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Remove Dashboard Item Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_dashboard_item_property(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the item."),
     item_id: str = Field(..., alias="itemId", description="The unique identifier of the dashboard item whose property will be deleted."),
@@ -2917,7 +3206,13 @@ async def remove_dashboard_item_property(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Dashboard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a dashboard by its ID. The dashboard must be shared with the user, owned by the user, or the user must have Jira administration permissions to access it."""
 
@@ -2953,7 +3248,13 @@ async def get_dashboard(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard(
     id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to update."),
     edit_permissions: list[_models.SharePermission] = Field(..., alias="editPermissions", description="An array of permission objects that define who can edit the dashboard and their access level."),
@@ -2992,13 +3293,20 @@ async def update_dashboard(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dashboard",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a dashboard. You must be the owner of the dashboard to delete it."""
 
@@ -3034,7 +3342,12 @@ async def delete_dashboard(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_dashboard(
     id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to copy."),
     edit_permissions: list[_models.SharePermission] = Field(..., alias="editPermissions", description="An array of user or group permissions that grants edit access to the dashboard. Specifies who can modify the dashboard after creation."),
@@ -3073,13 +3386,20 @@ async def duplicate_dashboard(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="List Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_events() -> dict[str, Any] | ToolResult:
     """Retrieve all issue events from your Jira instance. Requires Administer Jira global permission to access."""
 
@@ -3106,7 +3426,12 @@ async def list_events() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Jira expressions
-@mcp.tool()
+@mcp.tool(
+    title="Evaluate Jira Expression",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def evaluate_jira_expression(
     expression: str = Field(..., description="The Jira expression to evaluate as a string. Can reference context variables and perform operations like field extraction, filtering, and mapping (e.g., extracting issue keys, types, and linked issue IDs)."),
     context: _models.EvaluateJsisJiraExpressionBodyContext | None = Field(None, description="Optional context object that defines variables available to the expression, including built-in contexts (user, issue, issues, project, sprint, board, serviceDesk, customerRequest) and custom variables (user IDs, issue keys, JSON objects, or lists). Omit if using only automatic contexts."),
@@ -3141,13 +3466,20 @@ async def evaluate_jira_expression(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="List Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_fields() -> dict[str, Any] | ToolResult:
     """Retrieve all available issue fields in Jira, including system and custom fields. Returns fields based on global settings, screen configuration, and your project access permissions."""
 
@@ -3174,7 +3506,13 @@ async def list_fields() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="Search Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_fields_search(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Defaults to 50 if not specified."),
@@ -3220,7 +3558,13 @@ async def list_fields_search(
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="List Trashed Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_trashed_fields(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results. Defaults to 0."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Defaults to 50 items per page."),
@@ -3265,10 +3609,16 @@ async def list_trashed_fields(
     return _response_data
 
 # Tags: Issue custom field contexts
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Field Context Issue Type Mappings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_field_context_issue_type_mappings(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field for which to retrieve issue type mappings."),
-    context_id: list[int] | None = Field(None, alias="contextId", description="Filter results to specific contexts by providing one or more context IDs. Omit to retrieve mappings for all contexts."),
+    context_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="contextId", description="Filter results to specific contexts by providing one or more context IDs. Omit to retrieve mappings for all contexts."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of mappings to return per page. Defaults to 50 items if not specified."),
 ) -> dict[str, Any] | ToolResult:
@@ -3312,7 +3662,13 @@ async def list_custom_field_context_issue_type_mappings(
     return _response_data
 
 # Tags: Issue custom field options
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_field_options(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the context associated with the custom field."),
@@ -3363,7 +3719,12 @@ async def list_custom_field_options(
     return _response_data
 
 # Tags: Issue custom field options
-@mcp.tool()
+@mcp.tool(
+    title="Create Custom Field Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_custom_field_options(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field to which options will be added."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the field context where options will be created. Must be a positive integer."),
@@ -3402,13 +3763,20 @@ async def create_custom_field_options(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue custom field options
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field Options",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_field_options(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field to update options for."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the context where the custom field options apply. Must be a valid 64-bit integer."),
@@ -3447,13 +3815,19 @@ async def update_custom_field_options(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue custom field options
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Custom Field Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_custom_field_options(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field containing the options to reorder."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the context in which the custom field options are defined."),
@@ -3494,13 +3868,20 @@ async def reorder_custom_field_options(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue custom field options
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Field Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_field_option(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field containing the option to delete."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the context from which the option should be deleted. This is a numeric ID."),
@@ -3543,7 +3924,13 @@ async def delete_custom_field_option(
     return _response_data
 
 # Tags: Screens
-@mcp.tool()
+@mcp.tool(
+    title="List Field Screens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_field_screens(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the field to retrieve screens for."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the paginated results should start. Defaults to 0 if not specified."),
@@ -3589,7 +3976,13 @@ async def list_field_screens(
     return _response_data
 
 # Tags: Issue custom field options (apps)
-@mcp.tool()
+@mcp.tool(
+    title="List Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_field_options(
     field_key: str = Field(..., alias="fieldKey", description="The field key in the format app-key__field-key (e.g., example-add-on__example-issue-field). Find this value in the app's plugin descriptor or by running the Get fields operation."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Defaults to 0 if not specified."),
@@ -3635,7 +4028,12 @@ async def list_field_options(
     return _response_data
 
 # Tags: Issue custom field options (apps)
-@mcp.tool()
+@mcp.tool(
+    title="Add Field Option",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_field_option(
     field_key: str = Field(..., alias="fieldKey", description="The unique identifier for the Connect app's custom field, formatted as app-key__field-key (e.g., example-add-on__example-issue-field). Find this value in the app's plugin descriptor or by calling Get fields."),
     value: str = Field(..., description="The display name for the new option as it will appear in Jira. This is the user-facing label for the select list option."),
@@ -3671,13 +4069,20 @@ async def add_field_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue custom field options (apps)
-@mcp.tool()
+@mcp.tool(
+    title="List Field Option Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_field_option_suggestions(
     field_key: str = Field(..., alias="fieldKey", description="The field key in the format $(app-key)__$(field-key), such as example-add-on__example-issue-field. Find this value in the app's plugin descriptor or by calling Get fields."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Use this to retrieve subsequent pages of results."),
@@ -3725,7 +4130,13 @@ async def list_field_option_suggestions(
     return _response_data
 
 # Tags: Issue custom field options (apps)
-@mcp.tool()
+@mcp.tool(
+    title="Search Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_field_options(
     field_key: str = Field(..., alias="fieldKey", description="The field identifier in the format appKey__fieldKey (e.g., example-add-on__example-issue-field). Retrieve this value from the app's plugin descriptor or by calling Get fields."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (0-based index). Use this to retrieve subsequent pages of results."),
@@ -3773,7 +4184,13 @@ async def search_field_options(
     return _response_data
 
 # Tags: Issue custom field options (apps)
-@mcp.tool()
+@mcp.tool(
+    title="Get Field Option",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_field_option(
     field_key: str = Field(..., alias="fieldKey", description="The field key in the format app-key__field-key (e.g., example-add-on__example-issue-field). Find this value in the app's plugin descriptor or by running Get fields to retrieve the key from field details."),
     option_id: str = Field(..., alias="optionId", description="The numeric ID of the option to retrieve. Must be a valid 64-bit integer."),
@@ -3814,7 +4231,13 @@ async def get_field_option(
     return _response_data
 
 # Tags: Issue custom field options (apps)
-@mcp.tool()
+@mcp.tool(
+    title="Replace Field Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_field_option(
     field_key: str = Field(..., alias="fieldKey", description="The field key in the format app-key__field-key (e.g., example-add-on__example-issue-field). Retrieve this value from the app's plugin descriptor or by calling Get fields."),
     option_id: str = Field(..., alias="optionId", description="The numeric ID of the select-list option to be deselected from all issues."),
@@ -3862,7 +4285,13 @@ async def replace_field_option(
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_field(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a custom field from Jira, whether it's in the trash or active. This is an asynchronous operation; use the location link in the response to track the deletion task status."""
 
@@ -3898,7 +4327,12 @@ async def delete_custom_field(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="Restore Custom Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_custom_field(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to restore from trash.")) -> dict[str, Any] | ToolResult:
     """Restore a custom field from trash back to active use. Requires Administer Jira global permission."""
 
@@ -3934,7 +4368,13 @@ async def restore_custom_field(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="Move Custom Field to Trash",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def move_custom_field_to_trash(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to move to trash.")) -> dict[str, Any] | ToolResult:
     """Move a custom field to trash, making it unavailable for use while preserving the option to permanently delete it later. Requires Administer Jira global permission."""
 
@@ -3970,7 +4410,12 @@ async def move_custom_field_to_trash(id_: str = Field(..., alias="id", descripti
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Create Filter",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_filter(
     name: str = Field(..., description="The display name for the filter. Must be unique across all filters in the Jira instance."),
     description: str | None = Field(None, description="A brief explanation of the filter's purpose and usage."),
@@ -4009,13 +4454,20 @@ async def create_filter(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Filter sharing
-@mcp.tool()
+@mcp.tool(
+    title="Get Default Share Scope",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_default_share_scope() -> dict[str, Any] | ToolResult:
     """Retrieves the default sharing settings that apply to new filters and dashboards created by the authenticated user in Jira."""
 
@@ -4042,7 +4494,13 @@ async def get_default_share_scope() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="List Favorite Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_favorite_filters() -> dict[str, Any] | ToolResult:
     """Retrieves all visible favorite filters for the authenticated user. A filter is visible only if it's owned by the user, shared with a group they belong to, shared with a private project they can browse, shared with a public project, or shared publicly."""
 
@@ -4069,7 +4527,13 @@ async def list_favorite_filters() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="List My Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_my_filters(include_favourites: bool | None = Field(None, alias="includeFavourites", description="When enabled, includes the user's favorite filters in the response alongside owned filters. Disabled by default.")) -> dict[str, Any] | ToolResult:
     """Retrieve filters owned by the authenticated user, with optional inclusion of their favorite filters. Favorite filters are only visible if they are owned by the user, shared with a group the user belongs to, shared with a private project the user can browse, shared with a public project, or shared publicly."""
 
@@ -4107,7 +4571,13 @@ async def list_my_filters(include_favourites: bool | None = Field(None, alias="i
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Search Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_filters(
     filter_name: str | None = Field(None, alias="filterName", description="Partial filter name to search for using case-insensitive matching. Matching behavior depends on the isSubstringMatch parameter."),
     project_id: str | None = Field(None, alias="projectId", description="Filter results to only those shared with a specific project by its ID."),
@@ -4156,7 +4626,13 @@ async def search_filters(
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Get Filter",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_filter(id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a filter by its ID. The filter is only returned if you have access to it through ownership, group sharing, project sharing, or public sharing."""
 
@@ -4194,7 +4670,13 @@ async def get_filter(id_: str = Field(..., alias="id", description="The unique i
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Update Filter",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_filter(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to update. Must be a valid 64-bit integer."),
     name: str = Field(..., description="The display name for the filter. Must be unique across all filters you own."),
@@ -4237,13 +4719,20 @@ async def update_filter(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Delete Filter",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_filter(id_: str = Field(..., alias="id", description="The unique identifier of the filter to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a filter from Jira. Only the filter creator or users with Administer Jira permission can delete filters."""
 
@@ -4281,7 +4770,13 @@ async def delete_filter(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="List Filter Columns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_filter_columns(id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves the columns configured for a filter, which are used when viewing filter results in List View with Columns set to Filter. Column details are only returned for filters you own, filters shared with your groups, or filters shared with projects you have access to."""
 
@@ -4319,7 +4814,13 @@ async def list_filter_columns(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Add Filter to Favorites",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_filter_to_favorites(id_: str = Field(..., alias="id", description="The unique identifier of the filter to add as a favorite. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Mark a filter as a favorite for the current user. You can only favorite filters you own, filters shared with your groups or projects, or publicly shared filters."""
 
@@ -4357,7 +4858,13 @@ async def add_filter_to_favorites(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Remove Filter Favorite",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_filter_favorite(id_: str = Field(..., alias="id", description="The unique identifier of the filter to remove from favorites, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Remove a filter from the user's favorites list. This operation only removes filters that are currently visible to the user; filters that were favorited but subsequently made private cannot be removed through this operation."""
 
@@ -4395,7 +4902,13 @@ async def remove_filter_favorite(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: Filters
-@mcp.tool()
+@mcp.tool(
+    title="Transfer Filter Ownership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def transfer_filter_ownership(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to transfer. This is a numeric ID that identifies the specific filter in your Jira instance."),
     account_id: str = Field(..., alias="accountId", description="The account ID of the new filter owner. This must be a valid Jira user account ID."),
@@ -4433,13 +4946,20 @@ async def transfer_filter_ownership(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Filter sharing
-@mcp.tool()
+@mcp.tool(
+    title="List Filter Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_filter_permissions(id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all share permissions for a filter, including access granted to groups, projects, all logged-in users, or the public. Only returns permissions visible to the requesting user based on their access level."""
 
@@ -4477,7 +4997,12 @@ async def list_filter_permissions(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Filter sharing
-@mcp.tool()
+@mcp.tool(
+    title="Grant Filter Share Permission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_filter_share_permission(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to share. Must be a positive integer."),
     type_: Literal["user", "project", "group", "projectRole", "global", "authenticated"] = Field(..., alias="type", description="The recipient type for the share permission. Choose from: 'user' (share with individual user), 'group' (share with group), 'project' (share with project), 'projectRole' (share with project role), 'global' (share with all users including anonymous), or 'authenticated' (share with all logged-in users). Global and authenticated types override all existing permissions."),
@@ -4519,13 +5044,20 @@ async def grant_filter_share_permission(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Filter sharing
-@mcp.tool()
+@mcp.tool(
+    title="Get Filter Share Permission",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_filter_share_permission(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a positive integer."),
     permission_id: str = Field(..., alias="permissionId", description="The unique identifier of the share permission to retrieve. Must be a positive integer."),
@@ -4567,7 +5099,13 @@ async def get_filter_share_permission(
     return _response_data
 
 # Tags: Filter sharing
-@mcp.tool()
+@mcp.tool(
+    title="Remove Filter Share Permission",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_filter_share_permission(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter from which to remove the share permission. Must be a positive integer."),
     permission_id: str = Field(..., alias="permissionId", description="The unique identifier of the specific share permission to delete. Must be a positive integer."),
@@ -4609,7 +5147,12 @@ async def remove_filter_share_permission(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(name: str = Field(..., description="The name for the new group. This identifier is used to reference the group in Jira.")) -> dict[str, Any] | ToolResult:
     """Creates a new group in Jira. Requires site administration permissions to perform this action."""
 
@@ -4641,13 +5184,20 @@ async def create_group(name: str = Field(..., description="The name for the new 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(
     swap_group_id: str | None = Field(None, alias="swapGroupId", description="The ID of an existing group to receive the deleted group's restrictions. Only comments and worklogs are transferred. Omit this parameter if you want restrictions to be removed without transfer. Cannot be used together with the `swapGroup` parameter."),
     group_id: str | None = Field(None, alias="groupId", description="The ID of the group. This parameter cannot be used with the `groupname` parameter."),
@@ -4688,7 +5238,13 @@ async def delete_group(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first group. Use this to navigate through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of groups to return per page. Defaults to 50 if not specified."),
@@ -4735,7 +5291,13 @@ async def list_groups(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_members(
     include_inactive_users: bool | None = Field(None, alias="includeInactiveUsers", description="Whether to include inactive users in the results. Defaults to excluding inactive users."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page should start. Use this for pagination to retrieve subsequent pages of results."),
@@ -4781,7 +5343,12 @@ async def list_group_members(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_group(
     group_id: str | None = Field(None, alias="groupId", description="The ID of the group. This parameter cannot be used with the `groupName` parameter."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128),
@@ -4819,13 +5386,20 @@ async def add_user_to_group(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Search Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_groups(
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of groups to return in the results. Limited by the system's autocomplete configuration, typically capped at a system-defined threshold."),
     case_insensitive: bool | None = Field(None, alias="caseInsensitive", description="Whether the group name search should ignore case distinctions. Defaults to case-sensitive matching when not specified."),
@@ -4868,7 +5442,13 @@ async def search_groups(
     return _response_data
 
 # Tags: Group and user picker
-@mcp.tool()
+@mcp.tool(
+    title="Search Users and Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users_and_groups(
     query: str = Field(..., description="The search string to match against user display names, email addresses, and group names. User matches are case-insensitive; group matches are case-sensitive by default unless caseInsensitive is enabled."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of results to return per list (users and groups). Defaults to 50 items."),
@@ -4915,7 +5495,12 @@ async def search_users_and_groups(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Create Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_issue(
     update_history: bool | None = Field(None, alias="updateHistory", description="Whether to add the project to your recently viewed projects list and track the issue type and request type in your project history for future create screen defaults. Defaults to false."),
     fields: dict[str, Any] | None = Field(None, description="List of issue screen fields to update, specifying the sub-field to update and its value for each field. This field provides a straightforward option when setting a sub-field. When multiple sub-fields or other operations are required, use `update`. Fields included in here cannot be included in `update`."),
@@ -4954,13 +5539,20 @@ async def create_issue(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Archive Issues by JQL",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_issues_by_jql(jql: str | None = Field(None, description="JQL query string to select issues for archival. Only issues from software, service management, and business projects can be archived; subtasks must be archived through their parent issues.")) -> dict[str, Any] | ToolResult:
     """Asynchronously archive up to 100,000 issues matching a JQL query. Returns a task URL to monitor the archival progress. Requires Jira admin permissions and a Premium or Enterprise license."""
 
@@ -4992,13 +5584,20 @@ async def archive_issues_by_jql(jql: str | None = Field(None, description="JQL q
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Archive Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_issues(issue_ids_or_keys: list[str] | None = Field(None, alias="issueIdsOrKeys", description="Array of issue IDs or keys to archive (up to 1000 per request). Subtasks cannot be archived directly; archive them through their parent issues. Only issues from software, service management, and business projects can be archived.")) -> dict[str, Any] | ToolResult:
     """Archive up to 1000 issues by their ID or key in a single request. Returns details of successfully archived issues and any errors encountered. Requires Jira admin permissions and a Premium or Enterprise license."""
 
@@ -5030,13 +5629,19 @@ async def archive_issues(issue_ids_or_keys: list[str] | None = Field(None, alias
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Create Issues in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_issues_bulk(issue_updates: list[_models.IssueUpdateDetails] | None = Field(None, alias="issueUpdates", description="Array of issue or subtask definitions to create. Each item specifies fields and updates for one issue. For subtasks, include the parent issue ID or key and set issueType to a subtask type. Order is preserved in processing.")) -> dict[str, Any] | ToolResult:
     """Create up to 50 issues and subtasks in bulk with optional workflow transitions and property assignments. Use the Get create issue metadata endpoint to determine available fields for your project."""
 
@@ -5068,13 +5673,19 @@ async def create_issues_bulk(issue_updates: list[_models.IssueUpdateDetails] | N
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Fetch Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fetch_issues(issue_ids_or_keys: list[str] = Field(..., alias="issueIdsOrKeys", description="Array of issue identifiers to fetch, accepting up to 100 items. You can mix issue IDs and keys in the same request (e.g., both numeric IDs and text keys like 'PROJ-123'). Results are returned in ascending ID order.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for multiple issues by their IDs or keys in a single request. Supports up to 100 issues per request with case-insensitive matching and automatic detection of moved issues."""
 
@@ -5106,13 +5717,20 @@ async def fetch_issues(issue_ids_or_keys: list[str] = Field(..., alias="issueIds
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Types for Creation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_types_for_creation(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 if not specified."),
@@ -5158,7 +5776,13 @@ async def list_issue_types_for_creation(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Creation Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_creation_fields(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key."),
     issue_type_id: str = Field(..., alias="issueTypeId", description="The ID of the issue type for which to retrieve creation field metadata."),
@@ -5205,7 +5829,13 @@ async def get_issue_creation_fields(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Limit Violations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_limit_violations(is_returning_keys: bool | None = Field(None, alias="isReturningKeys", description="Return issue keys (e.g., PROJ-123) instead of numeric issue IDs in the response. Defaults to false, which returns issue IDs.")) -> dict[str, Any] | ToolResult:
     """Retrieve all issues that are breaching or approaching per-issue limits in Jira. Requires Browse projects permission for the relevant projects or Administer Jira global permission for complete results."""
 
@@ -5243,7 +5873,13 @@ async def list_issue_limit_violations(is_returning_keys: bool | None = Field(Non
     return _response_data
 
 # Tags: Issue search
-@mcp.tool()
+@mcp.tool(
+    title="Search Issues Picker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_issues_picker(
     current_jql: str | None = Field(None, alias="currentJQL", description="A JQL query that defines the pool of issues to search within. Note that username and userkey cannot be used for privacy reasons; use accountId instead."),
     current_issue_key: str | None = Field(None, alias="currentIssueKey", description="The key of an issue to exclude from the search results, typically the issue currently being viewed."),
@@ -5288,7 +5924,13 @@ async def search_issues_picker(
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="Set Issue Properties in Bulk",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_issue_properties_bulk(
     entities_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, alias="entitiesIds", description="List of issue IDs to update with the specified properties. Accepts between 1 and 10,000 issue identifiers.", min_length=1, max_length=10000),
     properties: dict[str, _models.JsonNode] | None = Field(None, description="A list of entity property keys and values.", min_length=1, max_length=10),
@@ -5323,13 +5965,20 @@ async def set_issue_properties_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="Set Issue Properties in Bulk",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_issue_properties_bulk_per_issue(issues: list[_models.IssueEntityPropertiesForMultiUpdate] | None = Field(None, description="A list of issues with their respective properties to set or update. Each entry should contain an issue ID and its associated property key-value pairs. Maximum of 100 issues per request, with up to 10 properties per issue.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Bulk set or update custom properties on multiple issues. Supports up to 100 issues with up to 10 properties each in a single asynchronous request. Updates are non-transactional, so some entities may succeed while others fail."""
 
@@ -5361,13 +6010,20 @@ async def set_issue_properties_bulk_per_issue(issues: list[_models.IssueEntityPr
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="Set Issue Property in Bulk",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_issue_property_bulk(
     property_key: str = Field(..., alias="propertyKey", description="The property key identifier. Maximum length is 255 characters."),
     expression: str | None = Field(None, description="A Jira expression to dynamically calculate the property value for each issue. The expression must return a JSON-serializable object (number, boolean, string, list, or map) with a JSON representation not exceeding 32,768 characters. Available context variables are `issue` and `user`. Either this or `value` should be specified, but not both."),
@@ -5405,13 +6061,20 @@ async def set_issue_property_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Properties in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_property_bulk(
     property_key: str = Field(..., alias="propertyKey", description="The unique identifier of the property to delete from issues."),
     current_value: Any | None = Field(None, alias="currentValue", description="Optional filter to only delete the property from issues where it currently has this specific value."),
@@ -5448,13 +6111,19 @@ async def delete_issue_property_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Restore Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_issues(issue_ids_or_keys: list[str] | None = Field(None, alias="issueIdsOrKeys", description="Array of issue keys or issue IDs to restore. You can restore up to 1000 issues per request. Subtasks cannot be restored directly; restore their parent issues instead. Only applicable to software, service management, and business projects.")) -> dict[str, Any] | ToolResult:
     """Restore up to 1000 archived issues in a single request using their issue keys or IDs. Returns details of successfully restored issues and any errors encountered. Requires Jira admin permissions and a Premium or Enterprise license."""
 
@@ -5486,13 +6155,19 @@ async def restore_issues(issue_ids_or_keys: list[str] | None = Field(None, alias
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue watchers
-@mcp.tool()
+@mcp.tool(
+    title="Check Watched Issues in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def check_watched_issues_bulk(issue_ids: list[str] = Field(..., alias="issueIds", description="A list of issue IDs to check the watched status for. The order of IDs in the list is preserved in the response.")) -> dict[str, Any] | ToolResult:
     """Check the watched status of multiple issues for the current user. Returns whether each issue is being watched, with invalid issue IDs returning a watched status of false."""
 
@@ -5524,13 +6199,20 @@ async def check_watched_issues_bulk(issue_ids: list[str] = Field(..., alias="iss
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The unique identifier for the issue, either its numeric ID or alphanumeric key (e.g., PROJ-123). The search is case-insensitive and will locate moved issues."),
     update_history: bool | None = Field(None, alias="updateHistory", description="When enabled, adds the issue's project to your recently viewed projects list and updates the lastViewed field for JQL searches. Defaults to disabled."),
@@ -5572,7 +6254,13 @@ async def retrieve_issue(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Update Issue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., PROJ-123)."),
     notify_users: bool | None = Field(None, alias="notifyUsers", description="Whether to send notification emails to all watchers about this update. Defaults to true; only users with Administer Jira or Administer project permissions can disable notifications."),
@@ -5615,13 +6303,20 @@ async def update_issue(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The unique identifier or key of the issue to delete (e.g., PROJ-123 or 10001)."),
     delete_subtasks: Literal["true", "false"] | None = Field(None, alias="deleteSubtasks", description="Whether to automatically delete all subtasks when the issue is deleted. Set to 'true' to delete subtasks along with the issue, or 'false' to prevent deletion if subtasks exist. Defaults to 'false'."),
@@ -5663,7 +6358,13 @@ async def delete_issue(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Assign Issue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required in requests.", max_length=128),
@@ -5699,13 +6400,19 @@ async def assign_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue attachments
-@mcp.tool()
+@mcp.tool(
+    title="Attach Files",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def attach_files(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., TEST-123)."),
     body: list[_models.MultipartFile] = Field(..., description="Array of files to attach. Each file is submitted as a multipart form field named 'file'. Multiple files can be attached in a single request."),
@@ -5749,7 +6456,13 @@ async def attach_files(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Change Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_changelogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123)."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first changelog entry. Defaults to 0 if not specified."),
@@ -5795,7 +6508,12 @@ async def list_issue_changelogs(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Fetch Changelogs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fetch_changelogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123). Used to locate the issue whose changelogs you want to retrieve."),
     changelog_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="changelogIds", description="A list of changelog IDs to retrieve. Specify the exact IDs of the changelog entries you want to fetch; order is preserved in the response."),
@@ -5831,13 +6549,20 @@ async def fetch_changelogs(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue comments
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_comments(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., PROJ-123)."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
@@ -5884,7 +6609,12 @@ async def list_issue_comments(
     return _response_data
 
 # Tags: Issue comments
-@mcp.tool()
+@mcp.tool(
+    title="Add Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     body: Any | None = Field(None, description="The comment text formatted using Atlassian Document Format. This field supports rich text formatting including mentions, links, and other document elements."),
@@ -5921,13 +6651,20 @@ async def add_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue comments
-@mcp.tool()
+@mcp.tool(
+    title="Get Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the numeric issue ID or the issue key (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to retrieve."),
@@ -5966,7 +6703,13 @@ async def get_comment(
     return _response_data
 
 # Tags: Issue comments
-@mcp.tool()
+@mcp.tool(
+    title="Update Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key-based identifier (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to update."),
@@ -6009,13 +6752,20 @@ async def update_comment(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to delete."),
@@ -6054,7 +6804,13 @@ async def delete_comment(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Editable Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_editable_fields(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., PROJ-123)."),
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="When enabled, returns non-editable fields by bypassing workflow editability checks. Only available to administrators. Defaults to false."),
@@ -6096,7 +6852,12 @@ async def get_issue_editable_fields(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Send Issue Notification",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_issue_notification(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., PROJ-123)."),
     html_body: str | None = Field(None, alias="htmlBody", description="The HTML-formatted body content of the email notification. If provided, this takes precedence over plain text body for HTML-capable email clients."),
@@ -6136,13 +6897,20 @@ async def send_issue_notification(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_property_keys(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the issue key (e.g., PROJ-123) or the numeric issue ID.")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys and their URLs associated with a specific issue. This allows you to discover what custom properties are stored on an issue."""
 
@@ -6178,7 +6946,13 @@ async def list_issue_property_keys(issue_id_or_key: str = Field(..., alias="issu
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the issue key (e.g., PROJ-123) or the numeric issue ID."),
     property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the property to retrieve from the issue."),
@@ -6217,7 +6991,13 @@ async def get_issue_property(
     return _response_data
 
 # Tags: Issue properties
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the issue key (e.g., PROJ-123) or the numeric issue ID."),
     property_key: str = Field(..., alias="propertyKey", description="The unique key identifying the property to delete from the issue."),
@@ -6256,7 +7036,13 @@ async def remove_issue_property(
     return _response_data
 
 # Tags: Issue remote links
-@mcp.tool()
+@mcp.tool(
+    title="List Remote Issue Links",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_remote_issue_links(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID (e.g., 10000) or the issue key (e.g., PROJ-123)."),
     global_id: str | None = Field(None, alias="globalId", description="Optional global ID to retrieve a specific remote issue link. If omitted, all remote issue links for the issue are returned. URL-reserved characters in the global ID must be percent-encoded."),
@@ -6298,7 +7084,13 @@ async def list_remote_issue_links(
     return _response_data
 
 # Tags: Issue remote links
-@mcp.tool()
+@mcp.tool(
+    title="Link Remote Issue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def link_remote_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The Jira issue identifier, either the numeric ID or the issue key (e.g., PROJ-123)."),
     object_: _models.CreateOrUpdateRemoteIssueLinkBodyObject = Field(..., alias="object", description="Details about the item being linked to, including its URL, title, and other metadata from the remote system."),
@@ -6337,13 +7129,20 @@ async def link_remote_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue remote links
-@mcp.tool()
+@mcp.tool(
+    title="Get Remote Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_remote_link(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the numeric issue ID or the issue key (e.g., PROJECT-123)."),
     link_id: str = Field(..., alias="linkId", description="The unique identifier of the remote issue link to retrieve."),
@@ -6382,7 +7181,13 @@ async def get_remote_link(
     return _response_data
 
 # Tags: Issue remote links
-@mcp.tool()
+@mcp.tool(
+    title="Update Remote Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_remote_link(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., 'PROJ-123')."),
     link_id: str = Field(..., alias="linkId", description="The numeric ID of the remote issue link to update."),
@@ -6422,13 +7227,20 @@ async def update_remote_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue remote links
-@mcp.tool()
+@mcp.tool(
+    title="Delete Remote Link by ID",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_remote_link_by_id(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID (e.g., 10000) or the issue key (e.g., PROJ-123)."),
     link_id: str = Field(..., alias="linkId", description="The numeric ID of the remote issue link to delete (e.g., 10000)."),
@@ -6467,7 +7279,13 @@ async def delete_remote_link_by_id(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Transitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_transitions_single(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     transition_id: str | None = Field(None, alias="transitionId", description="Optional ID of a specific transition to retrieve. When provided, only that transition is returned if it exists and is available."),
@@ -6510,7 +7328,12 @@ async def list_issue_transitions_single(
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Transition Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def transition_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     transition: _models.DoTransitionBodyTransition | None = Field(None, description="Details of a transition. Required when performing a transition, optional when creating or editing an issue."),
@@ -6548,13 +7371,20 @@ async def transition_issue(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue votes
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Issue Votes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_issue_votes(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Retrieve voting details for an issue, including vote count and voter information. Requires the voting feature to be enabled in Jira configuration and appropriate project permissions."""
 
@@ -6590,7 +7420,12 @@ async def retrieve_issue_votes(issue_id_or_key: str = Field(..., alias="issueIdO
     return _response_data
 
 # Tags: Issue votes
-@mcp.tool()
+@mcp.tool(
+    title="Vote on Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def vote_issue(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Register the user's vote on an issue. This action is equivalent to clicking the Vote button in Jira and requires voting to be enabled in Jira's general configuration."""
 
@@ -6626,7 +7461,13 @@ async def vote_issue(issue_id_or_key: str = Field(..., alias="issueIdOrKey", des
     return _response_data
 
 # Tags: Issue votes
-@mcp.tool()
+@mcp.tool(
+    title="Remove Vote",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_vote(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Remove a user's vote from an issue, equivalent to clicking Unvote in Jira. Requires voting to be enabled in Jira's general configuration."""
 
@@ -6662,7 +7503,13 @@ async def remove_vote(issue_id_or_key: str = Field(..., alias="issueIdOrKey", de
     return _response_data
 
 # Tags: Issue watchers
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Watchers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_watchers(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of users watching an issue. Requires the 'Allow users to watch issues' option to be enabled in Jira's general configuration."""
 
@@ -6698,7 +7545,12 @@ async def list_issue_watchers(issue_id_or_key: str = Field(..., alias="issueIdOr
     return _response_data
 
 # Tags: Issue watchers
-@mcp.tool()
+@mcp.tool(
+    title="Add Issue Watcher",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_issue_watcher(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     body: str = Field(..., description="The account ID of the user to add as a watcher. If omitted, the authenticated user making the request is added instead."),
@@ -6735,13 +7587,20 @@ async def add_issue_watcher(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue watchers
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Watcher",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_watcher(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required.", max_length=128),
@@ -6783,7 +7642,13 @@ async def remove_issue_watcher(
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Worklogs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_worklogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key (e.g., PROJ-123)."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index for pagination, allowing you to retrieve results starting from a specific position in the list. Defaults to 0 (first page)."),
@@ -6833,7 +7698,12 @@ async def list_issue_worklogs(
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Record Worklog",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def record_worklog(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue ID or key to record work against."),
     notify_users: bool | None = Field(None, alias="notifyUsers", description="Whether to notify users watching the issue via email about the worklog entry. Defaults to true."),
@@ -6883,13 +7753,20 @@ async def record_worklog(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Worklogs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_worklogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue ID or key identifying which issue to delete worklogs from."),
     ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of worklog IDs to delete. All worklogs must belong to the specified issue. Maximum of 5000 IDs per request."),
@@ -6930,13 +7807,20 @@ async def delete_worklogs(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Move Worklogs",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def move_worklogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue ID or key of the source issue containing the worklogs to move."),
     adjust_estimate: Literal["leave", "auto"] | None = Field(None, alias="adjustEstimate", description="Determines how to update time estimates on both issues. Use 'leave' to keep estimates unchanged, or 'auto' to reduce the source issue estimate by the total time spent and increase the destination issue estimate accordingly. Defaults to 'auto'."),
@@ -6978,13 +7862,20 @@ async def move_worklogs(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Worklog",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_worklog(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the worklog entry to retrieve."),
@@ -7023,7 +7914,13 @@ async def get_worklog(
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Worklog",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_worklog(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the worklog entry to update."),
@@ -7069,13 +7966,20 @@ async def update_worklog(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Worklog",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_worklog(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the worklog entry to delete."),
@@ -7122,7 +8026,13 @@ async def remove_worklog(
     return _response_data
 
 # Tags: Issue worklog properties
-@mcp.tool()
+@mcp.tool(
+    title="List Worklog Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_worklog_property_keys(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the numeric issue ID or the issue key (e.g., PROJECT-123)."),
     worklog_id: str = Field(..., alias="worklogId", description="The unique identifier of the worklog entry within the specified issue."),
@@ -7161,7 +8071,13 @@ async def list_worklog_property_keys(
     return _response_data
 
 # Tags: Issue worklog properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Worklog Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_worklog_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123)."),
     worklog_id: str = Field(..., alias="worklogId", description="The unique identifier of the worklog entry from which to retrieve the property."),
@@ -7201,7 +8117,13 @@ async def get_worklog_property(
     return _response_data
 
 # Tags: Issue worklog properties
-@mcp.tool()
+@mcp.tool(
+    title="Remove Worklog Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_worklog_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     worklog_id: str = Field(..., alias="worklogId", description="The unique identifier of the worklog entry from which the property will be removed."),
@@ -7241,7 +8163,12 @@ async def remove_worklog_property(
     return _response_data
 
 # Tags: Issue links
-@mcp.tool()
+@mcp.tool(
+    title="Create Issue Link",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_issue_link(
     body: Any | None = Field(None, description="The comment text to add to the outward issue, formatted as Atlassian Document Format. Optional on creation."),
     visibility: _models.LinkIssuesBodyCommentVisibility | None = Field(None, description="The group or role to which the comment visibility is restricted. Optional; if omitted, the comment is visible to all users with permission to view the issue."),
@@ -7283,13 +8210,20 @@ async def create_issue_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue links
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_link(link_id: str = Field(..., alias="linkId", description="The unique identifier of the issue link to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details about a specific issue link by its ID. Returns the link information if you have permission to view both linked issues."""
 
@@ -7325,7 +8259,13 @@ async def get_issue_link(link_id: str = Field(..., alias="linkId", description="
     return _response_data
 
 # Tags: Issue links
-@mcp.tool()
+@mcp.tool(
+    title="Remove Issue Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_issue_link(link_id: str = Field(..., alias="linkId", description="The unique identifier of the issue link to delete.")) -> dict[str, Any] | ToolResult:
     """Removes a link between two issues. Requires browse and link issue permissions for the affected projects, and view access if issue-level security is configured."""
 
@@ -7361,7 +8301,13 @@ async def remove_issue_link(link_id: str = Field(..., alias="linkId", descriptio
     return _response_data
 
 # Tags: Issue link types
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Link Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_link_types() -> dict[str, Any] | ToolResult:
     """Retrieves all available issue link types configured in the Jira instance. Requires issue linking to be enabled and the user to have Browse projects permission."""
 
@@ -7388,7 +8334,13 @@ async def list_issue_link_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Issue link types
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Link Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_link_type(issue_link_type_id: str = Field(..., alias="issueLinkTypeId", description="The unique identifier of the issue link type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific issue link type by its ID. Requires issue linking to be enabled on the site and the user to have Browse projects permission."""
 
@@ -7424,7 +8376,13 @@ async def get_issue_link_type(issue_link_type_id: str = Field(..., alias="issueL
     return _response_data
 
 # Tags: Issue link types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Link Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_link_type(issue_link_type_id: str = Field(..., alias="issueLinkTypeId", description="The unique identifier of the issue link type to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an issue link type from your Jira instance. Requires issue linking to be enabled and Administer Jira global permission."""
 
@@ -7460,7 +8418,13 @@ async def delete_issue_link_type(issue_link_type_id: str = Field(..., alias="iss
     return _response_data
 
 # Tags: Issues
-@mcp.tool()
+@mcp.tool(
+    title="Export Archived Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_archived_issues(
     date_after: str = Field(..., alias="dateAfter", description="Include only issues archived on or after this date. Specify in YYYY-MM-DD format."),
     date_before: str = Field(..., alias="dateBefore", description="Include only issues archived on or before this date. Specify in YYYY-MM-DD format."),
@@ -7500,13 +8464,20 @@ async def export_archived_issues(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue types
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_types() -> dict[str, Any] | ToolResult:
     """Retrieve all issue types available to the authenticated user. The returned issue types depend on the user's permissions: administrators see all types, users with project browse permissions see types for those projects, and anonymous users see types for projects with anonymous browse access."""
 
@@ -7533,7 +8504,13 @@ async def list_issue_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Issue types
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Types for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_types_project(
     project_id: str = Field(..., alias="projectId", description="The numeric identifier of the project. This is a 64-bit integer that uniquely identifies the project in your Jira instance."),
     level: str | None = Field(None, description="Optional filter to retrieve issue types at a specific hierarchy level: use -1 for Subtasks, 0 for Base issue types, or 1 for Epics. Omit this parameter to retrieve all issue types regardless of level."),
@@ -7577,7 +8554,13 @@ async def list_issue_types_project(
     return _response_data
 
 # Tags: Issue types
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_type(id_: str = Field(..., alias="id", description="The unique identifier of the issue type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific issue type by its ID. Requires either Browse projects permission in an associated project or Jira administrator access."""
 
@@ -7613,7 +8596,13 @@ async def get_issue_type(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Issue types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_type(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue type to delete."),
     alternative_issue_type_id: str | None = Field(None, alias="alternativeIssueTypeId", description="The unique identifier of the issue type to use as a replacement for any issues currently using the deleted type. Required if the issue type being deleted is in use."),
@@ -7655,7 +8644,13 @@ async def delete_issue_type(
     return _response_data
 
 # Tags: Issue types
-@mcp.tool()
+@mcp.tool(
+    title="List Alternative Issue Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alternative_issue_types(id_: str = Field(..., alias="id", description="The unique identifier of the issue type for which to find compatible alternatives.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of issue types that can replace a given issue type. The alternatives are those sharing the same workflow scheme, field configuration scheme, and screen scheme."""
 
@@ -7691,7 +8686,12 @@ async def list_alternative_issue_types(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: Issue types
-@mcp.tool()
+@mcp.tool(
+    title="Upload Issue Type Avatar",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_issue_type_avatar(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue type to which the avatar will be assigned."),
     size: str = Field(..., description="The width and height in pixels of the square crop region. This determines the size of the cropped area before resizing."),
@@ -7718,6 +8718,7 @@ async def upload_issue_type_avatar(
     _http_path = _build_path("/rest/api/3/issuetype/{id}/avatar2", _request.path.model_dump(by_alias=True)) if _request.path else "/rest/api/3/issuetype/{id}/avatar2"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_headers = {}
+    _http_headers["Content-Type"] = "*/*"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_issue_type_avatar")
@@ -7739,7 +8740,13 @@ async def upload_issue_type_avatar(
     return _response_data
 
 # Tags: Issue type properties
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Type Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_type_property_keys(issue_type_id: str = Field(..., alias="issueTypeId", description="The unique identifier of the issue type whose property keys you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys stored on a specific issue type. Property keys are identifiers for custom data attached to the issue type entity."""
 
@@ -7775,7 +8782,13 @@ async def list_issue_type_property_keys(issue_type_id: str = Field(..., alias="i
     return _response_data
 
 # Tags: Issue type properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Type Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_type_property(
     issue_type_id: str = Field(..., alias="issueTypeId", description="The unique identifier of the issue type whose property you want to retrieve."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying which property to retrieve. Use the list issue type property keys operation to discover available property keys for an issue type."),
@@ -7814,7 +8827,13 @@ async def get_issue_type_property(
     return _response_data
 
 # Tags: Issue type schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Type Schemes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_type_schemes(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of issue type schemes to return per page. Defaults to 50 items per page."),
@@ -7860,7 +8879,13 @@ async def list_issue_type_schemes(
     return _response_data
 
 # Tags: Issue type schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Type Schemes for Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_type_schemes_for_projects(
     project_id: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="projectId", description="One or more project IDs to filter schemes by. Provide multiple IDs as an ampersand-separated list in the query string."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through large result sets."),
@@ -7905,7 +8930,13 @@ async def list_issue_type_schemes_for_projects(
     return _response_data
 
 # Tags: JQL
-@mcp.tool()
+@mcp.tool(
+    title="List JQL Autocomplete Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_jql_autocomplete_data() -> dict[str, Any] | ToolResult:
     """Retrieve JQL field and function reference data for building and validating JQL queries programmatically. Returns comprehensive metadata including field definitions, available functions, and reserved words to support dynamic query construction."""
 
@@ -7932,10 +8963,15 @@ async def list_jql_autocomplete_data() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: JQL
-@mcp.tool()
+@mcp.tool(
+    title="List JQL Autocomplete Data Filtered",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_jql_autocomplete_data_filtered(
     include_collapsed_fields: bool | None = Field(None, alias="includeCollapsedFields", description="Include collapsed fields that allow searches across multiple fields with the same name and type. Disabled by default."),
-    project_ids: list[int] | None = Field(None, alias="projectIds", description="Filter returned field details by one or more project IDs. Invalid project IDs are ignored; system fields are always included regardless of this filter."),
+    project_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="projectIds", description="Filter returned field details by one or more project IDs. Invalid project IDs are ignored; system fields are always included regardless of this filter."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieve JQL field and function reference data to support programmatic query building and validation. Returns system fields always, with optional filtering by project and support for collapsed fields that enable cross-field searches."""
 
@@ -7967,13 +9003,20 @@ async def list_jql_autocomplete_data_filtered(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: JQL
-@mcp.tool()
+@mcp.tool(
+    title="Get JQL Autocomplete Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_jql_autocomplete_suggestions(
     field_name: str | None = Field(None, alias="fieldName", description="The JQL field name to get suggestions for (e.g., 'reporter'). Required to initiate any suggestion query."),
     field_value: str | None = Field(None, alias="fieldValue", description="Partial field value entered by the user to filter suggestions. When provided with fieldName, returns values containing this text."),
@@ -8016,7 +9059,12 @@ async def get_jql_autocomplete_suggestions(
     return _response_data
 
 # Tags: Issue search
-@mcp.tool()
+@mcp.tool(
+    title="Filter Issues by JQL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def filter_issues_by_jql(
     issue_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="issueIds", description="A list of issue IDs to evaluate against the JQL queries. Each ID must correspond to an issue the user has permission to view."),
     jqls: list[str] = Field(..., description="A list of JQL (Jira Query Language) queries to match against the provided issues. Each query is evaluated independently for each issue."),
@@ -8051,13 +9099,19 @@ async def filter_issues_by_jql(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: JQL
-@mcp.tool()
+@mcp.tool(
+    title="Validate JQL Queries",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_jql_queries(
     validation: Literal["strict", "warn", "none"] = Field(..., description="Validation mode that determines how strictly to validate queries and what to return on errors. Use 'strict' to reject malformed queries entirely, 'warn' to return structure even if errors exist, or 'none' to skip validation and only check syntax."),
     queries: list[str] = Field(..., description="One or more JQL query strings to parse and validate. Each query is processed independently.", min_length=1),
@@ -8095,13 +9149,20 @@ async def validate_jql_queries(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Labels
-@mcp.tool()
+@mcp.tool(
+    title="List Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_labels(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to skip earlier results and navigate through pages."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of labels to return in a single page, with a default of 1000 items per page."),
@@ -8145,7 +9206,13 @@ async def list_labels(
     return _response_data
 
 # Tags: Permissions
-@mcp.tool()
+@mcp.tool(
+    title="Check Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_permissions(
     project_id: str | None = Field(None, alias="projectId", description="The project ID to check permissions within. When provided, project-level permissions are evaluated for this specific project."),
     issue_id: str | None = Field(None, alias="issueId", description="The issue ID to check permissions within. When provided, permissions are evaluated in the context of this specific issue, with issue-based permissions determined by the user's relationship to the issue."),
@@ -8188,7 +9255,13 @@ async def check_permissions(
     return _response_data
 
 # Tags: Myself
-@mcp.tool()
+@mcp.tool(
+    title="Get User Preference",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_preference(key: str = Field(..., description="The preference key to retrieve (e.g., jira.user.locale, jira.user.timezone, user.notifications.watcher). Note that some keys like jira.user.locale and jira.user.timezone are deprecated; use the user management API instead to manage timezone and locale.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific preference value for the current user. Use this to fetch user settings like notifications, locale, or timezone preferences."""
 
@@ -8226,7 +9299,13 @@ async def get_user_preference(key: str = Field(..., description="The preference 
     return _response_data
 
 # Tags: Myself
-@mcp.tool()
+@mcp.tool(
+    title="Get Locale",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_locale() -> dict[str, Any] | ToolResult:
     """Retrieves the locale preference for the current user. If no preference is set, returns the browser locale detected from the Accept-Language header, or the site default locale if no match is found. This operation can be accessed anonymously."""
 
@@ -8253,7 +9332,13 @@ async def get_locale() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Myself
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and account details of the currently authenticated user in Jira. This operation requires valid Jira access permissions."""
 
@@ -8280,7 +9365,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Issue notification schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Notification Scheme Project Mappings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notification_scheme_project_mappings(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of items to return per page. Defaults to 50 items if not specified."),
@@ -8323,7 +9414,13 @@ async def list_notification_scheme_project_mappings(
     return _response_data
 
 # Tags: Permissions
-@mcp.tool()
+@mcp.tool(
+    title="List Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_permissions() -> dict[str, Any] | ToolResult:
     """Retrieve all available permissions in the system, including global permissions, project-specific permissions, and permissions added by installed plugins. This operation is accessible without authentication."""
 
@@ -8350,7 +9447,12 @@ async def list_permissions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Permissions
-@mcp.tool()
+@mcp.tool(
+    title="Check Permissions in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def check_permissions_bulk(
     global_permissions: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="globalPermissions", description="List of global permission keys to check. Only permissions included in this list will be evaluated for the user."),
     project_permissions: Annotated[list[_models.BulkProjectPermissions], AfterValidator(_check_unique_items)] | None = Field(None, alias="projectPermissions", description="Project and issue-specific permissions to check. For each permission, specify the projects and issues to validate access against. Up to 1000 projects and 1000 issues can be checked per request; invalid IDs are ignored."),
@@ -8385,13 +9487,19 @@ async def check_permissions_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Permissions
-@mcp.tool()
+@mcp.tool(
+    title="List Permitted Projects",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_permitted_projects(permissions: list[str] = Field(..., description="A list of permission keys to filter projects by. Only projects where the user has all specified permissions will be returned. Permission keys should be provided as strings in the array.")) -> dict[str, Any] | ToolResult:
     """Retrieve all projects where the authenticated user has been granted specific permissions. This operation helps identify which projects a user can access based on their assigned permission keys."""
 
@@ -8423,13 +9531,20 @@ async def list_permitted_projects(permissions: list[str] = Field(..., descriptio
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="List Plans",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_plans(
     include_trashed: bool | None = Field(None, alias="includeTrashed", description="Include trashed plans in the results. By default, only active plans are returned."),
     include_archived: bool | None = Field(None, alias="includeArchived", description="Include archived plans in the results. By default, only active plans are returned."),
@@ -8473,7 +9588,12 @@ async def list_plans(
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="Create Plan",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_plan(
     issue_sources: Annotated[list[_models.CreateIssueSourceRequest], AfterValidator(_check_unique_items)] = Field(..., alias="issueSources", description="The issue sources that populate the plan. This determines which issues are included and must be specified as an array of source identifiers or configurations."),
     name: str = Field(..., description="The name of the plan. Must be between 1 and 255 characters.", min_length=1, max_length=255),
@@ -8513,13 +9633,20 @@ async def create_plan(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Plan",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to retrieve, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific plan by its ID. Requires Jira administrator permissions."""
 
@@ -8557,7 +9684,13 @@ async def retrieve_plan(plan_id: str = Field(..., alias="planId", description="T
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="Update Plan",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to update. Must be a positive integer."),
     body: dict[str, Any] = Field(..., description="JSON Patch document (RFC 6902) containing one or more operations to update plan properties. Each operation specifies an action (add, replace, remove), a JSON pointer path to the target property, and the new value. Supports updates to: name, leadAccountId, scheduling (estimation type, start/end dates, inferred dates, dependencies), issueSources, exclusionRules, crossProjectReleases, customFields, and permissions."),
@@ -8604,7 +9737,13 @@ async def update_plan(
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="Archive Plan",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to archive, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Archives a plan, removing it from active use while preserving its data. Requires Administer Jira global permission."""
 
@@ -8642,7 +9781,12 @@ async def archive_plan(plan_id: str = Field(..., alias="planId", description="Th
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Plan",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to duplicate. Must be a valid 64-bit integer."),
     name: str = Field(..., description="The name for the duplicated plan. This will be the display name of the new plan copy."),
@@ -8680,13 +9824,20 @@ async def duplicate_plan(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="List Plan Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_plan_teams(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan for which to retrieve teams."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of teams to return per page, up to a maximum of 50. Defaults to 50 if not specified."),
@@ -8731,7 +9882,12 @@ async def list_plan_teams(
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Add Team to Plan",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_team_to_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to which the team will be added."),
     id_: str = Field(..., alias="id", description="The unique identifier of the Atlassian team to add to the plan."),
@@ -8775,13 +9931,20 @@ async def add_team_to_plan(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Get Atlassian Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a valid 64-bit integer."),
     atlassian_team_id: str = Field(..., alias="atlassianTeamId", description="The unique identifier of the Atlassian team whose planning settings should be retrieved."),
@@ -8822,7 +9985,13 @@ async def get_team(
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Update Team Planning Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team_planning_settings(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a positive integer."),
     atlassian_team_id: str = Field(..., alias="atlassianTeamId", description="The unique identifier of the Atlassian team to update within the plan."),
@@ -8870,7 +10039,13 @@ async def update_team_planning_settings(
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team from Plan",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_from_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan from which the team will be removed. Must be a valid 64-bit integer."),
     atlassian_team_id: str = Field(..., alias="atlassianTeamId", description="The unique identifier of the Atlassian team to remove from the plan."),
@@ -8911,7 +10086,12 @@ async def remove_team_from_plan(
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Create Plan-Only Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_plan_only_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to which the team will be added."),
     name: str = Field(..., description="The name of the plan-only team. Must be between 1 and 255 characters.", min_length=1, max_length=255),
@@ -8956,13 +10136,20 @@ async def create_plan_only_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Get Plan-Only Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_plan_only_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a positive integer."),
     plan_only_team_id: str = Field(..., alias="planOnlyTeamId", description="The unique identifier of the plan-only team whose settings you want to retrieve. Must be a positive integer."),
@@ -9004,7 +10191,13 @@ async def get_plan_only_team(
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Update Plan-Only Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_plan_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a positive integer."),
     plan_only_team_id: str = Field(..., alias="planOnlyTeamId", description="The unique identifier of the plan-only team to update. Must be a positive integer."),
@@ -9053,7 +10246,13 @@ async def update_plan_team(
     return _response_data
 
 # Tags: Teams in plan
-@mcp.tool()
+@mcp.tool(
+    title="Remove Plan-Only Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_plan_only_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team to be removed. Must be a positive integer."),
     plan_only_team_id: str = Field(..., alias="planOnlyTeamId", description="The unique identifier of the plan-only team to delete. Must be a positive integer."),
@@ -9095,7 +10294,13 @@ async def remove_plan_only_team(
     return _response_data
 
 # Tags: Plans
-@mcp.tool()
+@mcp.tool(
+    title="Trash Plan",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def trash_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to move to trash. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Move a plan to trash, removing it from active use. Requires Administer Jira global permission."""
 
@@ -9133,7 +10338,13 @@ async def trash_plan(plan_id: str = Field(..., alias="planId", description="The 
     return _response_data
 
 # Tags: Issue priorities
-@mcp.tool()
+@mcp.tool(
+    title="Get Priority",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_priority(id_: str = Field(..., alias="id", description="The unique identifier of the issue priority to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific issue priority in Jira. Returns the priority configuration including its name, description, and other metadata."""
 
@@ -9169,7 +10380,13 @@ async def get_priority(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Issue priorities
-@mcp.tool()
+@mcp.tool(
+    title="Remove Priority",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_priority(id_: str = Field(..., alias="id", description="The unique identifier of the priority to delete.")) -> dict[str, Any] | ToolResult:
     """Removes an issue priority from the Jira instance. This is an asynchronous operation; check the returned location link to monitor task status."""
 
@@ -9205,7 +10422,13 @@ async def remove_priority(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Priority schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Available Priorities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_available_priorities(
     scheme_id: str = Field(..., alias="schemeId", description="The unique identifier of the priority scheme for which to retrieve available priorities."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through large result sets."),
@@ -9247,7 +10470,13 @@ async def list_available_priorities(
     return _response_data
 
 # Tags: Priority schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Priorities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_priorities(
     scheme_id: str = Field(..., alias="schemeId", description="The unique identifier of the priority scheme from which to retrieve priorities."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets. Defaults to 0 if not specified."),
@@ -9290,7 +10519,12 @@ async def list_priorities(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     key: str = Field(..., description="A unique project identifier consisting of 1-10 uppercase alphanumeric characters, starting with a letter. This key is used in issue keys (e.g., PROJ-123) and cannot be changed after creation."),
     name: str = Field(..., description="The display name of the project, which appears in the Jira interface and project listings."),
@@ -9348,13 +10582,19 @@ async def create_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Project From Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_from_template(
     details: _models.CreateProjectWithCustomTemplateBodyDetails | None = Field(None, description="Project details: name, description, access level, assignee type, avatar, category, language, URL, and other project-level settings."),
     template: _models.CreateProjectWithCustomTemplateBodyTemplate | None = Field(None, description="Project template configuration: boards, field schemes, issue types, notification schemes, permission schemes, roles, security levels, workflows, and their mappings."),
@@ -9389,13 +10629,20 @@ async def create_project_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Recent Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_recent_projects() -> dict[str, Any] | ToolResult:
     """Retrieve up to 20 projects recently viewed by the user, filtered to show only those the user has permission to access. This operation can be used anonymously and respects project-level and global permissions."""
 
@@ -9422,7 +10669,13 @@ async def list_recent_projects() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of projects to return per page, capped at 100. Values exceeding 100 will be automatically limited to 100."),
@@ -9474,7 +10727,13 @@ async def list_projects(
     return _response_data
 
 # Tags: Project types
-@mcp.tool()
+@mcp.tool(
+    title="List Project Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_types() -> dict[str, Any] | ToolResult:
     """Retrieves all available project types in the Jira instance, including both licensed and unlicensed types. This operation requires no authentication and can be accessed anonymously."""
 
@@ -9501,7 +10760,13 @@ async def list_project_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Project types
-@mcp.tool()
+@mcp.tool(
+    title="List Accessible Project Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_accessible_project_types() -> dict[str, Any] | ToolResult:
     """Retrieve all project types available with valid licenses in your Jira instance. Use this to discover which project type options are available for creating new projects."""
 
@@ -9528,7 +10793,13 @@ async def list_accessible_project_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Project types
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_type(project_type_key: Literal["software", "service_desk", "business", "product_discovery"] = Field(..., alias="projectTypeKey", description="The unique identifier for the project type. Must be one of the following: software, service_desk, business, or product_discovery.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project type by its key. This operation is publicly accessible and requires no authentication or permissions."""
 
@@ -9564,7 +10835,13 @@ async def get_project_type(project_type_key: Literal["software", "service_desk",
     return _response_data
 
 # Tags: Project types
-@mcp.tool()
+@mcp.tool(
+    title="Get Accessible Project Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_accessible_project_type(project_type_key: Literal["software", "service_desk", "business", "product_discovery"] = Field(..., alias="projectTypeKey", description="The unique identifier for the project type. Must be one of the four supported project types: software, service_desk, business, or product_discovery.")) -> dict[str, Any] | ToolResult:
     """Retrieves a project type if it is accessible to the authenticated user. Returns project type details for the specified project type key."""
 
@@ -9600,7 +10877,13 @@ async def get_accessible_project_type(project_type_key: Literal["software", "ser
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the project ID (numeric) or project key (case-sensitive alphanumeric code). Project keys are typically short uppercase abbreviations like 'PROJ'.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project, including its configuration and metadata. Requires Browse projects permission for the target project."""
 
@@ -9636,7 +10919,13 @@ async def get_project(project_id_or_key: str = Field(..., alias="projectIdOrKey"
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     assignee_type: Literal["PROJECT_LEAD", "UNASSIGNED"] | None = Field(None, alias="assigneeType", description="The default assignee type for newly created issues in this project. Choose between the project lead or unassigned."),
@@ -9686,13 +10975,20 @@ async def update_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either the numeric project ID or the project key (case-sensitive)."),
     enable_undo: bool | None = Field(None, alias="enableUndo", description="Whether to move the project to the Jira recycle bin for later restoration instead of permanently deleting it. Defaults to true."),
@@ -9734,7 +11030,13 @@ async def delete_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Archive Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either the project ID (numeric) or project key (case-sensitive alphanumeric code).")) -> dict[str, Any] | ToolResult:
     """Archive a project to prevent further modifications while preserving its data. Archived projects cannot be deleted directly; restore the project first if deletion is needed."""
 
@@ -9770,7 +11072,13 @@ async def archive_project(project_id_or_key: str = Field(..., alias="projectIdOr
     return _response_data
 
 # Tags: Project avatars
-@mcp.tool()
+@mcp.tool(
+    title="Set Project Avatar",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_project_avatar(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key."),
     id_: str = Field(..., alias="id", description="The unique identifier of the avatar image to display. This avatar must have been previously uploaded to the project."),
@@ -9806,13 +11114,20 @@ async def set_project_avatar(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project avatars
-@mcp.tool()
+@mcp.tool(
+    title="Remove Project Avatar",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_project_avatar(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key."),
     id_: str = Field(..., alias="id", description="The numeric identifier of the avatar to delete. Must be a valid 64-bit integer."),
@@ -9853,7 +11168,13 @@ async def remove_project_avatar(
     return _response_data
 
 # Tags: Project avatars
-@mcp.tool()
+@mcp.tool(
+    title="Upload Project Avatar",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upload_project_avatar(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key."),
     x: str | None = Field(None, description="The X coordinate (in pixels) of the top-left corner of the crop region. Defaults to 0 if not specified."),
@@ -9880,6 +11201,7 @@ async def upload_project_avatar(
     _http_path = _build_path("/rest/api/3/project/{projectIdOrKey}/avatar2", _request.path.model_dump(by_alias=True)) if _request.path else "/rest/api/3/project/{projectIdOrKey}/avatar2"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_headers = {}
+    _http_headers["Content-Type"] = "*/*"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_project_avatar")
@@ -9901,7 +11223,13 @@ async def upload_project_avatar(
     return _response_data
 
 # Tags: Project avatars
-@mcp.tool()
+@mcp.tool(
+    title="List Project Avatars",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_avatars(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key.")) -> dict[str, Any] | ToolResult:
     """Retrieves all avatars available for a project, organized into system-provided and custom avatar groups. Requires browse project permission and can be accessed anonymously."""
 
@@ -9937,7 +11265,13 @@ async def list_project_avatars(project_id_or_key: str = Field(..., alias="projec
     return _response_data
 
 # Tags: Project classification levels
-@mcp.tool()
+@mcp.tool(
+    title="Get Default Project Classification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_classification(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Retrieve the default data classification level assigned to a project. This determines the default sensitivity or confidentiality level for issues and data within the project."""
 
@@ -9973,7 +11307,13 @@ async def get_project_classification(project_id_or_key: str = Field(..., alias="
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="List Project Components",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_components(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key (case-sensitive)."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page begins. Use this to navigate through paginated results."),
@@ -10021,7 +11361,13 @@ async def list_project_components(
     return _response_data
 
 # Tags: Project components
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Components",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_components_all(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key (case-sensitive)."),
     component_source: Literal["jira", "compass", "auto"] | None = Field(None, alias="componentSource", description="The source of components to return: use 'jira' for Jira components (default), 'compass' for Compass components, or 'auto' to return Compass components if available, otherwise Jira components."),
@@ -10063,7 +11409,13 @@ async def get_project_components_all(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Asynchronously",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_async(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Asynchronously delete a project. The operation is transactional—if any part fails, the project remains unchanged. Monitor the returned task location to track deletion progress."""
 
@@ -10099,7 +11451,13 @@ async def delete_project_async(project_id_or_key: str = Field(..., alias="projec
     return _response_data
 
 # Tags: Project features
-@mcp.tool()
+@mcp.tool(
+    title="List Project Features",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_features(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier or key of the project. You can use either the numeric project ID or the case-sensitive project key to identify the project.")) -> dict[str, Any] | ToolResult:
     """Retrieves all available features for a specified project. Features represent optional capabilities or modules that can be enabled or configured within the project."""
 
@@ -10135,7 +11493,13 @@ async def list_project_features(project_id_or_key: str = Field(..., alias="proje
     return _response_data
 
 # Tags: Project properties
-@mcp.tool()
+@mcp.tool(
+    title="List Project Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_property_keys(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys stored for a specific project. Property keys are identifiers for custom data associated with the project."""
 
@@ -10171,7 +11535,13 @@ async def list_project_property_keys(project_id_or_key: str = Field(..., alias="
     return _response_data
 
 # Tags: Project properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_property(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the project property to retrieve. Use the list project property keys operation to discover available property keys for a project."),
@@ -10210,7 +11580,13 @@ async def get_project_property(
     return _response_data
 
 # Tags: Project properties
-@mcp.tool()
+@mcp.tool(
+    title="Remove Project Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_project_property(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the project property to delete. Retrieve available property keys using the list project properties operation."),
@@ -10249,7 +11625,12 @@ async def remove_project_property(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Restore Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restore_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case sensitive).")) -> dict[str, Any] | ToolResult:
     """Restore a project that has been archived or moved to the Jira recycle bin. Requires Administer Jira global permission for Company managed projects, or Administer Jira global permission or Administer projects project permission for Team managed projects."""
 
@@ -10285,7 +11666,13 @@ async def restore_project(project_id_or_key: str = Field(..., alias="projectIdOr
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="List Project Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_roles(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Retrieve all project roles available for a specific project, including their names and API endpoints. Project roles are shared across all projects in Jira Cloud."""
 
@@ -10321,7 +11708,13 @@ async def list_project_roles(project_id_or_key: str = Field(..., alias="projectI
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_role(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role to retrieve. Use the get_project_roles operation to discover available project role IDs."),
@@ -10366,7 +11759,12 @@ async def get_project_role(
     return _response_data
 
 # Tags: Project role actors
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Role Actors",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_project_role_actors(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive string)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role to add actors to. Retrieve available project role IDs using the get_project_roles operation."),
@@ -10405,13 +11803,20 @@ async def add_project_role_actors(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project role actors
-@mcp.tool()
+@mcp.tool(
+    title="Replace Project Role Actors",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_project_role_actors(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive string)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role to modify. Retrieve available project role IDs using the get all project roles operation."),
@@ -10450,13 +11855,20 @@ async def replace_project_role_actors(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project role actors
-@mcp.tool()
+@mcp.tool(
+    title="Remove Actor From Project Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_actor_from_project_role(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role. Retrieve available project role IDs using the get all project roles operation."),
@@ -10501,7 +11913,13 @@ async def remove_actor_from_project_role(
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="List Project Roles with Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_roles_with_details(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     current_member: bool | None = Field(None, alias="currentMember", description="Filter roles to show only those assigned to the current user. Defaults to false to return all roles."),
@@ -10544,7 +11962,13 @@ async def list_project_roles_with_details(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_statuses(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive). Use the key for human-readable references or the ID for programmatic consistency.")) -> dict[str, Any] | ToolResult:
     """Retrieves all valid statuses for a project, organized by issue type. Each issue type within the project has its own set of valid statuses that can be used for workflow transitions."""
 
@@ -10580,7 +12004,13 @@ async def list_project_statuses(project_id_or_key: str = Field(..., alias="proje
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="List Project Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_versions(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the paginated results should start. Defaults to 0 for the first page."),
@@ -10628,7 +12058,13 @@ async def list_project_versions(
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="List Project Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_versions_all(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the project ID (numeric) or project key (case-sensitive alphanumeric code).")) -> dict[str, Any] | ToolResult:
     """Retrieves all versions for a specified project in a single non-paginated response. Use this operation when you need the complete list of versions; for paginated results, use the paginated versions endpoint instead."""
 
@@ -10664,7 +12100,13 @@ async def list_project_versions_all(project_id_or_key: str = Field(..., alias="p
     return _response_data
 
 # Tags: Project email
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Email",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_email(project_id: str = Field(..., alias="projectId", description="The unique identifier of the project. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves the sender email address configured for a project. This email is used as the from address for project notifications and communications."""
 
@@ -10702,7 +12144,13 @@ async def get_project_email(project_id: str = Field(..., alias="projectId", desc
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Type Hierarchy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_type_hierarchy(project_id: str = Field(..., alias="projectId", description="The numeric identifier of the project for which to retrieve the issue type hierarchy.")) -> dict[str, Any] | ToolResult:
     """Retrieve the issue type hierarchy for a next-gen project, which defines the structural levels of issue types (Epic, Story/Task/Bug, and Subtask) and their relationships. Requires Browse projects permission."""
 
@@ -10740,7 +12188,13 @@ async def get_issue_type_hierarchy(project_id: str = Field(..., alias="projectId
     return _response_data
 
 # Tags: Project permission schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Security Levels for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_security_levels_project(project_key_or_id: str = Field(..., alias="projectKeyOrId", description="The project identifier, either the project key (case-sensitive) or the project ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve all issue security levels available in a project that the authenticated user can access. Security levels are only returned for users with the Set Issue Security permission."""
 
@@ -10776,7 +12230,13 @@ async def list_security_levels_project(project_key_or_id: str = Field(..., alias
     return _response_data
 
 # Tags: Project categories
-@mcp.tool()
+@mcp.tool(
+    title="List Project Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_categories() -> dict[str, Any] | ToolResult:
     """Retrieves all available project categories in Jira. Use this to populate category selections or understand the complete category taxonomy."""
 
@@ -10803,7 +12263,12 @@ async def list_project_categories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Project categories
-@mcp.tool()
+@mcp.tool(
+    title="Create Project Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_category(
     description: str | None = Field(None, description="Optional text describing the purpose and scope of this project category."),
     name: str | None = Field(None, description="The name of the project category. Required on create, optional on update."),
@@ -10838,13 +12303,20 @@ async def create_project_category(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project categories
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_category(id_: str = Field(..., alias="id", description="The unique identifier of the project category as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific project category by its ID. Returns the category details for use in project organization and filtering."""
 
@@ -10882,7 +12354,13 @@ async def get_project_category(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Project categories
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Category",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_category(
     id_: str = Field(..., alias="id", description="The unique identifier of the project category to update. This is a numeric ID that identifies which category to modify."),
     description: str | None = Field(None, description="The new description text for the project category. This field is optional and can be used to update the category's descriptive information."),
@@ -10920,13 +12398,20 @@ async def update_project_category(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project categories
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_category(id_: str = Field(..., alias="id", description="The unique identifier of the project category to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a project category from Jira. Requires Administer Jira global permission."""
 
@@ -10964,10 +12449,16 @@ async def delete_project_category(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Issue fields
-@mcp.tool()
+@mcp.tool(
+    title="List Project Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_fields(
-    project_id: list[int] = Field(..., alias="projectId", description="One or more project IDs to retrieve fields for. Only fields available to these projects will be returned."),
-    work_type_id: list[int] = Field(..., alias="workTypeId", description="One or more work type (issue type) IDs to retrieve fields for. Only fields applicable to these work types will be returned."),
+    project_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., alias="projectId", description="One or more project IDs to retrieve fields for. Only fields available to these projects will be returned."),
+    work_type_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., alias="workTypeId", description="One or more work type (issue type) IDs to retrieve fields for. Only fields applicable to these work types will be returned."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items."),
     field_id: list[str] | None = Field(None, alias="fieldId", description="Optional list of specific field IDs to retrieve. If omitted, all available fields for the project and work type combination are returned."),
@@ -11011,7 +12502,13 @@ async def list_project_fields(
     return _response_data
 
 # Tags: Project key and name validation
-@mcp.tool()
+@mcp.tool(
+    title="Validate Project Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def validate_project_key() -> dict[str, Any] | ToolResult:
     """Validates a project key to ensure it is a properly formatted string and is not already in use by another project. Use this to verify key availability before creating a new project."""
 
@@ -11038,7 +12535,13 @@ async def validate_project_key() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Project key and name validation
-@mcp.tool()
+@mcp.tool(
+    title="Validate Project Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def validate_project_key_generate() -> dict[str, Any] | ToolResult:
     """Validates a project key and generates a valid random alternative if the provided key is invalid or already in use. No authentication required."""
 
@@ -11065,7 +12568,13 @@ async def validate_project_key_generate() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Project key and name validation
-@mcp.tool()
+@mcp.tool(
+    title="Validate Project Name",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def validate_project_name(name: str = Field(..., description="The desired project name to validate for availability.")) -> dict[str, Any] | ToolResult:
     """Validates whether a project name is available. Returns the provided name if unused, attempts to generate an alternative name by appending a sequence number if the name is taken, or returns an error if no valid alternative can be generated."""
 
@@ -11103,7 +12612,13 @@ async def validate_project_name(name: str = Field(..., description="The desired 
     return _response_data
 
 # Tags: Issue redaction
-@mcp.tool()
+@mcp.tool(
+    title="Redact Issue Fields",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def redact_issue_fields(redactions: Annotated[list[_models.SingleRedactionRequest], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of field redaction specifications defining which issue fields should have their data redacted. Each item specifies the field identifier and redaction parameters.")) -> dict[str, Any] | ToolResult:
     """Submit an asynchronous job to redact sensitive data from specified issue fields. Use the returned job ID to poll the redaction status."""
 
@@ -11135,13 +12650,20 @@ async def redact_issue_fields(redactions: Annotated[list[_models.SingleRedaction
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue resolutions
-@mcp.tool()
+@mcp.tool(
+    title="List Resolutions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_resolutions(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of resolutions to return per page. Defaults to 50 items if not specified."),
@@ -11183,7 +12705,13 @@ async def list_resolutions(
     return _response_data
 
 # Tags: Issue resolutions
-@mcp.tool()
+@mcp.tool(
+    title="Get Resolution",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_resolution(id_: str = Field(..., alias="id", description="The unique identifier of the resolution value to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific issue resolution value by its ID. This returns metadata about how an issue can be resolved in Jira."""
 
@@ -11219,7 +12747,13 @@ async def get_resolution(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Issue resolutions
-@mcp.tool()
+@mcp.tool(
+    title="Update Resolution",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_resolution(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue resolution to update."),
     name: str = Field(..., description="The name of the resolution. Must be unique across all resolutions and limited to 60 characters maximum.", max_length=60),
@@ -11256,13 +12790,20 @@ async def update_resolution(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue resolutions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Resolution",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_resolution(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue resolution to delete."),
     replace_with: str = Field(..., alias="replaceWith", description="The unique identifier of the issue resolution that will replace the deleted one for all affected issues. This parameter is required to ensure no issues are left without a resolution."),
@@ -11304,7 +12845,13 @@ async def delete_resolution(
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="List Global Project Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_roles_global() -> dict[str, Any] | ToolResult:
     """Retrieve all project roles available in the Jira instance, including their details and default actors. Project roles are used globally across all projects for permission schemes, notifications, issue security, and workflow conditions."""
 
@@ -11331,7 +12878,13 @@ async def list_project_roles_global() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_role_global(id_: str = Field(..., alias="id", description="The unique identifier of the project role as a 64-bit integer. Retrieve available project role IDs using the list project roles operation.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific project role, including its default actors sorted by display name. Requires Jira administrator permissions."""
 
@@ -11369,7 +12922,12 @@ async def get_project_role_global(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Role",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_project_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the project role to update. This is a 64-bit integer that can be obtained from the list of all project roles."),
     description: str | None = Field(None, description="The new description for the project role. This field is optional for partial updates and will only be applied if the name is not provided in the same request."),
@@ -11407,13 +12965,20 @@ async def update_project_role(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_role_full(
     id_: str = Field(..., alias="id", description="The unique identifier of the project role to update. This is a numeric ID that can be retrieved from the list of all project roles."),
     description: str | None = Field(None, description="The new description for the project role. This field is required when fully updating a project role."),
@@ -11452,13 +13017,20 @@ async def update_project_role_full(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project roles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the project role to delete. Retrieve available project role IDs using the list project roles operation."),
     swap: str | None = Field(None, description="The unique identifier of a project role to replace the deleted role across all schemes, workflows, worklogs, and comments. Required if the role being deleted is currently in use."),
@@ -11503,7 +13075,13 @@ async def delete_project_role(
     return _response_data
 
 # Tags: Screens
-@mcp.tool()
+@mcp.tool(
+    title="List Screen Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_screen_fields(screen_id: str = Field(..., alias="screenId", description="The unique identifier of the screen. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all fields available to be added to a screen tab. This helps identify which fields can be configured for a specific screen layout."""
 
@@ -11541,7 +13119,12 @@ async def list_screen_fields(screen_id: str = Field(..., alias="screenId", descr
     return _response_data
 
 # Tags: Issue search
-@mcp.tool()
+@mcp.tool(
+    title="Count Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def count_issues(jql: str | None = Field(None, description="A JQL query expression to filter issues. The query must include at least one search restriction (bounded query) for performance reasons.")) -> dict[str, Any] | ToolResult:
     """Get an estimated count of issues matching a JQL query. Returns a fast approximate count for issues the user has permission to view; note that recent updates may not be immediately reflected."""
 
@@ -11573,17 +13156,24 @@ async def count_issues(jql: str | None = Field(None, description="A JQL query ex
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue search
-@mcp.tool()
+@mcp.tool(
+    title="Search Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_issues(
     jql: str | None = Field(None, description="A JQL expression to filter issues. Must include a search restriction (bounded query) for performance—for example, filtering by project, assignee, or status. The orderBy clause supports a maximum of 7 fields. Unbounded queries like 'order by key desc' are not permitted."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of issues to return per page, up to 5000. The API may return fewer items when many fields or properties are requested. Defaults to 50 items per page."),
-    reconcile_issues: list[int] | None = Field(None, alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use this when read-after-write consistency is critical. The same list should be included across all paginated requests."),
+    reconcile_issues: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use this when read-after-write consistency is critical. The same list should be included across all paginated requests."),
 ) -> dict[str, Any] | ToolResult:
     """Search for issues using JQL (Jira Query Language) with optional read-after-write consistency reconciliation. Results reflect issues where you have browse permissions on the containing project and any applicable issue-level security permissions."""
 
@@ -11623,11 +13213,16 @@ async def search_issues(
     return _response_data
 
 # Tags: Issue search
-@mcp.tool()
+@mcp.tool(
+    title="Search Issues with JQL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_issues_jql(
     jql: str | None = Field(None, description="A JQL expression to filter issues. Must include at least one search restriction (e.g., assignee, project, status) to be considered bounded. The orderBy clause supports a maximum of 7 fields."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of issues to return per page, up to 5000. Defaults to 50 items per page. Actual results may be fewer when requesting many fields."),
-    reconcile_issues: list[int] | None = Field(None, alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use the same list across all paginated requests to ensure consistency."),
+    reconcile_issues: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use the same list across all paginated requests to ensure consistency."),
 ) -> dict[str, Any] | ToolResult:
     """Search for issues using JQL with optional read-after-write consistency reconciliation. Requires a bounded query with at least one search restriction for optimal performance."""
 
@@ -11661,13 +13256,20 @@ async def search_issues_jql(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue security level
-@mcp.tool()
+@mcp.tool(
+    title="Get Security Level",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_security_level(id_: str = Field(..., alias="id", description="The unique identifier of the issue security level to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific issue security level. Use this to get security level properties after obtaining the level ID from the issue security scheme."""
 
@@ -11703,7 +13305,13 @@ async def get_security_level(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: Workflow statuses
-@mcp.tool()
+@mcp.tool(
+    title="List Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_statuses() -> dict[str, Any] | ToolResult:
     """Retrieves all statuses associated with active workflows in Jira. This operation is useful for understanding the available status values that can be assigned to issues across your projects."""
 
@@ -11730,7 +13338,13 @@ async def list_statuses() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Workflow statuses
-@mcp.tool()
+@mcp.tool(
+    title="Get Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status(id_or_name: str = Field(..., alias="idOrName", description="The unique identifier or display name of the status. Using the status ID is preferred when the name may not be unique across your instance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a status associated with an active workflow by its ID or name. If multiple statuses share the same name, the first match is returned; using the status ID is recommended for precise identification."""
 
@@ -11766,7 +13380,13 @@ async def get_status(id_or_name: str = Field(..., alias="idOrName", description=
     return _response_data
 
 # Tags: Workflow status categories
-@mcp.tool()
+@mcp.tool(
+    title="List Status Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_categories() -> dict[str, Any] | ToolResult:
     """Retrieves all available status categories in Jira. Status categories group statuses by their workflow state (e.g., To Do, In Progress, Done)."""
 
@@ -11793,7 +13413,13 @@ async def list_status_categories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Workflow status categories
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_category(id_or_key: str = Field(..., alias="idOrKey", description="The unique identifier or key of the status category to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a status category by its ID or key. Status categories are used to group and organize statuses in Jira workflows."""
 
@@ -11829,7 +13455,13 @@ async def get_status_category(id_or_key: str = Field(..., alias="idOrKey", descr
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="List Statuses in Bulk",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_statuses_bulk(id_: list[str] = Field(..., alias="id", description="One or more status IDs to retrieve. Provide between 1 and 50 IDs in a single request.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for one or more statuses by their IDs. Useful for fetching status configurations needed for workflow operations or validation."""
 
@@ -11867,7 +13499,13 @@ async def list_statuses_bulk(id_: list[str] = Field(..., alias="id", description
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="Delete Statuses",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_statuses(id_: list[str] = Field(..., alias="id", description="One or more status IDs to delete. Provide between 1 and 50 IDs in a single request.")) -> dict[str, Any] | ToolResult:
     """Permanently delete one or more statuses by their IDs. Requires either Administer projects or Administer Jira permission."""
 
@@ -11905,7 +13543,13 @@ async def delete_statuses(id_: list[str] = Field(..., alias="id", description="O
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="List Statuses by Name",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_statuses_by_name(
     name: list[str] = Field(..., description="One or more status names to retrieve. Provide between 1 and 50 names as an ampersand-separated list."),
     project_id: str | None = Field(None, alias="projectId", description="Optional project ID to scope the status lookup to a specific project. Omit or use null to retrieve global statuses."),
@@ -11946,7 +13590,13 @@ async def list_statuses_by_name(
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="Search Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_statuses(
     project_id: str | None = Field(None, alias="projectId", description="The project ID to filter statuses to a specific project, or omit to search global statuses."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 if not specified."),
@@ -11993,7 +13643,13 @@ async def search_statuses(
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Type Usages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_type_usages(
     status_id: str = Field(..., alias="statusId", description="The unique identifier of the status to query for issue type usage."),
     project_id: str = Field(..., alias="projectId", description="The unique identifier of the project to filter issue type usages."),
@@ -12038,7 +13694,13 @@ async def list_issue_type_usages(
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="List Project Usages by Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_usages_by_status(
     status_id: str = Field(..., alias="statusId", description="The unique identifier of the status to query for project usage."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of results to return per page. Must be between 1 and 200, defaults to 50 results."),
@@ -12082,7 +13744,13 @@ async def list_project_usages_by_status(
     return _response_data
 
 # Tags: Status
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Usages by Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_usages_by_status(
     status_id: str = Field(..., alias="statusId", description="The unique identifier of the status for which to retrieve workflow usages."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of workflow results to return per page. Must be between 1 and 200, with a default of 50 results."),
@@ -12126,7 +13794,13 @@ async def list_workflow_usages_by_status(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(task_id: str = Field(..., alias="taskId", description="The unique identifier of the task to retrieve status and results for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and results of a long-running asynchronous task. Once completed, returns the JSON response applicable to the task; details are retained for 14 days."""
 
@@ -12162,7 +13836,13 @@ async def get_task(task_id: str = Field(..., alias="taskId", description="The un
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_task(task_id: str = Field(..., alias="taskId", description="The unique identifier of the task to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancels an active task in Jira. Requires either Jira administrator permissions or creator status of the task."""
 
@@ -12198,7 +13878,13 @@ async def cancel_task(task_id: str = Field(..., alias="taskId", description="The
     return _response_data
 
 # Tags: Avatars
-@mcp.tool()
+@mcp.tool(
+    title="List Avatars",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_avatars(
     type_: Literal["project", "issuetype", "priority"] = Field(..., alias="type", description="The category of avatar to retrieve: project, issue type, or priority."),
     entity_id: str = Field(..., alias="entityId", description="The unique identifier of the entity (project, issue type, or priority) associated with the avatars."),
@@ -12237,7 +13923,13 @@ async def list_avatars(
     return _response_data
 
 # Tags: Avatars
-@mcp.tool()
+@mcp.tool(
+    title="Upload Avatar",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upload_avatar(
     type_: Literal["project", "issuetype", "priority"] = Field(..., alias="type", description="The category of entity receiving the avatar. Must be one of: project, issuetype, or priority."),
     entity_id: str = Field(..., alias="entityId", description="The unique identifier of the entity (project, issue type, or priority) that will use this avatar."),
@@ -12265,6 +13957,7 @@ async def upload_avatar(
     _http_path = _build_path("/rest/api/3/universal_avatar/type/{type}/owner/{entityId}", _request.path.model_dump(by_alias=True)) if _request.path else "/rest/api/3/universal_avatar/type/{type}/owner/{entityId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_headers = {}
+    _http_headers["Content-Type"] = "*/*"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_avatar")
@@ -12286,7 +13979,13 @@ async def upload_avatar(
     return _response_data
 
 # Tags: Avatars
-@mcp.tool()
+@mcp.tool(
+    title="Delete Avatar",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_avatar(
     type_: Literal["project", "issuetype", "priority"] = Field(..., alias="type", description="The category of object the avatar belongs to: project, issue type, or priority."),
     owning_object_id: str = Field(..., alias="owningObjectId", description="The unique identifier of the project, issue type, or priority that owns the avatar."),
@@ -12328,7 +14027,13 @@ async def delete_avatar(
     return _response_data
 
 # Tags: Avatars
-@mcp.tool()
+@mcp.tool(
+    title="Get Avatar Image by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_avatar_image_by_avatar_id(
     type_: Literal["issuetype", "project", "priority"] = Field(..., alias="type", description="The avatar category: either 'issuetype' for issue type avatars, 'project' for project avatars, or 'priority' for priority avatars."),
     id_: str = Field(..., alias="id", description="The unique identifier of the avatar to retrieve."),
@@ -12374,7 +14079,13 @@ async def get_avatar_image_by_avatar_id(
     return _response_data
 
 # Tags: Avatars
-@mcp.tool()
+@mcp.tool(
+    title="Get Avatar Image by Entity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_avatar_image_by_entity(
     type_: Literal["issuetype", "project", "priority"] = Field(..., alias="type", description="The avatar type to retrieve: either 'issuetype', 'project', or 'priority'."),
     entity_id: str = Field(..., alias="entityId", description="The unique identifier of the entity (project or issue type) that owns the avatar."),
@@ -12418,7 +14129,13 @@ async def get_avatar_image_by_entity(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required.", max_length=128)) -> dict[str, Any] | ToolResult:
     """Retrieve a user's profile information from Jira. Privacy controls are applied based on the user's preferences, which may hide sensitive details like email addresses."""
 
@@ -12456,7 +14173,12 @@ async def get_user(account_id: str | None = Field(None, alias="accountId", descr
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Create User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user(
     email_address: str = Field(..., alias="emailAddress", description="The email address for the new user. This serves as the unique identifier for the user account."),
     products: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="An array of products the user should have access to. Valid options include jira-core, jira-servicedesk, jira-product-discovery, and jira-software. Pass an empty array to create a user without any product access."),
@@ -12491,13 +14213,20 @@ async def create_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(account_id: str = Field(..., alias="accountId", description="The unique account ID that identifies the user across all Atlassian products. This is a string identifier up to 128 characters long (for example, 5b10ac8d82e05b22cc7d4ef5).", max_length=128)) -> dict[str, Any] | ToolResult:
     """Permanently removes a user from Jira's user base. Note that this operation only deletes the user's Jira account and does not affect their Atlassian account."""
 
@@ -12535,7 +14264,13 @@ async def delete_user(account_id: str = Field(..., alias="accountId", descriptio
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="List Assignable Users Across Multiple Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignable_users_multiproject(
     project_keys: str = Field(..., alias="projectKeys", description="Comma-separated list of project keys (case-sensitive) to search for assignable users. At least one project key is required."),
     start_at: str | None = Field(None, alias="startAt", description="Zero-based index for pagination to specify which result page to return. Defaults to 0 if not provided."),
@@ -12580,7 +14315,13 @@ async def list_assignable_users_multiproject(
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="List Assignable Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assignable_users(
     issue_id: str | None = Field(None, alias="issueId", description="The issue ID to check assignability against. Required unless issueKey or project is specified."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 for the first page."),
@@ -12628,7 +14369,13 @@ async def list_assignable_users(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users by Account IDs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users_by_account_ids(
     account_id: list[str] = Field(..., alias="accountId", description="One or more user account IDs to retrieve. Specify multiple account IDs to fetch multiple users in a single request. Each account ID must not exceed 128 characters.", max_length=128),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first user. Use this to navigate through pages of results."),
@@ -12673,7 +14420,13 @@ async def list_users_by_account_ids(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Account IDs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_account_ids(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of user results to return in a single page. Defaults to 10 items per page."),
@@ -12719,7 +14472,13 @@ async def list_user_account_ids(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Default Columns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_default_columns() -> dict[str, Any] | ToolResult:
     """Retrieves the default issue table columns configured for a user. Returns the calling user's column preferences unless an account ID is specified, which requires Jira administration permissions."""
 
@@ -12746,7 +14505,13 @@ async def list_user_default_columns() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_groups(account_id: str = Field(..., alias="accountId", description="The unique account ID of the user across all Atlassian products (up to 128 characters).", max_length=128)) -> dict[str, Any] | ToolResult:
     """Retrieve all groups that a user belongs to. Requires Browse users and groups global permission."""
 
@@ -12784,7 +14549,13 @@ async def list_user_groups(account_id: str = Field(..., alias="accountId", descr
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users by Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users_by_permissions(
     permissions: str = Field(..., description="Comma-separated list of permission identifiers to filter users. Use permission keys from the Jira permissions API, custom project permissions from Connect apps, or deprecated permission constants like BROWSE, CREATE_ISSUE, or PROJECT_ADMIN."),
     start_at: str | None = Field(None, alias="startAt", description="Zero-based index for pagination to specify which result page to retrieve. Defaults to 0 for the first page."),
@@ -12831,7 +14602,13 @@ async def search_users_by_permissions(
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users for Picker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users_picker(
     query: str = Field(..., description="Search query matched against user attributes such as displayName and emailAddress. Supports prefix matching, so partial names and email prefixes will return relevant results."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of users to return in the results, up to 1000. Defaults to 50 if not specified. The total count of matched users is provided separately."),
@@ -12875,7 +14652,13 @@ async def search_users_picker(
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="List User Property Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_property_keys(account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128)) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys associated with a user. These are custom properties stored at the user level, distinct from Jira user profile properties."""
 
@@ -12913,7 +14696,13 @@ async def list_user_property_keys(account_id: str | None = Field(None, alias="ac
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="Get User Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_property(
     property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the user property you want to retrieve."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128),
@@ -12955,7 +14744,13 @@ async def get_user_property(
     return _response_data
 
 # Tags: User properties
-@mcp.tool()
+@mcp.tool(
+    title="Remove User Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_property(property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the user property to delete. This key must match an existing property on the user's profile.")) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a user's profile. Requires either Jira administrator permissions to delete properties from any user, or standard Jira access to delete properties from your own user record."""
 
@@ -12991,7 +14786,13 @@ async def remove_user_property(property_key: str = Field(..., alias="propertyKey
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for paginated results, where 0 is the first user. Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of users to return per page. Defaults to 50 users per page."),
@@ -13038,7 +14839,13 @@ async def search_users(
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users by Query",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users_query(
     query: str = Field(..., description="A structured query string to filter users. Supports queries like 'is assignee of PROJ', 'is reporter of (PROJ-1, PROJ-2)', or custom property matching with AND/OR operators for complex filters."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page begins. Use this to paginate through results in combination with maxResults."),
@@ -13083,7 +14890,13 @@ async def search_users_query(
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="Search Users by Query",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_users_by_query(
     query: str = Field(..., description="A structured query string using statements like 'is assignee of PROJ', 'is reporter of (PROJ-1, PROJ-2)', or property matching syntax. Multiple statements can be combined with AND/OR operators to create complex queries."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page begins. Use this to paginate through results in combination with maxResult."),
@@ -13128,7 +14941,13 @@ async def search_users_by_query(
     return _response_data
 
 # Tags: User search
-@mcp.tool()
+@mcp.tool(
+    title="Search Browsable Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_browsable_users(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first user. Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per page, up to 50 by default. The operation may return fewer results if fewer users match the search criteria."),
@@ -13175,7 +14994,13 @@ async def search_browsable_users(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users_default(
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from. Use this to paginate through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per request, up to a limit of 1000. Defaults to 50 if not specified."),
@@ -13219,7 +15044,13 @@ async def list_users_default(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large user lists. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per request, capped at 1000. Defaults to 50 if not specified."),
@@ -13263,7 +15094,12 @@ async def list_users(
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Create Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_version(
     archived: bool | None = Field(None, description="Whether the version should be marked as archived. Defaults to false if not specified."),
     description: str | None = Field(None, description="A text description of the version, up to 16,384 bytes in length."),
@@ -13307,13 +15143,20 @@ async def create_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Get Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_version(id_: str = Field(..., alias="id", description="The unique identifier of the version to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific project version by its ID. This operation can be accessed anonymously and requires Browse projects permission for the project containing the version."""
 
@@ -13349,7 +15192,13 @@ async def get_version(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Update Version",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the version to update."),
     archived: bool | None = Field(None, description="Set whether this version is archived. Archived versions are typically hidden from active workflows."),
@@ -13394,13 +15243,20 @@ async def update_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Merge Versions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_versions(
     id_: str = Field(..., alias="id", description="The ID of the version to delete. This version will be removed after all its issues are reassigned to the target version."),
     move_issues_to: str = Field(..., alias="moveIssuesTo", description="The ID of the version to merge into. All issues currently assigned to the source version will be reassigned to this version."),
@@ -13439,7 +15295,12 @@ async def merge_versions(
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the version to reorder."),
     after: str | None = Field(None, description="The URL (self link) of the version after which to place the moved version. Cannot be used with `position`."),
@@ -13476,13 +15337,20 @@ async def reorder_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Count Version Related Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def count_version_related_issues(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve related issue counts.")) -> dict[str, Any] | ToolResult:
     """Retrieves counts of issues related to a specific version, including issues where the version is set as a fix version, affected version, or in a custom version field. Requires Browse projects permission for the project containing the version."""
 
@@ -13518,7 +15386,13 @@ async def count_version_related_issues(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="List Related Work",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_related_work(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve related work items.")) -> dict[str, Any] | ToolResult:
     """Retrieves all related work items associated with a specific version. Requires Browse projects permission for the project containing the version."""
 
@@ -13554,7 +15428,12 @@ async def list_related_work(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Create Related Work",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_related_work(
     id_: str = Field(..., alias="id", description="The unique identifier of the version to which the related work will be linked."),
     category: str = Field(..., description="The category classification for the related work item."),
@@ -13592,13 +15471,20 @@ async def create_related_work(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Update Related Work",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_related_work(
     id_: str = Field(..., alias="id", description="The unique identifier of the version containing the related work to update."),
     category: str = Field(..., description="The classification type of the related work (e.g., generic link, release note)."),
@@ -13637,13 +15523,20 @@ async def update_related_work(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Delete and Replace Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_and_replace_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the version to delete. Must be a valid version ID from the target project."),
     custom_field_replacement_list: list[_models.CustomFieldReplacement] | None = Field(None, alias="customFieldReplacementList", description="An optional array of mappings to reassign custom fields containing the deleted version. Each mapping specifies a custom field ID and the replacement version ID to use. All replacement versions must belong to the same project as the deleted version and cannot be the version being deleted."),
@@ -13679,13 +15572,20 @@ async def delete_and_replace_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Get Version Unresolved Issue Count",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_version_unresolved_issues(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve issue counts.")) -> dict[str, Any] | ToolResult:
     """Retrieves the count of total and unresolved issues for a specific project version. Useful for tracking version completion status and identifying outstanding work."""
 
@@ -13721,7 +15621,13 @@ async def get_version_unresolved_issues(id_: str = Field(..., alias="id", descri
     return _response_data
 
 # Tags: Project versions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Related Work",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_related_work(
     version_id: str = Field(..., alias="versionId", description="The unique identifier of the version containing the related work to be deleted."),
     related_work_id: str = Field(..., alias="relatedWorkId", description="The unique identifier of the related work item to remove."),
@@ -13760,7 +15666,12 @@ async def delete_related_work(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow History",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_workflow_history(workflow_id: str | None = Field(None, alias="workflowId", description="The unique identifier of the workflow whose history you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves workflow history entries for a specified workflow, showing past changes and events. Note that historical data is only available for the last 60 days and entries before October 30th, 2025 are not accessible."""
 
@@ -13792,13 +15703,20 @@ async def list_workflow_history(workflow_id: str | None = Field(None, alias="wor
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Issue Type Usages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_issue_type_usages(
     workflow_id: str = Field(..., alias="workflowId", description="The unique identifier of the workflow to query for issue type usage."),
     project_id: str = Field(..., alias="projectId", description="The unique identifier of the project in which to find issue type usages."),
@@ -13844,7 +15762,13 @@ async def list_workflow_issue_type_usages(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_projects(
     workflow_id: str = Field(..., alias="workflowId", description="The unique identifier of the workflow to query for project usage."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of projects to return per page, between 1 and 200. Defaults to 50 if not specified."),
@@ -13888,7 +15812,13 @@ async def list_workflow_projects(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Capabilities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_capabilities(
     workflow_id: str | None = Field(None, alias="workflowId", description="The unique identifier of the workflow. Use this to retrieve capabilities for a specific workflow by ID."),
     project_id: str | None = Field(None, alias="projectId", description="The unique identifier of the project. Use this with issueTypeId as an alternative to workflowId to identify the workflow by project context."),
@@ -13930,7 +15860,13 @@ async def list_workflow_capabilities(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Default Editor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_default_editor() -> dict[str, Any] | ToolResult:
     """Retrieve the user's default workflow editor preference, which can be either the new editor or the legacy editor."""
 
@@ -13957,7 +15893,12 @@ async def get_workflow_default_editor() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Preview Workflows",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def preview_workflows(
     project_id: str = Field(..., alias="projectId", description="The project ID for permission validation and workflow association. Required to identify the project context and enforce access controls."),
     issue_type_ids: list[str] | None = Field(None, alias="issueTypeIds", description="List of issue type IDs to filter workflows. Specify up to 25 issue type IDs; at least one lookup criterion (issueTypeIds, workflowNames, or workflowIds) is required.", min_length=0, max_length=25),
@@ -13992,13 +15933,20 @@ async def preview_workflows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workflow scheme project associations
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Schemes by Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_schemes_by_projects(project_id: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="projectId", description="One or more project IDs to retrieve associated workflow schemes for. Provide between 1 and 100 project IDs; non-existent or team-managed projects are ignored without error.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Retrieves the workflow schemes associated with specified projects, showing which projects are linked to each scheme. Team-managed and non-existent projects are silently ignored. The Default Workflow Scheme is returned without an ID."""
 
@@ -14036,7 +15984,13 @@ async def list_workflow_schemes_by_projects(project_id: Annotated[list[int], Aft
     return _response_data
 
 # Tags: Workflow schemes
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Scheme Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_scheme_projects(
     workflow_scheme_id: str = Field(..., alias="workflowSchemeId", description="The unique identifier of the workflow scheme for which to retrieve associated projects."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of projects to return per page, between 1 and 200. Defaults to 50 if not specified."),
@@ -14080,7 +16034,13 @@ async def list_workflow_scheme_projects(
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="List Deleted Worklogs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deleted_worklogs(since: str | None = Field(None, description="The UNIX timestamp in milliseconds marking the start of the deletion window. Only worklogs deleted after this timestamp are returned. Defaults to 0 (epoch start) if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of worklog IDs and deletion timestamps for worklogs deleted after a specified date and time. Results are ordered from oldest to youngest, with up to 1000 worklogs per page."""
 
@@ -14120,7 +16080,12 @@ async def list_deleted_worklogs(since: str | None = Field(None, description="The
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Worklogs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_worklogs(ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of worklog IDs to retrieve. Only worklogs that are viewable by all users or where you have project role or group permissions will be returned, up to a maximum of 1000 items.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed worklog information for a specified list of worklog IDs. Returns up to 1000 worklogs where you have permission to view them."""
 
@@ -14152,13 +16117,20 @@ async def get_worklogs(ids: Annotated[list[int], AfterValidator(_check_unique_it
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Issue worklogs
-@mcp.tool()
+@mcp.tool(
+    title="List Worklogs Modified Since",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_worklogs_modified_since(since: str | None = Field(None, description="The UNIX timestamp in milliseconds marking the start of the time range. Only worklogs updated after this timestamp are returned. Defaults to 0 (epoch start) if not specified. Note: worklogs updated during the minute immediately preceding the request are excluded.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of worklog IDs and their update timestamps for all worklogs modified after a specified date and time. Results are ordered from oldest to youngest, with a maximum of 1000 worklogs per page."""
 

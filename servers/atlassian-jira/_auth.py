@@ -1,7 +1,7 @@
 """
 Authentication module for Atlassian Jira MCP server.
 
-Generated: 2026-05-05 14:20:37 UTC
+Generated: 2026-05-11 19:28:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

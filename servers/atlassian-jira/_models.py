@@ -1,7 +1,7 @@
 """
 Atlassian Jira MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:20:37 UTC
+Generated: 2026-05-11 19:28:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -795,7 +795,7 @@ class GetTrashedFieldsPaginatedRequest(StrictModel):
 class GetIssueTypeMappingsForContextsRequestPath(StrictModel):
     field_id: str = Field(default=..., validation_alias="fieldId", serialization_alias="fieldId", description="The unique identifier of the custom field for which to retrieve issue type mappings.")
 class GetIssueTypeMappingsForContextsRequestQuery(StrictModel):
-    context_id: list[int] | None = Field(default=None, validation_alias="contextId", serialization_alias="contextId", description="Filter results to specific contexts by providing one or more context IDs. Omit to retrieve mappings for all contexts.")
+    context_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="contextId", serialization_alias="contextId", description="Filter results to specific contexts by providing one or more context IDs. Omit to retrieve mappings for all contexts.")
     start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets.", json_schema_extra={'format': 'int64'})
     max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The maximum number of mappings to return per page. Defaults to 50 items if not specified.", json_schema_extra={'format': 'int32'})
 class GetIssueTypeMappingsForContextsRequest(StrictModel):
@@ -1881,7 +1881,7 @@ class GetIssueTypeSchemeForProjectsRequest(StrictModel):
 # Operation: list_jql_autocomplete_data_filtered
 class GetAutoCompletePostRequestBody(StrictModel):
     include_collapsed_fields: bool | None = Field(default=None, validation_alias="includeCollapsedFields", serialization_alias="includeCollapsedFields", description="Include collapsed fields that allow searches across multiple fields with the same name and type. Disabled by default.")
-    project_ids: list[int] | None = Field(default=None, validation_alias="projectIds", serialization_alias="projectIds", description="Filter returned field details by one or more project IDs. Invalid project IDs are ignored; system fields are always included regardless of this filter.")
+    project_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="projectIds", serialization_alias="projectIds", description="Filter returned field details by one or more project IDs. Invalid project IDs are ignored; system fields are always included regardless of this filter.")
 class GetAutoCompletePostRequest(StrictModel):
     """Retrieve JQL field and function reference data to support programmatic query building and validation. Returns system fields always, with optional filtering by project and support for collapsed fields that enable cross-field searches."""
     body: GetAutoCompletePostRequestBody | None = None
@@ -2517,8 +2517,8 @@ class RemoveProjectCategoryRequest(StrictModel):
 class GetProjectFieldsRequestQuery(StrictModel):
     start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results.", json_schema_extra={'format': 'int64'})
     max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items.", json_schema_extra={'format': 'int32'})
-    project_id: list[int] = Field(default=..., validation_alias="projectId", serialization_alias="projectId", description="One or more project IDs to retrieve fields for. Only fields available to these projects will be returned.")
-    work_type_id: list[int] = Field(default=..., validation_alias="workTypeId", serialization_alias="workTypeId", description="One or more work type (issue type) IDs to retrieve fields for. Only fields applicable to these work types will be returned.")
+    project_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(default=..., validation_alias="projectId", serialization_alias="projectId", description="One or more project IDs to retrieve fields for. Only fields available to these projects will be returned.")
+    work_type_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(default=..., validation_alias="workTypeId", serialization_alias="workTypeId", description="One or more work type (issue type) IDs to retrieve fields for. Only fields applicable to these work types will be returned.")
     field_id: list[str] | None = Field(default=None, validation_alias="fieldId", serialization_alias="fieldId", description="Optional list of specific field IDs to retrieve. If omitted, all available fields for the project and work type combination are returned.")
 class GetProjectFieldsRequest(StrictModel):
     """Retrieve available fields for specified projects and work types. Returns a paginated list of fields that are applicable to the given project and work type combination, with optional filtering by specific field IDs."""
@@ -2633,7 +2633,7 @@ class CountIssuesRequest(StrictModel):
 class SearchAndReconsileIssuesUsingJqlRequestQuery(StrictModel):
     jql: str | None = Field(default=None, description="A JQL expression to filter issues. Must include a search restriction (bounded query) for performance—for example, filtering by project, assignee, or status. The orderBy clause supports a maximum of 7 fields. Unbounded queries like 'order by key desc' are not permitted.")
     max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of issues to return per page, up to 5000. The API may return fewer items when many fields or properties are requested. Defaults to 50 items per page.", json_schema_extra={'format': 'int32'})
-    reconcile_issues: list[int] | None = Field(default=None, validation_alias="reconcileIssues", serialization_alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use this when read-after-write consistency is critical. The same list should be included across all paginated requests.")
+    reconcile_issues: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="reconcileIssues", serialization_alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use this when read-after-write consistency is critical. The same list should be included across all paginated requests.")
 class SearchAndReconsileIssuesUsingJqlRequest(StrictModel):
     """Search for issues using JQL (Jira Query Language) with optional read-after-write consistency reconciliation. Results reflect issues where you have browse permissions on the containing project and any applicable issue-level security permissions."""
     query: SearchAndReconsileIssuesUsingJqlRequestQuery | None = None
@@ -2642,7 +2642,7 @@ class SearchAndReconsileIssuesUsingJqlRequest(StrictModel):
 class SearchAndReconsileIssuesUsingJqlPostRequestBody(StrictModel):
     jql: str | None = Field(default=None, description="A JQL expression to filter issues. Must include at least one search restriction (e.g., assignee, project, status) to be considered bounded. The orderBy clause supports a maximum of 7 fields.")
     max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of issues to return per page, up to 5000. Defaults to 50 items per page. Actual results may be fewer when requesting many fields.", json_schema_extra={'format': 'int32'})
-    reconcile_issues: list[int] | None = Field(default=None, validation_alias="reconcileIssues", serialization_alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use the same list across all paginated requests to ensure consistency.")
+    reconcile_issues: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="reconcileIssues", serialization_alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use the same list across all paginated requests to ensure consistency.")
 class SearchAndReconsileIssuesUsingJqlPostRequest(StrictModel):
     """Search for issues using JQL with optional read-after-write consistency reconciliation. Requires a bounded query with at least one search restriction for optimal performance."""
     body: SearchAndReconsileIssuesUsingJqlPostRequestBody | None = None
@@ -3209,14 +3209,14 @@ class BulkEditDashboardsBodyChangeOwnerDetails(StrictModel):
 
 class BulkProjectPermissions(StrictModel):
     """Details of project permissions and associated issues and projects to look up."""
-    issues: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, description="List of issue IDs.")
+    issues: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="List of issue IDs.")
     permissions: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="List of project permissions.")
-    projects: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, description="List of project IDs.")
+    projects: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="List of project IDs.")
 
 class BulkSetIssuePropertyBodyFilter(StrictModel):
     """The bulk operation filter."""
     current_value: Any | None = Field(None, validation_alias="currentValue", serialization_alias="currentValue", description="The value of properties to perform the bulk operation on.")
-    entity_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="entityIds", serialization_alias="entityIds", description="List of issues to perform the bulk operation on.")
+    entity_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="entityIds", serialization_alias="entityIds", description="List of issues to perform the bulk operation on.")
     has_property: bool | None = Field(None, validation_alias="hasProperty", serialization_alias="hasProperty", description="Whether the bulk operation occurs only when the property is present on or absent from an issue.")
 
 class BulkTransitionSubmitInput(StrictModel):
@@ -3242,7 +3242,7 @@ class ContentItem(StrictModel):
 
 class CreateCrossProjectReleaseRequest(StrictModel):
     name: str = Field(..., description="The cross-project release name.")
-    release_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="releaseIds", serialization_alias="releaseIds", description="The IDs of the releases to include in the cross-project release.")
+    release_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="releaseIds", serialization_alias="releaseIds", description="The IDs of the releases to include in the cross-project release.")
 
 class CreateCustomFieldRequest(StrictModel):
     custom_field_id: int = Field(..., validation_alias="customFieldId", serialization_alias="customFieldId", description="The custom field ID.", json_schema_extra={'format': 'int64'})
@@ -3253,12 +3253,12 @@ class CreateDateFieldRequest(StrictModel):
     type_: Literal["DueDate", "TargetStartDate", "TargetEndDate", "DateCustomField"] = Field(..., validation_alias="type", serialization_alias="type", description="The date field type. This must be \"DueDate\", \"TargetStartDate\", \"TargetEndDate\" or \"DateCustomField\".")
 
 class CreateExclusionRulesRequest(StrictModel):
-    issue_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueIds", serialization_alias="issueIds", description="The IDs of the issues to exclude from the plan.")
-    issue_type_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueTypeIds", serialization_alias="issueTypeIds", description="The IDs of the issue types to exclude from the plan.")
+    issue_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueIds", serialization_alias="issueIds", description="The IDs of the issues to exclude from the plan.")
+    issue_type_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueTypeIds", serialization_alias="issueTypeIds", description="The IDs of the issue types to exclude from the plan.")
     number_of_days_to_show_completed_issues: int | None = Field(None, validation_alias="numberOfDaysToShowCompletedIssues", serialization_alias="numberOfDaysToShowCompletedIssues", description="Issues completed this number of days ago will be excluded from the plan.", json_schema_extra={'format': 'int32'})
-    release_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="releaseIds", serialization_alias="releaseIds", description="The IDs of the releases to exclude from the plan.")
-    work_status_category_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusCategoryIds", serialization_alias="workStatusCategoryIds", description="The IDs of the work status categories to exclude from the plan.")
-    work_status_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusIds", serialization_alias="workStatusIds", description="The IDs of the work statuses to exclude from the plan.")
+    release_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="releaseIds", serialization_alias="releaseIds", description="The IDs of the releases to exclude from the plan.")
+    work_status_category_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusCategoryIds", serialization_alias="workStatusCategoryIds", description="The IDs of the work status categories to exclude from the plan.")
+    work_status_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusIds", serialization_alias="workStatusIds", description="The IDs of the work statuses to exclude from the plan.")
 
 class CreateOrUpdateRemoteIssueLinkBodyApplication(PermissiveModel):
     """Details of the remote application the linked item is in. For example, trello."""
@@ -3292,12 +3292,12 @@ class CreateOrUpdateRemoteIssueLinkBodyObject(PermissiveModel):
 
 class CreatePlanBodyExclusionRules(StrictModel):
     """The exclusion rules for the plan."""
-    issue_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueIds", serialization_alias="issueIds", description="The IDs of the issues to exclude from the plan.")
-    issue_type_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueTypeIds", serialization_alias="issueTypeIds", description="The IDs of the issue types to exclude from the plan.")
+    issue_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueIds", serialization_alias="issueIds", description="The IDs of the issues to exclude from the plan.")
+    issue_type_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="issueTypeIds", serialization_alias="issueTypeIds", description="The IDs of the issue types to exclude from the plan.")
     number_of_days_to_show_completed_issues: int | None = Field(None, validation_alias="numberOfDaysToShowCompletedIssues", serialization_alias="numberOfDaysToShowCompletedIssues", description="Issues completed this number of days ago will be excluded from the plan.", json_schema_extra={'format': 'int32'})
-    release_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="releaseIds", serialization_alias="releaseIds", description="The IDs of the releases to exclude from the plan.")
-    work_status_category_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusCategoryIds", serialization_alias="workStatusCategoryIds", description="The IDs of the work status categories to exclude from the plan.")
-    work_status_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusIds", serialization_alias="workStatusIds", description="The IDs of the work statuses to exclude from the plan.")
+    release_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="releaseIds", serialization_alias="releaseIds", description="The IDs of the releases to exclude from the plan.")
+    work_status_category_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusCategoryIds", serialization_alias="workStatusCategoryIds", description="The IDs of the work status categories to exclude from the plan.")
+    work_status_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, validation_alias="workStatusIds", serialization_alias="workStatusIds", description="The IDs of the work statuses to exclude from the plan.")
 
 class CreatePlanBodySchedulingEndDate(StrictModel):
     """The end date field for the plan."""
@@ -3554,7 +3554,7 @@ class CustomFieldReplacement(StrictModel):
 
 class CustomFieldValueUpdate(StrictModel):
     """A list of issue IDs and the value to update a custom field to."""
-    issue_ids: list[int] = Field(..., validation_alias="issueIds", serialization_alias="issueIds", description="The list of issue IDs.")
+    issue_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., validation_alias="issueIds", serialization_alias="issueIds", description="The list of issue IDs.")
     value: Any = Field(..., description="The value for the custom field. The value must be compatible with the [custom field type](https://developer.atlassian.com/platform/forge/manifest-reference/modules/jira-custom-field/#data-types) as follows:\n\n *  `string` the value must be a string.\n *  `number` the value must be a number.\n *  `datetime` the value must be a string that represents a date in the ISO format or the simplified extended ISO format. For example, `\"2023-01-18T12:00:00-03:00\"` or `\"2023-01-18T12:00:00.000Z\"`. However, the milliseconds part is ignored.\n *  `user` the value must be an object that contains the `accountId` field.\n *  `group` the value must be an object that contains the group `name` or `groupId` field. Because group names can change, we recommend using `groupId`.\n\nA list of appropriate values must be provided if the field is of the `list` [collection type](https://developer.atlassian.com/platform/forge/manifest-reference/modules/jira-custom-field/#collection-types).")
 
 class DoTransitionBodyTransitionToScopeProjectAvatarUrls(StrictModel):
@@ -3825,7 +3825,7 @@ class JsonNode(StrictModel):
     big_integer: bool | None = Field(None, validation_alias="bigInteger", serialization_alias="bigInteger")
     big_integer_value: int | None = Field(None, validation_alias="bigIntegerValue", serialization_alias="bigIntegerValue")
     binary: bool | None = None
-    binary_value: list[str] | None = Field(None, validation_alias="binaryValue", serialization_alias="binaryValue")
+    binary_value: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, validation_alias="binaryValue", serialization_alias="binaryValue")
     boolean: bool | None = None
     boolean_value: bool | None = Field(None, validation_alias="booleanValue", serialization_alias="booleanValue")
     container_node: bool | None = Field(None, validation_alias="containerNode", serialization_alias="containerNode")
@@ -3925,7 +3925,7 @@ class MandatoryFieldValueForAdf(PermissiveModel):
 class MultipleCustomFieldValuesUpdate(StrictModel):
     """A custom field and its new value with a list of issue to update."""
     custom_field: str = Field(..., validation_alias="customField", serialization_alias="customField", description="The ID or key of the custom field. For example, `customfield_10010`.")
-    issue_ids: list[int] = Field(..., validation_alias="issueIds", serialization_alias="issueIds", description="The list of issue IDs.")
+    issue_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., validation_alias="issueIds", serialization_alias="issueIds", description="The list of issue IDs.")
     value: Any = Field(..., description="The value for the custom field. The value must be compatible with the [custom field type](https://developer.atlassian.com/platform/forge/manifest-reference/modules/jira-custom-field/#data-types) as follows:\n\n *  `string` the value must be a string.\n *  `number` the value must be a number.\n *  `datetime` the value must be a string that represents a date in the ISO format or the simplified extended ISO format. For example, `\"2023-01-18T12:00:00-03:00\"` or `\"2023-01-18T12:00:00.000Z\"`. However, the milliseconds part is ignored.\n *  `user` the value must be an object that contains the `accountId` field.\n *  `group` the value must be an object that contains the group `name` or `groupId` field. Because group names can change, we recommend using `groupId`.\n\nA list of appropriate values must be provided if the field is of the `list` [collection type](https://developer.atlassian.com/platform/forge/manifest-reference/modules/jira-custom-field/#collection-types).")
 
 class NonWorkingDay(StrictModel):
@@ -4177,7 +4177,7 @@ class RedactionPosition(StrictModel):
     to: int = Field(..., description="The ending index(exclusive) for the redaction in specified content", json_schema_extra={'format': 'int32'})
 
 class ResourceModel(StrictModel):
-    content_as_byte_array: list[str] | None = Field(None, validation_alias="contentAsByteArray", serialization_alias="contentAsByteArray")
+    content_as_byte_array: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, validation_alias="contentAsByteArray", serialization_alias="contentAsByteArray")
     description: str | None = None
     file_: str | None = Field(None, validation_alias="file", serialization_alias="file", json_schema_extra={'format': 'binary'})
     filename: str | None = None
@@ -4188,7 +4188,7 @@ class ResourceModel(StrictModel):
     url: str | None = Field(None, json_schema_extra={'format': 'url'})
 
 class MultipartFile(StrictModel):
-    bytes_: list[str] | None = Field(None, validation_alias="bytes", serialization_alias="bytes")
+    bytes_: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, validation_alias="bytes", serialization_alias="bytes")
     content_type: str | None = Field(None, validation_alias="contentType", serialization_alias="contentType")
     empty: bool | None = None
     input_stream: dict[str, Any] | None = Field(None, validation_alias="inputStream", serialization_alias="inputStream")
@@ -4293,7 +4293,7 @@ class SimplifiedHierarchyLevel(StrictModel):
     external_uuid: str | None = Field(None, validation_alias="externalUuid", serialization_alias="externalUuid", description="The external UUID of the hierarchy level. This property is deprecated, see [Change notice: Removing hierarchy level IDs from next-gen APIs](https://developer.atlassian.com/cloud/jira/platform/change-notice-removing-hierarchy-level-ids-from-next-gen-apis/).", json_schema_extra={'format': 'uuid'})
     hierarchy_level_number: int | None = Field(None, validation_alias="hierarchyLevelNumber", serialization_alias="hierarchyLevelNumber", json_schema_extra={'format': 'int32'})
     id_: int | None = Field(None, validation_alias="id", serialization_alias="id", description="The ID of the hierarchy level. This property is deprecated, see [Change notice: Removing hierarchy level IDs from next-gen APIs](https://developer.atlassian.com/cloud/jira/platform/change-notice-removing-hierarchy-level-ids-from-next-gen-apis/).", json_schema_extra={'format': 'int64'})
-    issue_type_ids: list[int] | None = Field(None, validation_alias="issueTypeIds", serialization_alias="issueTypeIds", description="The issue types available in this hierarchy level.")
+    issue_type_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="issueTypeIds", serialization_alias="issueTypeIds", description="The issue types available in this hierarchy level.")
     level: int | None = Field(None, description="The level of this item in the hierarchy.", json_schema_extra={'format': 'int32'})
     name: str | None = Field(None, description="The name of this hierarchy level.")
     project_configuration_id: int | None = Field(None, validation_alias="projectConfigurationId", serialization_alias="projectConfigurationId", description="The ID of the project configuration. This property is deprecated, see [Change oticen: Removing hierarchy level IDs from next-gen APIs](https://developer.atlassian.com/cloud/jira/platform/change-notice-removing-hierarchy-level-ids-from-next-gen-apis/).", json_schema_extra={'format': 'int64'})
