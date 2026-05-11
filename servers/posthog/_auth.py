@@ -1,7 +1,7 @@
 """
-Authentication module for PostHog API MCP server.
+Authentication module for PostHog MCP server.
 
-Generated: 2026-05-05 15:59:13 UTC
+Generated: 2026-05-11 20:07:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

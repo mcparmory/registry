@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PostHog API MCP Server
-Generated: 2026-05-05 15:59:13 UTC
+PostHog MCP Server
+Generated: 2026-05-11 20:07:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -21,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -38,6 +39,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -45,8 +47,8 @@ _SERVER_VARS = {
     "region": os.getenv("SERVER_REGION", "us"),
 }
 BASE_URL = os.getenv("BASE_URL", "https://{region}.posthog.com".format_map(collections.defaultdict(str, _SERVER_VARS)))
-SERVER_NAME = "PostHog API"
-SERVER_VERSION = "1.0.3"
+SERVER_NAME = "PostHog"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1040,6 +1071,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1064,6 +1097,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1268,10 +1303,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("PostHog API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("PostHog", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: max, conversations
-@mcp.tool()
+@mcp.tool(
+    title="List Conversations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversations(
     project_id: str = Field(..., description="The unique identifier of the project containing the conversations. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of conversation records to return in a single response page. Omit or set to default for standard page size."),
@@ -1314,7 +1355,12 @@ async def list_conversations(
     return _response_data
 
 # Tags: max, conversations
-@mcp.tool()
+@mcp.tool(
+    title="Send Conversation Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_conversation_message(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this ID by calling the /api/projects/ endpoint if needed."),
     content: str | None = Field(..., description="The message content to send. Maximum length is 40,000 characters.", max_length=40000),
@@ -1362,7 +1408,13 @@ async def send_conversation_message(
     return _response_data
 
 # Tags: max, conversations
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation(
     conversation: str = Field(..., description="The unique identifier (UUID) of the conversation to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the conversation. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -1401,7 +1453,13 @@ async def get_conversation(
     return _response_data
 
 # Tags: customer_profile_configs
-@mcp.tool()
+@mcp.tool(
+    title="List Customer Profile Configs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_customer_profile_configs(
     project_id: str = Field(..., description="The unique identifier of the project whose customer profile configurations you want to retrieve. You can obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of customer profile configurations to return in a single page of results. Omit to use the API's default page size."),
@@ -1444,7 +1502,13 @@ async def list_customer_profile_configs(
     return _response_data
 
 # Tags: customer_profile_configs
-@mcp.tool()
+@mcp.tool(
+    title="Get Customer Profile Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_customer_profile_config(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the customer profile config to retrieve."),
     project_id: str = Field(..., description="The project ID that contains the customer profile config. Find your project ID by calling the /api/projects/ endpoint."),
@@ -1483,7 +1547,13 @@ async def get_customer_profile_config(
     return _response_data
 
 # Tags: dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Collaborators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_collaborators(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard whose collaborators you want to list."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -1522,7 +1592,13 @@ async def list_dashboard_collaborators(
     return _response_data
 
 # Tags: dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Remove Dashboard Collaborator",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_dashboard_collaborator(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard from which to remove the collaborator."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve your project ID by calling /api/projects/."),
@@ -1562,7 +1638,13 @@ async def remove_dashboard_collaborator(
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="List Desktop Recordings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_desktop_recordings(
     project_id: str = Field(..., description="The unique identifier of the project containing the desktop recordings. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of recording results to return in a single page of results."),
@@ -1605,7 +1687,12 @@ async def list_desktop_recordings(
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Create Desktop Recording",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_desktop_recording(project_id: str = Field(..., description="The unique identifier of the project where the recording will be created. You can retrieve your project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Initiate a new desktop recording session and obtain an upload token for the Recall.ai desktop SDK to use during the recording."""
 
@@ -1641,7 +1728,13 @@ async def create_desktop_recording(project_id: str = Field(..., description="The
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Get Desktop Recording",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_desktop_recording(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the desktop recording to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the desktop recording. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -1680,7 +1773,13 @@ async def get_desktop_recording(
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Update Desktop Recording",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_desktop_recording(
     id_: str = Field(..., alias="id", description="Unique identifier (UUID) of the desktop recording to update."),
     project_id: str = Field(..., description="Project ID that owns this recording. Retrieve available project IDs from /api/projects/."),
@@ -1737,7 +1836,12 @@ async def update_desktop_recording(
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Update Desktop Recording",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_desktop_recording_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the desktop recording to update."),
     project_id: str = Field(..., description="The project ID that owns this recording. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -1793,7 +1897,13 @@ async def update_desktop_recording_partial(
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Delete Desktop Recording",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_desktop_recording(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the desktop recording to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the desktop recording. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -1832,7 +1942,12 @@ async def delete_desktop_recording(
     return _response_data
 
 # Tags: desktop_recordings, desktop_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Append Segments to Desktop Recording",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_segments_to_desktop_recording(
     id_: str = Field(..., alias="id", description="The UUID identifier of the desktop recording to append segments to."),
     project_id: str = Field(..., description="The unique identifier of the project containing the desktop recording. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -1875,7 +1990,13 @@ async def append_segments_to_desktop_recording(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Assignment Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_assignment_rules(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of assignment rules to return in a single page of results. Defaults to the API's standard page size if not specified."),
@@ -1918,7 +2039,13 @@ async def list_error_tracking_assignment_rules(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Assignment Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_assignment_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking assignment rule to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the assignment rule. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -1957,7 +2084,13 @@ async def get_error_tracking_assignment_rule(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Assignment Rule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_assignment_rule(
     id_: str = Field(..., alias="id", description="The UUID identifier of the error tracking assignment rule to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the assignment rule. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -2004,7 +2137,12 @@ async def update_error_tracking_assignment_rule(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Assignment Rule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_assignment_rule_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking assignment rule to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the assignment rule. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -2051,7 +2189,13 @@ async def update_error_tracking_assignment_rule_partial(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Assignment Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_assignment_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking assignment rule to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the assignment rule. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -2090,7 +2234,13 @@ async def delete_error_tracking_assignment_rule(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Fingerprints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_fingerprints(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of fingerprints to return in a single page of results. Use with offset for pagination."),
@@ -2133,7 +2283,13 @@ async def list_error_tracking_fingerprints(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Fingerprint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_fingerprint(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking fingerprint to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error fingerprint. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -2172,7 +2328,13 @@ async def get_error_fingerprint(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Grouping Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_grouping_rules(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of grouping rules to return in a single response page. Use with offset for pagination."),
@@ -2215,7 +2377,13 @@ async def list_error_tracking_grouping_rules(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Grouping Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_grouping_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking grouping rule to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the grouping rule. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -2254,7 +2422,13 @@ async def get_error_tracking_grouping_rule(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Grouping Rule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_grouping_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking grouping rule to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the grouping rule. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -2301,7 +2475,12 @@ async def update_error_tracking_grouping_rule(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Grouping Rule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_grouping_rule_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking grouping rule to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the grouping rule. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -2348,7 +2527,13 @@ async def update_error_tracking_grouping_rule_partial(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Grouping Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_grouping_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking grouping rule to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the grouping rule. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -2387,7 +2572,13 @@ async def delete_error_tracking_grouping_rule(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_issues(
     project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of issues to return in a single page of results. Controls the page size for pagination."),
@@ -2430,7 +2621,12 @@ async def list_error_tracking_issues(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Create Error Tracking Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_error_tracking_issue(
     project_id: str = Field(..., description="The unique identifier of the project where the error tracking issue will be created. Retrieve this ID from the /api/projects/ endpoint."),
     assignee_id: str = Field(..., alias="assigneeId", description="The ID of the user to assign this issue to. Accepts either a string or integer identifier."),
@@ -2480,7 +2676,13 @@ async def create_error_tracking_issue(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_issue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking issue to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking issue. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -2519,7 +2721,13 @@ async def get_error_tracking_issue(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Issue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_issue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking issue to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this error tracking issue. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -2570,7 +2778,12 @@ async def update_error_tracking_issue(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Issue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_issue_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking issue to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this error tracking issue. Retrieve project IDs via the /api/projects/ endpoint."),
@@ -2618,7 +2831,13 @@ async def update_error_tracking_issue_partial(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Issue Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_issue_activity(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking issue whose activity you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking issue. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -2657,7 +2876,13 @@ async def get_error_tracking_issue_activity(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Issues Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_issues_activity(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve the activity log for error tracking issues within a specific project. This endpoint returns a timeline of events and changes related to tracked errors."""
 
@@ -2693,7 +2918,13 @@ async def list_error_tracking_issues_activity(project_id: str = Field(..., descr
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Releases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_releases(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if you don't have it."),
     limit: int | None = Field(None, description="Maximum number of releases to return in a single response page. Defaults to the API's standard page size if not specified."),
@@ -2736,7 +2967,12 @@ async def list_error_tracking_releases(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Create Error Tracking Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_error_tracking_release(
     project_id: str = Field(..., description="The unique identifier of the project where the release will be tracked. Retrieve this ID from the /api/projects/ endpoint if needed."),
     hash_id: str = Field(..., description="A unique hash identifier for the release, used to distinguish this release from others in the error tracking system."),
@@ -2781,7 +3017,13 @@ async def create_error_tracking_release(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Release",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_release(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -2820,7 +3062,13 @@ async def get_error_tracking_release(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_release(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to update."),
     project_id: str = Field(..., description="The project ID that contains the error tracking release. Find your project ID by calling the /api/projects/ endpoint."),
@@ -2866,7 +3114,13 @@ async def update_error_tracking_release(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_release_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -2911,7 +3165,13 @@ async def update_error_tracking_release_partial(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Release",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_release(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -2950,7 +3210,13 @@ async def delete_error_tracking_release(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Release by Hash",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_release_by_hash(
     hash_id: str = Field(..., description="The unique hash identifier of the release to retrieve. This identifier is used to look up the specific release record in the error tracking system."),
     project_id: str = Field(..., description="The unique identifier of the project containing the release. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -2989,7 +3255,13 @@ async def get_error_tracking_release_by_hash(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Spike Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_spike_events(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if needed."),
     limit: int | None = Field(None, description="Maximum number of spike events to return in a single response page. Controls pagination size."),
@@ -3032,7 +3304,13 @@ async def list_error_tracking_spike_events(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Suppression Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_suppression_rules(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of suppression rules to return in a single page of results. Use with offset for pagination."),
@@ -3075,7 +3353,13 @@ async def list_error_tracking_suppression_rules(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Suppression Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_suppression_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking suppression rule to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the suppression rule. Find your project ID by calling the /api/projects/ endpoint."),
@@ -3114,7 +3398,13 @@ async def get_error_tracking_suppression_rule(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Suppression Rule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_suppression_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the suppression rule to update."),
     project_id: str = Field(..., description="The project ID containing the suppression rule. Find your project ID by calling the /api/projects/ endpoint."),
@@ -3160,7 +3450,12 @@ async def update_error_tracking_suppression_rule(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Suppression Rule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_suppression_rule_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking suppression rule to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the suppression rule. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -3206,7 +3501,13 @@ async def update_error_tracking_suppression_rule_partial(
     return _response_data
 
 # Tags: error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Suppression Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_suppression_rule(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking suppression rule to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the suppression rule. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -3245,7 +3546,13 @@ async def delete_error_tracking_suppression_rule(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Symbol Sets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_symbol_sets(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of symbol sets to return in a single page of results. Use with offset for pagination."),
@@ -3288,7 +3595,13 @@ async def list_error_tracking_symbol_sets(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Symbol Set",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_symbol_set(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking symbol set to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the symbol set. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -3327,7 +3640,13 @@ async def get_error_tracking_symbol_set(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Symbol Set",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_symbol_set(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking symbol set to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the symbol set. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -3371,7 +3690,13 @@ async def update_error_tracking_symbol_set(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Symbol Set",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_symbol_set(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking symbol set to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the symbol set. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -3410,7 +3735,12 @@ async def delete_error_tracking_symbol_set(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Finish Symbol Set Bulk Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def finish_symbol_set_bulk_upload(
     project_id: str = Field(..., description="The unique identifier of the project where the symbol set upload is being finalized. Retrieve this ID from the /api/projects/ endpoint."),
     ref: str = Field(..., description="A reference identifier for the bulk upload session being completed. This reference is typically provided when the upload was initiated."),
@@ -3452,7 +3782,12 @@ async def finish_symbol_set_bulk_upload(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Start Symbol Sets Bulk Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_symbol_sets_bulk_upload(
     project_id: str = Field(..., description="The unique identifier of the project where symbol sets will be uploaded. Retrieve this ID from the /api/projects/ endpoint if needed."),
     ref: str = Field(..., description="A reference identifier or token that associates this bulk upload session with a specific upload batch or transaction, enabling tracking and management of the upload process."),
@@ -3494,11 +3829,17 @@ async def start_symbol_sets_bulk_upload(
     return _response_data
 
 # Tags: evaluations
-@mcp.tool()
+@mcp.tool(
+    title="List Evaluations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_evaluations(
     project_id: str = Field(..., description="The unique identifier of the project containing the evaluations. Obtain this ID by calling the /api/projects/ endpoint."),
     enabled: bool | None = Field(None, description="Filter results to show only enabled or disabled evaluations."),
-    id__in: list[str] | None = Field(None, description="Filter results to include only evaluations with IDs matching the provided list. Separate multiple IDs with commas."),
+    id__in: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter results to include only evaluations with IDs matching the provided list. Separate multiple IDs with commas."),
     limit: int | None = Field(None, description="Maximum number of evaluations to return in a single page of results."),
     offset: int | None = Field(None, description="Zero-based index position to start returning results from, used for pagination."),
     order_by: list[Literal["-created_at", "-name", "-updated_at", "created_at", "name", "updated_at"]] | None = Field(None, description="Sort results by one or more fields. Prefix field names with a hyphen to sort in descending order. Available fields: created_at, updated_at, and name."),
@@ -3544,7 +3885,12 @@ async def list_evaluations(
     return _response_data
 
 # Tags: evaluations
-@mcp.tool()
+@mcp.tool(
+    title="Create Evaluation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_evaluation(
     project_id: str = Field(..., description="The unique identifier of the project where the evaluation will be created. Retrieve project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A descriptive name for the evaluation. Maximum length is 400 characters.", max_length=400),
@@ -3594,7 +3940,13 @@ async def create_evaluation(
     return _response_data
 
 # Tags: evaluations
-@mcp.tool()
+@mcp.tool(
+    title="Get Evaluation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_evaluation(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the evaluation to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the evaluation. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -3633,7 +3985,13 @@ async def get_evaluation(
     return _response_data
 
 # Tags: evaluations
-@mcp.tool()
+@mcp.tool(
+    title="Update Evaluation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_evaluation(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the evaluation to update."),
     project_id: str = Field(..., description="The project ID containing the evaluation. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -3684,7 +4042,12 @@ async def update_evaluation(
     return _response_data
 
 # Tags: evaluations
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Evaluation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_evaluation_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the evaluation to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the evaluation. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -3734,7 +4097,13 @@ async def update_evaluation_partial(
     return _response_data
 
 # Tags: health_issues
-@mcp.tool()
+@mcp.tool(
+    title="List Health Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_health_issues(
     project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of health issues to return in a single page of results. Use with offset for pagination."),
@@ -3777,7 +4146,13 @@ async def list_health_issues(
     return _response_data
 
 # Tags: health_issues
-@mcp.tool()
+@mcp.tool(
+    title="Get Health Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_health_issue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the health issue to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the health issue. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -3816,7 +4191,13 @@ async def get_health_issue(
     return _response_data
 
 # Tags: health_issues
-@mcp.tool()
+@mcp.tool(
+    title="Update Health Issue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_health_issue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the health issue to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the health issue. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -3859,7 +4240,13 @@ async def update_health_issue(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Clustering Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_clustering_jobs(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of clustering jobs to return in a single page of results. Use with offset for pagination."),
@@ -3902,7 +4289,12 @@ async def list_clustering_jobs(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Create LLM Analytics Clustering Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_llm_analytics_clustering_job(
     project_id: str = Field(..., description="The unique identifier of the project where the clustering job will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A descriptive name for the clustering job. Must not exceed 100 characters.", max_length=100),
@@ -3947,7 +4339,13 @@ async def create_llm_analytics_clustering_job(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Clustering Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_clustering_job(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the clustering job to retrieve."),
     project_id: str = Field(..., description="The project ID that owns the clustering job. Find your project ID by calling the /api/projects/ endpoint."),
@@ -3986,7 +4384,13 @@ async def get_clustering_job(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update Clustering Job",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_clustering_job(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the clustering job to update."),
     project_id: str = Field(..., description="The project ID containing this clustering job. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -4032,7 +4436,12 @@ async def update_clustering_job(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update Clustering Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_clustering_job_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the clustering job to update."),
     project_id: str = Field(..., description="The project ID containing the clustering job. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -4077,7 +4486,13 @@ async def update_clustering_job_partial(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Clustering Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_clustering_job(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the clustering job to delete."),
     project_id: str = Field(..., description="The project ID that contains the clustering job. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -4116,7 +4531,13 @@ async def delete_clustering_job(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get LLM Analytics Evaluation Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_llm_analytics_evaluation_config(project_id: str = Field(..., description="The unique identifier of the project whose evaluation configuration you want to retrieve. You can obtain this ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve the LLM analytics evaluation configuration for a specific project, which defines how evaluation metrics and criteria are applied to LLM outputs."""
 
@@ -4152,12 +4573,17 @@ async def get_llm_analytics_evaluation_config(project_id: str = Field(..., descr
     return _response_data
 
 # Tags: LLM Analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Generate LLM Evaluation Summary",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_llm_evaluation_summary(
     project_id: str = Field(..., description="The unique identifier of the project containing the evaluation. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     evaluation_id: str = Field(..., description="The UUID of the evaluation configuration to analyze and summarize."),
     filter_: Literal["all", "pass", "fail", "na"] | None = Field(None, alias="filter", description="Filter the evaluation results to analyze: 'all' includes all results, 'pass' includes only passing evaluations, 'fail' includes only failing evaluations, and 'na' includes results with no applicable status. Defaults to 'all' if not specified."),
-    generation_ids: list[str] | None = Field(None, description="Optional list of specific generation IDs to include in the summary analysis. If provided, the summary will focus only on these generations. Maximum of 250 IDs allowed.", max_length=250),
+    generation_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Optional list of specific generation IDs to include in the summary analysis. If provided, the summary will focus only on these generations. Maximum of 250 IDs allowed.", max_length=250),
 ) -> dict[str, Any] | ToolResult:
     """Generate an AI-powered analysis of evaluation results that identifies patterns in passing and failing evaluations and provides actionable recommendations for improving LLM response quality."""
 
@@ -4196,7 +4622,13 @@ async def generate_llm_evaluation_summary(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List LLM Analytics Provider Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_llm_analytics_provider_keys(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if you don't have it."),
     limit: int | None = Field(None, description="Maximum number of provider keys to return in a single page of results. Omit to use the default page size."),
@@ -4239,7 +4671,13 @@ async def list_llm_analytics_provider_keys(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get LLM Provider Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_llm_provider_key(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the LLM provider key to retrieve."),
     project_id: str = Field(..., description="The project ID that contains the provider key. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -4278,7 +4716,13 @@ async def get_llm_provider_key(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update LLM Provider Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_llm_provider_key(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the LLM provider key to update."),
     project_id: str = Field(..., description="The project ID that owns this LLM provider key. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -4322,7 +4766,13 @@ async def update_llm_provider_key(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update LLM Provider Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_llm_provider_key_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the LLM provider key to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the provider key. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -4365,7 +4815,13 @@ async def update_llm_provider_key_partial(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Delete LLM Provider Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_llm_provider_key(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the LLM provider key to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the provider key. Find your project ID by calling the /api/projects/ endpoint."),
@@ -4404,7 +4860,13 @@ async def delete_llm_provider_key(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Dependent Configs for Provider Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependent_configs_for_provider_key(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the LLM provider key to retrieve dependent configurations for."),
     project_id: str = Field(..., description="The unique identifier of the project containing the provider key. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -4443,7 +4905,12 @@ async def list_dependent_configs_for_provider_key(
     return _response_data
 
 # Tags: llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Validate LLM Provider Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_llm_provider_key(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the LLM provider key to validate."),
     project_id: str = Field(..., description="The unique identifier of the project containing the provider key. Retrieve this ID from the /api/projects/ endpoint if needed."),
@@ -4487,7 +4954,13 @@ async def validate_llm_provider_key(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Review Queue Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_review_queue_items(
     project_id: str = Field(..., description="The unique identifier of the project containing the review queue items. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of items to return in a single page of results. Use with offset for pagination."),
@@ -4532,7 +5005,12 @@ async def list_review_queue_items(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Add Trace to Review Queue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_trace_to_review_queue(
     project_id: str = Field(..., description="The unique identifier of the project containing the review queue. Retrieve this ID from the /api/projects/ endpoint if needed."),
     queue_id: str = Field(..., description="The unique identifier (UUID format) of the review queue that will own this trace."),
@@ -4575,7 +5053,13 @@ async def add_trace_to_review_queue(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Review Queue Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_review_queue_item(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the review queue item to retrieve."),
     project_id: str = Field(..., description="The project ID that contains the review queue item. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -4614,7 +5098,13 @@ async def get_review_queue_item(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update Review Queue Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_review_queue_item(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the review queue item to update."),
     project_id: str = Field(..., description="The project ID that owns the review queue item. Find your project ID by calling the /api/projects/ endpoint."),
@@ -4657,7 +5147,13 @@ async def update_review_queue_item(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Delete LLM Analytics Review Queue Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_llm_analytics_review_queue_item(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the review queue item to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the review queue item. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -4696,7 +5192,13 @@ async def delete_llm_analytics_review_queue_item(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List LLM Analytics Review Queues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_llm_analytics_review_queues(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if needed."),
     limit: int | None = Field(None, description="Maximum number of review queues to return in a single page of results."),
@@ -4740,7 +5242,12 @@ async def list_llm_analytics_review_queues(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Create LLM Analytics Review Queue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_llm_analytics_review_queue(
     project_id: str = Field(..., description="The unique identifier of the project where the review queue will be created. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A human-readable name for the review queue. Must be 255 characters or fewer.", max_length=255),
@@ -4782,7 +5289,13 @@ async def create_llm_analytics_review_queue(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Review Queue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_review_queue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the review queue to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the review queue. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -4821,7 +5334,13 @@ async def get_review_queue(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update Review Queue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_review_queue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the review queue to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the review queue. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -4860,7 +5379,13 @@ async def update_review_queue(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Review Queue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_review_queue(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the review queue to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the review queue. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -4899,7 +5424,13 @@ async def delete_review_queue(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List LLM Analytics Score Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_llm_analytics_score_definitions(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if needed."),
     kind: str | None = Field(None, description="Filter results to include only score definitions of a specific scorer kind, such as 'categorical' for categorical scorers."),
@@ -4944,7 +5475,12 @@ async def list_llm_analytics_score_definitions(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Create LLM Analytics Score Definition",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_llm_analytics_score_definition(
     project_id: str = Field(..., description="The unique identifier of the project where the score definition will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A human-readable name for the scorer, up to 255 characters. This name identifies the score definition in analytics dashboards and reports.", max_length=255),
@@ -4989,7 +5525,13 @@ async def create_llm_analytics_score_definition(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get LLM Analytics Score Definition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_llm_analytics_score_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the score definition to retrieve."),
     project_id: str = Field(..., description="The project ID that contains the score definition. Find your project ID by calling the /api/projects/ endpoint."),
@@ -5028,7 +5570,13 @@ async def get_llm_analytics_score_definition(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update LLM Analytics Score Definition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_llm_analytics_score_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the score definition to update."),
     project_id: str = Field(..., description="The project ID that contains the score definition. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -5071,7 +5619,12 @@ async def update_llm_analytics_score_definition(
     return _response_data
 
 # Tags: LLM Analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Analyze Sentiment for LLM Outputs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def analyze_sentiment_for_llm_outputs(
     project_id: str = Field(..., description="The unique identifier of the project containing the LLM outputs to analyze. Retrieve your project ID from the /api/projects/ endpoint."),
     ids: list[str] = Field(..., description="Array of output IDs to analyze for sentiment. Must contain between 1 and 5 IDs. Order is preserved in the analysis results.", min_length=1, max_length=5),
@@ -5114,7 +5667,13 @@ async def analyze_sentiment_for_llm_outputs(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Trace Reviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_trace_reviews(
     project_id: str = Field(..., description="The unique identifier of the project containing the trace reviews. Obtain this ID by calling the /api/projects/ endpoint."),
     definition_id: str | None = Field(None, description="Filter results to only include trace reviews associated with a specific scorer definition, specified as a UUID."),
@@ -5159,7 +5718,12 @@ async def list_trace_reviews(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Create Trace Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_trace_review(
     project_id: str = Field(..., description="The unique identifier of the project containing the trace. Retrieve this ID from the /api/projects/ endpoint."),
     trace_id: str = Field(..., description="The unique identifier of the trace being reviewed. Must be 255 characters or fewer. Only one active review per trace and team is permitted.", max_length=255),
@@ -5204,7 +5768,13 @@ async def create_trace_review(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Trace Review",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trace_review(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the trace review to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the trace review. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -5243,7 +5813,12 @@ async def get_trace_review(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Update Trace Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_trace_review(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the trace review to update."),
     project_id: str = Field(..., description="The project ID containing the trace review. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -5288,7 +5863,13 @@ async def update_trace_review(
     return _response_data
 
 # Tags: llm_analytics, llm_analytics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Trace Review",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_trace_review(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the trace review to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the trace review. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -5327,7 +5908,13 @@ async def delete_trace_review(
     return _response_data
 
 # Tags: llm_analytics, llm_prompts
-@mcp.tool()
+@mcp.tool(
+    title="List LLM Prompts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_llm_prompts(
     project_id: str = Field(..., description="The unique identifier of the project containing the LLM prompts. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit or set to default for standard pagination."),
@@ -5370,7 +5957,12 @@ async def list_llm_prompts(
     return _response_data
 
 # Tags: llm_analytics, llm_prompts
-@mcp.tool()
+@mcp.tool(
+    title="Create LLM Prompt",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_llm_prompt(
     project_id: str = Field(..., description="The unique identifier of the project where the prompt will be created. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A unique name for the prompt using only letters, numbers, hyphens, and underscores. Maximum length is 255 characters.", max_length=255),
@@ -5413,7 +6005,13 @@ async def create_llm_prompt(
     return _response_data
 
 # Tags: llm_analytics, llm_prompts
-@mcp.tool()
+@mcp.tool(
+    title="Get LLM Prompt by Name",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_llm_prompt_by_name(
     project_id: str = Field(..., description="The unique identifier of the project containing the LLM prompt. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     prompt_name: str = Field(..., description="The name of the LLM prompt to retrieve. The name cannot contain forward slashes and must be a valid prompt identifier within the project.", pattern="^[^/]+$"),
@@ -5452,7 +6050,13 @@ async def get_llm_prompt_by_name(
     return _response_data
 
 # Tags: llm_analytics, llm_prompts
-@mcp.tool()
+@mcp.tool(
+    title="Archive LLM Prompt by Name",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_llm_prompt_by_name(
     project_id: str = Field(..., description="The unique identifier of the project containing the prompt. Retrieve this ID by calling the /api/projects/ endpoint."),
     prompt_name: str = Field(..., description="The name of the prompt to archive. Must not contain forward slashes.", pattern="^[^/]+$"),
@@ -5496,7 +6100,12 @@ async def archive_llm_prompt_by_name(
     return _response_data
 
 # Tags: llm_analytics, llm_prompts
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate LLM Prompt",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_llm_prompt(
     project_id: str = Field(..., description="The unique identifier of the project containing the prompt to duplicate. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     prompt_name: str = Field(..., description="The name of the existing LLM prompt to duplicate. The name cannot contain forward slashes.", pattern="^[^/]+$"),
@@ -5539,7 +6148,13 @@ async def duplicate_llm_prompt(
     return _response_data
 
 # Tags: llm_analytics, llm_prompts
-@mcp.tool()
+@mcp.tool(
+    title="Get LLM Prompt by Resolved Name",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_llm_prompt_by_name_resolved(
     project_id: str = Field(..., description="The unique identifier of the project containing the LLM prompt. Obtain this ID by calling the projects endpoint."),
     prompt_name: str = Field(..., description="The name of the LLM prompt to retrieve. Must not contain forward slashes.", pattern="^[^/]+$"),
@@ -5584,7 +6199,12 @@ async def get_llm_prompt_by_name_resolved(
     return _response_data
 
 # Tags: logs
-@mcp.tool()
+@mcp.tool(
+    title="Explain Log with AI",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def explain_log_with_ai(
     project_id: str = Field(..., description="The unique identifier of the project containing the log entry. Retrieve this ID from the /api/projects/ endpoint if needed."),
     uuid_: str = Field(..., alias="uuid", description="The unique identifier (UUID) of the log entry you want to explain."),
@@ -5627,7 +6247,13 @@ async def explain_log_with_ai(
     return _response_data
 
 # Tags: logs, logs
-@mcp.tool()
+@mcp.tool(
+    title="List Log Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_log_views(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value by calling the /api/projects/ endpoint if you don't have it."),
     limit: int | None = Field(None, description="Maximum number of log views to return in a single response page. Omit to use the API's default page size."),
@@ -5670,7 +6296,12 @@ async def list_log_views(
     return _response_data
 
 # Tags: logs, logs
-@mcp.tool()
+@mcp.tool(
+    title="Create Logs View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_logs_view(
     project_id: str = Field(..., description="The unique identifier of the project where the logs view will be created. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The display name for the logs view. Must be 400 characters or fewer.", max_length=400),
@@ -5714,7 +6345,13 @@ async def create_logs_view(
     return _response_data
 
 # Tags: logs, logs
-@mcp.tool()
+@mcp.tool(
+    title="Get Log View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_log_view(
     project_id: str = Field(..., description="The unique identifier of the project containing the log view. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the log view to retrieve."),
@@ -5753,7 +6390,13 @@ async def get_log_view(
     return _response_data
 
 # Tags: logs, logs
-@mcp.tool()
+@mcp.tool(
+    title="Update Logs View",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_logs_view(
     project_id: str = Field(..., description="The unique identifier of the project containing the logs view. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the logs view to update."),
@@ -5798,7 +6441,13 @@ async def update_logs_view(
     return _response_data
 
 # Tags: logs, logs
-@mcp.tool()
+@mcp.tool(
+    title="Update Logs View",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_logs_view_partial(
     project_id: str = Field(..., description="The unique identifier of the project containing the logs view. Retrieve this ID from the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the logs view to update."),
@@ -5842,7 +6491,13 @@ async def update_logs_view_partial(
     return _response_data
 
 # Tags: logs, logs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Log View",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_log_view(
     project_id: str = Field(..., description="The unique identifier of the project containing the log view. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the log view to delete."),
@@ -5881,7 +6536,13 @@ async def delete_log_view(
     return _response_data
 
 # Tags: user_interviews, user_interviews
-@mcp.tool()
+@mcp.tool(
+    title="List User Interviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_interviews(
     project_id: str = Field(..., description="The unique identifier of the project containing the user interviews. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of interview records to return in a single response page. Omit to use the API's default page size."),
@@ -5924,7 +6585,13 @@ async def list_user_interviews(
     return _response_data
 
 # Tags: user_interviews, user_interviews
-@mcp.tool()
+@mcp.tool(
+    title="Get User Interview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_interview(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user interview to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the user interview. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -5963,7 +6630,13 @@ async def get_user_interview(
     return _response_data
 
 # Tags: user_interviews, user_interviews
-@mcp.tool()
+@mcp.tool(
+    title="Update User Interview",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_interview(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user interview to update."),
     project_id: str = Field(..., description="The project ID that contains this user interview. Find your project ID by calling the /api/projects/ endpoint."),
@@ -6008,7 +6681,13 @@ async def update_user_interview(
     return _response_data
 
 # Tags: user_interviews, user_interviews
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update User Interview",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_interview_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user interview to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the user interview. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -6052,7 +6731,13 @@ async def update_user_interview_partial(
     return _response_data
 
 # Tags: user_interviews, user_interviews
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Interview",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_interview(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user interview to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the user interview. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -6091,7 +6776,13 @@ async def delete_user_interview(
     return _response_data
 
 # Tags: web_vitals
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Vitals for Pathname",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_vitals_for_pathname(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     pathname: str = Field(..., description="The URL pathname to filter web vitals data by (e.g., '/home', '/products/details'). Only metrics for this specific pathname will be returned."),
@@ -6133,7 +6824,13 @@ async def get_web_vitals_for_pathname(
     return _response_data
 
 # Tags: organizations, organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations(
     limit: int | None = Field(None, description="Maximum number of organizations to return in a single response page. Controls the size of each paginated result set."),
     offset: int | None = Field(None, description="Zero-based index position from which to start returning results. Use with limit to navigate through paginated results."),
@@ -6174,7 +6871,12 @@ async def list_organizations(
     return _response_data
 
 # Tags: organizations, organizations
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization(
     name: str = Field(..., description="The name of the organization. Must be 64 characters or fewer.", max_length=64),
     logo_media_id: str | None = Field(None, description="UUID of a media asset to use as the organization's logo."),
@@ -6224,7 +6926,13 @@ async def create_organization(
     return _response_data
 
 # Tags: organizations, organizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization(id_: str = Field(..., alias="id", description="The unique identifier of the organization, provided as a UUID string.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific organization by its unique identifier."""
 
@@ -6260,7 +6968,13 @@ async def get_organization(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: organizations, organizations
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the organization to update."),
     name: str = Field(..., description="The organization's display name. Must not exceed 64 characters.", max_length=64),
@@ -6312,7 +7026,13 @@ async def update_organization(
     return _response_data
 
 # Tags: organizations, organizations
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Organization",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the organization to update."),
     logo_media_id: str | None = Field(None, description="UUID of the media asset to use as the organization's logo."),
@@ -6363,7 +7083,13 @@ async def update_organization_partial(
     return _response_data
 
 # Tags: organizations, organizations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization(id_: str = Field(..., alias="id", description="The unique identifier of the organization to delete, provided as a UUID string.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an organization and all associated data. This action cannot be undone."""
 
@@ -6399,7 +7125,13 @@ async def delete_organization(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Batch Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_batch_exports(
     organization_id: str = Field(..., description="The unique identifier of the organization whose batch exports should be retrieved."),
     limit: int | None = Field(None, description="Maximum number of batch export records to return in a single page of results. Controls pagination size."),
@@ -6442,7 +7174,13 @@ async def list_batch_exports(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Batch Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_batch_export(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to retrieve."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the batch export."),
@@ -6481,7 +7219,13 @@ async def get_batch_export(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Update Batch Export",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_batch_export(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to update."),
     organization_id: str = Field(..., description="The organization ID that owns this batch export."),
@@ -6536,7 +7280,13 @@ async def update_batch_export(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Batch Export",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_batch_export_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to update."),
     organization_id: str = Field(..., description="The organization ID that owns this batch export."),
@@ -6590,7 +7340,13 @@ async def update_batch_export_partial(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Delete Batch Export",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_batch_export(
     id_: str = Field(..., alias="id", description="The unique identifier of the batch export to delete, provided as a UUID string."),
     organization_id: str = Field(..., description="The organization ID that owns the batch export being deleted."),
@@ -6629,7 +7385,12 @@ async def delete_batch_export(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Pause Batch Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def pause_batch_export(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to pause."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns this batch export."),
@@ -6684,7 +7445,12 @@ async def pause_batch_export(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Create Batch Export Test Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_batch_export_test_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to test."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns this batch export."),
@@ -6739,7 +7505,12 @@ async def create_batch_export_test_run(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Unpause Batch Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unpause_batch_export(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to unpause."),
     organization_id: str = Field(..., description="The organization ID that owns this batch export."),
@@ -6794,7 +7565,12 @@ async def unpause_batch_export(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Create Batch Export Test Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_batch_export_test_run_new(
     organization_id: str = Field(..., description="The unique identifier of the organization that will own this batch export."),
     name: str = Field(..., description="A human-readable name to identify this batch export job."),
@@ -6848,7 +7624,13 @@ async def create_batch_export_test_run_new(
     return _response_data
 
 # Tags: core, domains
-@mcp.tool()
+@mcp.tool(
+    title="List Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_domains(
     organization_id: str = Field(..., description="The unique identifier of the organization whose domains should be retrieved."),
     limit: int | None = Field(None, description="Maximum number of domain records to return in a single page of results. Use with offset for pagination."),
@@ -6891,7 +7673,12 @@ async def list_domains(
     return _response_data
 
 # Tags: core, domains
-@mcp.tool()
+@mcp.tool(
+    title="Create Domain",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_domain(
     organization_id: str = Field(..., description="The unique identifier of the organization that will own this domain."),
     domain: str = Field(..., description="The domain name to register (e.g., example.com). Maximum 128 characters.", max_length=128),
@@ -6939,7 +7726,13 @@ async def create_domain(
     return _response_data
 
 # Tags: core, domains
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain(
     id_: str = Field(..., alias="id", description="The unique identifier of the domain to retrieve, formatted as a UUID."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the domain, formatted as a UUID."),
@@ -6978,7 +7771,13 @@ async def get_domain(
     return _response_data
 
 # Tags: core, domains
-@mcp.tool()
+@mcp.tool(
+    title="Update Domain",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_domain(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the domain to update."),
     organization_id: str = Field(..., description="The organization that owns this domain."),
@@ -7027,7 +7826,13 @@ async def update_domain(
     return _response_data
 
 # Tags: core, domains
-@mcp.tool()
+@mcp.tool(
+    title="Update Domain (Partial)",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_domain_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the domain to update."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns this domain."),
@@ -7076,7 +7881,13 @@ async def update_domain_partial(
     return _response_data
 
 # Tags: core, domains
-@mcp.tool()
+@mcp.tool(
+    title="Delete Domain",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_domain(
     id_: str = Field(..., alias="id", description="The unique identifier of the domain to delete, provided as a UUID string."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the domain, provided as a UUID string."),
@@ -7115,7 +7926,13 @@ async def delete_domain(
     return _response_data
 
 # Tags: organizations, integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_integrations(
     organization_id: str = Field(..., description="The unique identifier of the organization whose integrations you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of integration results to return in a single page of results."),
@@ -7158,7 +7975,13 @@ async def list_organization_integrations(
     return _response_data
 
 # Tags: organizations, integrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the organization integration to retrieve, formatted as a UUID."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the integration, formatted as a UUID."),
@@ -7197,7 +8020,13 @@ async def get_organization_integration(
     return _response_data
 
 # Tags: core, invites
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Invites",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_invites(
     organization_id: str = Field(..., description="The unique identifier of the organization whose invitations you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of invitation records to return in a single response. Controls page size for pagination."),
@@ -7240,7 +8069,12 @@ async def list_organization_invites(
     return _response_data
 
 # Tags: core, invites
-@mcp.tool()
+@mcp.tool(
+    title="Send Organization Invite",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_organization_invite(
     organization_id: str = Field(..., description="The unique identifier of the organization to which the user is being invited."),
     target_email: str = Field(..., description="The email address of the invitee. Must be a valid email format with a maximum length of 254 characters.", max_length=254),
@@ -7287,7 +8121,13 @@ async def send_organization_invite(
     return _response_data
 
 # Tags: core, invites
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Invite",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_invite(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the organization invite to delete."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the invite."),
@@ -7326,7 +8166,13 @@ async def delete_organization_invite(
     return _response_data
 
 # Tags: core, members
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_members(
     organization_id: str = Field(..., description="The unique identifier of the organization whose members you want to retrieve."),
     limit: int | None = Field(None, description="Maximum number of member records to return in a single response page. Controls pagination size."),
@@ -7369,7 +8215,13 @@ async def list_organization_members(
     return _response_data
 
 # Tags: core, members
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Member",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_member(
     organization_id: str = Field(..., description="The unique identifier of the organization containing the member to update."),
     user__uuid: str = Field(..., description="The UUID of the user whose membership level should be updated."),
@@ -7412,7 +8264,13 @@ async def update_organization_member(
     return _response_data
 
 # Tags: core, members
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Member Level",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_member_level(
     organization_id: str = Field(..., description="The unique identifier of the organization containing the member to update."),
     user__uuid: str = Field(..., description="The UUID of the user whose membership details should be updated."),
@@ -7455,7 +8313,13 @@ async def update_organization_member_level(
     return _response_data
 
 # Tags: core, members
-@mcp.tool()
+@mcp.tool(
+    title="Remove Member from Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_member_from_organization(
     organization_id: str = Field(..., description="The unique identifier of the organization from which the member will be removed."),
     user__uuid: str = Field(..., description="The UUID of the user to be removed from the organization. Must be a valid UUID format."),
@@ -7494,7 +8358,13 @@ async def remove_member_from_organization(
     return _response_data
 
 # Tags: core, oauth_applications
-@mcp.tool()
+@mcp.tool(
+    title="List OAuth Applications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_oauth_applications(
     organization_id: str = Field(..., description="The unique identifier of the organization whose OAuth applications you want to retrieve."),
     limit: int | None = Field(None, description="The maximum number of OAuth applications to return in a single page of results. Use this to control pagination size."),
@@ -7537,7 +8407,13 @@ async def list_oauth_applications(
     return _response_data
 
 # Tags: core, projects
-@mcp.tool()
+@mcp.tool(
+    title="List Projects for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects_for_organization(
     organization_id: str = Field(..., description="The unique identifier of the organization whose projects should be retrieved."),
     limit: int | None = Field(None, description="Maximum number of projects to return in a single response page. Use with offset for pagination."),
@@ -7580,7 +8456,12 @@ async def list_projects_for_organization(
     return _response_data
 
 # Tags: core, projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     organization_id: str = Field(..., description="The unique identifier of the organization where the project will be created."),
     product_description: str | None = Field(None, description="A detailed description of the product or service being tracked, up to 1000 characters.", max_length=1000),
@@ -7650,7 +8531,13 @@ async def create_project(
     return _response_data
 
 # Tags: core, projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(
     id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve. Must be a valid 64-bit integer."),
     organization_id: str = Field(..., description="The organization ID that owns the project. Used to scope the project lookup to the correct organization context."),
@@ -7691,7 +8578,13 @@ async def get_project(
     return _response_data
 
 # Tags: core, projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     id_: str = Field(..., alias="id", description="The unique identifier of the project to update. Must be a valid 64-bit integer."),
     organization_id: str = Field(..., description="The organization ID that owns the project. Required to scope the update to the correct organization."),
@@ -7764,7 +8657,13 @@ async def update_project(
     return _response_data
 
 # Tags: core, projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_settings(
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the project to update. Must be a valid 64-bit integer."),
     organization_id: str = Field(..., description="The organization ID that owns the project. Used to scope the project within the correct organizational context."),
@@ -7837,7 +8736,13 @@ async def update_project_settings(
     return _response_data
 
 # Tags: core, projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(
     id_: str = Field(..., alias="id", description="The unique identifier of the project to delete. Must be a valid 64-bit integer."),
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the project."),
@@ -7878,7 +8783,13 @@ async def delete_project(
     return _response_data
 
 # Tags: reverse_proxy, proxy_records
-@mcp.tool()
+@mcp.tool(
+    title="List Proxy Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_proxy_records(organization_id: str = Field(..., description="The unique identifier of the organization whose proxy records should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all reverse proxy configurations for an organization, including details about each proxy record and the maximum number of proxies allowed under the current plan."""
 
@@ -7914,7 +8825,12 @@ async def list_proxy_records(organization_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: reverse_proxy, proxy_records
-@mcp.tool()
+@mcp.tool(
+    title="Create Proxy Record",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_proxy_record(
     organization_id: str = Field(..., description="The unique identifier of the organization that will own this proxy record."),
     domain: str = Field(..., description="The custom subdomain to proxy through (e.g., 'e.example.com'). Must be a valid subdomain that you control."),
@@ -7956,7 +8872,13 @@ async def create_proxy_record(
     return _response_data
 
 # Tags: reverse_proxy, proxy_records
-@mcp.tool()
+@mcp.tool(
+    title="Get Proxy Record",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_proxy_record(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the proxy record to retrieve."),
     organization_id: str = Field(..., description="The unique identifier (UUID) of the organization that owns the proxy record."),
@@ -7995,7 +8917,13 @@ async def get_proxy_record(
     return _response_data
 
 # Tags: reverse_proxy, proxy_records
-@mcp.tool()
+@mcp.tool(
+    title="Delete Proxy Record",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_proxy_record(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the proxy record to delete."),
     organization_id: str = Field(..., description="The unique identifier (UUID) of the organization that owns the proxy record."),
@@ -8034,7 +8962,13 @@ async def delete_proxy_record(
     return _response_data
 
 # Tags: core, roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_role(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the role to retrieve."),
     organization_id: str = Field(..., description="The unique identifier of the organization that contains the role."),
@@ -8073,7 +9007,13 @@ async def get_role(
     return _response_data
 
 # Tags: core, roles
-@mcp.tool()
+@mcp.tool(
+    title="Update Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the role to update, formatted as a UUID string."),
     organization_id: str = Field(..., description="The unique identifier of the organization that contains the role."),
@@ -8112,7 +9052,13 @@ async def update_role(
     return _response_data
 
 # Tags: core, roles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the role to delete, provided as a UUID string."),
     organization_id: str = Field(..., description="The unique identifier of the organization that contains the role, provided as a UUID string."),
@@ -8151,7 +9097,13 @@ async def delete_role(
     return _response_data
 
 # Tags: organizations, roles
-@mcp.tool()
+@mcp.tool(
+    title="List Role Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_role_memberships(
     organization_id: str = Field(..., description="The unique identifier of the organization containing the role."),
     role_id: str = Field(..., description="The unique identifier (UUID format) of the role whose memberships you want to retrieve."),
@@ -8195,7 +9147,12 @@ async def list_role_memberships(
     return _response_data
 
 # Tags: organizations, roles
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Role",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_role(
     organization_id: str = Field(..., description="The unique identifier of the organization where the role membership is being created."),
     role_id: str = Field(..., description="The unique identifier (UUID format) of the role to which the user is being added."),
@@ -8238,7 +9195,13 @@ async def add_user_to_role(
     return _response_data
 
 # Tags: organizations, roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Role Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_role_membership(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the role membership to retrieve."),
     organization_id: str = Field(..., description="The unique identifier of the organization that contains the role and role membership."),
@@ -8278,7 +9241,13 @@ async def get_role_membership(
     return _response_data
 
 # Tags: organizations, roles
-@mcp.tool()
+@mcp.tool(
+    title="Remove Role Membership",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_role_membership(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the role membership to remove."),
     organization_id: str = Field(..., description="The unique identifier of the organization containing the role."),
@@ -8318,7 +9287,13 @@ async def remove_role_membership(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="List Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actions(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of actions to return in a single response page. Defaults to the API's standard page size if not specified."),
@@ -8361,7 +9336,12 @@ async def list_actions(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Action",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_action(
     project_id: str = Field(..., description="The unique identifier of the project where the action will be created. Retrieve available project IDs by calling the projects list endpoint."),
     description: str | None = Field(None, description="A human-readable explanation of the action's purpose and behavior."),
@@ -8409,7 +9389,13 @@ async def create_action(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_action(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the action to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the action. You can obtain project IDs by calling the projects list endpoint."),
@@ -8448,7 +9434,13 @@ async def get_action(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Action",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_action(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the action to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the action. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -8497,7 +9489,13 @@ async def update_action(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Action",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_action_partial(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the action to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the action. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -8546,7 +9544,13 @@ async def update_action_partial(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="List Action References",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_action_references(
     id_: int = Field(..., alias="id", description="The unique identifier of the action whose references you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the action. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -8585,7 +9589,13 @@ async def list_action_references(
     return _response_data
 
 # Tags: activity_logs, activity_log
-@mcp.tool()
+@mcp.tool(
+    title="List Activity Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_activity_logs(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     item_id: str | None = Field(None, description="Filter activity logs to only those affecting a specific resource by its ID. Must be at least 1 character long.", min_length=1),
@@ -8630,7 +9640,13 @@ async def list_activity_logs(
     return _response_data
 
 # Tags: advanced_activity_logs
-@mcp.tool()
+@mcp.tool(
+    title="List Advanced Activity Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_advanced_activity_logs(project_id: str = Field(..., description="The unique identifier of the project for which to retrieve activity logs. You can obtain the project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of advanced activity logs for a specific project, providing detailed records of project activities and events."""
 
@@ -8666,7 +9682,13 @@ async def list_advanced_activity_logs(project_id: str = Field(..., description="
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="List Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alerts(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of alerts to return in a single response page. Controls pagination size."),
@@ -8709,7 +9731,12 @@ async def list_alerts(
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert(
     project_id: str = Field(..., description="The unique identifier of the project containing the insight to monitor. Retrieve available project IDs from the /api/projects/ endpoint."),
     insight: int = Field(..., description="The unique identifier of the insight to be monitored by this alert. The response will include the full insight details."),
@@ -8760,7 +9787,13 @@ async def create_alert(
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the alert configuration to retrieve."),
     project_id: str = Field(..., description="The ID of the project containing the alert. Use /api/projects/ to discover available project IDs."),
@@ -8805,7 +9838,13 @@ async def get_alert(
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the alert configuration to update."),
     project_id: str = Field(..., description="The project ID containing this alert. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -8856,7 +9895,12 @@ async def update_alert(
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert Configuration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_alert_configuration(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the alert configuration to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the alert. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -8906,7 +9950,13 @@ async def update_alert_configuration(
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert configuration to delete, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the alert. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -8945,7 +9995,12 @@ async def delete_alert(
     return _response_data
 
 # Tags: alerts
-@mcp.tool()
+@mcp.tool(
+    title="Simulate Detector on Insight",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def simulate_detector_on_insight(
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. Retrieve available project IDs from the /api/projects/ endpoint."),
     insight: int = Field(..., description="The unique identifier of the insight whose historical data will be used for the detector simulation."),
@@ -8989,7 +10044,13 @@ async def simulate_detector_on_insight(
     return _response_data
 
 # Tags: core, annotations
-@mcp.tool()
+@mcp.tool(
+    title="List Annotations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_annotations(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of annotations to return per page. Use this to control pagination size."),
@@ -9032,7 +10093,12 @@ async def list_annotations(
     return _response_data
 
 # Tags: core, annotations
-@mcp.tool()
+@mcp.tool(
+    title="Create Annotation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_annotation(
     project_id: str = Field(..., description="The unique identifier of the project where you want to create the annotation. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     date_marker: str | None = Field(None, description="The timestamp when this annotation occurred, formatted as an ISO 8601 datetime string. This positions the annotation on your charts at the correct point in time."),
@@ -9076,7 +10142,13 @@ async def create_annotation(
     return _response_data
 
 # Tags: core, annotations
-@mcp.tool()
+@mcp.tool(
+    title="Get Annotation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_annotation(
     id_: int = Field(..., alias="id", description="The unique identifier of the annotation to retrieve. This is a positive integer assigned by PostHog when the annotation was created."),
     project_id: str = Field(..., description="The unique identifier of the PostHog project containing the annotation. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -9115,7 +10187,13 @@ async def get_annotation(
     return _response_data
 
 # Tags: core, annotations
-@mcp.tool()
+@mcp.tool(
+    title="Update Annotation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_annotation(
     id_: int = Field(..., alias="id", description="The unique identifier of the annotation to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the annotation. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -9160,7 +10238,12 @@ async def update_annotation(
     return _response_data
 
 # Tags: core, annotations
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Annotation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_annotation_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the annotation to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the annotation. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -9205,7 +10288,13 @@ async def update_annotation_partial(
     return _response_data
 
 # Tags: app_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get App Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_metrics(
     id_: int = Field(..., alias="id", description="The unique identifier of the app metrics record to retrieve. This is a positive integer that uniquely identifies the metrics configuration within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the app metrics. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -9244,7 +10333,13 @@ async def get_app_metrics(
     return _response_data
 
 # Tags: app_metrics
-@mcp.tool()
+@mcp.tool(
+    title="List App Metrics Historical Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_metrics_historical_exports(
     plugin_config_id: int = Field(..., description="The unique identifier of the plugin configuration whose historical metric exports you want to retrieve. This ID specifies which plugin's metrics to query."),
     project_id: str = Field(..., description="The unique identifier of the project containing the plugin configuration. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -9283,7 +10378,13 @@ async def list_app_metrics_historical_exports(
     return _response_data
 
 # Tags: app_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Historical Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_historical_export(
     id_: str = Field(..., alias="id", description="The unique identifier of the historical export record to retrieve."),
     plugin_config_id: int = Field(..., description="The plugin configuration ID associated with the app metrics for which the export was generated."),
@@ -9323,7 +10424,13 @@ async def get_historical_export(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Batch Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_batch_exports_project(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of batch exports to return in a single page of results. Omit to use the API's default page size."),
@@ -9366,7 +10473,13 @@ async def list_batch_exports_project(
     return _response_data
 
 # Tags: batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Backfills for Batch Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_backfills_for_batch_export(
     batch_export_id: str = Field(..., description="The unique identifier (UUID) of the batch export that contains the backfills you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the batch export. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -9409,7 +10522,12 @@ async def list_backfills_for_batch_export(
     return _response_data
 
 # Tags: batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Create Backfill for Batch Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_backfill_for_batch_export(
     batch_export_id: str = Field(..., description="The unique identifier (UUID) of the BatchExport this backfill belongs to."),
     project_id: str = Field(..., description="The unique identifier of the project containing the BatchExport. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -9456,7 +10574,13 @@ async def create_backfill_for_batch_export(
     return _response_data
 
 # Tags: batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Batch Export Backfill",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_batch_export_backfill(
     batch_export_id: str = Field(..., description="The unique identifier (UUID) of the batch export that contains this backfill."),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export backfill to retrieve."),
@@ -9496,7 +10620,13 @@ async def get_batch_export_backfill(
     return _response_data
 
 # Tags: batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Batch Export Backfill",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_batch_export_backfill(
     batch_export_id: str = Field(..., description="The unique identifier (UUID) of the batch export that contains the backfill to cancel."),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export backfill to cancel."),
@@ -9544,7 +10674,13 @@ async def cancel_batch_export_backfill(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="List Batch Export Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_batch_export_runs(
     batch_export_id: str = Field(..., description="The unique identifier (UUID format) of the batch export job whose runs you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the batch export. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -9587,7 +10723,13 @@ async def list_batch_export_runs(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Batch Export Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_batch_export_run(
     batch_export_id: str = Field(..., description="The unique identifier (UUID) of the batch export that contains the run you want to retrieve."),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the specific batch export run to retrieve."),
@@ -9627,7 +10769,13 @@ async def get_batch_export_run(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Batch Export Run",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_batch_export_run(
     batch_export_id: str = Field(..., description="The unique identifier (UUID) of the batch export that contains the run to cancel."),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export run to cancel."),
@@ -9672,7 +10820,13 @@ async def cancel_batch_export_run(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Retry Batch Export Run",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def retry_batch_export_run(
     batch_export_id: str = Field(..., description="The UUID of the batch export that contains the run to retry."),
     id_: str = Field(..., alias="id", description="The UUID of the specific batch export run to retry."),
@@ -9717,7 +10871,13 @@ async def retry_batch_export_run(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Batch Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_batch_export_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the batch export. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -9756,7 +10916,13 @@ async def get_batch_export_project(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Update Batch Export",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_batch_export_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this batch export. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -9811,7 +10977,13 @@ async def update_batch_export_project(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Update Batch Export (Partial)",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_batch_export_project_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the batch export. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -9865,7 +11037,13 @@ async def update_batch_export_project_partial(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Delete Batch Export",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_batch_export_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the batch export. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -9904,7 +11082,12 @@ async def delete_batch_export_project(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Pause Batch Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def pause_batch_export_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the BatchExport to pause."),
     project_id: str = Field(..., description="The unique identifier of the project containing the BatchExport. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -9959,7 +11142,12 @@ async def pause_batch_export_project(
     return _response_data
 
 # Tags: batch_exports, batch_exports
-@mcp.tool()
+@mcp.tool(
+    title="Run Batch Export Test Step",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_batch_export_test_step(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the batch export to test."),
     project_id: str = Field(..., description="The unique identifier of the project containing the batch export. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10014,7 +11202,13 @@ async def run_batch_export_test_step(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="List Cohorts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cohorts(
     project_id: str = Field(..., description="The unique identifier of the project containing the cohorts. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of cohorts to return in a single response page. Omit or set to default for standard page size."),
@@ -10057,7 +11251,12 @@ async def list_cohorts(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Create Cohort",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_cohort(
     project_id: str = Field(..., description="The unique identifier of the project where the cohort will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     description: str | None = Field(None, description="Optional text description of the cohort's purpose or definition. Limited to 1000 characters.", max_length=1000),
@@ -10103,7 +11302,13 @@ async def create_cohort(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Get Cohort",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cohort(
     id_: int = Field(..., alias="id", description="The unique identifier of the cohort to retrieve. This is a positive integer that uniquely identifies the cohort within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. You can obtain project IDs by calling the projects list endpoint."),
@@ -10142,7 +11347,13 @@ async def get_cohort(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Update Cohort",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cohort(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the cohort to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10189,7 +11400,13 @@ async def update_cohort(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Cohort",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cohort_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the cohort to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10236,7 +11453,13 @@ async def update_cohort_partial(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Get Cohort Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cohort_activity(
     id_: int = Field(..., alias="id", description="The unique identifier of the cohort whose activity you want to retrieve. This must be a positive integer."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -10275,11 +11498,16 @@ async def get_cohort_activity(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Add Persons to Static Cohort",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_persons_to_static_cohort(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the cohort to which persons will be added."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. Retrieve available project IDs by calling the /api/projects/ endpoint."),
-    person_ids: list[str] | None = Field(None, description="An array of person UUIDs to add to the cohort. Each UUID must be a valid identifier for an existing person in the project."),
+    person_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="An array of person UUIDs to add to the cohort. Each UUID must be a valid identifier for an existing person in the project."),
 ) -> dict[str, Any] | ToolResult:
     """Add one or more persons to an existing static cohort by their unique identifiers. This operation allows bulk addition of individuals to a cohort for segmentation and analysis purposes."""
 
@@ -10318,7 +11546,13 @@ async def add_persons_to_static_cohort(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Get Cohort Calculation History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cohort_calculation_history(
     id_: int = Field(..., alias="id", description="The unique identifier of the cohort whose calculation history you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -10357,7 +11591,13 @@ async def get_cohort_calculation_history(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="List Cohort Persons",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cohort_persons(
     id_: int = Field(..., alias="id", description="The unique identifier of the cohort whose members you want to retrieve. This must be a valid integer ID for a cohort that exists within the specified project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -10396,7 +11636,13 @@ async def list_cohort_persons(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Remove Person from Static Cohort",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_person_from_static_cohort(
     id_: int = Field(..., alias="id", description="The unique identifier of the cohort to modify. This must be a positive integer that corresponds to an existing static cohort in the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the cohort. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -10435,7 +11681,13 @@ async def remove_person_from_static_cohort(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="List Cohorts Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cohorts_activity(project_id: str = Field(..., description="The unique identifier of the project containing the cohorts. You can retrieve available project IDs by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve activity data for cohorts within a specific project. This endpoint provides insights into cohort engagement and interactions."""
 
@@ -10471,7 +11723,13 @@ async def list_cohorts_activity(project_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="List Conversation Tickets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversation_tickets(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of tickets to return in a single page of results. Use with offset for pagination."),
@@ -10514,7 +11772,12 @@ async def list_conversation_tickets(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Create Conversation Ticket",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_conversation_ticket(
     project_id: str = Field(..., description="The unique identifier of the project where the ticket will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     status: Literal["new", "open", "pending", "on_hold", "resolved"] | None = Field(None, description="The initial status of the ticket. Must be one of: new, open, pending, on_hold, or resolved. Defaults to new if not specified."),
@@ -10562,7 +11825,13 @@ async def create_conversation_ticket(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Get Ticket",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ticket(
     id_: str = Field(..., alias="id", description="The unique identifier of the ticket, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the ticket. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -10601,7 +11870,13 @@ async def get_ticket(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Update Ticket",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_ticket(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the ticket to update."),
     project_id: str = Field(..., description="The project ID containing this ticket. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10650,7 +11925,12 @@ async def update_ticket(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Update Conversation Ticket",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_conversation_ticket(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the ticket to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the ticket. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10699,7 +11979,13 @@ async def update_conversation_ticket(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Conversation Ticket",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_conversation_ticket(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the ticket to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the ticket. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -10738,7 +12024,13 @@ async def delete_conversation_ticket(
     return _response_data
 
 # Tags: core, dashboard_templates
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_templates(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if needed."),
     is_featured: bool | None = Field(None, description="Filter templates by their featured status. Omit this parameter to retrieve all templates regardless of featured status."),
@@ -10783,7 +12075,13 @@ async def list_dashboard_templates(
     return _response_data
 
 # Tags: core, dashboard_templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Dashboard Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dashboard_template(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dashboard template to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard template. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -10822,7 +12120,13 @@ async def get_dashboard_template(
     return _response_data
 
 # Tags: core, dashboard_templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard_template(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dashboard template to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard template. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10873,7 +12177,13 @@ async def update_dashboard_template(
     return _response_data
 
 # Tags: core, dashboard_templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard_template_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dashboard template to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard template. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -10924,7 +12234,13 @@ async def update_dashboard_template_partial(
     return _response_data
 
 # Tags: core, dashboard_templates
-@mcp.tool()
+@mcp.tool(
+    title="Soft Delete Dashboard Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def soft_delete_dashboard_template(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dashboard template to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard template. Retrieve available project IDs by calling /api/projects/."),
@@ -10963,7 +12279,13 @@ async def soft_delete_dashboard_template(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboards(
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboards. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of dashboard results to return in a single page. Omit or adjust to control result set size."),
@@ -11006,7 +12328,12 @@ async def list_dashboards(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Create Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dashboard(
     project_id: str = Field(..., description="The unique identifier of the project where the dashboard will be created. Retrieve project IDs by calling the /api/projects/ endpoint."),
     description: str | None = Field(None, description="Optional text description of the dashboard's purpose or contents."),
@@ -11054,7 +12381,13 @@ async def create_dashboard(
     return _response_data
 
 # Tags: dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Collaborators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_collaborators_project(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard whose collaborators you want to list."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11093,7 +12426,12 @@ async def list_dashboard_collaborators_project(
     return _response_data
 
 # Tags: dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Add Collaborator to Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_collaborator_to_dashboard_project(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard to which the collaborator will be added."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve project IDs by calling /api/projects/."),
@@ -11137,7 +12475,13 @@ async def add_collaborator_to_dashboard_project(
     return _response_data
 
 # Tags: dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Remove Dashboard Collaborator",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_dashboard_collaborator_project(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard from which to remove the collaborator."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve project IDs by calling /api/projects/."),
@@ -11177,7 +12521,13 @@ async def remove_dashboard_collaborator_project(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Sharing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_sharing(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard whose sharing settings you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11216,7 +12566,12 @@ async def list_dashboard_sharing(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Create Dashboard Sharing Password",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dashboard_sharing_password(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard for which to create a sharing password."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11261,7 +12616,13 @@ async def create_dashboard_sharing_password(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dashboard Sharing Password",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dashboard_sharing_password(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard from which the sharing password will be removed."),
     password_id: str = Field(..., description="The unique identifier of the password credential to delete from the dashboard's sharing configuration."),
@@ -11301,7 +12662,12 @@ async def delete_dashboard_sharing_password(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Dashboard Sharing",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_dashboard_sharing(
     dashboard_id: int = Field(..., description="The unique identifier of the dashboard whose sharing settings you want to refresh."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve project IDs by calling the /api/projects/ endpoint."),
@@ -11346,7 +12712,13 @@ async def refresh_dashboard_sharing(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Dashboard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dashboard(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the dashboard to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -11385,7 +12757,13 @@ async def get_dashboard(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard(
     id_: int = Field(..., alias="id", description="The unique identifier of the dashboard to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -11434,7 +12812,13 @@ async def update_dashboard(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the dashboard to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -11483,7 +12867,13 @@ async def update_dashboard_partial(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Soft Delete Dashboard",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def soft_delete_dashboard(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the dashboard to be soft deleted."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11529,7 +12919,12 @@ async def soft_delete_dashboard(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Copy Tile to Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_tile_to_dashboard(
     id_: int = Field(..., alias="id", description="The unique identifier of the destination dashboard where the tile will be copied to."),
     project_id: str = Field(..., description="The project ID containing both the source and destination dashboards. Find your project ID by calling /api/projects/."),
@@ -11573,7 +12968,12 @@ async def copy_tile_to_dashboard(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Generate Dashboard Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_dashboard_metadata(
     id_: int = Field(..., alias="id", description="The unique identifier of the dashboard for which to generate metadata."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11612,7 +13012,13 @@ async def generate_dashboard_metadata(
     return _response_data
 
 # Tags: core, dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Dashboard Tiles",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def reorder_dashboard_tiles(
     id_: int = Field(..., alias="id", description="The unique identifier of the dashboard to reorder. This is a positive integer that uniquely identifies the dashboard within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11655,7 +13061,13 @@ async def reorder_dashboard_tiles(
     return _response_data
 
 # Tags: dashboards, data_color_themes
-@mcp.tool()
+@mcp.tool(
+    title="List Data Color Themes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_data_color_themes(
     project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of color themes to return in a single response page. Omit to use the default page size."),
@@ -11698,7 +13110,12 @@ async def list_data_color_themes(
     return _response_data
 
 # Tags: dashboards, data_color_themes
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Color Theme",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_color_theme(
     project_id: str = Field(..., description="The unique identifier of the project where the color theme will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the color theme. Must be 100 characters or fewer.", max_length=100),
@@ -11741,7 +13158,13 @@ async def create_data_color_theme(
     return _response_data
 
 # Tags: dashboards, data_color_themes
-@mcp.tool()
+@mcp.tool(
+    title="Get Data Color Theme",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_data_color_theme(
     id_: int = Field(..., alias="id", description="The unique identifier of the data color theme to retrieve. This is a positive integer that uniquely identifies the theme within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the data color theme. You can obtain project IDs by calling the /api/projects/ endpoint."),
@@ -11780,7 +13203,13 @@ async def get_data_color_theme(
     return _response_data
 
 # Tags: dashboards, data_color_themes
-@mcp.tool()
+@mcp.tool(
+    title="Update Data Color Theme",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_data_color_theme(
     id_: int = Field(..., alias="id", description="The unique identifier of the data color theme to update. Must be a positive integer."),
     project_id: str = Field(..., description="The unique identifier of the project containing the data color theme. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -11823,7 +13252,13 @@ async def update_data_color_theme(
     return _response_data
 
 # Tags: dashboards, data_color_themes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Data Color Theme",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_data_color_theme(
     id_: int = Field(..., alias="id", description="The unique identifier of the data color theme to delete. This is a positive integer value."),
     project_id: str = Field(..., description="The unique identifier of the project containing the data color theme. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -11862,7 +13297,13 @@ async def delete_data_color_theme(
     return _response_data
 
 # Tags: llm_analytics, dataset_items
-@mcp.tool()
+@mcp.tool(
+    title="List Dataset Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dataset_items(
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset items. Obtain this ID by calling the /api/projects/ endpoint."),
     dataset: str | None = Field(None, description="Filter results to include only items from a specific dataset by providing its unique identifier."),
@@ -11906,7 +13347,12 @@ async def list_dataset_items(
     return _response_data
 
 # Tags: llm_analytics, dataset_items
-@mcp.tool()
+@mcp.tool(
+    title="Create Dataset Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dataset_item(
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     dataset: str = Field(..., description="The unique identifier (UUID format) of the dataset where the item will be created."),
@@ -11951,7 +13397,13 @@ async def create_dataset_item(
     return _response_data
 
 # Tags: llm_analytics, dataset_items
-@mcp.tool()
+@mcp.tool(
+    title="Get Dataset Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dataset_item(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dataset item to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset item. You can obtain the project ID by calling the list projects endpoint."),
@@ -11990,7 +13442,13 @@ async def get_dataset_item(
     return _response_data
 
 # Tags: llm_analytics, dataset_items
-@mcp.tool()
+@mcp.tool(
+    title="Update Dataset Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dataset_item(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dataset item to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset item. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -12036,7 +13494,12 @@ async def update_dataset_item(
     return _response_data
 
 # Tags: llm_analytics, dataset_items
-@mcp.tool()
+@mcp.tool(
+    title="Update Dataset Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_dataset_item_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dataset item to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset item. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -12082,10 +13545,16 @@ async def update_dataset_item_partial(
     return _response_data
 
 # Tags: llm_analytics, datasets
-@mcp.tool()
+@mcp.tool(
+    title="List Datasets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_datasets(
     project_id: str = Field(..., description="The unique identifier of the project containing the datasets. Obtain this ID by calling the projects list endpoint."),
-    id__in: list[str] | None = Field(None, description="Filter results to include only datasets with IDs matching the provided list. Specify multiple IDs as a comma-separated array."),
+    id__in: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter results to include only datasets with IDs matching the provided list. Specify multiple IDs as a comma-separated array."),
     limit: int | None = Field(None, description="Maximum number of datasets to return in a single response page. Use with offset for pagination."),
     offset: int | None = Field(None, description="Zero-based index position to start returning results from. Use with limit to paginate through large result sets."),
     order_by: list[Literal["-created_at", "-updated_at", "created_at", "updated_at"]] | None = Field(None, description="Sort results by creation or modification timestamp. Prefix with hyphen (e.g., `-created_at`) for descending order. Specify as a comma-separated array for multiple sort criteria."),
@@ -12131,7 +13600,12 @@ async def list_datasets(
     return _response_data
 
 # Tags: llm_analytics, datasets
-@mcp.tool()
+@mcp.tool(
+    title="Create Dataset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dataset(
     project_id: str = Field(..., description="The unique identifier of the project where the dataset will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the dataset. Must be 400 characters or fewer.", max_length=400),
@@ -12175,7 +13649,13 @@ async def create_dataset(
     return _response_data
 
 # Tags: llm_analytics, datasets
-@mcp.tool()
+@mcp.tool(
+    title="Get Dataset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dataset(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dataset to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -12214,7 +13694,13 @@ async def get_dataset(
     return _response_data
 
 # Tags: llm_analytics, datasets
-@mcp.tool()
+@mcp.tool(
+    title="Update Dataset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dataset(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dataset to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -12259,7 +13745,13 @@ async def update_dataset(
     return _response_data
 
 # Tags: llm_analytics, datasets
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Dataset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dataset_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the dataset to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the dataset. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -12303,7 +13795,13 @@ async def update_dataset_partial(
     return _response_data
 
 # Tags: early_access_features, early_access_feature
-@mcp.tool()
+@mcp.tool(
+    title="List Early Access Features",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_early_access_features(
     project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of the response. Omit to use the API's default page size."),
@@ -12346,7 +13844,12 @@ async def list_early_access_features(
     return _response_data
 
 # Tags: early_access_features, early_access_feature
-@mcp.tool()
+@mcp.tool(
+    title="Create Early Access Feature",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_early_access_feature(
     project_id: str = Field(..., description="The unique identifier of the project where the early access feature will be created. Retrieve available project IDs from the /api/projects/ endpoint."),
     name: str = Field(..., description="The display name of the early access feature, up to 200 characters. This is shown to users in the opt-in interface.", max_length=200),
@@ -12392,7 +13895,13 @@ async def create_early_access_feature(
     return _response_data
 
 # Tags: early_access_features, early_access_feature
-@mcp.tool()
+@mcp.tool(
+    title="Get Early Access Feature",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_early_access_feature(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the early access feature to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the early access feature. You can obtain project IDs by calling the list projects endpoint."),
@@ -12431,7 +13940,13 @@ async def get_early_access_feature(
     return _response_data
 
 # Tags: early_access_features, early_access_feature
-@mcp.tool()
+@mcp.tool(
+    title="Update Early Access Feature",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_early_access_feature(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the early access feature to update."),
     project_id: str = Field(..., description="The ID of the project containing this early access feature. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -12477,7 +13992,13 @@ async def update_early_access_feature(
     return _response_data
 
 # Tags: early_access_features, early_access_feature
-@mcp.tool()
+@mcp.tool(
+    title="Update Early Access Feature",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_early_access_feature_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the early access feature to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this feature. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -12522,7 +14043,13 @@ async def update_early_access_feature_partial(
     return _response_data
 
 # Tags: early_access_features, early_access_feature
-@mcp.tool()
+@mcp.tool(
+    title="Delete Early Access Feature",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_early_access_feature(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the early access feature to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the early access feature. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -12561,7 +14088,13 @@ async def delete_early_access_feature(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="List Elements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_elements(
     project_id: str = Field(..., description="The unique identifier of the project containing the elements. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of elements to return in a single response page. Omit or set to default for standard page size."),
@@ -12604,7 +14137,12 @@ async def list_elements(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="Create Element",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_element(
     project_id: str = Field(..., description="The unique identifier of the project where the element will be created. Retrieve available project IDs by calling the projects list endpoint."),
     text: str | None = Field(None, description="The text content of the element, up to 10,000 characters.", max_length=10000),
@@ -12654,7 +14192,13 @@ async def create_element(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="Get Element",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_element(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the element to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the element. You can obtain project IDs by calling the projects list endpoint."),
@@ -12693,7 +14237,13 @@ async def get_element(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="Update Element",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_element(
     id_: int = Field(..., alias="id", description="The unique identifier of the element to update."),
     project_id: str = Field(..., description="The project ID containing the element. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -12744,7 +14294,13 @@ async def update_element(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="Update Element",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_element_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the element to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the element. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -12795,7 +14351,13 @@ async def update_element_partial(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="Delete Element",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_element(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the element to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the element. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -12834,7 +14396,13 @@ async def delete_element(
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="Get Element Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_element_stats(project_id: str = Field(..., description="The unique identifier of the project for which to retrieve element statistics. You can obtain this ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve statistics for elements in a project, supporting multiple element types including autocapture, rage clicks, and dead clicks. By default returns only autocapture elements unless specific types are requested via query parameters."""
 
@@ -12870,7 +14438,13 @@ async def get_element_stats(project_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: product_analytics, elements
-@mcp.tool()
+@mcp.tool(
+    title="List Element Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_element_values(project_id: str = Field(..., description="The unique identifier of the project. You can obtain the project ID by calling the /api/projects/ endpoint to list available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve all element values for a specific project. This operation returns the values associated with elements within the project."""
 
@@ -12906,7 +14480,13 @@ async def list_element_values(project_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Endpoints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_endpoints(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     is_active: bool | None = Field(None, description="Filter endpoints by their active status. When true, returns only active endpoints; when false, returns only inactive endpoints. Omit to retrieve all endpoints regardless of status."),
@@ -12950,7 +14530,13 @@ async def list_endpoints(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Endpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_endpoint(
     name: str = Field(..., description="The URL-safe identifier for the endpoint. This name must match the endpoint's registered name in the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. Retrieve available project IDs by calling the projects list endpoint."),
@@ -12989,7 +14575,13 @@ async def get_endpoint(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Endpoint",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_endpoint(
     name: str = Field(..., description="URL-safe name of the endpoint to update. Must contain only letters, numbers, hyphens, and underscores."),
     project_id: str = Field(..., description="Project ID containing the endpoint. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -13040,7 +14632,13 @@ async def update_endpoint(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Endpoint",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_endpoint_partial(
     name: str = Field(..., description="The URL-safe identifier for the endpoint being updated. Must be a valid endpoint name within the specified project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -13079,7 +14677,13 @@ async def update_endpoint_partial(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Delete Endpoint",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_endpoint(
     name: str = Field(..., description="The URL-safe name identifier for the endpoint to delete. Must match the exact name of an existing endpoint in the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -13118,7 +14722,12 @@ async def delete_endpoint(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Preview Endpoint Materialization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def preview_endpoint_materialization(
     name: str = Field(..., description="The URL-safe identifier for the endpoint whose materialization transform you want to preview."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. Retrieve available project IDs by calling the list projects endpoint."),
@@ -13161,7 +14770,13 @@ async def preview_endpoint_materialization(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Endpoint Materialization Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_endpoint_materialization_status(
     name: str = Field(..., description="The URL-safe name identifier for the endpoint whose materialization status you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -13200,7 +14815,13 @@ async def get_endpoint_materialization_status(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Run Endpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def run_endpoint(
     name: str = Field(..., description="The URL-safe name identifier for the endpoint to execute."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. Retrieve available project IDs by calling the list projects endpoint."),
@@ -13239,7 +14860,12 @@ async def run_endpoint(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Run Endpoint Materialized",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_endpoint_materialized(
     name: str = Field(..., description="The URL-safe name identifier for the endpoint to execute."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -13291,7 +14917,13 @@ async def run_endpoint_materialized(
     return _response_data
 
 # Tags: endpoints, endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Endpoint Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_endpoint_versions(
     name: str = Field(..., description="The URL-safe identifier for the endpoint whose versions you want to list."),
     project_id: str = Field(..., description="The unique identifier of the project containing the endpoint. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -13336,7 +14968,13 @@ async def list_endpoint_versions(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Releases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_releases_project(
     project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of releases to return in a single response page. Controls pagination size."),
@@ -13379,7 +15017,12 @@ async def list_error_tracking_releases_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Create Error Tracking Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_error_tracking_release_project(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this by calling the /api/projects/ endpoint if you don't have it."),
     hash_id: str = Field(..., description="A unique hash identifier for the release, used to distinguish this release from others in the error tracking system."),
@@ -13424,7 +15067,13 @@ async def create_error_tracking_release_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Release",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_release_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -13463,7 +15112,13 @@ async def get_error_tracking_release_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_release_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -13509,7 +15164,13 @@ async def update_error_tracking_release_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_release_project_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. Find your project ID by calling the /api/projects/ endpoint."),
@@ -13554,7 +15215,13 @@ async def update_error_tracking_release_project_partial(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Release",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_release_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking release to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the error tracking release. You can retrieve project IDs by calling the /api/projects/ endpoint."),
@@ -13593,7 +15260,13 @@ async def delete_error_tracking_release_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Release by Hash",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_release_by_hash_project(
     hash_id: str = Field(..., description="The unique hash identifier of the release to retrieve. This identifier is used to look up the specific release record in the error tracking system."),
     project_id: str = Field(..., description="The unique identifier of the project containing the release. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -13632,7 +15305,13 @@ async def get_error_tracking_release_by_hash_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="List Error Tracking Symbol Sets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_error_tracking_symbol_sets_project(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of symbol sets to return in a single page of results. Use with offset for pagination."),
@@ -13675,7 +15354,13 @@ async def list_error_tracking_symbol_sets_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Get Error Tracking Symbol Set",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_error_tracking_symbol_set_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking symbol set to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the symbol set. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -13714,7 +15399,13 @@ async def get_error_tracking_symbol_set_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Update Error Tracking Symbol Set",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_error_tracking_symbol_set_project_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking symbol set to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the symbol set. Find your project ID by calling the /api/projects/ endpoint."),
@@ -13758,7 +15449,13 @@ async def update_error_tracking_symbol_set_project_partial(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Delete Error Tracking Symbol Set",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_error_tracking_symbol_set_project(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the error tracking symbol set to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the symbol set. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -13797,7 +15494,12 @@ async def delete_error_tracking_symbol_set_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Finish Symbol Set Bulk Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def finish_symbol_set_bulk_upload_project(
     project_id: str = Field(..., description="The unique identifier of the project where the symbol set upload is being finalized. Retrieve this ID from the /api/projects/ endpoint."),
     ref: str = Field(..., description="The reference identifier for the bulk upload session being completed. This reference was provided when the upload was initiated."),
@@ -13839,7 +15541,12 @@ async def finish_symbol_set_bulk_upload_project(
     return _response_data
 
 # Tags: error_tracking, error_tracking
-@mcp.tool()
+@mcp.tool(
+    title="Start Symbol Sets Bulk Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_symbol_sets_bulk_upload_project(
     project_id: str = Field(..., description="The unique identifier of the project where symbol sets will be uploaded. Retrieve this ID from the /api/projects/ endpoint if needed."),
     ref: str = Field(..., description="A reference identifier or version tag for this bulk upload session, used to track and organize the uploaded symbol sets."),
@@ -13881,7 +15588,13 @@ async def start_symbol_sets_bulk_upload_project(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="List Event Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_definitions(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value by calling the projects list endpoint if you don't have it."),
     limit: int | None = Field(None, description="Maximum number of event definitions to return in a single page of results. Omit to use the API's default page size."),
@@ -13924,7 +15637,12 @@ async def list_event_definitions(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Create Event Definition",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_event_definition(
     project_id: str = Field(..., description="The unique identifier of the project where the event definition will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the event definition. Must be 400 characters or fewer.", max_length=400),
@@ -13974,7 +15692,13 @@ async def create_event_definition(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Definition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_definition(
     id_: str = Field(..., alias="id", description="The UUID identifier of the event definition to retrieve."),
     project_id: str = Field(..., description="The UUID of the project containing the event definition. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -14013,7 +15737,13 @@ async def get_event_definition(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Update Event Definition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the event definition to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event definition. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -14064,7 +15794,13 @@ async def update_event_definition(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Update Event Definition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event_definition_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the event definition to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event definition. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -14114,7 +15850,13 @@ async def update_event_definition_partial(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Event Definition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_event_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the event definition to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event definition. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -14153,7 +15895,13 @@ async def delete_event_definition(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Definition by Name",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_definition_by_name(
     project_id: str = Field(..., description="The unique identifier of the project containing the event definition. You can retrieve available project IDs by calling the projects list endpoint."),
     name: str = Field(..., description="The exact name of the event definition to retrieve. The lookup is case-sensitive and requires a complete match."),
@@ -14195,7 +15943,13 @@ async def get_event_definition_by_name(
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="List Event Definitions for Go",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_definitions_golang(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Go event definitions configured for a specific project. This returns the event schema and metadata used for Go-based event tracking within the project."""
 
@@ -14231,7 +15985,13 @@ async def list_event_definitions_golang(project_id: str = Field(..., description
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="List Event Definitions for Python",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_definitions_python(project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list all available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Python event definitions configured for a specific project. This returns the event schemas and metadata used for tracking Python-related events in your project."""
 
@@ -14267,7 +16027,13 @@ async def list_event_definitions_python(project_id: str = Field(..., description
     return _response_data
 
 # Tags: core, event_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Definitions TypeScript",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_definitions_typescript(project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve TypeScript event definitions for a specific project. Returns the event schema and type definitions used for tracking events in TypeScript applications."""
 
@@ -14303,7 +16069,13 @@ async def get_event_definitions_typescript(project_id: str = Field(..., descript
     return _response_data
 
 # Tags: event_schemas
-@mcp.tool()
+@mcp.tool(
+    title="List Event Schemas",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_schemas(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if you don't have it."),
     limit: int | None = Field(None, description="Maximum number of event schemas to return in a single page of results. Defaults to the API's standard page size if not specified."),
@@ -14346,7 +16118,13 @@ async def list_event_schemas(
     return _response_data
 
 # Tags: event_schemas
-@mcp.tool()
+@mcp.tool(
+    title="Update Event Schema",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event_schema(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the event schema to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event schema. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -14390,7 +16168,13 @@ async def update_event_schema(
     return _response_data
 
 # Tags: event_schemas
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Event Schema",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event_schema_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the event schema to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event schema. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -14433,7 +16217,13 @@ async def update_event_schema_partial(
     return _response_data
 
 # Tags: event_schemas
-@mcp.tool()
+@mcp.tool(
+    title="Delete Event Schema",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_event_schema(
     id_: str = Field(..., alias="id", description="The unique identifier of the event schema to delete, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event schema. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -14472,7 +16262,13 @@ async def delete_event_schema(
     return _response_data
 
 # Tags: events
-@mcp.tool()
+@mcp.tool(
+    title="Get Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the event. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -14511,7 +16307,13 @@ async def get_event(
     return _response_data
 
 # Tags: experiment_holdouts
-@mcp.tool()
+@mcp.tool(
+    title="List Experiment Holdouts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_experiment_holdouts(
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment holdouts. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of holdout records to return in a single page of results. Use with offset for pagination."),
@@ -14554,7 +16356,13 @@ async def list_experiment_holdouts(
     return _response_data
 
 # Tags: experiment_holdouts
-@mcp.tool()
+@mcp.tool(
+    title="Get Experiment Holdout",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_experiment_holdout(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment holdout to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment holdout. You can obtain project IDs by calling the projects list endpoint."),
@@ -14593,7 +16401,13 @@ async def get_experiment_holdout(
     return _response_data
 
 # Tags: experiment_holdouts
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment Holdout",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experiment_holdout(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment holdout to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment holdout. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -14638,7 +16452,13 @@ async def update_experiment_holdout(
     return _response_data
 
 # Tags: experiment_holdouts
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment Holdout",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experiment_holdout_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment holdout to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment holdout. Retrieve available project IDs by calling /api/projects/."),
@@ -14682,7 +16502,13 @@ async def update_experiment_holdout_partial(
     return _response_data
 
 # Tags: experiment_holdouts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Experiment Holdout",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_experiment_holdout(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment holdout to delete. This is a positive integer that uniquely identifies the holdout within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment holdout. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -14721,7 +16547,13 @@ async def delete_experiment_holdout(
     return _response_data
 
 # Tags: experiment_saved_metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Experiment Saved Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_experiment_saved_metrics(
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment metrics. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit or set to default for standard pagination."),
@@ -14764,7 +16596,12 @@ async def list_experiment_saved_metrics(
     return _response_data
 
 # Tags: experiment_saved_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Create Experiment Saved Metric",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_experiment_saved_metric(
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A descriptive name for the saved metric. Must not exceed 400 characters.", max_length=400),
@@ -14809,7 +16646,13 @@ async def create_experiment_saved_metric(
     return _response_data
 
 # Tags: experiment_saved_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Experiment Saved Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_experiment_saved_metric(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment saved metric to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment saved metric. You can obtain project IDs by calling the list projects endpoint."),
@@ -14848,7 +16691,13 @@ async def get_experiment_saved_metric(
     return _response_data
 
 # Tags: experiment_saved_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment Saved Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experiment_saved_metric(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment saved metric to update."),
     project_id: str = Field(..., description="The project ID containing the experiment. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -14894,7 +16743,13 @@ async def update_experiment_saved_metric(
     return _response_data
 
 # Tags: experiment_saved_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment Saved Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experiment_saved_metric_partial(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment saved metric to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment saved metric. Retrieve available project IDs by calling /api/projects/."),
@@ -14939,7 +16794,13 @@ async def update_experiment_saved_metric_partial(
     return _response_data
 
 # Tags: experiment_saved_metrics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Experiment Saved Metric",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_experiment_saved_metric(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment saved metric to delete. This is a positive integer that uniquely identifies the metric within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment saved metric. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -14978,7 +16839,13 @@ async def delete_experiment_saved_metric(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="List Experiments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_experiments(
     project_id: str = Field(..., description="The unique identifier of the project containing the experiments. You can retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of experiment records to return in a single page of results. Use with offset for pagination."),
@@ -15021,7 +16888,12 @@ async def list_experiments(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Create Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_experiment(
     project_id: str = Field(..., description="The unique identifier of the project where the experiment will be created. Retrieve project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the experiment. Must not exceed 400 characters.", max_length=400),
@@ -15079,7 +16951,13 @@ async def create_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Get Experiment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_experiment(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -15118,7 +16996,13 @@ async def get_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experiment(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -15177,7 +17061,12 @@ async def update_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_experiment_partial(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -15235,7 +17124,13 @@ async def update_experiment_partial(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Mark Experiment Deleted",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_experiment_deleted(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to mark as deleted."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -15281,7 +17176,13 @@ async def mark_experiment_deleted(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Archive Experiment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_experiment(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to archive."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. You can retrieve project IDs by calling the /api/projects/ endpoint."),
@@ -15320,7 +17221,12 @@ async def archive_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Create Exposure Cohort for Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_exposure_cohort_for_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -15379,7 +17285,12 @@ async def create_exposure_cohort_for_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment to duplicate. This is a positive integer value."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -15438,7 +17349,13 @@ async def duplicate_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="End Experiment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def end_experiment(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to end."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Find your project ID by calling /api/projects/."),
@@ -15482,7 +17399,12 @@ async def end_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Launch Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def launch_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment to launch. Must reference an experiment in draft state within the specified project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Use the /api/projects/ endpoint to retrieve available project IDs."),
@@ -15521,7 +17443,13 @@ async def launch_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Pause Experiment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def pause_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment to pause. Must be a positive integer."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. Can be retrieved from the /api/projects/ endpoint."),
@@ -15560,7 +17488,13 @@ async def pause_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Reset Experiment to Draft",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_experiment_to_draft(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to reset."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -15599,7 +17533,12 @@ async def reset_experiment_to_draft(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Resume Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resume_experiment(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the experiment to resume."),
     project_id: str = Field(..., description="The unique identifier of the project containing the experiment. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -15638,7 +17577,13 @@ async def resume_experiment(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Ship Experiment Variant",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def ship_experiment_variant(
     id_: int = Field(..., alias="id", description="The unique identifier of the experiment to ship. Must be an integer."),
     project_id: str = Field(..., description="The ID of the project containing the experiment. Find your project ID by calling /api/projects/."),
@@ -15683,7 +17628,13 @@ async def ship_experiment_variant(
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="List Eligible Feature Flags for Experiments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_eligible_feature_flags_for_experiments(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of feature flags that are eligible for use in experiments. Eligible flags must be multivariate with at least 2 variants and have 'control' as the first variant key."""
 
@@ -15719,7 +17670,13 @@ async def list_eligible_feature_flags_for_experiments(project_id: str = Field(..
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="List Experiments Requiring Flag Implementation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_experiments_requiring_flag_implementation(project_id: str = Field(..., description="The unique identifier of the project containing the experiments. You can obtain the project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of experiments within a project that require flag implementation. This operation helps identify experiments that need feature flag setup before they can be deployed."""
 
@@ -15755,7 +17712,13 @@ async def list_experiments_requiring_flag_implementation(project_id: str = Field
     return _response_data
 
 # Tags: experiments, experiments
-@mcp.tool()
+@mcp.tool(
+    title="Get Experiments Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_experiments_stats(project_id: str = Field(..., description="The unique identifier of the project for which to retrieve experiment statistics. You can obtain the project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated statistics and metrics for all experiments within a specific project. This provides an overview of experiment performance and status across the project."""
 
@@ -15791,7 +17754,13 @@ async def get_experiments_stats(project_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: core, exports
-@mcp.tool()
+@mcp.tool(
+    title="List Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_exports(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of export records to return in a single response page. Defaults to the API's standard page size if not specified."),
@@ -15834,7 +17803,12 @@ async def list_exports(
     return _response_data
 
 # Tags: core, exports
-@mcp.tool()
+@mcp.tool(
+    title="Create Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_export(
     project_id: str = Field(..., description="The unique identifier of the project containing the dashboard or insight to export. Retrieve project IDs by calling the /api/projects/ endpoint."),
     export_format: Literal["image/png", "application/pdf", "text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "video/webm", "video/mp4", "image/gif", "application/json"] = Field(..., description="The desired output format for the export. Supported formats include PNG and GIF images, PDF documents, CSV and Excel spreadsheets, MP4 and WebM videos, and JSON data."),
@@ -15879,7 +17853,13 @@ async def create_export(
     return _response_data
 
 # Tags: core, exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_export(
     id_: int = Field(..., alias="id", description="The unique identifier of the exported asset you want to retrieve. This is a positive integer assigned when the export was created."),
     project_id: str = Field(..., description="The unique identifier of the project containing the export. You can retrieve your project IDs by calling the projects list endpoint."),
@@ -15918,7 +17898,13 @@ async def get_export(
     return _response_data
 
 # Tags: core, exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Export Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_export_content(
     id_: int = Field(..., alias="id", description="The unique identifier of the exported asset to retrieve. This is a positive integer assigned when the export was created."),
     project_id: str = Field(..., description="The unique identifier of the project containing the export. You can retrieve available project IDs by calling the projects list endpoint."),
@@ -15957,7 +17943,13 @@ async def get_export_content(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="List External Data Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_data_sources(
     project_id: str = Field(..., description="The unique identifier of the project containing the external data sources. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit or set to default for standard pagination."),
@@ -16000,7 +17992,13 @@ async def list_external_data_sources(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Get External Data Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. Obtain this by calling the projects list endpoint if needed."),
@@ -16039,7 +18037,13 @@ async def get_external_data_source(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Update External Data Source",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this external data source. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -16086,7 +18090,13 @@ async def update_external_data_source(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update External Data Source",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_data_source_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -16131,7 +18141,13 @@ async def update_external_data_source_partial(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Delete External Data Source",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_external_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -16170,7 +18186,12 @@ async def delete_external_data_source(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Create Webhook for External Data Source",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook_for_external_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source for which the webhook is being created."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. Retrieve this from the /api/projects/ endpoint if needed."),
@@ -16217,7 +18238,12 @@ async def create_webhook_for_external_data_source(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Create External Data Source Delete Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_data_source_delete_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source for which you want to create the delete webhook."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -16264,7 +18290,13 @@ async def create_external_data_source_delete_webhook(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="List External Data Source Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_data_source_jobs(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source whose jobs you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -16303,7 +18335,12 @@ async def list_external_data_source_jobs(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Refresh External Data Source Schemas",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_external_data_source_schemas(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to refresh schemas for."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. Retrieve this from the /api/projects/ endpoint if needed."),
@@ -16350,7 +18387,12 @@ async def refresh_external_data_source_schemas(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Reload External Data Source",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reload_external_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to reload."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -16397,7 +18439,13 @@ async def reload_external_data_source(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Update External Data Source Revenue Analytics Config",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_data_source_revenue_analytics_config(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -16442,7 +18490,12 @@ async def update_external_data_source_revenue_analytics_config(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Create External Data Source Webhook Inputs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_data_source_webhook_inputs(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source to configure."),
     project_id: str = Field(..., description="The project ID containing the external data source. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -16489,7 +18542,13 @@ async def create_external_data_source_webhook_inputs(
     return _response_data
 
 # Tags: data_warehouse, external_data_sources
-@mcp.tool()
+@mcp.tool(
+    title="Get External Data Source Webhook Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_data_source_webhook_info(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the external data source whose webhook information you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the external data source. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -16528,7 +18587,13 @@ async def get_external_data_source_webhook_info(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Feature Flags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feature_flags(
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flags. Obtain this ID by calling the /api/projects/ endpoint."),
     active: Literal["STALE", "false", "true"] | None = Field(None, description="Filter by feature flag status: 'true' for active flags, 'false' for inactive flags, or 'STALE' for flags that haven't been evaluated recently."),
@@ -16577,7 +18642,12 @@ async def list_feature_flags(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Create Feature Flag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_feature_flag(
     project_id: str = Field(..., description="The unique identifier of the project where the feature flag will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     key: str | None = Field(None, description="A unique identifier for the feature flag used to reference it in your application code and API calls."),
@@ -16622,7 +18692,13 @@ async def create_feature_flag(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag(
     id_: int = Field(..., alias="id", description="The unique identifier of the feature flag to retrieve. This is a positive integer assigned by the system."),
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flag. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -16661,7 +18737,13 @@ async def get_feature_flag(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Update Feature Flag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_feature_flag(
     id_: int = Field(..., alias="id", description="The unique identifier of the feature flag to update."),
     project_id: str = Field(..., description="The project ID containing the feature flag. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -16713,7 +18795,13 @@ async def update_feature_flag(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Update Feature Flag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_feature_flag_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the feature flag to update."),
     project_id: str = Field(..., description="The project ID containing the feature flag. Find your project ID by calling the /api/projects/ endpoint."),
@@ -16759,7 +18847,13 @@ async def update_feature_flag_partial(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_activity(
     id_: int = Field(..., alias="id", description="The unique identifier of the feature flag whose activity you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flag. You can obtain this by calling the /api/projects/ endpoint."),
@@ -16803,7 +18897,13 @@ async def get_feature_flag_activity(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Dependent Flags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependent_flags(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the feature flag to check for dependents."),
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flag. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -16842,7 +18942,13 @@ async def list_dependent_flags(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag Remote Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_remote_config(
     id_: int = Field(..., alias="id", description="The unique identifier of the feature flag. This is a positive integer that uniquely identifies the feature flag within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flag. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -16881,7 +18987,13 @@ async def get_feature_flag_remote_config(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_status(
     id_: int = Field(..., alias="id", description="The unique identifier of the feature flag you want to retrieve status for. This is a positive integer assigned by the system."),
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flag. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -16920,7 +19032,13 @@ async def get_feature_flag_status(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Feature Flags Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feature_flags_activity(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of activity records to return per page. Must be at least 1; defaults to 10 if not specified.", ge=1),
@@ -16963,7 +19081,13 @@ async def list_feature_flags_activity(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag Evaluation Reasons",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_evaluation_reasons(
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flags. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     distinct_id: str = Field(..., description="The unique identifier for the user whose feature flag evaluation reasons you want to retrieve. Must be at least 1 character long.", min_length=1),
@@ -17006,7 +19130,13 @@ async def get_feature_flag_evaluation_reasons(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flags for Local Evaluation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flags_for_local_evaluation(
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flags. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     send_cohorts: bool | None = Field(None, description="When enabled, includes cohort definitions in the response to support flag rules that reference cohorts. Defaults to false if not specified."),
@@ -17048,7 +19178,13 @@ async def get_feature_flags_for_local_evaluation(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Feature Flag IDs by Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feature_flag_ids_by_filters(project_id: str = Field(..., description="The unique identifier of the project containing the feature flags. You can retrieve your project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve IDs of all feature flags in a project that match the current filter criteria. Only returns IDs for flags the user has permission to edit, using the same filtering logic as the standard feature flags list endpoint."""
 
@@ -17084,7 +19220,13 @@ async def list_feature_flag_ids_by_filters(project_id: str = Field(..., descript
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="List Feature Flags for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feature_flags_for_user(
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flags. Obtain this by calling the /api/projects/ endpoint if you don't have it."),
     groups: str | None = Field(None, description="Optional groups for feature flag evaluation, provided as a JSON object string. Defaults to an empty object if not specified."),
@@ -17126,7 +19268,12 @@ async def list_feature_flags_for_user(
     return _response_data
 
 # Tags: feature_flags, feature_flags
-@mcp.tool()
+@mcp.tool(
+    title="Evaluate Feature Flag User Blast Radius",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def evaluate_feature_flag_user_blast_radius(
     project_id: str = Field(..., description="The unique identifier of the project containing the feature flag. Retrieve this ID from the /api/projects/ endpoint if unknown."),
     condition: dict[str, Any] = Field(..., description="The release condition logic to evaluate against the user. This defines the targeting rules and rollout percentage that determine flag eligibility."),
@@ -17169,7 +19316,13 @@ async def evaluate_feature_flag_user_blast_radius(
     return _response_data
 
 # Tags: file_system_shortcut
-@mcp.tool()
+@mcp.tool(
+    title="List File System Shortcuts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_system_shortcuts(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of shortcuts to return in a single response page. Omit to use the API's default page size."),
@@ -17212,7 +19365,12 @@ async def list_file_system_shortcuts(
     return _response_data
 
 # Tags: file_system_shortcut
-@mcp.tool()
+@mcp.tool(
+    title="Create File System Shortcut",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file_system_shortcut(
     project_id: str = Field(..., description="The unique identifier of the project where the shortcut will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     path: str = Field(..., description="The file system path that the shortcut points to. This is the target location the shortcut will reference."),
@@ -17256,7 +19414,13 @@ async def create_file_system_shortcut(
     return _response_data
 
 # Tags: file_system_shortcut
-@mcp.tool()
+@mcp.tool(
+    title="Get File System Shortcut",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_system_shortcut(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file system shortcut to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the file system shortcut. You can obtain the project ID by calling the list projects endpoint."),
@@ -17295,7 +19459,13 @@ async def get_file_system_shortcut(
     return _response_data
 
 # Tags: file_system_shortcut
-@mcp.tool()
+@mcp.tool(
+    title="Update File System Shortcut",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_system_shortcut(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file system shortcut to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the file system shortcut. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -17340,7 +19510,13 @@ async def update_file_system_shortcut(
     return _response_data
 
 # Tags: file_system_shortcut
-@mcp.tool()
+@mcp.tool(
+    title="Update File System Shortcut",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_system_shortcut_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file system shortcut to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the file system shortcut. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -17385,7 +19561,13 @@ async def update_file_system_shortcut_partial(
     return _response_data
 
 # Tags: file_system_shortcut
-@mcp.tool()
+@mcp.tool(
+    title="Delete File System Shortcut",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_system_shortcut(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file system shortcut to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the file system shortcut. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -17424,7 +19606,13 @@ async def delete_file_system_shortcut(
     return _response_data
 
 # Tags: core, groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups by Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups_by_type(
     project_id: str = Field(..., description="The unique identifier of the project containing the groups. Retrieve available project IDs by calling the projects endpoint."),
     group_type_index: int = Field(..., description="The numeric index identifying which group type to list. Must correspond to a valid group type for the project; call the groups_types endpoint to see all available options."),
@@ -17467,7 +19655,12 @@ async def list_groups_by_type(
     return _response_data
 
 # Tags: core, groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(
     project_id: str = Field(..., description="The unique identifier of the project where the group will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     group_type_index: int = Field(..., description="The type index that determines the group's classification or behavior. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
@@ -17511,7 +19704,13 @@ async def create_group(
     return _response_data
 
 # Tags: core, groups
-@mcp.tool()
+@mcp.tool(
+    title="List User Group Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_group_activity(
     project_id: str = Field(..., description="The unique identifier of the project. Obtain this by calling the /api/projects/ endpoint to list available projects."),
     group_type_index: int = Field(..., description="The numeric index identifying the group type to filter activity results by. This determines which category of groups to retrieve activity for."),
@@ -17554,7 +19753,13 @@ async def list_user_group_activity(
     return _response_data
 
 # Tags: core, groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group by Key and Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_by_key_and_type(
     project_id: str = Field(..., description="The unique identifier of the project containing the group. Retrieve available project IDs by calling the projects list endpoint."),
     group_key: str = Field(..., description="The unique key that identifies the group within the project."),
@@ -17597,7 +19802,13 @@ async def get_group_by_key_and_type(
     return _response_data
 
 # Tags: core, groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Property Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_property_definitions(project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve all property definitions for groups within a specific project. Property definitions define the custom fields and attributes available for group objects."""
 
@@ -17633,7 +19844,13 @@ async def list_group_property_definitions(project_id: str = Field(..., descripti
     return _response_data
 
 # Tags: core, groups
-@mcp.tool()
+@mcp.tool(
+    title="List Related Groups for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_related_groups_for_user(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     group_type_index: int = Field(..., description="The numeric index identifying the group type to filter results. Specify which category or classification of groups to retrieve."),
@@ -17676,7 +19893,13 @@ async def list_related_groups_for_user(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="List Group Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_types(project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list all available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve all available group types for a specific project. Group types define the categories or classifications that can be applied to groups within the project."""
 
@@ -17712,7 +19935,13 @@ async def list_group_types(project_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group_type(
     group_type_index: int = Field(..., description="The index identifier of the group type to delete. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
     project_id: str = Field(..., description="The unique identifier of the project containing the group type. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -17751,7 +19980,13 @@ async def delete_group_type(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="List Metrics for Group Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metrics_for_group_type(
     group_type_index: int = Field(..., description="The index identifier for the group type within the project. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
     project_id: str = Field(..., description="The unique identifier of the project containing the group type. Obtain this ID by calling the /api/projects/ endpoint."),
@@ -17795,7 +20030,12 @@ async def list_metrics_for_group_type(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="Create Group Type Metric",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group_type_metric(
     group_type_index: int = Field(..., description="The index identifier of the group type within the project. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
     project_id: str = Field(..., description="The unique identifier of the project containing the group type. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -17841,7 +20081,13 @@ async def create_group_type_metric(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Type Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_type_metric(
     group_type_index: int = Field(..., description="The index identifying the group type within the project. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group usage metric to retrieve."),
@@ -17881,7 +20127,13 @@ async def get_group_type_metric(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Type Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_type_metric(
     group_type_index: int = Field(..., description="The index position of the group type within the project's group type collection.", ge=-2147483648, le=2147483647),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the metric to update."),
@@ -17928,7 +20180,13 @@ async def update_group_type_metric(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Type Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_type_metric_partial(
     group_type_index: int = Field(..., description="The index identifying the group type within the project. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group usage metric to update."),
@@ -17974,7 +20232,13 @@ async def update_group_type_metric_partial(
     return _response_data
 
 # Tags: groups_types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group Type Metric",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group_type_metric(
     group_type_index: int = Field(..., description="The index identifier for the group type within the project. Must be a valid 32-bit integer.", ge=-2147483648, le=2147483647),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group usage metric to delete."),
@@ -18014,7 +20278,13 @@ async def delete_group_type_metric(
     return _response_data
 
 # Tags: heatmap_screenshots
-@mcp.tool()
+@mcp.tool(
+    title="Get Heatmap Screenshot Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_heatmap_screenshot_content(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the heatmap screenshot whose content you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the heatmap screenshot. You can obtain project IDs by calling the /api/projects/ endpoint."),
@@ -18053,7 +20323,13 @@ async def get_heatmap_screenshot_content(
     return _response_data
 
 # Tags: heatmaps
-@mcp.tool()
+@mcp.tool(
+    title="List Heatmaps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_heatmaps(
     project_id: str = Field(..., description="The unique identifier of the project containing the heatmaps. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of heatmap records to return in a single response page."),
@@ -18096,7 +20372,13 @@ async def list_heatmaps(
     return _response_data
 
 # Tags: workflows, hog_flows
-@mcp.tool()
+@mcp.tool(
+    title="List Hog Flows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hog_flows(
     project_id: str = Field(..., description="The unique identifier of the project containing the HOG flows. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of HOG flows to return in a single response page. Omit or set to default for standard page size."),
@@ -18139,7 +20421,12 @@ async def list_hog_flows(
     return _response_data
 
 # Tags: workflows, hog_flows
-@mcp.tool()
+@mcp.tool(
+    title="Create Hog Flow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_hog_flow(
     project_id: str = Field(..., description="The unique identifier of the project where the flow will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     actions: list[_models.HogFlowAction] = Field(..., description="Required array of actions to execute within the flow. Actions are performed in sequence when flow conditions are met."),
@@ -18188,7 +20475,13 @@ async def create_hog_flow(
     return _response_data
 
 # Tags: workflows, hog_flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Hog Flow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hog_flow(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog flow to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the Hog flow. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -18227,7 +20520,13 @@ async def get_hog_flow(
     return _response_data
 
 # Tags: workflows, hog_flows
-@mcp.tool()
+@mcp.tool(
+    title="Update Hog Flow",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_hog_flow(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog flow to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this Hog flow. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -18277,7 +20576,12 @@ async def update_hog_flow(
     return _response_data
 
 # Tags: workflows, hog_flows
-@mcp.tool()
+@mcp.tool(
+    title="Update Hog Flow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_hog_flow_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog flow to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the Hog flow. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -18327,7 +20631,13 @@ async def update_hog_flow_partial(
     return _response_data
 
 # Tags: workflows, hog_flows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Hog Flow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_hog_flow(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog flow to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the Hog flow. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -18366,7 +20676,13 @@ async def delete_hog_flow(
     return _response_data
 
 # Tags: hog_function_templates, cdp, hog_function_templates
-@mcp.tool()
+@mcp.tool(
+    title="List Hog Function Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hog_function_templates(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this value from the /api/projects/ endpoint if needed."),
     limit: int | None = Field(None, description="Maximum number of templates to return per page. Controls pagination size for the result set."),
@@ -18410,7 +20726,13 @@ async def list_hog_function_templates(
     return _response_data
 
 # Tags: hog_function_templates, cdp, hog_function_templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Hog Function Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hog_function_template(
     project_id: str = Field(..., description="The unique identifier of the project containing the template. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     template_id: str = Field(..., description="The unique identifier of the Hog function template to retrieve."),
@@ -18449,7 +20771,13 @@ async def get_hog_function_template(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="List Hog Functions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hog_functions(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     enabled: bool | None = Field(None, description="Filter results to return only enabled or disabled Hog functions. Omit to return all functions regardless of status."),
@@ -18493,7 +20821,12 @@ async def list_hog_functions(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="Create Hog Function",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_hog_function(
     project_id: str = Field(..., description="The unique identifier of the project where this function will be created. Retrieve available project IDs from the /api/projects/ endpoint."),
     description: str | None = Field(None, description="A human-readable explanation of the function's purpose and behavior."),
@@ -18544,7 +20877,13 @@ async def create_hog_function(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="Get Hog Function",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_hog_function(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog function to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the Hog function. You can retrieve your project ID by calling the projects list endpoint."),
@@ -18583,7 +20922,13 @@ async def get_hog_function(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="Update Hog Function",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_hog_function(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog function to update."),
     project_id: str = Field(..., description="The project ID containing this Hog function. Find your project ID by calling the projects list endpoint."),
@@ -18635,7 +20980,13 @@ async def update_hog_function(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="Update Hog Function",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_hog_function_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog function to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this Hog function. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -18687,7 +21038,12 @@ async def update_hog_function_partial(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="Test Hog Function Invocation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def test_hog_function_invocation(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the Hog function to test."),
     project_id: str = Field(..., description="The unique identifier of the project containing the Hog function. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -18734,7 +21090,13 @@ async def test_hog_function_invocation(
     return _response_data
 
 # Tags: hog_functions, cdp, hog_functions
-@mcp.tool()
+@mcp.tool(
+    title="Update Hog Functions Execution Order",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_hog_functions_execution_order(
     project_id: str = Field(..., description="The unique identifier of the project containing the HogFunctions to reorder. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     orders: dict[str, int] | None = Field(None, description="A mapping of HogFunction UUIDs to their desired execution_order values. Each entry specifies which position a function should occupy in the execution sequence."),
@@ -18776,7 +21138,13 @@ async def update_hog_functions_execution_order(
     return _response_data
 
 # Tags: insight_variables
-@mcp.tool()
+@mcp.tool(
+    title="List Insight Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_insight_variables(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve your project ID by calling the /api/projects/ endpoint if you don't have it available."),
     page: int | None = Field(None, description="The page number to retrieve from the paginated result set. Omit to get the first page."),
@@ -18818,7 +21186,12 @@ async def list_insight_variables(
     return _response_data
 
 # Tags: insight_variables
-@mcp.tool()
+@mcp.tool(
+    title="Create Insight Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_insight_variable(
     project_id: str = Field(..., description="The unique identifier of the project where the insight variable will be created. Retrieve project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the insight variable. Must be a string with a maximum length of 400 characters.", max_length=400),
@@ -18863,7 +21236,13 @@ async def create_insight_variable(
     return _response_data
 
 # Tags: insight_variables
-@mcp.tool()
+@mcp.tool(
+    title="Get Insight Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insight_variable(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the insight variable to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight variable. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -18902,7 +21281,13 @@ async def get_insight_variable(
     return _response_data
 
 # Tags: insight_variables
-@mcp.tool()
+@mcp.tool(
+    title="Update Insight Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_insight_variable(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the insight variable to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight variable. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -18948,7 +21333,13 @@ async def update_insight_variable(
     return _response_data
 
 # Tags: insight_variables
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Insight Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_insight_variable_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the insight variable to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight variable. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -18992,7 +21383,13 @@ async def update_insight_variable_partial(
     return _response_data
 
 # Tags: insight_variables
-@mcp.tool()
+@mcp.tool(
+    title="Delete Insight Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_insight_variable(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the insight variable to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight variable. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19031,7 +21428,13 @@ async def delete_insight_variable(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="List Insights",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_insights(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     basic: bool | None = Field(None, description="When enabled, returns only basic insight metadata without computed results, providing faster response times."),
@@ -19077,7 +21480,12 @@ async def list_insights(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Create Insight",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_insight(
     project_id: str = Field(..., description="The unique identifier of the project where the insight will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     query: _models.InsightVizNode | _models.DataTableNode | _models.DataVisualizationNode | _models.HogQuery | None = Field(None, description="The query definition or filter criteria for the insight. Specify the data or conditions this insight should analyze or display."),
@@ -19123,7 +21531,13 @@ async def create_insight(
     return _response_data
 
 # Tags: core, insights
-@mcp.tool()
+@mcp.tool(
+    title="List Insight Sharing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_insight_sharing(
     insight_id: int = Field(..., description="The unique identifier of the insight whose sharing settings you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19162,7 +21576,12 @@ async def list_insight_sharing(
     return _response_data
 
 # Tags: core, insights
-@mcp.tool()
+@mcp.tool(
+    title="Create Insight Sharing Password",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_insight_sharing_password(
     insight_id: int = Field(..., description="The unique identifier of the insight for which you want to create a sharing password."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -19207,7 +21626,13 @@ async def create_insight_sharing_password(
     return _response_data
 
 # Tags: core, insights
-@mcp.tool()
+@mcp.tool(
+    title="Delete Insight Sharing Password",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_insight_sharing_password(
     insight_id: int = Field(..., description="The unique identifier of the insight whose sharing password you want to delete."),
     password_id: str = Field(..., description="The unique identifier of the password to remove from the insight's sharing configuration."),
@@ -19247,7 +21672,12 @@ async def delete_insight_sharing_password(
     return _response_data
 
 # Tags: core, insights
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Insight Sharing",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_insight_sharing(
     insight_id: int = Field(..., description="The unique identifier of the insight whose sharing settings you want to refresh or update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19292,7 +21722,13 @@ async def refresh_insight_sharing(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="List Insight Thresholds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_insight_thresholds(
     insight_id: int = Field(..., description="The unique identifier of the insight for which to retrieve thresholds."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19336,7 +21772,13 @@ async def list_insight_thresholds(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Insight Threshold",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insight_threshold(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the threshold to retrieve."),
     insight_id: int = Field(..., description="The numeric identifier of the insight that contains the threshold."),
@@ -19376,7 +21818,13 @@ async def get_insight_threshold(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Insight",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insight(
     id_: int = Field(..., alias="id", description="The unique identifier of the insight to retrieve."),
     project_id: str = Field(..., description="The project ID containing the insight. Find your project ID by calling the /api/projects/ endpoint."),
@@ -19420,7 +21868,13 @@ async def get_insight(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Update Insight",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_insight(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the insight to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. Find your project ID by calling /api/projects/."),
@@ -19467,7 +21921,13 @@ async def update_insight(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Update Insight",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_insight_partial(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the insight to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. Find your project ID by calling /api/projects/."),
@@ -19514,7 +21974,13 @@ async def update_insight_partial(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Mark Insight Deleted",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_insight_deleted(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the insight to be marked as deleted."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19560,7 +22026,13 @@ async def mark_insight_deleted(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Insight Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insight_activity(
     id_: int = Field(..., alias="id", description="The unique identifier of the insight whose activity you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19599,7 +22071,13 @@ async def get_insight_activity(
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Activity Insights",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_activity_insights(project_id: str = Field(..., description="The unique identifier of the project for which to retrieve activity insights. You can obtain the project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve activity insights for a specific project. Returns cached coalesced response data after verifying the request is authorized through authentication, permissions, and throttling checks."""
 
@@ -19635,7 +22113,12 @@ async def get_project_activity_insights(project_id: str = Field(..., description
     return _response_data
 
 # Tags: insights
-@mcp.tool()
+@mcp.tool(
+    title="Generate Insight Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_insight_metadata(
     project_id: str = Field(..., description="The unique identifier of the project containing the insight. Retrieve available project IDs from the /api/projects/ endpoint."),
     query: _models.InsightVizNode | _models.DataTableNode | _models.DataVisualizationNode | _models.HogQuery | None = Field(None, description="The query configuration object that defines the insight's data source and filtering criteria. Used by the AI to generate contextually relevant metadata."),
@@ -19681,7 +22164,13 @@ async def generate_insight_metadata(
     return _response_data
 
 # Tags: core, integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_integrations(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of integration records to return in a single response page. Defaults to API's standard page size if not specified."),
@@ -19724,7 +22213,13 @@ async def list_integrations(
     return _response_data
 
 # Tags: core, integrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_integration(
     id_: int = Field(..., alias="id", description="The unique identifier of the integration to retrieve. This is a positive integer assigned when the integration was created."),
     project_id: str = Field(..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the projects list endpoint."),
@@ -19763,7 +22258,13 @@ async def get_integration(
     return _response_data
 
 # Tags: core, integrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_integration(
     id_: int = Field(..., alias="id", description="The unique identifier of the integration to delete. This must be a positive integer value."),
     project_id: str = Field(..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19802,7 +22303,13 @@ async def delete_integration(
     return _response_data
 
 # Tags: core, integrations
-@mcp.tool()
+@mcp.tool(
+    title="List GitHub Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_github_branches(
     id_: int = Field(..., alias="id", description="The unique identifier of the GitHub integration within your project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the GitHub integration. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19845,7 +22352,13 @@ async def list_github_branches(
     return _response_data
 
 # Tags: core, integrations
-@mcp.tool()
+@mcp.tool(
+    title="List GitHub Repos for Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_github_repos_for_integration(
     id_: int = Field(..., alias="id", description="The unique identifier of the GitHub integration within the project. This must be a positive integer value."),
     project_id: str = Field(..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -19884,7 +22397,13 @@ async def list_github_repos_for_integration(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Live Debugger Breakpoints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_live_debugger_breakpoints(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     filename: str | None = Field(None, description="Filter breakpoints by source filename to narrow results to a specific file."),
@@ -19929,7 +22448,12 @@ async def list_live_debugger_breakpoints(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="Create Live Debugger Breakpoint",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_live_debugger_breakpoint(
     project_id: str = Field(..., description="The unique identifier of the project where you want to create the breakpoint. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     filename: str = Field(..., description="The file path or name where the breakpoint will be set."),
@@ -19975,7 +22499,13 @@ async def create_live_debugger_breakpoint(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Live Debugger Breakpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_live_debugger_breakpoint(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the live debugger breakpoint to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the breakpoint. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -20014,7 +22544,13 @@ async def get_live_debugger_breakpoint(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Live Debugger Breakpoint",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_live_debugger_breakpoint(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the breakpoint to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the breakpoint. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -20061,7 +22597,12 @@ async def update_live_debugger_breakpoint(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Live Debugger Breakpoint",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_live_debugger_breakpoint_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the breakpoint to update."),
     project_id: str = Field(..., description="The ID of the project containing the breakpoint. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -20108,7 +22649,13 @@ async def update_live_debugger_breakpoint_partial(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="Delete Live Debugger Breakpoint",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_live_debugger_breakpoint(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the breakpoint to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the breakpoint. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -20147,7 +22694,13 @@ async def delete_live_debugger_breakpoint(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Active Breakpoints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_active_breakpoints(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     enabled: bool | None = Field(None, description="When set to true, only return breakpoints that are currently enabled. Omit to return all active breakpoints regardless of enabled status."),
@@ -20191,7 +22744,13 @@ async def list_active_breakpoints(
     return _response_data
 
 # Tags: live_debugger_breakpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Breakpoint Hits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_breakpoint_hits(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     breakpoint_ids: str | None = Field(None, description="Filter results to only include hits from specific breakpoints by providing one or more breakpoint IDs. Repeat this parameter for each breakpoint ID you want to include."),
@@ -20235,7 +22794,13 @@ async def list_breakpoint_hits(
     return _response_data
 
 # Tags: logs
-@mcp.tool()
+@mcp.tool(
+    title="List Logs Attributes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_logs_attributes(project_id: str = Field(..., description="The unique identifier of the project. You can obtain the project ID by calling the /api/projects/ endpoint to list all accessible projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve all available attributes for logs within a specific project. This operation returns the metadata about what attributes can be used to filter, search, or analyze logs in the project."""
 
@@ -20271,7 +22836,13 @@ async def list_logs_attributes(project_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: logs
-@mcp.tool()
+@mcp.tool(
+    title="Check Project Has Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_project_has_logs(project_id: str = Field(..., description="The unique identifier of the project to check for logs. You can retrieve available project IDs by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Check whether a project contains any logs. This operation determines if the specified project has log data available."""
 
@@ -20307,7 +22878,13 @@ async def check_project_has_logs(project_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="List Notebooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notebooks(
     project_id: str = Field(..., description="The unique identifier of the project containing the notebooks. Obtain this ID by calling the /api/projects/ endpoint."),
     contains: str | None = Field(None, description="Filter notebooks by specific criteria using colon-separated key-value pairs. Supports filtering by recording status (true/false) or a specific recording ID. Multiple filters can be combined using spaces or commas as separators."),
@@ -20351,7 +22928,12 @@ async def list_notebooks(
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="Create Notebook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_notebook(
     project_id: str = Field(..., description="The unique identifier of the project where the notebook will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     title: str | None = Field(None, description="The display name for the notebook. Must not exceed 256 characters.", max_length=256),
@@ -20393,7 +22975,13 @@ async def create_notebook(
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Notebook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notebook(
     project_id: str = Field(..., description="The unique identifier of the project containing the notebook. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the notebook to retrieve within the specified project."),
@@ -20432,7 +23020,13 @@ async def get_notebook(
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Notebook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_notebook(
     project_id: str = Field(..., description="The unique identifier of the project containing the notebook. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the notebook to update."),
@@ -20475,7 +23069,13 @@ async def update_notebook(
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Notebook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_notebook_partial(
     project_id: str = Field(..., description="The unique identifier of the project containing the notebook. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the notebook to update."),
@@ -20518,7 +23118,13 @@ async def update_notebook_partial(
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="Soft Delete Notebook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def soft_delete_notebook(
     project_id: str = Field(..., description="The unique identifier of the project containing the notebook. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the notebook to be marked as deleted."),
@@ -20564,7 +23170,13 @@ async def soft_delete_notebook(
     return _response_data
 
 # Tags: notebooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Notebook Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notebook_activity(
     project_id: str = Field(..., description="The unique identifier of the project containing the notebook. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the notebook whose activity history you want to retrieve."),
@@ -20603,7 +23215,13 @@ async def get_notebook_activity(
     return _response_data
 
 # Tags: object_media_previews
-@mcp.tool()
+@mcp.tool(
+    title="List Object Media Previews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_object_media_previews(
     project_id: str = Field(..., description="The unique identifier of the project containing the media previews. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit to use the API's default page size."),
@@ -20646,7 +23264,13 @@ async def list_object_media_previews(
     return _response_data
 
 # Tags: object_media_previews
-@mcp.tool()
+@mcp.tool(
+    title="Get Object Media Preview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_object_media_preview(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the object media preview to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the media preview. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -20685,7 +23309,13 @@ async def get_object_media_preview(
     return _response_data
 
 # Tags: object_media_previews
-@mcp.tool()
+@mcp.tool(
+    title="Update Object Media Preview",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_object_media_preview(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the object media preview to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the media preview. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -20728,7 +23358,13 @@ async def update_object_media_preview(
     return _response_data
 
 # Tags: object_media_previews
-@mcp.tool()
+@mcp.tool(
+    title="Update Object Media Preview",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_object_media_preview_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the object media preview to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the object media preview. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -20771,7 +23407,13 @@ async def update_object_media_preview_partial(
     return _response_data
 
 # Tags: object_media_previews
-@mcp.tool()
+@mcp.tool(
+    title="Delete Object Media Preview",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_object_media_preview(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the object media preview to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the object media preview. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -20810,7 +23452,13 @@ async def delete_object_media_preview(
     return _response_data
 
 # Tags: persisted_folder
-@mcp.tool()
+@mcp.tool(
+    title="List Persisted Folders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_persisted_folders(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page. Omit or set to default for standard page size."),
@@ -20853,7 +23501,12 @@ async def list_persisted_folders(
     return _response_data
 
 # Tags: persisted_folder
-@mcp.tool()
+@mcp.tool(
+    title="Create Persisted Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_persisted_folder(
     project_id: str = Field(..., description="The unique identifier of the project where the persisted folder will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     type_: Literal["home", "pinned", "custom_products"] = Field(..., alias="type", description="The folder type that determines its purpose and behavior: 'home' for the default home folder, 'pinned' for frequently accessed items, or 'custom_products' for custom product collections."),
@@ -20897,7 +23550,13 @@ async def create_persisted_folder(
     return _response_data
 
 # Tags: persisted_folder
-@mcp.tool()
+@mcp.tool(
+    title="Get Persisted Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_persisted_folder(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the persisted folder to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the persisted folder. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -20936,7 +23595,13 @@ async def get_persisted_folder(
     return _response_data
 
 # Tags: persisted_folder
-@mcp.tool()
+@mcp.tool(
+    title="Update Persisted Folder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_persisted_folder(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the persisted folder to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the persisted folder. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -20981,7 +23646,12 @@ async def update_persisted_folder(
     return _response_data
 
 # Tags: persisted_folder
-@mcp.tool()
+@mcp.tool(
+    title="Update Persisted Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_persisted_folder_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the persisted folder to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the persisted folder. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -21025,7 +23695,13 @@ async def update_persisted_folder_partial(
     return _response_data
 
 # Tags: persisted_folder
-@mcp.tool()
+@mcp.tool(
+    title="Delete Persisted Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_persisted_folder(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the persisted folder to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the persisted folder. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -21064,7 +23740,13 @@ async def delete_persisted_folder(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="List Persons",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_persons(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results."),
@@ -21108,7 +23790,13 @@ async def list_persons(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="Get Person",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_person(
     id_: str = Field(..., alias="id", description="The unique identifier of the person to retrieve. Can be either a numeric ID or a UUID format."),
     project_id: str = Field(..., description="The unique identifier of the project containing the person. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -21147,7 +23835,13 @@ async def get_person(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="Update Person Properties",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_person_properties(
     id_: str = Field(..., alias="id", description="The unique identifier of the person to update. Accepts either a numeric ID or UUID format."),
     project_id: str = Field(..., description="The ID of the project containing the person. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -21190,7 +23884,13 @@ async def update_person_properties(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="Get Person Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_person_activity(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the person whose activity you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the person. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -21229,7 +23929,13 @@ async def get_person_activity(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="Remove Person Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_person_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the person. Can be either a numeric ID or a UUID format."),
     project_id: str = Field(..., description="The ID of the project containing the person. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -21272,7 +23978,13 @@ async def remove_person_property(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="Split Person",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def split_person(
     id_: int = Field(..., alias="id", description="The unique identifier of the person record to split. Must be a positive integer."),
     project_id: str = Field(..., description="The unique identifier of the project containing the person. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -21315,7 +24027,13 @@ async def split_person(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="Set Person Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_person_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the person to update. Accepts either a numeric ID or UUID format."),
     project_id: str = Field(..., description="The ID of the project containing the person. Retrieve available project IDs by calling /api/projects/."),
@@ -21359,7 +24077,13 @@ async def set_person_property(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="List Persons Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_persons_activity(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve activity records for persons in a project. This endpoint supports reading and filtering person activity data; for creating or updating person information, use the capture API, user properties ($set/$unset), or PostHog SDKs."""
 
@@ -21395,7 +24119,13 @@ async def list_persons_activity(project_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="List Cohorts for Person",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cohorts_for_person(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     person_id: str = Field(..., description="The unique identifier or UUID of the person whose cohort memberships you want to retrieve."),
@@ -21437,7 +24167,13 @@ async def list_cohorts_for_person(
     return _response_data
 
 # Tags: persons, persons
-@mcp.tool()
+@mcp.tool(
+    title="List Person Property Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_person_property_values(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     key: str = Field(..., description="The person property key to retrieve values for (e.g., 'email', 'plan', 'role'). This identifies which user property you want to inspect."),
@@ -21480,7 +24216,13 @@ async def list_person_property_values(
     return _response_data
 
 # Tags: plugin_configs
-@mcp.tool()
+@mcp.tool(
+    title="List Plugin Config Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_plugin_config_logs(
     plugin_config_id: int = Field(..., description="The unique identifier of the plugin configuration whose logs you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the plugin configuration. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -21524,7 +24266,13 @@ async def list_plugin_config_logs(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="List Product Tours",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_product_tours(
     project_id: str = Field(..., description="The unique identifier of the project containing the product tours. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of product tours to return in a single response page. Omit or adjust to control result set size."),
@@ -21567,7 +24315,12 @@ async def list_product_tours(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Create Product Tour",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_product_tour(
     project_id: str = Field(..., description="The unique identifier of the project where the product tour will be created. Retrieve project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the product tour. Must be 400 characters or fewer.", max_length=400),
@@ -21613,7 +24366,13 @@ async def create_product_tour(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Get Product Tour",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_product_tour(
     id_: str = Field(..., alias="id", description="The unique identifier of the product tour, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -21652,7 +24411,13 @@ async def get_product_tour(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Update Product Tour",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_product_tour(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the product tour to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -21699,7 +24464,13 @@ async def update_product_tour(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Update Product Tour (Partial)",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_product_tour_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the product tour to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -21745,7 +24516,13 @@ async def update_product_tour_partial(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Delete Product Tour",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_product_tour(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the product tour to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -21784,7 +24561,13 @@ async def delete_product_tour(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Delete Product Tour Draft",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_product_tour_draft(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the product tour whose draft should be discarded."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -21823,7 +24606,13 @@ async def delete_product_tour_draft(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Update Product Tour Draft",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_product_tour_draft(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the product tour to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. Find your project ID by calling /api/projects/."),
@@ -21869,7 +24658,13 @@ async def update_product_tour_draft(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Get Product Tour Draft Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_product_tour_draft_status(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the product tour whose draft status you want to check."),
     project_id: str = Field(..., description="The unique identifier of the project containing the product tour. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -21908,7 +24703,12 @@ async def get_product_tour_draft_status(
     return _response_data
 
 # Tags: product_tours
-@mcp.tool()
+@mcp.tool(
+    title="Publish Product Tour Draft",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_product_tour_draft(
     id_: str = Field(..., alias="id", description="The UUID identifier of the product tour to publish."),
     project_id: str = Field(..., description="The project ID containing the product tour. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -21955,7 +24755,13 @@ async def publish_product_tour_draft(
     return _response_data
 
 # Tags: core, project_secret_api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Secret API Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_secret_api_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the project secret API key to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the API key. You can obtain the project ID by calling the list projects endpoint."),
@@ -21994,7 +24800,13 @@ async def get_project_secret_api_key(
     return _response_data
 
 # Tags: core, project_secret_api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Secret API Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_secret_api_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the secret API key to update."),
     project_id: str = Field(..., description="The project ID containing the secret API key. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -22038,7 +24850,13 @@ async def update_project_secret_api_key(
     return _response_data
 
 # Tags: core, project_secret_api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Secret API Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_secret_api_key_partial(
     id_: str = Field(..., alias="id", description="The unique identifier of the project secret API key to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the secret API key. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -22082,7 +24900,13 @@ async def update_project_secret_api_key_partial(
     return _response_data
 
 # Tags: core, project_secret_api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project Secret API Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_secret_api_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the project secret API key to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the API key. You can retrieve your project ID by calling the list projects endpoint."),
@@ -22121,7 +24945,13 @@ async def delete_project_secret_api_key(
     return _response_data
 
 # Tags: core, property_definitions
-@mcp.tool()
+@mcp.tool(
+    title="List Property Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_property_definitions(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this from the /api/projects/ endpoint if unknown."),
     event_names: str | None = Field(None, description="JSON-encoded list of event names to filter property visibility. When provided, the response will indicate which properties appear in these events.", min_length=1),
@@ -22174,7 +25004,13 @@ async def list_property_definitions(
     return _response_data
 
 # Tags: core, property_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Get Property Definition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_property_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the property definition to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the property definition. You can retrieve your project ID by calling the list projects endpoint."),
@@ -22213,7 +25049,13 @@ async def get_property_definition(
     return _response_data
 
 # Tags: core, property_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Update Property Definition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_property_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the property definition to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the property definition. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -22260,7 +25102,13 @@ async def update_property_definition(
     return _response_data
 
 # Tags: core, property_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Update Property Definition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_property_definition_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the property definition to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the property definition. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -22307,7 +25155,13 @@ async def update_property_definition_partial(
     return _response_data
 
 # Tags: core, property_definitions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Property Definition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_property_definition(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the property definition to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the property definition. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -22346,7 +25200,12 @@ async def delete_property_definition(
     return _response_data
 
 # Tags: query
-@mcp.tool()
+@mcp.tool(
+    title="Create Query",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_create(
     project_id: str = Field(..., description="The unique identifier of the project to query. Retrieve available project IDs from the /api/projects/ endpoint."),
     query: _models.EventsNode | _models.ActionsNode | _models.PersonsNode | _models.DataWarehouseNode | _models.FunnelsDataWarehouseNode | _models.LifecycleDataWarehouseNode | _models.EventsQuery | _models.SessionsQuery | _models.ActorsQuery | _models.GroupsQuery | _models.InsightActorsQuery | _models.InsightActorsQueryOptions | _models.SessionsTimelineQuery | _models.HogQuery | _models.HogQlQuery | _models.HogQlMetadata | _models.HogQlAutocomplete | _models.SessionAttributionExplorerQuery | _models.RevenueExampleEventsQuery | _models.RevenueExampleDataWarehouseTablesQuery | _models.ErrorTrackingQuery | _models.ErrorTrackingSimilarIssuesQuery | _models.ErrorTrackingBreakdownsQuery | _models.ErrorTrackingIssueCorrelationQuery | _models.ExperimentFunnelsQuery | _models.ExperimentTrendsQuery | _models.ExperimentQuery | _models.ExperimentExposureQuery | _models.DocumentSimilarityQuery | _models.WebOverviewQuery | _models.WebStatsTableQuery | _models.WebExternalClicksTableQuery | _models.WebGoalsQuery | _models.WebVitalsQuery | _models.WebVitalsPathBreakdownQuery | _models.WebPageUrlSearchQuery | _models.WebAnalyticsExternalSummaryQuery | _models.WebNotableChangesQuery | _models.RevenueAnalyticsGrossRevenueQuery | _models.RevenueAnalyticsMetricsQuery | _models.RevenueAnalyticsMrrQuery | _models.RevenueAnalyticsOverviewQuery | _models.RevenueAnalyticsTopCustomersQuery | _models.MarketingAnalyticsTableQuery | _models.MarketingAnalyticsAggregatedQuery | _models.NonIntegratedConversionsTableQuery | _models.DataVisualizationNode | _models.DataTableNode | _models.SavedInsightNode | _models.InsightVizNode | _models.TrendsQuery | _models.FunnelsQuery | _models.RetentionQuery | _models.PathsQuery | _models.StickinessQuery | _models.LifecycleQuery | _models.FunnelCorrelationQuery | _models.DatabaseSchemaQuery | _models.LogsQuery | _models.LogAttributesQuery | _models.LogValuesQuery | _models.TraceSpansQuery | _models.SuggestedQuestionsQuery | _models.TeamTaxonomyQuery | _models.EventTaxonomyQuery | _models.ActorsPropertyTaxonomyQuery | _models.TracesQuery | _models.TraceQuery | _models.TraceNeighborsQuery | _models.VectorSearchQuery | _models.UsageMetricsQuery | _models.EndpointsUsageOverviewQuery | _models.EndpointsUsageTableQuery | _models.EndpointsUsageTrendsQuery | _models.PropertyValuesQuery = Field(..., description="A JSON object representing the query to execute, typically a HogQL query. Must include 'kind' (e.g., 'HogQLQuery') and 'query' fields with the actual query string."),
@@ -22398,7 +25257,13 @@ async def query_create(
     return _response_data
 
 # Tags: query
-@mcp.tool()
+@mcp.tool(
+    title="Get Query",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_query(
     id_: str = Field(..., alias="id", description="The unique identifier of the query to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the query. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -22437,7 +25302,13 @@ async def get_query(
     return _response_data
 
 # Tags: query
-@mcp.tool()
+@mcp.tool(
+    title="Delete Query",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_query(
     id_: str = Field(..., alias="id", description="The unique identifier of the query to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the query. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -22476,7 +25347,13 @@ async def delete_query(
     return _response_data
 
 # Tags: sandbox-environments, sandbox_environments
-@mcp.tool()
+@mcp.tool(
+    title="Get Sandbox Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sandbox_environment(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the sandbox environment to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the sandbox environment. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -22515,7 +25392,13 @@ async def get_sandbox_environment(
     return _response_data
 
 # Tags: sandbox-environments, sandbox_environments
-@mcp.tool()
+@mcp.tool(
+    title="Update Sandbox Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_sandbox_environment(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the sandbox environment to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this sandbox environment. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -22562,7 +25445,13 @@ async def update_sandbox_environment(
     return _response_data
 
 # Tags: sandbox-environments, sandbox_environments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Sandbox Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sandbox_environment(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the sandbox environment to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the sandbox environment. Retrieve available project IDs by calling the list projects endpoint."),
@@ -22601,7 +25490,13 @@ async def delete_sandbox_environment(
     return _response_data
 
 # Tags: saved
-@mcp.tool()
+@mcp.tool(
+    title="List Saved Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_saved_items(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit to use the default page size."),
@@ -22644,7 +25539,12 @@ async def list_saved_items(
     return _response_data
 
 # Tags: saved
-@mcp.tool()
+@mcp.tool(
+    title="Create Saved URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_saved_url(
     project_id: str = Field(..., description="The unique identifier of the project where the URL will be saved. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     url: str = Field(..., description="A valid URI to save. The URL must be properly formatted and cannot exceed 2000 characters in length.", max_length=2000),
@@ -22686,7 +25586,13 @@ async def create_saved_url(
     return _response_data
 
 # Tags: saved
-@mcp.tool()
+@mcp.tool(
+    title="Get Saved Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_saved_item(
     project_id: str = Field(..., description="The unique identifier of the project containing the saved item. You can retrieve available project IDs by calling the projects list endpoint."),
     short_id: str = Field(..., description="The short identifier of the saved item to retrieve within the specified project."),
@@ -22725,7 +25631,13 @@ async def get_saved_item(
     return _response_data
 
 # Tags: saved
-@mcp.tool()
+@mcp.tool(
+    title="Update Saved Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_saved_partial(
     project_id: str = Field(..., description="The unique identifier of the project containing the saved item. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the saved item to update within the specified project."),
@@ -22768,7 +25680,13 @@ async def update_saved_partial(
     return _response_data
 
 # Tags: saved
-@mcp.tool()
+@mcp.tool(
+    title="Mark Saved Deleted",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_saved_deleted(
     project_id: str = Field(..., description="The unique identifier of the project containing the saved item. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the saved item to be marked as deleted."),
@@ -22814,7 +25732,13 @@ async def mark_saved_deleted(
     return _response_data
 
 # Tags: schema_property_groups
-@mcp.tool()
+@mcp.tool(
+    title="List Schema Property Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schema_property_groups(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Use with offset for pagination."),
@@ -22857,7 +25781,12 @@ async def list_schema_property_groups(
     return _response_data
 
 # Tags: schema_property_groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Schema Property Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schema_property_group(
     project_id: str = Field(..., description="The unique identifier of the project where the property group will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="The name of the property group. Must be 400 characters or fewer.", max_length=400),
@@ -22901,7 +25830,13 @@ async def create_schema_property_group(
     return _response_data
 
 # Tags: schema_property_groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Schema Property Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schema_property_group(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the schema property group to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the schema property group. Find your project ID by calling the projects list endpoint."),
@@ -22940,7 +25875,13 @@ async def get_schema_property_group(
     return _response_data
 
 # Tags: schema_property_groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Schema Property Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schema_property_group(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the schema property group to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the schema property group. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -22985,7 +25926,13 @@ async def update_schema_property_group(
     return _response_data
 
 # Tags: schema_property_groups
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Schema Property Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schema_property_group_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the schema property group to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the schema property group. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -23029,7 +25976,13 @@ async def update_schema_property_group_partial(
     return _response_data
 
 # Tags: schema_property_groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schema Property Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schema_property_group(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the schema property group to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the schema property group. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -23068,7 +26021,13 @@ async def delete_schema_property_group(
     return _response_data
 
 # Tags: session_group_summaries
-@mcp.tool()
+@mcp.tool(
+    title="List Session Group Summaries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_session_group_summaries(
     project_id: str = Field(..., description="The unique identifier of the project containing the session group summaries. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit or set to default for standard pagination."),
@@ -23111,7 +26070,13 @@ async def list_session_group_summaries(
     return _response_data
 
 # Tags: session_group_summaries
-@mcp.tool()
+@mcp.tool(
+    title="Get Session Group Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session_group_summary(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session group summary to retrieve."),
     project_id: str = Field(..., description="The project ID that contains the session group summary. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -23150,7 +26115,13 @@ async def get_session_group_summary(
     return _response_data
 
 # Tags: session_group_summaries
-@mcp.tool()
+@mcp.tool(
+    title="Update Session Group Summary",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_session_group_summary(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session group summary to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session group summary. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -23189,7 +26160,12 @@ async def update_session_group_summary(
     return _response_data
 
 # Tags: session_group_summaries
-@mcp.tool()
+@mcp.tool(
+    title="Update Session Group Summary",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_session_group_summary_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session group summary to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session group summary. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -23228,7 +26204,13 @@ async def update_session_group_summary_partial(
     return _response_data
 
 # Tags: session_group_summaries
-@mcp.tool()
+@mcp.tool(
+    title="Delete Session Group Summary",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_session_group_summary(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session group summary to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session group summary. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -23267,7 +26249,13 @@ async def delete_session_group_summary(
     return _response_data
 
 # Tags: replay, session_recording_playlists
-@mcp.tool()
+@mcp.tool(
+    title="List Session Recording Playlists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_session_recording_playlists(
     project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of playlists to return per page. Use with offset for pagination."),
@@ -23311,7 +26299,13 @@ async def list_session_recording_playlists(
     return _response_data
 
 # Tags: replay, session_recording_playlists
-@mcp.tool()
+@mcp.tool(
+    title="Get Session Recording Playlist",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session_recording_playlist(
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording playlist. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short ID of the session recording playlist to retrieve. This is a unique identifier for the playlist within the project."),
@@ -23350,7 +26344,13 @@ async def get_session_recording_playlist(
     return _response_data
 
 # Tags: replay, session_recording_playlists
-@mcp.tool()
+@mcp.tool(
+    title="Update Session Recording Playlist",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_session_recording_playlist(
     project_id: str = Field(..., description="The unique identifier of the project containing the playlist. Retrieve project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the session recording playlist to update."),
@@ -23395,7 +26395,13 @@ async def update_session_recording_playlist(
     return _response_data
 
 # Tags: replay, session_recording_playlists
-@mcp.tool()
+@mcp.tool(
+    title="Update Session Recording Playlist",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_session_recording_playlist_partial(
     project_id: str = Field(..., description="The unique identifier of the project containing the playlist. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the session recording playlist to update."),
@@ -23440,7 +26446,13 @@ async def update_session_recording_playlist_partial(
     return _response_data
 
 # Tags: replay, session_recording_playlists
-@mcp.tool()
+@mcp.tool(
+    title="List Recordings in Playlist",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_recordings_in_playlist(
     project_id: str = Field(..., description="The unique identifier of the project containing the playlist. You can retrieve your project ID by calling the /api/projects/ endpoint."),
     short_id: str = Field(..., description="The short identifier of the session recording playlist from which to retrieve recordings."),
@@ -23479,7 +26491,13 @@ async def list_recordings_in_playlist(
     return _response_data
 
 # Tags: replay, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="List Session Recordings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_session_recordings(
     project_id: str = Field(..., description="The unique identifier of the project containing the session recordings. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of session recordings to return in a single response page. Controls pagination size."),
@@ -23522,7 +26540,13 @@ async def list_session_recordings(
     return _response_data
 
 # Tags: replay, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Get Session Recording",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_session_recording(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session recording to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -23561,7 +26585,13 @@ async def get_session_recording(
     return _response_data
 
 # Tags: replay, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Update Session Recording",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_session_recording(
     id_: str = Field(..., alias="id", description="The unique identifier of the session recording to update, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -23604,7 +26634,12 @@ async def update_session_recording(
     return _response_data
 
 # Tags: replay, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Update Session Recording",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_session_recording_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session recording to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -23647,7 +26682,13 @@ async def update_session_recording_partial(
     return _response_data
 
 # Tags: replay, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Delete Session Recording",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_session_recording(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the session recording to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -23686,7 +26727,13 @@ async def delete_session_recording(
     return _response_data
 
 # Tags: core, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="List Session Recording Shares",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_session_recording_shares(
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     recording_id: str = Field(..., description="The unique identifier of the session recording whose sharing configurations you want to retrieve."),
@@ -23725,7 +26772,12 @@ async def list_session_recording_shares(
     return _response_data
 
 # Tags: core, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Create Session Recording Sharing Password",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_session_recording_sharing_password(
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     recording_id: str = Field(..., description="The unique identifier of the session recording for which to create a sharing password."),
@@ -23770,7 +26822,12 @@ async def create_session_recording_sharing_password(
     return _response_data
 
 # Tags: core, session_recordings
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Session Recording Sharing",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_session_recording_sharing(
     project_id: str = Field(..., description="The unique identifier of the project containing the session recording. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     recording_id: str = Field(..., description="The unique identifier of the session recording whose sharing configuration should be refreshed."),
@@ -23815,7 +26872,13 @@ async def refresh_session_recording_sharing(
     return _response_data
 
 # Tags: sessions
-@mcp.tool()
+@mcp.tool(
+    title="List Session Property Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_session_property_definitions(project_id: str = Field(..., description="The unique identifier of the project. You can obtain the project ID by calling the /api/projects/ endpoint to list available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve all property definitions available for sessions within a specific project. Property definitions define the custom attributes and metadata that can be attached to session records."""
 
@@ -23851,7 +26914,13 @@ async def list_session_property_definitions(project_id: str = Field(..., descrip
     return _response_data
 
 # Tags: signal_source_configs
-@mcp.tool()
+@mcp.tool(
+    title="List Signal Source Configs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_signal_source_configs(
     project_id: str = Field(..., description="The unique identifier of the project containing the signal source configurations. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit or set to default for standard pagination."),
@@ -23894,7 +26963,12 @@ async def list_signal_source_configs(
     return _response_data
 
 # Tags: signal_source_configs
-@mcp.tool()
+@mcp.tool(
+    title="Create Signal Source Config",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_signal_source_config(
     project_id: str = Field(..., description="The unique identifier of the project where the signal source configuration will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     source_product: Literal["session_replay", "llm_analytics", "github", "linear", "zendesk", "error_tracking"] = Field(..., description="The external product or service to integrate with: session_replay, llm_analytics, github, linear, zendesk, or error_tracking."),
@@ -23938,7 +27012,13 @@ async def create_signal_source_config(
     return _response_data
 
 # Tags: signal_source_configs
-@mcp.tool()
+@mcp.tool(
+    title="Get Signal Source Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_signal_source_config(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the signal source config to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the signal source config. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -23977,7 +27057,13 @@ async def get_signal_source_config(
     return _response_data
 
 # Tags: signal_source_configs
-@mcp.tool()
+@mcp.tool(
+    title="Update Signal Source Config",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_signal_source_config(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the signal source configuration to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing this signal source configuration. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24022,7 +27108,12 @@ async def update_signal_source_config(
     return _response_data
 
 # Tags: signal_source_configs
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Signal Source Config",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_signal_source_config_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the signal source config to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the signal source config. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24067,7 +27158,13 @@ async def update_signal_source_config_partial(
     return _response_data
 
 # Tags: signal_source_configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Signal Source Config",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_signal_source_config(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the signal source config to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the signal source config. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -24106,7 +27203,12 @@ async def delete_signal_source_config(
     return _response_data
 
 # Tags: core, subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Create Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_subscription(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve this from the /api/projects/ endpoint if unknown."),
     target_type: Literal["email", "slack", "webhook"] = Field(..., description="The delivery channel for the subscription: email, Slack, or webhook."),
@@ -24161,7 +27263,13 @@ async def create_subscription(
     return _response_data
 
 # Tags: core, subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Get Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_subscription(
     id_: int = Field(..., alias="id", description="The unique identifier of the subscription to retrieve. Must be a positive integer."),
     project_id: str = Field(..., description="The unique identifier of the project containing the subscription. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -24200,7 +27308,13 @@ async def get_subscription(
     return _response_data
 
 # Tags: core, subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Update Subscription",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_subscription(
     id_: int = Field(..., alias="id", description="The unique identifier of the subscription to update."),
     project_id: str = Field(..., description="The project ID containing the subscription. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24256,7 +27370,12 @@ async def update_subscription(
     return _response_data
 
 # Tags: core, subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_subscription_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the subscription to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the subscription. Retrieve project IDs from the /api/projects/ endpoint."),
@@ -24312,7 +27431,13 @@ async def update_subscription_partial(
     return _response_data
 
 # Tags: core, subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Soft Delete Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def soft_delete_subscription(
     id_: int = Field(..., alias="id", description="The unique integer identifier of the subscription to be soft-deleted."),
     project_id: str = Field(..., description="The unique identifier of the project containing the subscription. Retrieve available project IDs by calling the projects list endpoint."),
@@ -24351,7 +27476,13 @@ async def soft_delete_subscription(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="List Surveys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_surveys(
     project_id: str = Field(..., description="The unique identifier of the project containing the surveys. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of survey results to return in a single page. Use with offset for pagination control."),
@@ -24394,7 +27525,12 @@ async def list_surveys(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Create Survey",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_survey(
     project_id: str = Field(..., description="The unique identifier of the project where the survey will be created. Retrieve project IDs from the /api/projects/ endpoint."),
     name: str = Field(..., description="The display name of the survey. Must be between 1 and 400 characters.", min_length=1, max_length=400),
@@ -24453,7 +27589,13 @@ async def create_survey(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Get Survey",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_survey(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the survey to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -24492,7 +27634,13 @@ async def get_survey(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Update Survey",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_survey(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the survey to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24551,7 +27699,12 @@ async def update_survey(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Survey",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_survey_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the survey to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24609,7 +27762,13 @@ async def update_survey_partial(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Delete Survey",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_survey(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the survey to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -24648,7 +27807,13 @@ async def delete_survey(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Get Survey Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_survey_activity(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the survey whose activity you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -24687,7 +27852,13 @@ async def get_survey_activity(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="List Archived Response UUIDs for Survey",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_archived_response_uuids_for_survey(
     id_: str = Field(..., alias="id", description="The UUID of the survey for which to retrieve archived response identifiers."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. Find your project ID by calling the /api/projects/ endpoint."),
@@ -24726,7 +27897,13 @@ async def list_archived_response_uuids_for_survey(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Archive Survey Response",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_survey_response(
     id_: str = Field(..., alias="id", description="The UUID of the survey containing the response to archive. Must be a valid UUID format."),
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24787,7 +27964,12 @@ async def archive_survey_response(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Unarchive Survey Response",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unarchive_survey_response(
     id_: str = Field(..., alias="id", description="The UUID of the survey containing the response to unarchive."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. Retrieve this from the /api/projects/ endpoint if needed."),
@@ -24848,7 +28030,13 @@ async def unarchive_survey_response(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Get Survey Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_survey_statistics(
     id_: str = Field(..., alias="id", description="The UUID identifier of the survey for which to retrieve statistics."),
     project_id: str = Field(..., description="The UUID identifier of the project containing the survey. Use /api/projects/ to discover available project IDs."),
@@ -24887,7 +28075,12 @@ async def get_survey_statistics(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Create Survey Summary Headline",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_survey_summary_headline(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the survey to create a summary headline for."),
     project_id: str = Field(..., description="The unique identifier of the project containing the survey. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -24947,7 +28140,13 @@ async def create_survey_summary_headline(
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="List Surveys Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_surveys_activity(project_id: str = Field(..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects.")) -> dict[str, Any] | ToolResult:
     """Retrieve activity records for surveys within a specific project. This endpoint provides insights into survey-related events and interactions for the given project."""
 
@@ -24983,7 +28182,13 @@ async def list_surveys_activity(project_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Get Survey Response Counts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_survey_response_counts(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve the total number of responses for all surveys in a project, with optional filtering by survey IDs and archived status."""
 
@@ -25019,7 +28224,13 @@ async def get_survey_response_counts(project_id: str = Field(..., description="T
     return _response_data
 
 # Tags: surveys, surveys
-@mcp.tool()
+@mcp.tool(
+    title="Get Surveys Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_surveys_stats(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated response statistics across all surveys in a project, with optional filtering by date range."""
 
@@ -25055,7 +28266,13 @@ async def get_surveys_stats(project_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tasks(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the projects list endpoint."),
     internal: bool | None = Field(None, description="Filter tasks by internal status. When not specified, internal tasks are excluded by default."),
@@ -25103,7 +28320,12 @@ async def list_tasks(
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task(
     project_id: str = Field(..., description="The unique identifier of the project where the task will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     title: str = Field(..., description="The name or title of the task. This is the primary identifier displayed to users and agents."),
@@ -25147,7 +28369,13 @@ async def create_task(
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(
     id_: str = Field(..., alias="id", description="The unique identifier of the task to retrieve, formatted as a UUID."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. You can retrieve available project IDs by calling the projects list endpoint."),
@@ -25186,7 +28414,13 @@ async def get_task(
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task(
     id_: str = Field(..., alias="id", description="The unique identifier of the task to update, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -25231,7 +28465,12 @@ async def update_task(
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Partially Update Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_task_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25282,7 +28521,13 @@ async def update_task_partial(
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(
     id_: str = Field(..., alias="id", description="The unique identifier of the task to delete, provided as a UUID string."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. Retrieve available project IDs by calling the projects list endpoint."),
@@ -25321,7 +28566,12 @@ async def delete_task(
     return _response_data
 
 # Tags: tasks, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task to run."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25368,7 +28618,13 @@ async def create_task_run(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Task Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_task_runs(
     project_id: str = Field(..., description="The unique identifier of the project containing the task. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     task_id: str = Field(..., description="The unique identifier (UUID format) of the task for which to list runs."),
@@ -25412,7 +28668,12 @@ async def list_task_runs(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Task Run Record",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task_run_record(
     project_id: str = Field(..., description="The unique identifier of the project containing the task. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     task_id: str = Field(..., description="The unique identifier (UUID format) of the task for which to create a run."),
@@ -25451,7 +28712,13 @@ async def create_task_run_record(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -25491,7 +28758,12 @@ async def get_task_run(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_task_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to update."),
     project_id: str = Field(..., description="The project ID containing the task. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25540,7 +28812,12 @@ async def update_task_run(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Append Log Entries to Task Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_log_entries_to_task_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to append logs to."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task run. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25584,7 +28861,12 @@ async def append_log_entries_to_task_run(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Artifacts for Task Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_artifacts_for_task_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to which artifacts will be attached."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task run. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -25628,7 +28910,12 @@ async def create_artifacts_for_task_run(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Artifact Presigned URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_artifact_presigned_url(
     id_: str = Field(..., alias="id", description="The UUID of the task run containing the artifact."),
     project_id: str = Field(..., description="The UUID or identifier of the project containing the task. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -25672,7 +28959,12 @@ async def get_artifact_presigned_url(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Send Command to Task Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_command_to_task_run(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to target with this command."),
     project_id: str = Field(..., description="The project ID containing the task. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25718,7 +29010,13 @@ async def send_command_to_task_run(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run Sandbox Connection Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run_sandbox_connection_token(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run for which to generate the connection token."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task run. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -25758,7 +29056,13 @@ async def get_task_run_sandbox_connection_token(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run_logs(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run whose logs you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task run. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -25798,7 +29102,12 @@ async def get_task_run_logs(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Send Run Message to Slack",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_run_message_to_slack(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to relay the message for."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task run. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25842,7 +29151,13 @@ async def send_run_message_to_slack(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run Session Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run_session_logs(
     id_: str = Field(..., alias="id", description="The UUID of the task run to retrieve logs for."),
     project_id: str = Field(..., description="The project ID containing the task run. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -25889,7 +29204,13 @@ async def get_task_run_session_logs(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task Run Output",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task_run_output(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task run. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -25929,7 +29250,13 @@ async def update_task_run_output(
     return _response_data
 
 # Tags: task-runs, tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task Run Stream",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task_run_stream(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the task run to retrieve stream data for."),
     project_id: str = Field(..., description="The unique identifier of the project containing the task. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -25969,7 +29296,13 @@ async def get_task_run_stream(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="List Visual Review Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_visual_review_repositories(
     project_id: str = Field(..., description="The unique identifier of the project containing the repositories. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of repositories to return in a single response page. Omit or adjust to control pagination size."),
@@ -26012,7 +29345,12 @@ async def list_visual_review_repositories(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Create Visual Review Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_visual_review_repo(
     project_id: str = Field(..., description="The unique identifier of the project where the visual review repository will be created. Retrieve this ID by calling the /api/projects/ endpoint."),
     repo_full_name: str = Field(..., description="The full name of the repository in the format owner/repo_name, used to identify and reference the repository within the visual review system."),
@@ -26055,7 +29393,13 @@ async def create_visual_review_repo(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Get Visual Review Repo",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_visual_review_repo(
     id_: str = Field(..., alias="id", description="The unique identifier of the visual review repository to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the repository. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -26094,7 +29438,13 @@ async def get_visual_review_repo(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Update Visual Review Repository Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_visual_review_repo_settings(
     id_: str = Field(..., alias="id", description="The unique identifier of the repository to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the repository. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -26138,7 +29488,13 @@ async def update_visual_review_repo_settings(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="List Visual Review Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_visual_review_runs(
     project_id: str = Field(..., description="The unique identifier of the project containing the visual review runs. You can retrieve available project IDs by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Use this to control pagination size."),
@@ -26182,7 +29538,12 @@ async def list_visual_review_runs(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Create Visual Review Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_visual_review_run(
     project_id: str = Field(..., description="The unique identifier of the project. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     repo_id: str = Field(..., description="The unique identifier (UUID format) of the repository associated with this visual review run."),
@@ -26234,7 +29595,13 @@ async def create_visual_review_run(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Get Visual Review Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_visual_review_run(
     id_: str = Field(..., alias="id", description="The unique identifier of the visual review run to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the visual review run. You can obtain the project ID by calling the /api/projects/ endpoint."),
@@ -26273,7 +29640,12 @@ async def get_visual_review_run(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Add Snapshots to Visual Review Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_snapshots_to_visual_review_run(
     id_: str = Field(..., alias="id", description="The unique identifier of the visual review run to which snapshots will be added."),
     project_id: str = Field(..., description="The unique identifier of the project containing the visual review run. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -26317,7 +29689,12 @@ async def add_snapshots_to_visual_review_run(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Approve Visual Review Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_visual_review_run(
     id_: str = Field(..., alias="id", description="The unique identifier of the visual review run to approve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the visual review run. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -26362,7 +29739,12 @@ async def approve_visual_review_run(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Complete Visual Review Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def complete_visual_review_run(
     id_: str = Field(..., alias="id", description="The unique identifier of the visual review run to complete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the visual review run. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -26401,7 +29783,13 @@ async def complete_visual_review_run(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="List Visual Review Run Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_visual_review_run_snapshots(
     id_: str = Field(..., alias="id", description="The unique identifier of the visual review run for which to retrieve snapshots."),
     project_id: str = Field(..., description="The unique identifier of the project containing the visual review run. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -26445,7 +29833,13 @@ async def list_visual_review_run_snapshots(
     return _response_data
 
 # Tags: visual_review, visual_review
-@mcp.tool()
+@mcp.tool(
+    title="Get Visual Review Runs Counts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_visual_review_runs_counts(project_id: str = Field(..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated state counts for visual review runs within a project, providing a summary of how many runs are in each review state."""
 
@@ -26481,7 +29875,13 @@ async def get_visual_review_runs_counts(project_id: str = Field(..., description
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="List Warehouse Saved Queries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_warehouse_saved_queries(
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse saved queries. Obtain this ID by calling the /api/projects/ endpoint."),
     page: int | None = Field(None, description="The page number to retrieve from the paginated result set. Omit to retrieve the first page."),
@@ -26523,7 +29923,12 @@ async def list_warehouse_saved_queries(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Create Warehouse Saved Query",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_warehouse_saved_query(
     project_id: str = Field(..., description="The unique identifier of the project where the saved query will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A unique name for the saved query that serves as the table name in HogQL queries and node name in data modeling. Must be 128 characters or fewer.", max_length=128),
@@ -26568,7 +29973,13 @@ async def create_warehouse_saved_query(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Get Warehouse Saved Query",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_warehouse_saved_query(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the saved query to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the saved query. Find your project ID by calling the /api/projects/ endpoint."),
@@ -26607,7 +30018,13 @@ async def get_warehouse_saved_query(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Update Warehouse Saved Query",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_warehouse_saved_query(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse saved query to update."),
     project_id: str = Field(..., description="The project ID containing this saved query. Find your project ID by calling the /api/projects/ endpoint."),
@@ -26654,7 +30071,13 @@ async def update_warehouse_saved_query(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Update Warehouse Saved Query",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_warehouse_saved_query_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse saved query to update."),
     project_id: str = Field(..., description="The project ID containing the saved query. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -26700,7 +30123,13 @@ async def update_warehouse_saved_query_partial(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Delete Warehouse Saved Query",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_warehouse_saved_query(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the saved query to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the saved query. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -26739,7 +30168,13 @@ async def delete_warehouse_saved_query(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Get Warehouse Saved Query Activity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_warehouse_saved_query_activity(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse saved query whose activity you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse saved query. You can retrieve your project ID by calling the /api/projects/ endpoint."),
@@ -26778,7 +30213,12 @@ async def get_warehouse_saved_query_activity(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Create Materialized View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_materialized_view(
     id_: str = Field(..., alias="id", description="The UUID identifier of the saved query to materialize."),
     project_id: str = Field(..., description="The UUID or identifier of the project containing the saved query. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -26824,7 +30264,13 @@ async def create_materialized_view(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Revert Saved Query Materialization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revert_saved_query_materialization(
     id_: str = Field(..., alias="id", description="The UUID identifier of the saved query to revert from materialization."),
     project_id: str = Field(..., description="The UUID or identifier of the project containing the saved query. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -26870,7 +30316,12 @@ async def revert_saved_query_materialization(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Run Warehouse Saved Query",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_warehouse_saved_query(
     id_: str = Field(..., alias="id", description="The UUID identifier of the saved query to execute."),
     project_id: str = Field(..., description="The UUID or identifier of the project containing this saved query. Retrieve available projects from /api/projects/."),
@@ -26916,7 +30367,13 @@ async def run_warehouse_saved_query(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_queries
-@mcp.tool()
+@mcp.tool(
+    title="Get Saved Query Run History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_saved_query_run_history(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the saved query whose run history you want to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the saved query. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -26955,7 +30412,13 @@ async def get_saved_query_run_history(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_query_folders
-@mcp.tool()
+@mcp.tool(
+    title="List Warehouse Saved Query Folders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_warehouse_saved_query_folders(project_id: str = Field(..., description="The unique identifier of the project containing the warehouse saved query folders. You can retrieve available project IDs by calling the /api/projects/ endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve all saved query folders within a warehouse project. This lists the organizational structure for saved queries in the specified project."""
 
@@ -26991,7 +30454,12 @@ async def list_warehouse_saved_query_folders(project_id: str = Field(..., descri
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_query_folders
-@mcp.tool()
+@mcp.tool(
+    title="Create Warehouse Saved Query Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_warehouse_saved_query_folder(
     project_id: str = Field(..., description="The unique identifier of the project where the folder will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A display name for the folder that appears in the SQL editor sidebar. Must be 128 characters or fewer.", max_length=128),
@@ -27033,7 +30501,13 @@ async def create_warehouse_saved_query_folder(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_query_folders
-@mcp.tool()
+@mcp.tool(
+    title="Get Warehouse Saved Query Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_warehouse_saved_query_folder(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the saved query folder to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the saved query folder. Find your project ID by calling the /api/projects/ endpoint."),
@@ -27072,7 +30546,13 @@ async def get_warehouse_saved_query_folder(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_query_folders
-@mcp.tool()
+@mcp.tool(
+    title="Update Warehouse Saved Query Folder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_warehouse_saved_query_folder(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse saved query folder to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the folder. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27111,7 +30591,13 @@ async def update_warehouse_saved_query_folder(
     return _response_data
 
 # Tags: data_warehouse, warehouse_saved_query_folders
-@mcp.tool()
+@mcp.tool(
+    title="Delete Warehouse Saved Query Folder",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_warehouse_saved_query_folder(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the saved query folder to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the saved query folder. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27150,7 +30636,13 @@ async def delete_warehouse_saved_query_folder(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="List Warehouse Tables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_warehouse_tables(
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse tables. Obtain this ID by calling the /api/projects/ endpoint."),
     limit: int | None = Field(None, description="Maximum number of warehouse tables to return in a single response page."),
@@ -27193,7 +30685,12 @@ async def list_warehouse_tables(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="Create Warehouse Table",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_warehouse_table(
     project_id: str = Field(..., description="The unique identifier of the project where the warehouse table will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A descriptive name for the warehouse table. Must be 128 characters or fewer.", max_length=128),
@@ -27241,7 +30738,13 @@ async def create_warehouse_table(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="Get Warehouse Table",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_warehouse_table(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse table to retrieve."),
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse table. Use the /api/projects/ endpoint to discover available project IDs."),
@@ -27280,7 +30783,13 @@ async def get_warehouse_table(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="Update Warehouse Table",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_warehouse_table(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse table to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse table. Retrieve available project IDs from the /api/projects/ endpoint."),
@@ -27329,7 +30838,13 @@ async def update_warehouse_table(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="Update Warehouse Table",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_warehouse_table_partial(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse table to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse table. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27376,7 +30891,13 @@ async def update_warehouse_table_partial(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="Delete Warehouse Table",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_warehouse_table(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the warehouse table to delete."),
     project_id: str = Field(..., description="The unique identifier of the project containing the warehouse table. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27415,7 +30936,12 @@ async def delete_warehouse_table(
     return _response_data
 
 # Tags: warehouse_tables
-@mcp.tool()
+@mcp.tool(
+    title="Create Warehouse Table from File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_warehouse_table_from_file(
     project_id: str = Field(..., description="The unique identifier of the project where the warehouse table will be created. Retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A descriptive name for the warehouse table. Must be 128 characters or fewer.", max_length=128),
@@ -27464,7 +30990,13 @@ async def create_warehouse_table_from_file(
     return _response_data
 
 # Tags: web_experiments
-@mcp.tool()
+@mcp.tool(
+    title="List Web Experiments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_web_experiments(
     project_id: str = Field(..., description="The unique identifier of the project containing the web experiments. Obtain this ID by calling the projects list endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return in a single page of results. Omit or adjust to control pagination size."),
@@ -27507,7 +31039,12 @@ async def list_web_experiments(
     return _response_data
 
 # Tags: web_experiments
-@mcp.tool()
+@mcp.tool(
+    title="Create Web Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_web_experiment(
     project_id: str = Field(..., description="The unique identifier of the project where the web experiment will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
     name: str = Field(..., description="A descriptive name for the web experiment. Must not exceed 400 characters.", max_length=400),
@@ -27550,7 +31087,13 @@ async def create_web_experiment(
     return _response_data
 
 # Tags: web_experiments
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Experiment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the web experiment to retrieve. This is a positive integer that uniquely identifies the experiment within the project."),
     project_id: str = Field(..., description="The unique identifier of the project containing the web experiment. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27589,7 +31132,13 @@ async def get_web_experiment(
     return _response_data
 
 # Tags: web_experiments
-@mcp.tool()
+@mcp.tool(
+    title="Update Web Experiment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_web_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the web experiment to update."),
     project_id: str = Field(..., description="The unique identifier of the project containing the web experiment. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27633,7 +31182,13 @@ async def update_web_experiment(
     return _response_data
 
 # Tags: web_experiments
-@mcp.tool()
+@mcp.tool(
+    title="Update Web Experiment (Partial)",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_web_experiment_partial(
     id_: int = Field(..., alias="id", description="The unique identifier of the web experiment to update. This is a positive integer assigned when the experiment was created."),
     project_id: str = Field(..., description="The unique identifier of the project containing the web experiment. Retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27676,7 +31231,13 @@ async def update_web_experiment_partial(
     return _response_data
 
 # Tags: web_experiments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Web Experiment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_web_experiment(
     id_: int = Field(..., alias="id", description="The unique identifier of the web experiment to delete. This is a positive integer value."),
     project_id: str = Field(..., description="The unique identifier of the project containing the web experiment. You can retrieve available project IDs by calling the /api/projects/ endpoint."),
@@ -27715,7 +31276,13 @@ async def delete_web_experiment(
     return _response_data
 
 # Tags: hog_function_templates, cdp, public_hog_function_templates
-@mcp.tool()
+@mcp.tool(
+    title="List Public Hog Function Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_hog_function_templates_public(
     limit: int | None = Field(None, description="Maximum number of templates to return in a single page of results. Use with offset for pagination."),
     offset: int | None = Field(None, description="Zero-based index position to start returning results from, enabling pagination through large result sets."),
@@ -27757,7 +31324,13 @@ async def list_hog_function_templates_public(
     return _response_data
 
 # Tags: core, users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     is_staff: bool | None = Field(None, description="Filter results to include only staff users when set to true, or only non-staff users when set to false. Omit to return all users regardless of staff status."),
     limit: int | None = Field(None, description="Maximum number of user records to return in a single response. Controls page size for pagination."),
@@ -27799,7 +31372,12 @@ async def list_users(
     return _response_data
 
 # Tags: core, users
-@mcp.tool()
+@mcp.tool(
+    title="Create User with Email Verification",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user_with_email_verification(
     email: str = Field(..., description="User's email address. Must be a valid email format and cannot exceed 254 characters.", max_length=254),
     password: str = Field(..., description="User's account password. Maximum 128 characters. Should meet security requirements (enforced server-side).", max_length=128),
@@ -27850,7 +31428,12 @@ async def create_user_with_email_verification(
     return _response_data
 
 # Tags: core, users
-@mcp.tool()
+@mcp.tool(
+    title="Create User with Email Verification",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user_with_email_verification_confirmation(
     email: str = Field(..., description="User's email address. Must be a valid email format and cannot exceed 254 characters.", max_length=254),
     password: str = Field(..., description="User's account password. Maximum 128 characters. Should meet security requirements.", max_length=128),
@@ -27901,7 +31484,13 @@ async def create_user_with_email_verification_confirmation(
     return _response_data
 
 # Tags: actions, actions
-@mcp.tool()
+@mcp.tool(
+    title="Destroy Action",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def actions_destroy(
     id_: int = Field(..., alias="id", description="A unique integer value identifying this action."),
     project_id: str = Field(..., description="Project ID of the project you're trying to access. To find the ID of the project, make a call to /api/projects/."),
@@ -27951,7 +31540,13 @@ async def actions_destroy(
     return _response_data
 
 # Tags: core, cohorts
-@mcp.tool()
+@mcp.tool(
+    title="Destroy Cohort",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cohorts_destroy(
     id_: int = Field(..., alias="id", description="A unique integer value identifying this cohort."),
     project_id: str = Field(..., description="Project ID of the project you're trying to access. To find the ID of the project, make a call to /api/projects/."),
@@ -27997,7 +31592,13 @@ async def cohorts_destroy(
     return _response_data
 
 # Tags: core, annotations
-@mcp.tool()
+@mcp.tool(
+    title="Destroy Annotation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def annotations_destroy(
     id_: int = Field(..., alias="id", description="A unique integer value identifying this annotation."),
     project_id: str = Field(..., description="Project ID of the project you're trying to access. To find the ID of the project, make a call to /api/projects/."),
@@ -28126,7 +31727,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python post_hog_api_server.py", file=sys.stderr)
+        print("  python post_hog_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -28228,7 +31829,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="PostHog API MCP Server")
+    parser = argparse.ArgumentParser(description="PostHog MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -28329,7 +31930,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting PostHog API MCP Server")
+    logger.info("Starting PostHog MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

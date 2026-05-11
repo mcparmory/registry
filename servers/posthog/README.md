@@ -1,4 +1,4 @@
-# PostHog API MCP Server
+# PostHog MCP Server
 <!-- mcp-name: com.mcparmory/posthog -->
 
 Base URL: https://us.posthog.com
@@ -56,6 +56,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BEARER_TOKEN` — Bearer token
 - `SERVER_REGION` — PostHog cloud region prefix. Use us for US Cloud (default) or eu for EU Cloud hosted in Frankfurt. (default: `us`)
+
 Do not commit credentials to version control.
 
 ---

@@ -1,13 +1,13 @@
 """
-Posthog Api MCP Server - Pydantic Models
+Posthog MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:59:13 UTC
+Generated: 2026-05-11 20:07:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -1390,7 +1390,7 @@ class EvaluationsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the evaluations. Obtain this ID by calling the /api/projects/ endpoint.")
 class EvaluationsListRequestQuery(StrictModel):
     enabled: bool | None = Field(default=None, description="Filter results to show only enabled or disabled evaluations.")
-    id__in: list[str] | None = Field(default=None, description="Filter results to include only evaluations with IDs matching the provided list. Separate multiple IDs with commas.")
+    id__in: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter results to include only evaluations with IDs matching the provided list. Separate multiple IDs with commas.")
     limit: int | None = Field(default=None, description="Maximum number of evaluations to return in a single page of results.")
     offset: int | None = Field(default=None, description="Zero-based index position to start returning results from, used for pagination.")
     order_by: list[Literal["-created_at", "-name", "-updated_at", "created_at", "name", "updated_at"]] | None = Field(default=None, description="Sort results by one or more fields. Prefix field names with a hyphen to sort in descending order. Available fields: created_at, updated_at, and name.")
@@ -1572,7 +1572,7 @@ class LlmAnalyticsEvaluationSummaryCreateRequestPath(StrictModel):
 class LlmAnalyticsEvaluationSummaryCreateRequestBody(StrictModel):
     evaluation_id: str = Field(default=..., description="The UUID of the evaluation configuration to analyze and summarize.", json_schema_extra={'format': 'uuid'})
     filter_: Literal["all", "pass", "fail", "na"] | None = Field(default=None, validation_alias="filter", serialization_alias="filter", description="Filter the evaluation results to analyze: 'all' includes all results, 'pass' includes only passing evaluations, 'fail' includes only failing evaluations, and 'na' includes results with no applicable status. Defaults to 'all' if not specified.")
-    generation_ids: list[str] | None = Field(default=None, description="Optional list of specific generation IDs to include in the summary analysis. If provided, the summary will focus only on these generations. Maximum of 250 IDs allowed.", max_length=250)
+    generation_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Optional list of specific generation IDs to include in the summary analysis. If provided, the summary will focus only on these generations. Maximum of 250 IDs allowed.", max_length=250)
 class LlmAnalyticsEvaluationSummaryCreateRequest(StrictModel):
     """Generate an AI-powered analysis of evaluation results that identifies patterns in passing and failing evaluations and provides actionable recommendations for improving LLM response quality."""
     path: LlmAnalyticsEvaluationSummaryCreateRequestPath
@@ -3303,7 +3303,7 @@ class CohortsAddPersonsToStaticCohortPartialUpdateRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the cohort to which persons will be added.")
     project_id: str = Field(default=..., description="The unique identifier of the project containing the cohort. Retrieve available project IDs by calling the /api/projects/ endpoint.")
 class CohortsAddPersonsToStaticCohortPartialUpdateRequestBody(StrictModel):
-    person_ids: list[str] | None = Field(default=None, description="An array of person UUIDs to add to the cohort. Each UUID must be a valid identifier for an existing person in the project.")
+    person_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="An array of person UUIDs to add to the cohort. Each UUID must be a valid identifier for an existing person in the project.")
 class CohortsAddPersonsToStaticCohortPartialUpdateRequest(StrictModel):
     """Add one or more persons to an existing static cohort by their unique identifiers. This operation allows bulk addition of individuals to a cohort for segmentation and analysis purposes."""
     path: CohortsAddPersonsToStaticCohortPartialUpdateRequestPath
@@ -3778,7 +3778,7 @@ class DatasetItemsPartialUpdateRequest(StrictModel):
 class DatasetsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the datasets. Obtain this ID by calling the projects list endpoint.")
 class DatasetsListRequestQuery(StrictModel):
-    id__in: list[str] | None = Field(default=None, description="Filter results to include only datasets with IDs matching the provided list. Specify multiple IDs as a comma-separated array.")
+    id__in: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter results to include only datasets with IDs matching the provided list. Specify multiple IDs as a comma-separated array.")
     limit: int | None = Field(default=None, description="Maximum number of datasets to return in a single response page. Use with offset for pagination.")
     offset: int | None = Field(default=None, description="Zero-based index position to start returning results from. Use with limit to paginate through large result sets.")
     order_by: list[Literal["-created_at", "-updated_at", "created_at", "updated_at"]] | None = Field(default=None, description="Sort results by creation or modification timestamp. Prefix with hyphen (e.g., `-created_at`) for descending order. Specify as a comma-separated array for multiple sort criteria.")
@@ -11468,7 +11468,7 @@ class Survey(PermissiveModel):
     feature_flag_keys: list[dict[str, str | None]]
     iteration_count: int | None = Field(None, ge=0, le=500)
     iteration_frequency_days: int | None = Field(None, ge=0, le=2147483647)
-    iteration_start_dates: list[str | None] | None = None
+    iteration_start_dates: list[Annotated[str | None, Field(json_schema_extra={'format': 'date-time'})]] | None = None
     current_iteration: int | None = Field(None, ge=0, le=2147483647)
     current_iteration_start_date: str | None = Field(None, json_schema_extra={'format': 'date-time'})
     response_sampling_start_date: str | None = Field(None, json_schema_extra={'format': 'date-time'})
