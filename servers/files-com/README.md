@@ -5,7 +5,7 @@ Base URL: https://.files.com/api/rest/v1
 | | |
 |---|---|
 | **Category** | Storage |
-| **Tools** | 197 |
+| **Tools** | 195 |
 | **Auth** | API Key |
 
 ## API Info
@@ -59,6 +59,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `API_KEY` — API Key Authentication (X-FilesAPI-Key)
 - `SERVER_SUBDOMAIN` — User-specific value for subdomain
+
 Do not commit credentials to version control.
 
 ---

@@ -5,7 +5,7 @@ Files.com MCP Server
 API Info:
 - Contact: Files.com Customer Success Team <support@files.com>
 
-Generated: 2026-05-05 14:57:39 UTC
+Generated: 2026-05-11 19:47:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -42,6 +43,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -50,7 +52,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{subdomain}.files.com/api/rest/v1".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Files.com"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -541,6 +543,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -548,6 +572,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -633,6 +659,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -642,18 +669,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -664,24 +689,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1065,6 +1096,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1089,6 +1122,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1296,7 +1331,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Files.com", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: action_notification_export_results
-@mcp.tool()
+@mcp.tool(
+    title="List Action Notification Export Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_action_notification_export_results(
     action_notification_export_id: str = Field(..., description="The unique identifier of the action notification export whose results you want to retrieve."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -1340,7 +1381,12 @@ async def list_action_notification_export_results(
     return _response_data
 
 # Tags: action_notification_exports
-@mcp.tool()
+@mcp.tool(
+    title="Export Action Notifications",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def export_action_notifications(
     end_at: str | None = Field(None, description="End date and time for the export range (inclusive). Notifications triggered after this timestamp will be excluded."),
     query_folder: str | None = Field(None, description="Filter to notifications triggered by actions within a specific folder. Useful for isolating notifications from a particular directory."),
@@ -1389,7 +1435,13 @@ async def export_action_notifications(
     return _response_data
 
 # Tags: action_notification_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get Action Notification Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_action_notification_export(id_: str = Field(..., alias="id", description="The unique identifier of the action notification export to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific action notification export by its ID. Use this to view the status, configuration, and results of a previously created notification export."""
 
@@ -1427,7 +1479,13 @@ async def get_action_notification_export(id_: str = Field(..., alias="id", descr
     return _response_data
 
 # Tags: action_webhook_failures
-@mcp.tool()
+@mcp.tool(
+    title="Retry Webhook Failure",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def retry_webhook_failure(id_: str = Field(..., alias="id", description="The unique identifier of the action webhook failure to retry.")) -> dict[str, Any] | ToolResult:
     """Retry a failed action webhook by its failure ID. This operation allows you to re-attempt delivery of a webhook that previously failed."""
 
@@ -1465,7 +1523,13 @@ async def retry_webhook_failure(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: api_key
-@mcp.tool()
+@mcp.tool(
+    title="Get Current API Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_api_key() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the API key currently being used for authentication. This operation requires the API connection to be authenticated using an API key rather than other authentication methods."""
 
@@ -1492,7 +1556,13 @@ async def get_current_api_key() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: api_keys
-@mcp.tool()
+@mcp.tool(
+    title="List API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_keys(
     per_page: str | None = Field(None, description="Number of API keys to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort the results by a specified field in ascending or descending order. Supports sorting by expiration date."),
@@ -1535,7 +1605,12 @@ async def list_api_keys(
     return _response_data
 
 # Tags: api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Create API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_key(
     description: str | None = Field(None, description="A user-supplied description to help identify the purpose or context of this API key."),
     expires_at: str | None = Field(None, description="The date and time when this API key will automatically expire and become invalid. Specify in ISO 8601 format."),
@@ -1579,7 +1654,13 @@ async def create_api_key(
     return _response_data
 
 # Tags: api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Get API Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api_key(id_: str = Field(..., alias="id", description="The unique identifier of the API key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific API key by its ID. Use this to view details of an existing API key in your account."""
 
@@ -1617,7 +1698,13 @@ async def get_api_key(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Update API Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_api_key_by_id(
     id_: str = Field(..., alias="id", description="The unique identifier of the API key to update."),
     description: str | None = Field(None, description="A user-supplied description to help identify the purpose or context of this API key."),
@@ -1665,7 +1752,13 @@ async def update_api_key_by_id(
     return _response_data
 
 # Tags: api_keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete API Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_api_key(id_: str = Field(..., alias="id", description="The unique identifier of the API key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an API key by its ID. This action cannot be undone and will immediately revoke access for any integrations using this key."""
 
@@ -1703,7 +1796,13 @@ async def delete_api_key(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: apps
-@mcp.tool()
+@mcp.tool(
+    title="List Apps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_apps(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are `name` and `app_type`. Specify the field name as the key and the direction (asc or desc) as the value."),
@@ -1746,7 +1845,13 @@ async def list_apps(
     return _response_data
 
 # Tags: as2_incoming_messages
-@mcp.tool()
+@mcp.tool(
+    title="List AS2 Incoming Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_as2_incoming_messages(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid fields are `created_at` and `as2_partner_id`."),
@@ -1791,7 +1896,13 @@ async def list_as2_incoming_messages(
     return _response_data
 
 # Tags: as2_outgoing_messages
-@mcp.tool()
+@mcp.tool(
+    title="List AS2 Outgoing Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_as2_outgoing_messages(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supported fields are `created_at` and `as2_partner_id`."),
@@ -1836,7 +1947,13 @@ async def list_as2_outgoing_messages(
     return _response_data
 
 # Tags: as2_partners
-@mcp.tool()
+@mcp.tool(
+    title="List AS2 Partners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_as2_partners(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of AS2 partners configured in the system. Use the per_page parameter to control result set size."""
 
@@ -1876,7 +1993,12 @@ async def list_as2_partners(per_page: str | None = Field(None, description="Numb
     return _response_data
 
 # Tags: as2_partners
-@mcp.tool()
+@mcp.tool(
+    title="Create AS2 Partner",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_as2_partner(
     as2_station_id: str = Field(..., description="The ID of the AS2 station that this partner will be associated with."),
     name: str = Field(..., description="The AS2 identifier name for this partner, used in AS2 message headers for partner identification."),
@@ -1923,7 +2045,13 @@ async def create_as2_partner(
     return _response_data
 
 # Tags: as2_partners
-@mcp.tool()
+@mcp.tool(
+    title="Get AS2 Partner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_as2_partner(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific AS2 partner by ID. Returns the partner's configuration and connection information."""
 
@@ -1961,7 +2089,13 @@ async def get_as2_partner(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: as2_partners
-@mcp.tool()
+@mcp.tool(
+    title="Update AS2 Partner",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_as2_partner(
     id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to update."),
     name: str | None = Field(None, description="The AS2 partner's display name or identifier."),
@@ -2009,7 +2143,13 @@ async def update_as2_partner(
     return _response_data
 
 # Tags: as2_partners
-@mcp.tool()
+@mcp.tool(
+    title="Delete AS2 Partner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_as2_partner(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an AS2 partner configuration. This operation permanently removes the specified AS2 partner from the system."""
 
@@ -2047,7 +2187,13 @@ async def delete_as2_partner(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: as2_stations
-@mcp.tool()
+@mcp.tool(
+    title="List AS2 Stations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_as2_stations(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of AS2 stations. Use the per_page parameter to control the number of records returned per page."""
 
@@ -2087,7 +2233,12 @@ async def list_as2_stations(per_page: str | None = Field(None, description="Numb
     return _response_data
 
 # Tags: as2_stations
-@mcp.tool()
+@mcp.tool(
+    title="Create AS2 Station",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_as2_station(
     name: str = Field(..., description="The name identifier for the AS2 station. Used to reference this station in AS2 communications and configurations."),
     private_key: str = Field(..., description="The private key used for signing outbound AS2 messages and decrypting inbound messages. Must be in PEM format."),
@@ -2131,7 +2282,13 @@ async def create_as2_station(
     return _response_data
 
 # Tags: as2_stations
-@mcp.tool()
+@mcp.tool(
+    title="Get AS2 Station",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_as2_station(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific AS2 station by its ID. Returns the configuration and status information for the AS2 station."""
 
@@ -2169,7 +2326,13 @@ async def get_as2_station(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: as2_stations
-@mcp.tool()
+@mcp.tool(
+    title="Update AS2 Station",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_as2_station(
     id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to update."),
     name: str | None = Field(None, description="The AS2 station name or identifier."),
@@ -2217,7 +2380,13 @@ async def update_as2_station(
     return _response_data
 
 # Tags: as2_stations
-@mcp.tool()
+@mcp.tool(
+    title="Delete AS2 Station",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_as2_station(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an AS2 station by its ID. This operation permanently removes the AS2 station configuration and cannot be undone."""
 
@@ -2255,7 +2424,13 @@ async def delete_as2_station(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: automation_runs
-@mcp.tool()
+@mcp.tool(
+    title="List Automation Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automation_runs(
     automation_id: str = Field(..., description="The ID of the automation whose runs you want to list."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -2300,7 +2475,13 @@ async def list_automation_runs(
     return _response_data
 
 # Tags: automation_runs
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation Run",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation_run(id_: str = Field(..., alias="id", description="The unique identifier of the automation run to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific automation run by its ID. Returns the current state, execution history, and results of the automation run."""
 
@@ -2338,7 +2519,13 @@ async def get_automation_run(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: automations
-@mcp.tool()
+@mcp.tool(
+    title="List Automations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automations(
     per_page: str | None = Field(None, description="Number of automation records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are: automation, disabled, last_modified_at, or name."),
@@ -2382,7 +2569,13 @@ async def list_automations(
     return _response_data
 
 # Tags: automations
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation(id_: str = Field(..., alias="id", description="The unique identifier of the automation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific automation by its ID. Returns the automation configuration and current state."""
 
@@ -2420,7 +2613,12 @@ async def get_automation(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: automations
-@mcp.tool()
+@mcp.tool(
+    title="Update Automation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_automation(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation to update."),
     description: str | None = Field(None, description="A descriptive label for this automation."),
@@ -2483,7 +2681,13 @@ async def update_automation(
     return _response_data
 
 # Tags: automations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Automation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_automation(id_: str = Field(..., alias="id", description="The unique identifier of the automation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an automation by its ID. This action cannot be undone."""
 
@@ -2521,7 +2725,13 @@ async def delete_automation(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: bandwidth_snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Bandwidth Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bandwidth_snapshots(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use the field name as the key and 'asc' or 'desc' as the value. Valid sortable field is 'logged_at'."),
@@ -2564,7 +2774,13 @@ async def list_bandwidth_snapshots(
     return _response_data
 
 # Tags: behaviors
-@mcp.tool()
+@mcp.tool(
+    title="List Behaviors by Path",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_behaviors_by_path(
     path: str = Field(..., description="The folder path where behaviors are located. This path determines the starting point for the behavior listing."),
     per_page: str | None = Field(None, description="Maximum number of behavior records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -2610,7 +2826,13 @@ async def list_behaviors_by_path(
     return _response_data
 
 # Tags: behaviors
-@mcp.tool()
+@mcp.tool(
+    title="Get Behavior",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_behavior(id_: str = Field(..., alias="id", description="The unique identifier of the behavior to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific behavior by its ID."""
 
@@ -2648,7 +2870,13 @@ async def get_behavior(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: behaviors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Behavior",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_behavior(id_: str = Field(..., alias="id", description="The unique identifier of the behavior to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a behavior by its ID. This action cannot be undone."""
 
@@ -2686,7 +2914,13 @@ async def delete_behavior(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: bundle_downloads
-@mcp.tool()
+@mcp.tool(
+    title="List Bundle Downloads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bundle_downloads(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only `created_at` is supported as a valid sort field."),
@@ -2733,7 +2967,13 @@ async def list_bundle_downloads(
     return _response_data
 
 # Tags: bundle_notifications
-@mcp.tool()
+@mcp.tool(
+    title="List Bundle Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bundle_notifications(
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     bundle_id: str | None = Field(None, description="Filter notifications by a specific bundle ID. Omit to retrieve notifications for all bundles."),
@@ -2777,7 +3017,13 @@ async def list_bundle_notifications(
     return _response_data
 
 # Tags: bundle_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Get Bundle Notification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bundle_notification(id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific bundle notification by its ID. Use this to fetch the full notification record including its content and metadata."""
 
@@ -2815,7 +3061,13 @@ async def get_bundle_notification(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: bundle_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Update Bundle Notification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_bundle_notification(
     id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to update."),
     notify_on_registration: bool | None = Field(None, description="Enable or disable notifications when a registration action occurs for this bundle."),
@@ -2861,7 +3113,13 @@ async def update_bundle_notification(
     return _response_data
 
 # Tags: bundle_notifications
-@mcp.tool()
+@mcp.tool(
+    title="Delete Bundle Notification",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_bundle_notification(id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific bundle notification by its ID. This operation permanently removes the bundle notification from the system."""
 
@@ -2899,7 +3157,13 @@ async def delete_bundle_notification(id_: str = Field(..., alias="id", descripti
     return _response_data
 
 # Tags: bundle_recipients
-@mcp.tool()
+@mcp.tool(
+    title="List Bundle Recipients",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bundle_recipients(
     bundle_id: str = Field(..., description="The ID of the bundle for which to list recipients."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
@@ -2944,7 +3208,12 @@ async def list_bundle_recipients(
     return _response_data
 
 # Tags: bundle_recipients
-@mcp.tool()
+@mcp.tool(
+    title="Share Bundle With Recipient",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def share_bundle_with_recipient(
     bundle_id: str = Field(..., description="The ID of the bundle to share with the recipient."),
     recipient: str = Field(..., description="The email address of the recipient to share the bundle with."),
@@ -2992,7 +3261,13 @@ async def share_bundle_with_recipient(
     return _response_data
 
 # Tags: bundle_registrations
-@mcp.tool()
+@mcp.tool(
+    title="List Bundle Registrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bundle_registrations(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     bundle_id: str | None = Field(None, description="Filter results to registrations associated with a specific bundle by its ID."),
@@ -3036,7 +3311,13 @@ async def list_bundle_registrations(
     return _response_data
 
 # Tags: bundles
-@mcp.tool()
+@mcp.tool(
+    title="List Bundles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bundles(
     per_page: str | None = Field(None, description="Number of bundle records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supports sorting by `created_at` or `code` fields."),
@@ -3079,7 +3360,12 @@ async def list_bundles(
     return _response_data
 
 # Tags: bundles
-@mcp.tool()
+@mcp.tool(
+    title="Create Bundle",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_bundle(
     paths: list[str] = Field(..., description="List of file and folder paths to include in this bundle. Paths are processed in the order specified."),
     clickwrap_id: str | None = Field(None, description="ID of the clickwrap agreement to display to bundle recipients before access is granted."),
@@ -3096,7 +3382,7 @@ async def create_bundle(
     require_registration: bool | None = Field(None, description="When enabled, recipients must provide their name and email address before accessing the bundle."),
     require_share_recipient: bool | None = Field(None, description="When enabled, only recipients who received an invitation email through the Files.com interface can access the bundle."),
     send_email_receipt_to_uploader: bool | None = Field(None, description="When enabled, an email receipt confirming successful upload is sent to the uploader. Only applicable for bundles with write permissions."),
-    watermark_attachment_file: str | None = Field(None, description="Image file to apply as a watermark overlay on all bundle item previews. Uploaded as binary file data."),
+    watermark_attachment_file: str | None = Field(None, description="Base64-encoded file content for upload. Image file to apply as a watermark overlay on all bundle item previews. Uploaded as binary file data.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Create a shareable bundle that packages files and folders with configurable access controls, expiration, and submission handling. Bundles can require registration, limit access to specific recipients, and apply watermarks to previewed items."""
 
@@ -3141,7 +3427,13 @@ async def create_bundle(
     return _response_data
 
 # Tags: bundles
-@mcp.tool()
+@mcp.tool(
+    title="Get Bundle",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bundle(id_: str = Field(..., alias="id", description="The unique identifier of the bundle to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific bundle by its ID."""
 
@@ -3179,7 +3471,13 @@ async def get_bundle(id_: str = Field(..., alias="id", description="The unique i
     return _response_data
 
 # Tags: bundles
-@mcp.tool()
+@mcp.tool(
+    title="Update Bundle",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_bundle(
     id_: str = Field(..., alias="id", description="The unique identifier of the bundle to update."),
     clickwrap_id: str | None = Field(None, description="The clickwrap agreement to associate with this bundle for user acceptance."),
@@ -3197,7 +3495,7 @@ async def update_bundle(
     require_registration: bool | None = Field(None, description="When enabled, displays a registration form to capture the downloader's name and email address."),
     require_share_recipient: bool | None = Field(None, description="When enabled, restricts access to only recipients who have been explicitly invited via email through the Files.com interface."),
     send_email_receipt_to_uploader: bool | None = Field(None, description="When enabled, sends a delivery receipt to the uploader upon bundle access. Only applicable for writable bundles."),
-    watermark_attachment_file: str | None = Field(None, description="A watermark image file to overlay on all bundle item previews for branding or security purposes."),
+    watermark_attachment_file: str | None = Field(None, description="Base64-encoded file content for upload. A watermark image file to overlay on all bundle item previews for branding or security purposes.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Update an existing bundle's configuration, including access controls, expiration, paths, and metadata. Allows modification of sharing permissions, recipient requirements, and submission handling."""
 
@@ -3244,7 +3542,13 @@ async def update_bundle(
     return _response_data
 
 # Tags: bundles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Bundle",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_bundle(id_: str = Field(..., alias="id", description="The unique identifier of the bundle to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a bundle by its ID. This action cannot be undone."""
 
@@ -3282,7 +3586,12 @@ async def delete_bundle(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: bundles
-@mcp.tool()
+@mcp.tool(
+    title="Share Bundle",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def share_bundle(
     id_: str = Field(..., alias="id", description="The unique identifier of the bundle to share."),
     note: str | None = Field(None, description="Optional custom message to include in the share email."),
@@ -3327,7 +3636,13 @@ async def share_bundle(
     return _response_data
 
 # Tags: clickwraps
-@mcp.tool()
+@mcp.tool(
+    title="List Clickwraps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_clickwraps(per_page: str | None = Field(None, description="Number of clickwrap records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of clickwraps. Use the per_page parameter to control the number of records returned in each page."""
 
@@ -3367,7 +3682,12 @@ async def list_clickwraps(per_page: str | None = Field(None, description="Number
     return _response_data
 
 # Tags: clickwraps
-@mcp.tool()
+@mcp.tool(
+    title="Create Clickwrap",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_clickwrap(
     name: str | None = Field(None, description="Display name for this clickwrap agreement, used when presenting multiple clickwrap options to users."),
     use_with_bundles: Literal["none", "available", "require"] | None = Field(None, description="Determines how this clickwrap applies to bundle operations: 'none' disables it, 'available' makes it optional, 'require' makes acceptance mandatory."),
@@ -3412,7 +3732,13 @@ async def create_clickwrap(
     return _response_data
 
 # Tags: clickwraps
-@mcp.tool()
+@mcp.tool(
+    title="Get Clickwrap",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_clickwrap(id_: str = Field(..., alias="id", description="The unique identifier of the clickwrap agreement to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific clickwrap agreement by its ID. Returns the clickwrap details including its configuration and status."""
 
@@ -3450,7 +3776,13 @@ async def get_clickwrap(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: clickwraps
-@mcp.tool()
+@mcp.tool(
+    title="Update Clickwrap",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_clickwrap(
     id_: str = Field(..., alias="id", description="The unique identifier of the Clickwrap agreement to update."),
     name: str | None = Field(None, description="Display name for the Clickwrap agreement, used when presenting multiple agreements to users for selection."),
@@ -3498,7 +3830,13 @@ async def update_clickwrap(
     return _response_data
 
 # Tags: clickwraps
-@mcp.tool()
+@mcp.tool(
+    title="Delete Clickwrap",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_clickwrap(id_: str = Field(..., alias="id", description="The unique identifier of the clickwrap to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a clickwrap by its ID. This action cannot be undone."""
 
@@ -3536,7 +3874,13 @@ async def delete_clickwrap(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: dns_records
-@mcp.tool()
+@mcp.tool(
+    title="List DNS Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dns_records(per_page: str | None = Field(None, description="Number of DNS records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 records can be retrieved in a single request.")) -> dict[str, Any] | ToolResult:
     """Retrieve the DNS records configured for a site. Results can be paginated to manage large record sets."""
 
@@ -3576,7 +3920,13 @@ async def list_dns_records(per_page: str | None = Field(None, description="Numbe
     return _response_data
 
 # Tags: external_events
-@mcp.tool()
+@mcp.tool(
+    title="List External Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_events(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are: remote_server_type, site_id, folder_behavior_id, event_type, created_at, or status."),
@@ -3619,7 +3969,12 @@ async def list_external_events(
     return _response_data
 
 # Tags: external_events
-@mcp.tool()
+@mcp.tool(
+    title="Create External Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_external_event(
     body: str = Field(..., description="The content or payload of the event being created."),
     status: Literal["success", "failure", "partial_failure", "in_progress", "skipped"] = Field(..., description="The current processing state of the event."),
@@ -3661,7 +4016,13 @@ async def create_external_event(
     return _response_data
 
 # Tags: external_events
-@mcp.tool()
+@mcp.tool(
+    title="Get External Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_event(id_: str = Field(..., alias="id", description="The unique identifier of the external event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific external event by its ID. Returns the complete event information including metadata and configuration."""
 
@@ -3699,7 +4060,12 @@ async def get_external_event(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: file_actions
-@mcp.tool()
+@mcp.tool(
+    title="Initiate File Upload",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_file_upload(
     path: str = Field(..., description="The file path where the upload will be stored. Can be a new file or an existing file for append/restart operations."),
     mkdir_parents: bool | None = Field(None, description="Whether to automatically create any missing parent directories in the path hierarchy."),
@@ -3747,7 +4113,12 @@ async def initiate_file_upload(
     return _response_data
 
 # Tags: file_actions
-@mcp.tool()
+@mcp.tool(
+    title="Copy File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_file(
     path: str = Field(..., description="The file or folder path to copy from."),
     destination: str = Field(..., description="The destination path where the file or folder will be copied to."),
@@ -3791,7 +4162,13 @@ async def copy_file(
     return _response_data
 
 # Tags: file_actions
-@mcp.tool()
+@mcp.tool(
+    title="Get File Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_metadata(
     path: str = Field(..., description="The file system path to the target file or folder."),
     preview_size: str | None = Field(None, description="The size of the file preview to include in the response. Determines the resolution and detail level of preview data."),
@@ -3835,7 +4212,12 @@ async def get_file_metadata(
     return _response_data
 
 # Tags: file_actions
-@mcp.tool()
+@mcp.tool(
+    title="Move File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_file(
     path: str = Field(..., description="The current path of the file or folder to be moved."),
     destination: str = Field(..., description="The destination path where the file or folder should be moved to."),
@@ -3878,7 +4260,12 @@ async def move_file(
     return _response_data
 
 # Tags: file_comment_reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add File Comment Reaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_file_comment_reaction(
     emoji: str = Field(..., description="The emoji character or emoji code to use as the reaction on the file comment."),
     file_comment_id: str = Field(..., description="The unique identifier of the file comment to attach the reaction to."),
@@ -3922,7 +4309,13 @@ async def add_file_comment_reaction(
     return _response_data
 
 # Tags: file_comment_reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove File Comment Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_file_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the file comment reaction to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a file comment. Deletes the specified file comment reaction by its ID."""
 
@@ -3960,7 +4353,12 @@ async def remove_file_comment_reaction(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: file_comments
-@mcp.tool()
+@mcp.tool(
+    title="Update File Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_file_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the file comment to update."),
     body: str = Field(..., description="The new comment text content to replace the existing body."),
@@ -4005,7 +4403,13 @@ async def update_file_comment(
     return _response_data
 
 # Tags: file_comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete File Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_comment(id_: str = Field(..., alias="id", description="The unique identifier of the file comment to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific file comment by its ID. This operation permanently removes the comment from the file."""
 
@@ -4043,7 +4447,13 @@ async def delete_file_comment(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: file_migrations
-@mcp.tool()
+@mcp.tool(
+    title="Get File Migration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_migration(id_: str = Field(..., alias="id", description="The unique identifier of the file migration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific file migration by its ID. Use this to check the status and information of a file migration operation."""
 
@@ -4081,7 +4491,13 @@ async def get_file_migration(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Download File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_file(
     path: str = Field(..., description="The file path to download or retrieve information for."),
     action: str | None = Field(None, description="Controls the response behavior: leave blank for standard download, use 'stat' to retrieve file metadata without a download URL, or use 'redirect' to receive a 302 redirect directly to the file."),
@@ -4126,11 +4542,16 @@ async def download_file(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(
     path: str = Field(..., description="The file system path where the file will be uploaded or operated on."),
     etags_etag: list[str] = Field(..., description="Array of etag identifiers for multipart upload validation, used to verify part integrity. Order corresponds to part numbers."),
-    etags_part: list[int] = Field(..., description="Array of part numbers corresponding to each etag, indicating the sequence of multipart upload segments. Order must match the etags array."),
+    etags_part: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] = Field(..., description="Array of part numbers corresponding to each etag, indicating the sequence of multipart upload segments. Order must match the etags array."),
     action: str | None = Field(None, description="The type of upload action to perform: `upload` for standard file upload, `append` to append to existing file, `attachment` for attachment handling, `put` for direct replacement, `end` to finalize multipart upload, or omit for default behavior."),
     length: str | None = Field(None, description="The length of the file being uploaded in bytes."),
     mkdir_parents: bool | None = Field(None, description="Whether to automatically create parent directories in the path if they do not already exist."),
@@ -4181,7 +4602,13 @@ async def upload_file(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Update File Metadata",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file_metadata(
     path: str = Field(..., description="The file or folder path to update."),
     priority_color: str | None = Field(None, description="Priority or bookmark color to assign to the file or folder."),
@@ -4225,7 +4652,13 @@ async def update_file_metadata(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(
     path: str = Field(..., description="The file system path to the file or folder to delete."),
     recursive: bool | None = Field(None, description="When true, recursively deletes folders and their contents. When false, deletion fails if the target folder is not empty."),
@@ -4267,7 +4700,13 @@ async def delete_file(
     return _response_data
 
 # Tags: folders
-@mcp.tool()
+@mcp.tool(
+    title="List Folders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folders(
     path: str = Field(..., description="The folder path to list contents from."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -4315,7 +4754,12 @@ async def list_folders(
     return _response_data
 
 # Tags: folders
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder(
     path: str = Field(..., description="The file system path where the folder should be created."),
     mkdir_parents: bool | None = Field(None, description="Whether to automatically create any missing parent directories in the path."),
@@ -4359,7 +4803,13 @@ async def create_folder(
     return _response_data
 
 # Tags: form_field_sets
-@mcp.tool()
+@mcp.tool(
+    title="List Form Field Sets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_field_sets(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of form field sets. Use pagination to control the number of records returned per page."""
 
@@ -4399,7 +4849,12 @@ async def list_form_field_sets(per_page: str | None = Field(None, description="N
     return _response_data
 
 # Tags: form_field_sets
-@mcp.tool()
+@mcp.tool(
+    title="Create Form Field Set",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form_field_set(
     form_fields: list[_models.PostFormFieldSetsBodyFormFieldsItem] | None = Field(None, description="Array of form fields to include in this set. Order is preserved and determines field display sequence. Each item should represent a field configuration."),
     title: str | None = Field(None, description="Display title for the form field set. Used to identify and label the set in user interfaces."),
@@ -4434,13 +4889,20 @@ async def create_form_field_set(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: form_field_sets
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Field Set",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_field_set(id_: str = Field(..., alias="id", description="The unique identifier of the form field set to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific form field set by its ID. Returns the complete configuration and structure of the requested form field set."""
 
@@ -4478,7 +4940,13 @@ async def get_form_field_set(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: form_field_sets
-@mcp.tool()
+@mcp.tool(
+    title="Update Form Field Set",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_form_field_set(
     id_: str = Field(..., alias="id", description="The unique identifier of the form field set to update."),
     form_fields: list[_models.PatchFormFieldSetsIdBodyFormFieldsItem] | None = Field(None, description="Array of form fields to associate with this field set. Order may be significant for display purposes."),
@@ -4517,13 +4985,20 @@ async def update_form_field_set(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: form_field_sets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form Field Set",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form_field_set(id_: str = Field(..., alias="id", description="The unique identifier of the form field set to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a form field set by its ID. This operation permanently removes the specified form field set and cannot be undone."""
 
@@ -4561,7 +5036,13 @@ async def delete_form_field_set(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: group_users
-@mcp.tool()
+@mcp.tool(
+    title="List Group Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_users(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
     group_id: str | None = Field(None, description="Group ID.  If provided, will return group_users of this group."),
@@ -4607,7 +5088,12 @@ async def list_group_users(
     return _response_data
 
 # Tags: group_users
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_group(
     group_id: str = Field(..., description="The ID of the group to which the user will be added."),
     user_id: str = Field(..., description="The ID of the user to add to the group."),
@@ -4653,7 +5139,13 @@ async def add_user_to_group(
     return _response_data
 
 # Tags: group_users
-@mcp.tool()
+@mcp.tool(
+    title="Update Group User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the group user membership record to update."),
     group_id: str = Field(..., description="The group to which the user belongs or should be associated."),
@@ -4702,7 +5194,13 @@ async def update_group_user(
     return _response_data
 
 # Tags: group_users
-@mcp.tool()
+@mcp.tool(
+    title="Remove User From Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group user membership record to delete."),
     group_id: str = Field(..., description="The unique identifier of the group from which the user will be removed."),
@@ -4749,7 +5247,13 @@ async def remove_user_from_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(
     per_page: str | None = Field(None, description="Maximum number of group records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. The `name` field is supported for sorting."),
@@ -4793,7 +5297,12 @@ async def list_groups(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(
     admin_ids: str | None = Field(None, description="Comma-delimited list of user IDs to designate as group administrators. Administrators have elevated permissions within the group."),
     name: str | None = Field(None, description="The name of the group. Used for identification and display purposes."),
@@ -4837,7 +5346,13 @@ async def create_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_membership(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership to update."),
     user_id: str = Field(..., description="The unique identifier of the user whose group membership should be updated."),
@@ -4884,7 +5399,13 @@ async def update_group_membership(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_member(
     group_id: str = Field(..., description="The unique identifier of the group from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the group."),
@@ -4926,7 +5447,13 @@ async def remove_group_member(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_permissions(
     group_id: str = Field(..., description="The ID of the group for which to list permissions. Note: This parameter is deprecated; use the `filter[group_id]` query parameter for filtering instead."),
     per_page: str | None = Field(None, description="Number of permission records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -4972,7 +5499,13 @@ async def list_group_permissions(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Group Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to retrieve."),
     per_page: str | None = Field(None, description="Number of user records to return per page. Recommended to use 1,000 or less for optimal performance; maximum allowed is 10,000."),
@@ -5017,7 +5550,12 @@ async def list_group_members(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group_user(
     group_id: str = Field(..., description="The group ID to associate with the new user."),
     allowed_ips: str | None = Field(None, description="Newline-delimited list of IP addresses permitted to access this user's account."),
@@ -5098,7 +5636,13 @@ async def create_group_user(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific group by its ID."""
 
@@ -5136,7 +5680,13 @@ async def get_group(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group to update."),
     admin_ids: str | None = Field(None, description="Comma-separated list of user IDs to designate as group administrators."),
@@ -5184,7 +5734,13 @@ async def update_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a group by its ID. This action cannot be undone."""
 
@@ -5222,7 +5778,13 @@ async def delete_group(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: history
-@mcp.tool()
+@mcp.tool(
+    title="List History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_history(
     start_at: str | None = Field(None, description="Filter to exclude history entries before this date and time. Leave blank to include all earlier entries."),
     end_at: str | None = Field(None, description="Filter to exclude history entries after this date and time. Leave blank to include all later entries."),
@@ -5272,7 +5834,13 @@ async def list_history(
     return _response_data
 
 # Tags: history
-@mcp.tool()
+@mcp.tool(
+    title="List File History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_history(
     path: str = Field(..., description="The file path to retrieve history for."),
     start_at: str | None = Field(None, description="Filter to only include history entries created on or after this date and time."),
@@ -5320,7 +5888,13 @@ async def list_file_history(
     return _response_data
 
 # Tags: history
-@mcp.tool()
+@mcp.tool(
+    title="List Folder History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_folder_history(
     path: str = Field(..., description="The folder path for which to retrieve history."),
     start_at: str | None = Field(None, description="Filter to exclude history entries created before this date and time."),
@@ -5368,7 +5942,13 @@ async def list_folder_history(
     return _response_data
 
 # Tags: history
-@mcp.tool()
+@mcp.tool(
+    title="List Logins",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_logins(
     start_at: str | None = Field(None, description="Filter to exclude login records before this date and time. Leave blank to include all earlier entries."),
     end_at: str | None = Field(None, description="Filter to exclude login records after this date and time. Leave blank to include all later entries."),
@@ -5414,7 +5994,13 @@ async def list_logins(
     return _response_data
 
 # Tags: history
-@mcp.tool()
+@mcp.tool(
+    title="List User History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_history(
     user_id: str = Field(..., description="The unique identifier of the user whose history records should be retrieved."),
     start_at: str | None = Field(None, description="Filter to exclude history entries created before this date and time. Leave blank to include all earlier entries."),
@@ -5463,7 +6049,13 @@ async def list_user_history(
     return _response_data
 
 # Tags: history_export_results
-@mcp.tool()
+@mcp.tool(
+    title="List History Export Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_history_export_results(
     history_export_id: str = Field(..., description="The unique identifier of the history export whose results you want to retrieve."),
     per_page: str | None = Field(None, description="Number of results to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
@@ -5507,7 +6099,12 @@ async def list_history_export_results(
     return _response_data
 
 # Tags: history_exports
-@mcp.tool()
+@mcp.tool(
+    title="Create History Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_history_export(
     end_at: str | None = Field(None, description="End date and time for the export range (inclusive). Use ISO 8601 format."),
     query_action: str | None = Field(None, description="Filter exported history records by action type performed (e.g., file operations, user management, authentication events)."),
@@ -5566,7 +6163,13 @@ async def create_history_export(
     return _response_data
 
 # Tags: history_exports
-@mcp.tool()
+@mcp.tool(
+    title="Get History Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_history_export(id_: str = Field(..., alias="id", description="The unique identifier of the history export to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific history export by its ID. Use this to check the status, metadata, and information about a previously created history export."""
 
@@ -5604,7 +6207,13 @@ async def get_history_export(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: inbox_recipients
-@mcp.tool()
+@mcp.tool(
+    title="List Inbox Recipients",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inbox_recipients(
     inbox_id: str = Field(..., description="The unique identifier of the inbox for which to list recipients."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -5649,7 +6258,12 @@ async def list_inbox_recipients(
     return _response_data
 
 # Tags: inbox_recipients
-@mcp.tool()
+@mcp.tool(
+    title="Share Inbox With Recipient",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def share_inbox_with_recipient(
     inbox_id: str = Field(..., description="The ID of the inbox to be shared with the recipient."),
     recipient: str = Field(..., description="Email address of the recipient who will receive access to the inbox."),
@@ -5697,7 +6311,13 @@ async def share_inbox_with_recipient(
     return _response_data
 
 # Tags: inbox_registrations
-@mcp.tool()
+@mcp.tool(
+    title="List Inbox Registrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inbox_registrations(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
     folder_behavior_id: str | None = Field(None, description="Filter results by the ID of the associated inbox. When provided, only registrations for that specific inbox are returned."),
@@ -5741,7 +6361,13 @@ async def list_inbox_registrations(
     return _response_data
 
 # Tags: inbox_uploads
-@mcp.tool()
+@mcp.tool(
+    title="List Inbox Uploads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inbox_uploads(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only `created_at` is supported as a valid sort field."),
@@ -5788,7 +6414,13 @@ async def list_inbox_uploads(
     return _response_data
 
 # Tags: invoices
-@mcp.tool()
+@mcp.tool(
+    title="List Invoices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_invoices(per_page: str | None = Field(None, description="Number of invoice records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of invoices. Use the per_page parameter to control the number of results returned per page."""
 
@@ -5828,7 +6460,13 @@ async def list_invoices(per_page: str | None = Field(None, description="Number o
     return _response_data
 
 # Tags: invoices
-@mcp.tool()
+@mcp.tool(
+    title="Get Invoice",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_invoice(id_: str = Field(..., alias="id", description="The unique identifier of the invoice to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific invoice by its ID. Returns detailed invoice information including amounts, dates, and line items."""
 
@@ -5866,7 +6504,13 @@ async def get_invoice(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: ip_addresses
-@mcp.tool()
+@mcp.tool(
+    title="List IP Addresses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of IP addresses associated with the current site. Use the per_page parameter to control result set size."""
 
@@ -5906,7 +6550,13 @@ async def list_ip_addresses(per_page: str | None = Field(None, description="Numb
     return _response_data
 
 # Tags: ip_addresses
-@mcp.tool()
+@mcp.tool(
+    title="List ExaVault Reserved IP Addresses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_exavault_reserved_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all public IP addresses reserved and used by ExaVault for its services. Use this to configure firewall rules or IP allowlists for ExaVault connectivity."""
 
@@ -5946,7 +6596,13 @@ async def list_exavault_reserved_ip_addresses(per_page: str | None = Field(None,
     return _response_data
 
 # Tags: ip_addresses
-@mcp.tool()
+@mcp.tool(
+    title="List Reserved IP Addresses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_reserved_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all reserved public IP addresses available in the system."""
 
@@ -5986,7 +6642,13 @@ async def list_reserved_ip_addresses(per_page: str | None = Field(None, descript
     return _response_data
 
 # Tags: locks
-@mcp.tool()
+@mcp.tool(
+    title="List Locks for Path",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_locks(
     path: str = Field(..., description="The resource path for which to retrieve locks."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
@@ -6031,7 +6693,13 @@ async def list_locks(
     return _response_data
 
 # Tags: locks
-@mcp.tool()
+@mcp.tool(
+    title="Release Lock",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def release_lock(
     path: str = Field(..., description="The resource path for which the lock should be released."),
     token: str = Field(..., description="The unique token that identifies and authorizes the release of this specific lock."),
@@ -6073,7 +6741,13 @@ async def release_lock(
     return _response_data
 
 # Tags: message_comment_reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Message Comment Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_comment_reactions(
     message_comment_id: str = Field(..., description="The ID of the message comment for which to retrieve reactions."),
     per_page: str | None = Field(None, description="Maximum number of reactions to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -6117,7 +6791,13 @@ async def list_message_comment_reactions(
     return _response_data
 
 # Tags: message_comment_reactions
-@mcp.tool()
+@mcp.tool(
+    title="Get Message Comment Reaction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message comment reaction to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific message comment reaction by its ID. Use this to fetch information about a user's reaction to a message comment."""
 
@@ -6155,7 +6835,13 @@ async def get_message_comment_reaction(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: message_comment_reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Message Comment Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_message_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message comment reaction to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a message comment. Deletes the specified reaction by its ID."""
 
@@ -6193,7 +6879,13 @@ async def remove_message_comment_reaction(id_: str = Field(..., alias="id", desc
     return _response_data
 
 # Tags: message_comments
-@mcp.tool()
+@mcp.tool(
+    title="List Message Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_comments(
     message_id: str = Field(..., description="The ID of the message for which to retrieve comments."),
     per_page: str | None = Field(None, description="Maximum number of comments to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -6237,7 +6929,13 @@ async def list_message_comments(
     return _response_data
 
 # Tags: message_comments
-@mcp.tool()
+@mcp.tool(
+    title="Get Message Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message_comment(id_: str = Field(..., alias="id", description="The unique identifier of the message comment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific message comment by its ID. Returns the full details of the requested comment."""
 
@@ -6275,7 +6973,12 @@ async def get_message_comment(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: message_comments
-@mcp.tool()
+@mcp.tool(
+    title="Update Message Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_message_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the message comment to update."),
     body: str = Field(..., description="The updated text content for the message comment."),
@@ -6320,7 +7023,13 @@ async def update_message_comment(
     return _response_data
 
 # Tags: message_comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Message Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_message_comment(id_: str = Field(..., alias="id", description="The unique identifier of the message comment to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific message comment by its ID. This operation permanently removes the comment from the message thread."""
 
@@ -6358,7 +7067,13 @@ async def delete_message_comment(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: message_reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Message Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_reactions(
     message_id: str = Field(..., description="The ID of the message to retrieve reactions for."),
     per_page: str | None = Field(None, description="Maximum number of reactions to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -6402,7 +7117,13 @@ async def list_message_reactions(
     return _response_data
 
 # Tags: message_reactions
-@mcp.tool()
+@mcp.tool(
+    title="Get Message Reaction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message reaction to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific message reaction by its ID. Use this to fetch information about a single reaction to a message."""
 
@@ -6440,7 +7161,13 @@ async def get_message_reaction(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: message_reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Message Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_message_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message reaction to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a message by its reaction ID. This deletes the association between the user and the message reaction."""
 
@@ -6478,7 +7205,13 @@ async def remove_message_reaction(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: messages
-@mcp.tool()
+@mcp.tool(
+    title="List Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_messages(
     project_id: str = Field(..., description="The project ID for which to retrieve messages. Required to scope results to a specific project."),
     per_page: str | None = Field(None, description="Number of messages to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -6522,7 +7255,12 @@ async def list_messages(
     return _response_data
 
 # Tags: messages
-@mcp.tool()
+@mcp.tool(
+    title="Create Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_message(
     body: str = Field(..., description="The content of the message to be created."),
     project_id: str = Field(..., description="The unique identifier of the project to which this message should be attached."),
@@ -6567,7 +7305,13 @@ async def create_message(
     return _response_data
 
 # Tags: messages
-@mcp.tool()
+@mcp.tool(
+    title="Get Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message(id_: str = Field(..., alias="id", description="The unique identifier of the message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific message by its ID. Returns the full message details including content, metadata, and timestamps."""
 
@@ -6605,7 +7349,13 @@ async def get_message(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: messages
-@mcp.tool()
+@mcp.tool(
+    title="Update Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the message to update."),
     body: str = Field(..., description="The new content body for the message."),
@@ -6653,7 +7403,13 @@ async def update_message(
     return _response_data
 
 # Tags: messages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Message",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_message(id_: str = Field(..., alias="id", description="The unique identifier of the message to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a message by its ID. This action cannot be undone."""
 
@@ -6691,7 +7447,13 @@ async def delete_message(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: notifications
-@mcp.tool()
+@mcp.tool(
+    title="List Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notifications(
     per_page: str | None = Field(None, description="Maximum number of notification records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are `path`, `user_id`, or `group_id`."),
@@ -6735,7 +7497,12 @@ async def list_notifications(
     return _response_data
 
 # Tags: notifications
-@mcp.tool()
+@mcp.tool(
+    title="Create Notification",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_notification(
     message: str | None = Field(None, description="Custom message to include in notification emails sent when the rule is triggered."),
     notify_on_copy: bool | None = Field(None, description="When enabled, copying or moving resources into this path will trigger a notification in addition to upload events."),
@@ -6748,8 +7515,8 @@ async def create_notification(
     send_interval: str | None = Field(None, description="The time interval over which notifications are aggregated before being sent. Longer intervals batch multiple events into a single notification."),
     trigger_by_share_recipients: bool | None = Field(None, description="When enabled, notifications will be triggered for actions performed by users who have access through a share link or shared folder."),
     triggering_filenames: list[str] | None = Field(None, description="Array of filename patterns to match against the action path. Supports wildcards to filter which files trigger notifications. Patterns are evaluated in order."),
-    triggering_group_ids: list[int] | None = Field(None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications."),
-    triggering_user_ids: list[int] | None = Field(None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications."),
+    triggering_group_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications."),
+    triggering_user_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications."),
     path: str | None = Field(None, description="Path"),
     user_id: str | None = Field(None, description="The id of the user to notify. Provide `user_id`, `username` or `group_id`."),
     group_id: str | None = Field(None, description="The ID of the group to notify.  Provide `user_id`, `username` or `group_id`."),
@@ -6794,7 +7561,13 @@ async def create_notification(
     return _response_data
 
 # Tags: notifications
-@mcp.tool()
+@mcp.tool(
+    title="Get Notification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notification(id_: str = Field(..., alias="id", description="The unique identifier of the notification to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific notification by its ID. Returns the full details of the requested notification."""
 
@@ -6832,7 +7605,13 @@ async def get_notification(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: notifications
-@mcp.tool()
+@mcp.tool(
+    title="Update Notification",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_notification(
     id_: str = Field(..., alias="id", description="The unique identifier of the notification rule to update."),
     message: str | None = Field(None, description="Custom message text to include in notification emails sent for this rule."),
@@ -6846,8 +7625,8 @@ async def update_notification(
     send_interval: str | None = Field(None, description="The time interval over which notifications are aggregated before sending. Valid values are five_minutes, fifteen_minutes, hourly, or daily."),
     trigger_by_share_recipients: bool | None = Field(None, description="When enabled, actions performed by share recipients will trigger notifications."),
     triggering_filenames: list[str] | None = Field(None, description="Array of filename patterns (supporting wildcards) to match against action paths. Only actions on matching files will trigger notifications."),
-    triggering_group_ids: list[int] | None = Field(None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications."),
-    triggering_user_ids: list[int] | None = Field(None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications."),
+    triggering_group_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications."),
+    triggering_user_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications."),
 ) -> dict[str, Any] | ToolResult:
     """Update notification settings for a specific notification rule, including trigger conditions, aggregation intervals, and recipient filters."""
 
@@ -6889,7 +7668,13 @@ async def update_notification(
     return _response_data
 
 # Tags: notifications
-@mcp.tool()
+@mcp.tool(
+    title="Delete Notification",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_notification(id_: str = Field(..., alias="id", description="The unique identifier of the notification to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a notification by its ID. This action cannot be undone."""
 
@@ -6927,7 +7712,13 @@ async def delete_notification(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: payments
-@mcp.tool()
+@mcp.tool(
+    title="List Payments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_payments(per_page: str | None = Field(None, description="Number of payment records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of payments. Use the per_page parameter to control the number of records returned per page."""
 
@@ -6967,7 +7758,13 @@ async def list_payments(per_page: str | None = Field(None, description="Number o
     return _response_data
 
 # Tags: payments
-@mcp.tool()
+@mcp.tool(
+    title="Get Payment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_payment(id_: str = Field(..., alias="id", description="The unique identifier of the payment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific payment by its ID. Returns the payment information including amount, status, and transaction details."""
 
@@ -7005,7 +7802,13 @@ async def get_payment(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: permissions
-@mcp.tool()
+@mcp.tool(
+    title="List Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_permissions(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are: group_id, path, user_id, or permission."),
@@ -7049,7 +7852,12 @@ async def list_permissions(
     return _response_data
 
 # Tags: permissions
-@mcp.tool()
+@mcp.tool(
+    title="Create Permission",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_permission(
     permission: str | None = Field(None, description="The access level type to assign. Determines what actions are permitted."),
     recursive: bool | None = Field(None, description="Whether to apply this permission to all subfolders in addition to the target folder."),
@@ -7097,7 +7905,13 @@ async def create_permission(
     return _response_data
 
 # Tags: permissions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Permission",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_permission(id_: str = Field(..., alias="id", description="The unique identifier of the permission to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a permission by its ID. This operation permanently removes the specified permission from the system."""
 
@@ -7135,7 +7949,12 @@ async def delete_permission(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(global_access: str = Field(..., description="Sets the global access level for the project, controlling visibility and permissions for all users in the organization.")) -> dict[str, Any] | ToolResult:
     """Create a new project with specified global access permissions. Global access determines who can view or modify the project across your organization."""
 
@@ -7174,7 +7993,13 @@ async def create_project(global_access: str = Field(..., description="Sets the g
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project by its ID."""
 
@@ -7212,7 +8037,13 @@ async def get_project(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a project by its ID. This action cannot be undone."""
 
@@ -7250,7 +8081,13 @@ async def delete_project(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: public_keys
-@mcp.tool()
+@mcp.tool(
+    title="List Public Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_keys(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of public keys. Use the per_page parameter to control the number of results returned per page."""
 
@@ -7290,7 +8127,12 @@ async def list_public_keys(per_page: str | None = Field(None, description="Numbe
     return _response_data
 
 # Tags: public_keys
-@mcp.tool()
+@mcp.tool(
+    title="Create Public Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_public_key(
     public_key: str = Field(..., description="The complete SSH public key content in standard format (typically starting with ssh-rsa, ssh-ed25519, or similar)."),
     title: str = Field(..., description="A descriptive name or label for this public key to help identify it among multiple keys."),
@@ -7332,7 +8174,13 @@ async def create_public_key(
     return _response_data
 
 # Tags: public_keys
-@mcp.tool()
+@mcp.tool(
+    title="Get Public Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_public_key(id_: str = Field(..., alias="id", description="The unique identifier of the public key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific public key by its ID. Use this to fetch details of a previously created or stored public key."""
 
@@ -7370,7 +8218,13 @@ async def get_public_key(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: public_keys
-@mcp.tool()
+@mcp.tool(
+    title="Update Public Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_public_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the public key to update."),
     title: str = Field(..., description="A descriptive name or label for the public key used for internal reference and identification."),
@@ -7415,7 +8269,13 @@ async def update_public_key(
     return _response_data
 
 # Tags: public_keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete Public Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_public_key(id_: str = Field(..., alias="id", description="The unique identifier of the public key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a public key by its ID. This action cannot be undone."""
 
@@ -7453,7 +8313,13 @@ async def delete_public_key(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: remote_bandwidth_snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Bandwidth Snapshots (Remote)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bandwidth_snapshots_remote(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use the field name as the key and 'asc' or 'desc' as the value. Valid sortable field is 'logged_at'."),
@@ -7496,7 +8362,13 @@ async def list_bandwidth_snapshots_remote(
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="List Remote Servers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_remote_servers(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of remote servers. Use the per_page parameter to control the number of results returned per page."""
 
@@ -7536,7 +8408,12 @@ async def list_remote_servers(per_page: str | None = Field(None, description="Nu
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="Create Remote Server",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_remote_server(
     enable_dedicated_ips: bool | None = Field(None, description="When enabled, restricts remote server connections to dedicated IP addresses only."),
     files_agent_permission_set: Literal["read_write", "read_only", "write_only"] | None = Field(None, description="File permissions level for the files agent: read_only allows downloads only, write_only allows uploads only, read_write allows both operations."),
@@ -7606,7 +8483,13 @@ async def create_remote_server(
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="Get Remote Server",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_remote_server(id_: str = Field(..., alias="id", description="The unique identifier of the remote server to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific remote server by its ID. Returns the configuration and status information for the requested remote server."""
 
@@ -7644,7 +8527,13 @@ async def get_remote_server(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="Update Remote Server",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_remote_server(
     id_: str = Field(..., alias="id", description="The unique identifier of the remote server to update."),
     enable_dedicated_ips: bool | None = Field(None, description="Restrict remote server connections to dedicated IP addresses only."),
@@ -7717,7 +8606,13 @@ async def update_remote_server(
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="Delete Remote Server",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_remote_server(id_: str = Field(..., alias="id", description="The unique identifier of the remote server to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a remote server by its ID. This action cannot be undone."""
 
@@ -7755,7 +8650,13 @@ async def delete_remote_server(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="Download Remote Server Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_remote_server_configuration(id_: str = Field(..., alias="id", description="The unique identifier of the Remote Server for which to download the configuration file.")) -> dict[str, Any] | ToolResult:
     """Download the configuration file for a Remote Server. This file is required for integrating certain Remote Server types, such as the Files.com Agent."""
 
@@ -7793,7 +8694,13 @@ async def download_remote_server_configuration(id_: str = Field(..., alias="id",
     return _response_data
 
 # Tags: remote_servers
-@mcp.tool()
+@mcp.tool(
+    title="Update Remote Server Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_remote_server_configuration(
     id_: str = Field(..., alias="id", description="The unique identifier of the remote server to update."),
     config_version: str | None = Field(None, description="The version identifier of the agent configuration being submitted."),
@@ -7848,7 +8755,13 @@ async def update_remote_server_configuration(
     return _response_data
 
 # Tags: requests
-@mcp.tool()
+@mcp.tool(
+    title="List Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_requests(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only the `destination` field is supported for sorting."),
@@ -7892,7 +8805,12 @@ async def list_requests(
     return _response_data
 
 # Tags: requests
-@mcp.tool()
+@mcp.tool(
+    title="Request File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def request_file(
     destination: str = Field(..., description="The destination filename (without file extension) being requested."),
     path: str = Field(..., description="The folder path where the requested file is located."),
@@ -7935,7 +8853,13 @@ async def request_file(
     return _response_data
 
 # Tags: requests
-@mcp.tool()
+@mcp.tool(
+    title="List Requests Folder",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_requests_folder(
     path: str = Field(..., description="The folder path to filter requests. Use `/` to represent the root directory. Required parameter."),
     per_page: str | None = Field(None, description="Number of records to return per page. Maximum allowed is 10,000, though 1,000 or less is recommended for optimal performance."),
@@ -7981,7 +8905,13 @@ async def list_requests_folder(
     return _response_data
 
 # Tags: requests
-@mcp.tool()
+@mcp.tool(
+    title="Delete Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_request(id_: str = Field(..., alias="id", description="The unique identifier of the request to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific request by its ID. This operation permanently removes the request from the system."""
 
@@ -8019,7 +8949,13 @@ async def delete_request(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: sftp_host_keys
-@mcp.tool()
+@mcp.tool(
+    title="List SFTP Host Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sftp_host_keys(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of SFTP host keys. Use pagination to manage large result sets efficiently."""
 
@@ -8059,7 +8995,12 @@ async def list_sftp_host_keys(per_page: str | None = Field(None, description="Nu
     return _response_data
 
 # Tags: sftp_host_keys
-@mcp.tool()
+@mcp.tool(
+    title="Create SFTP Host Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_sftp_host_key(
     name: str | None = Field(None, description="A user-friendly name to identify this SFTP host key for reference and management purposes."),
     private_key: str | None = Field(None, description="The private key data in PEM format used for SFTP host authentication. This should be the complete private key content."),
@@ -8101,7 +9042,13 @@ async def create_sftp_host_key(
     return _response_data
 
 # Tags: sftp_host_keys
-@mcp.tool()
+@mcp.tool(
+    title="Get SFTP Host Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sftp_host_key(id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific SFTP host key by its ID. Use this to view the configuration and properties of an existing host key."""
 
@@ -8139,7 +9086,13 @@ async def get_sftp_host_key(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: sftp_host_keys
-@mcp.tool()
+@mcp.tool(
+    title="Update SFTP Host Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_sftp_host_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to update."),
     name: str | None = Field(None, description="A user-friendly name to identify this SFTP host key."),
@@ -8185,7 +9138,13 @@ async def update_sftp_host_key(
     return _response_data
 
 # Tags: sftp_host_keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete SFTP Host Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sftp_host_key(id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an SFTP host key by its ID. This operation permanently removes the specified host key from the system."""
 
@@ -8223,7 +9182,13 @@ async def delete_sftp_host_key(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: site
-@mcp.tool()
+@mcp.tool(
+    title="List Site API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_keys_site(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supports sorting by expiration date."),
@@ -8266,7 +9231,12 @@ async def list_api_keys_site(
     return _response_data
 
 # Tags: site
-@mcp.tool()
+@mcp.tool(
+    title="Create Site API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_key_site(
     description: str | None = Field(None, description="A user-supplied description to help identify the purpose or context of this API key."),
     expires_at: str | None = Field(None, description="The date and time when this API key will automatically expire and become invalid. Specified in ISO 8601 format."),
@@ -8310,7 +9280,13 @@ async def create_api_key_site(
     return _response_data
 
 # Tags: site
-@mcp.tool()
+@mcp.tool(
+    title="List Site DNS Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dns_records_site(per_page: str | None = Field(None, description="Number of DNS records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 records can be retrieved in a single request.")) -> dict[str, Any] | ToolResult:
     """Retrieve the DNS records configured for a site. Results can be paginated to manage large record sets."""
 
@@ -8350,7 +9326,13 @@ async def list_dns_records_site(per_page: str | None = Field(None, description="
     return _response_data
 
 # Tags: site
-@mcp.tool()
+@mcp.tool(
+    title="List Site IP Addresses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_site_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of IP addresses associated with the current site. Use the per_page parameter to control result set size."""
 
@@ -8390,7 +9372,13 @@ async def list_site_ip_addresses(per_page: str | None = Field(None, description=
     return _response_data
 
 # Tags: site
-@mcp.tool()
+@mcp.tool(
+    title="Get Site Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_site_usage() -> dict[str, Any] | ToolResult:
     """Retrieve the most recent usage snapshot for a site, containing billing-related usage data. This provides a point-in-time view of resource consumption metrics."""
 
@@ -8417,7 +9405,13 @@ async def get_site_usage() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: sso_strategies
-@mcp.tool()
+@mcp.tool(
+    title="Get SSO Strategy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sso_strategy(id_: str = Field(..., alias="id", description="The unique identifier of the SSO strategy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific SSO (Single Sign-On) strategy by its ID. Use this to view the configuration and details of an existing SSO strategy."""
 
@@ -8455,7 +9449,12 @@ async def get_sso_strategy(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: sso_strategies
-@mcp.tool()
+@mcp.tool(
+    title="Sync SSO Strategy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def sync_sso_strategy(id_: str = Field(..., alias="id", description="The unique identifier of the SSO strategy to synchronize.")) -> dict[str, Any] | ToolResult:
     """Synchronize provisioning data between the local system and the remote SSO server for the specified strategy. This operation ensures user and group data are up-to-date across both systems."""
 
@@ -8493,10 +9492,15 @@ async def sync_sso_strategy(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: styles
-@mcp.tool()
+@mcp.tool(
+    title="Update Style",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_style(
     path: str = Field(..., description="The path identifier for the style to update."),
-    file_: str = Field(..., alias="file", description="Binary file containing the logo or branding assets for custom styling."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. Binary file containing the logo or branding assets for custom styling.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Update a style configuration by uploading a new branding file. Specify the style path and provide the binary file for custom branding."""
 
@@ -8537,7 +9541,13 @@ async def update_style(
     return _response_data
 
 # Tags: styles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Style",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_style(path: str = Field(..., description="The path identifier of the style to delete. This uniquely identifies which style resource to remove.")) -> dict[str, Any] | ToolResult:
     """Delete a style by its path. This operation permanently removes the style from the system."""
 
@@ -8573,7 +9583,13 @@ async def delete_style(path: str = Field(..., description="The path identifier o
     return _response_data
 
 # Tags: usage_daily_snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Daily Usage Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_usage_snapshots_daily(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supported fields are `date` and `usage_snapshot_id`. Specify as an object with field name as key and sort direction as value."),
@@ -8616,7 +9632,13 @@ async def list_usage_snapshots_daily(
     return _response_data
 
 # Tags: usage_snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Usage Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_usage_snapshots(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of usage snapshots. Use the per_page parameter to control the number of records returned per page."""
 
@@ -8656,7 +9678,13 @@ async def list_usage_snapshots(per_page: str | None = Field(None, description="N
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     allowed_ips: str | None = Field(None, description="Comma-separated or newline-delimited list of IP addresses permitted to access this user account. Leave empty to allow all IPs."),
     announcements_read: bool | None = Field(None, description="Mark whether the user has acknowledged all announcements displayed in the UI."),
@@ -8733,7 +9761,13 @@ async def update_user(
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="List API Keys for Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_keys_current_user(
     per_page: str | None = Field(None, description="Number of API keys to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supports sorting by expiration date (e.g., sort_by[expires_at]=desc)."),
@@ -8776,7 +9810,12 @@ async def list_api_keys_current_user(
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="Create API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_key_user(
     description: str | None = Field(None, description="Optional user-supplied description to help identify the purpose or context of this API key."),
     expires_at: str | None = Field(None, description="Optional expiration date and time for this API key in ISO 8601 format. After this date, the key will no longer be valid for authentication."),
@@ -8820,7 +9859,13 @@ async def create_api_key_user(
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="List User Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_groups(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users belonging to groups. Use the per_page parameter to control result set size for optimal performance."""
 
@@ -8860,7 +9905,13 @@ async def list_user_groups(per_page: str | None = Field(None, description="Numbe
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="List Public Keys for Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_keys_current_user(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of public keys associated with the user account. Use the per_page parameter to control pagination size."""
 
@@ -8900,7 +9951,12 @@ async def list_public_keys_current_user(per_page: str | None = Field(None, descr
     return _response_data
 
 # Tags: user
-@mcp.tool()
+@mcp.tool(
+    title="Add Public Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_public_key(
     public_key: str = Field(..., description="The complete SSH public key content (typically starts with 'ssh-rsa', 'ssh-ed25519', or similar algorithm identifier)."),
     title: str = Field(..., description="A descriptive label to identify this key within your account."),
@@ -8942,7 +9998,13 @@ async def add_public_key(
     return _response_data
 
 # Tags: user_cipher_uses
-@mcp.tool()
+@mcp.tool(
+    title="List Cipher Uses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cipher_uses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of cipher uses associated with the authenticated user. Use the per_page parameter to control result set size."""
 
@@ -8982,7 +10044,13 @@ async def list_cipher_uses(per_page: str | None = Field(None, description="Numbe
     return _response_data
 
 # Tags: user_requests
-@mcp.tool()
+@mcp.tool(
+    title="List User Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_requests_user(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of user requests. Use the per_page parameter to control result set size for optimal performance."""
 
@@ -9022,7 +10090,12 @@ async def list_requests_user(per_page: str | None = Field(None, description="Num
     return _response_data
 
 # Tags: user_requests
-@mcp.tool()
+@mcp.tool(
+    title="Create User Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user_request(
     details: str = Field(..., description="Detailed description or content of the user request, providing context about what is being requested."),
     email: str = Field(..., description="Email address of the user associated with this request. Used for identification and communication purposes."),
@@ -9065,7 +10138,13 @@ async def create_user_request(
     return _response_data
 
 # Tags: user_requests
-@mcp.tool()
+@mcp.tool(
+    title="Get User Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_request(id_: str = Field(..., alias="id", description="The unique identifier of the user request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific user request by its ID. Returns the complete request information including status, content, and metadata."""
 
@@ -9103,7 +10182,13 @@ async def get_user_request(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: user_requests
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_request(id_: str = Field(..., alias="id", description="The unique identifier of the user request to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific user request by its ID. This operation permanently removes the user request from the system."""
 
@@ -9141,7 +10226,13 @@ async def delete_user_request(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     ids: str | None = Field(None, description="Filter results by one or more user IDs using comma-separated values."),
@@ -9196,7 +10287,12 @@ async def list_users(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user(
     allowed_ips: str | None = Field(None, description="Comma-separated or newline-delimited list of IP addresses permitted to access this user account. Leave empty to allow all IPs."),
     announcements_read: bool | None = Field(None, description="Indicates whether the user has acknowledged all announcements displayed in the UI."),
@@ -9274,7 +10370,13 @@ async def create_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific user by their ID."""
 
@@ -9312,7 +10414,13 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update User Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_account(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to update."),
     allowed_ips: str | None = Field(None, description="Comma-separated or newline-delimited list of IP addresses permitted to access this user account."),
@@ -9392,7 +10500,13 @@ async def update_user_account(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a user account by ID. This action cannot be undone."""
 
@@ -9430,7 +10544,13 @@ async def delete_user(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Reset User 2FA",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_user_2fa(id_: str = Field(..., alias="id", description="The unique identifier of the user whose 2FA needs to be reset.")) -> dict[str, Any] | ToolResult:
     """Initiate a two-factor authentication reset for a user who has lost access to their existing 2FA methods. This process allows the user to regain account access and reconfigure their authentication."""
 
@@ -9468,7 +10588,12 @@ async def reset_user_2fa(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Resend Welcome Email",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resend_welcome_email(id_: str = Field(..., alias="id", description="The unique identifier of the user who should receive the welcome email.")) -> dict[str, Any] | ToolResult:
     """Resend the welcome email to a user. This operation is useful when the initial welcome email was not received or needs to be sent again."""
 
@@ -9506,7 +10631,12 @@ async def resend_welcome_email(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Unlock User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unlock_user(id_: str = Field(..., alias="id", description="The unique identifier of the user account to unlock.")) -> dict[str, Any] | ToolResult:
     """Unlock a user account that has been locked due to failed login attempts. This restores the user's ability to authenticate."""
 
@@ -9544,7 +10674,13 @@ async def unlock_user(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List API Keys for User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_keys_for_user(
     user_id: str = Field(..., description="The user ID whose API keys to retrieve. Use `0` to operate on the current session's user."),
     per_page: str | None = Field(None, description="Number of records to return per page. Maximum 10,000; 1,000 or less is recommended."),
@@ -9590,7 +10726,12 @@ async def list_api_keys_for_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create API Key for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_key_admin(
     user_id: str = Field(..., description="The user ID for which to create the API key. Use `0` to create a key for the current authenticated user."),
     description: str | None = Field(None, description="Optional user-supplied description to help identify the purpose or context of this API key."),
@@ -9638,7 +10779,13 @@ async def create_api_key_admin(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Cipher Uses by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cipher_uses_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose cipher uses should be retrieved. Use 0 to refer to the current session's authenticated user."),
     per_page: str | None = Field(None, description="Number of cipher use records to return per page. Maximum allowed is 10,000, though 1,000 or fewer is recommended for optimal performance."),
@@ -9683,7 +10830,13 @@ async def list_cipher_uses_by_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List User Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_groups_2(
     user_id: str = Field(..., description="The unique identifier of the user whose group memberships should be retrieved."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance; maximum allowed is 10,000."),
@@ -9728,7 +10881,13 @@ async def list_user_groups_2(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List User Permissions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_permissions(
     user_id: str = Field(..., description="The user ID to retrieve permissions for. Note: This parameter is deprecated; use the filter[user_id] query parameter instead for new implementations."),
     per_page: str | None = Field(None, description="Number of permission records to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -9774,7 +10933,13 @@ async def list_user_permissions(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Public Keys by User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_public_keys_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose public keys should be retrieved. Use `0` to refer to the current authenticated user."),
     per_page: str | None = Field(None, description="Number of public keys to return per page. Recommended to use 1,000 or less for optimal performance."),
@@ -9819,7 +10984,12 @@ async def list_public_keys_by_user(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create Public Key for User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_public_key_for_user(
     user_id: str = Field(..., description="The ID of the user to create the public key for. Use 0 to create a key for the current session's authenticated user."),
     public_key: str = Field(..., description="The complete SSH public key content (typically starting with ssh-rsa, ssh-ed25519, or similar)."),
@@ -9865,7 +11035,12 @@ async def create_public_key_for_user(
     return _response_data
 
 # Tags: webhook_tests
-@mcp.tool()
+@mcp.tool(
+    title="Test Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def test_webhook(
     url: str = Field(..., description="The webhook URL endpoint to test. Must be a valid HTTP or HTTPS URL."),
     action: str | None = Field(None, description="Action identifier to include in the test request body."),

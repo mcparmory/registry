@@ -1,13 +1,13 @@
 """
 Files.com MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:57:39 UTC
+Generated: 2026-05-11 19:47:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -622,7 +622,7 @@ class PostBundlesRequestBody(StrictModel):
     require_registration: bool | None = Field(default=None, description="When enabled, recipients must provide their name and email address before accessing the bundle.")
     require_share_recipient: bool | None = Field(default=None, description="When enabled, only recipients who received an invitation email through the Files.com interface can access the bundle.")
     send_email_receipt_to_uploader: bool | None = Field(default=None, description="When enabled, an email receipt confirming successful upload is sent to the uploader. Only applicable for bundles with write permissions.")
-    watermark_attachment_file: str | None = Field(default=None, description="Image file to apply as a watermark overlay on all bundle item previews. Uploaded as binary file data.", json_schema_extra={'format': 'binary'})
+    watermark_attachment_file: str | None = Field(default=None, description="Base64-encoded file content for upload. Image file to apply as a watermark overlay on all bundle item previews. Uploaded as binary file data.", json_schema_extra={'format': 'byte'})
 class PostBundlesRequest(StrictModel):
     """Create a shareable bundle that packages files and folders with configurable access controls, expiration, and submission handling. Bundles can require registration, limit access to specific recipients, and apply watermarks to previewed items."""
     body: PostBundlesRequestBody
@@ -653,7 +653,7 @@ class PatchBundlesIdRequestBody(StrictModel):
     require_registration: bool | None = Field(default=None, description="When enabled, displays a registration form to capture the downloader's name and email address.")
     require_share_recipient: bool | None = Field(default=None, description="When enabled, restricts access to only recipients who have been explicitly invited via email through the Files.com interface.")
     send_email_receipt_to_uploader: bool | None = Field(default=None, description="When enabled, sends a delivery receipt to the uploader upon bundle access. Only applicable for writable bundles.")
-    watermark_attachment_file: str | None = Field(default=None, description="A watermark image file to overlay on all bundle item previews for branding or security purposes.", json_schema_extra={'format': 'binary'})
+    watermark_attachment_file: str | None = Field(default=None, description="Base64-encoded file content for upload. A watermark image file to overlay on all bundle item previews for branding or security purposes.", json_schema_extra={'format': 'byte'})
 class PatchBundlesIdRequest(StrictModel):
     """Update an existing bundle's configuration, including access controls, expiration, paths, and metadata. Allows modification of sharing permissions, recipient requirements, and submission handling."""
     path: PatchBundlesIdRequestPath
@@ -854,7 +854,7 @@ class PostFilesPathRequestPath(StrictModel):
 class PostFilesPathRequestBody(StrictModel):
     action: str | None = Field(default=None, description="The type of upload action to perform: `upload` for standard file upload, `append` to append to existing file, `attachment` for attachment handling, `put` for direct replacement, `end` to finalize multipart upload, or omit for default behavior.")
     etags_etag: list[str] = Field(default=..., validation_alias="etags[etag]", serialization_alias="etags[etag]", description="Array of etag identifiers for multipart upload validation, used to verify part integrity. Order corresponds to part numbers.")
-    etags_part: list[int] = Field(default=..., validation_alias="etags[part]", serialization_alias="etags[part]", description="Array of part numbers corresponding to each etag, indicating the sequence of multipart upload segments. Order must match the etags array.")
+    etags_part: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] = Field(default=..., validation_alias="etags[part]", serialization_alias="etags[part]", description="Array of part numbers corresponding to each etag, indicating the sequence of multipart upload segments. Order must match the etags array.")
     length: int | None = Field(default=None, description="The length of the file being uploaded in bytes.", json_schema_extra={'format': 'int32'})
     mkdir_parents: bool | None = Field(default=None, description="Whether to automatically create parent directories in the path if they do not already exist.")
     parts: int | None = Field(default=None, description="The number of parts to fetch or process for multipart uploads.", json_schema_extra={'format': 'int32'})
@@ -1463,8 +1463,8 @@ class PostNotificationsRequestBody(StrictModel):
     send_interval: str | None = Field(default=None, description="The time interval over which notifications are aggregated before being sent. Longer intervals batch multiple events into a single notification.")
     trigger_by_share_recipients: bool | None = Field(default=None, description="When enabled, notifications will be triggered for actions performed by users who have access through a share link or shared folder.")
     triggering_filenames: list[str] | None = Field(default=None, description="Array of filename patterns to match against the action path. Supports wildcards to filter which files trigger notifications. Patterns are evaluated in order.")
-    triggering_group_ids: list[int] | None = Field(default=None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications.")
-    triggering_user_ids: list[int] | None = Field(default=None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications.")
+    triggering_group_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(default=None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications.")
+    triggering_user_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(default=None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications.")
     path: str | None = Field(default=None, description="Path")
     user_id: int | None = Field(default=None, description="The id of the user to notify. Provide `user_id`, `username` or `group_id`.", json_schema_extra={'format': 'int32'})
     group_id: int | None = Field(default=None, description="The ID of the group to notify.  Provide `user_id`, `username` or `group_id`.", json_schema_extra={'format': 'int32'})
@@ -1494,8 +1494,8 @@ class PatchNotificationsIdRequestBody(StrictModel):
     send_interval: str | None = Field(default=None, description="The time interval over which notifications are aggregated before sending. Valid values are five_minutes, fifteen_minutes, hourly, or daily.")
     trigger_by_share_recipients: bool | None = Field(default=None, description="When enabled, actions performed by share recipients will trigger notifications.")
     triggering_filenames: list[str] | None = Field(default=None, description="Array of filename patterns (supporting wildcards) to match against action paths. Only actions on matching files will trigger notifications.")
-    triggering_group_ids: list[int] | None = Field(default=None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications.")
-    triggering_user_ids: list[int] | None = Field(default=None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications.")
+    triggering_group_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(default=None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications.")
+    triggering_user_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(default=None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications.")
 class PatchNotificationsIdRequest(StrictModel):
     """Update notification settings for a specific notification rule, including trigger conditions, aggregation intervals, and recipient filters."""
     path: PatchNotificationsIdRequestPath
@@ -1860,7 +1860,7 @@ class PostSsoStrategiesIdSyncRequest(StrictModel):
 class PatchStylesPathRequestPath(StrictModel):
     path: str = Field(default=..., description="The path identifier for the style to update.")
 class PatchStylesPathRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Binary file containing the logo or branding assets for custom styling.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. Binary file containing the logo or branding assets for custom styling.", json_schema_extra={'format': 'byte'})
 class PatchStylesPathRequest(StrictModel):
     """Update a style configuration by uploading a new branding file. Specify the style path and provide the binary file for custom branding."""
     path: PatchStylesPathRequestPath
