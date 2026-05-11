@@ -1,7 +1,7 @@
 """
 Elevenlabs MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:54:05 UTC
+Generated: 2026-05-11 19:45:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -413,14 +413,14 @@ class SoundGenerationRequest(StrictModel):
 
 # Operation: isolate_audio
 class AudioIsolationRequestBody(StrictModel):
-    audio: str = Field(default=..., description="The audio file to process for noise removal and vocal/speech isolation. Accepts binary audio data in common formats.", json_schema_extra={'format': 'binary'})
+    audio: str = Field(default=..., description="Base64-encoded file content for upload. The audio file to process for noise removal and vocal/speech isolation. Accepts binary audio data in common formats.", json_schema_extra={'format': 'byte'})
 class AudioIsolationRequest(StrictModel):
     """Removes background noise and isolates vocals or speech from an audio file. Returns the cleaned audio with background noise suppressed."""
     body: AudioIsolationRequestBody
 
 # Operation: isolate_audio_stream
 class AudioIsolationStreamRequestBody(StrictModel):
-    audio: str = Field(default=..., description="The audio file to process for isolation. The audio data should be provided in binary format.", json_schema_extra={'format': 'binary'})
+    audio: str = Field(default=..., description="Base64-encoded file content for upload. The audio file to process for isolation. The audio data should be provided in binary format.", json_schema_extra={'format': 'byte'})
 class AudioIsolationStreamRequest(StrictModel):
     """Removes background noise from audio and streams the isolated vocals or speech. Processes the provided audio file and returns the cleaned result as a stream."""
     body: AudioIsolationStreamRequestBody
@@ -619,7 +619,7 @@ class SpeechToSpeechFullRequestPath(StrictModel):
 class SpeechToSpeechFullRequestQuery(StrictModel):
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(default=None, description="Audio encoding format specified as codec_sample_rate_bitrate (e.g., mp3_44100_128). Higher bitrates and PCM formats require higher subscription tiers.")
 class SpeechToSpeechFullRequestBody(StrictModel):
-    audio: str = Field(default=..., description="The source audio file containing the content and emotional expression to transfer to the target voice.", json_schema_extra={'format': 'binary'})
+    audio: str = Field(default=..., description="Base64-encoded file content for upload. The source audio file containing the content and emotional expression to transfer to the target voice.", json_schema_extra={'format': 'byte'})
     model_id: str | None = Field(default=None, description="The speech-to-speech model to use for conversion. Query available models to verify speech conversion support via the can_do_voice_conversion property.")
     remove_background_noise: bool | None = Field(default=None, description="Enable background noise removal from the input audio using audio isolation. Only applicable when using the Voice Changer model.", examples=[True])
     voice_settings: str | None = Field(default=None, description="Voice settings overriding stored settings for the given voice. They are applied only on the given request. Needs to be send as a JSON encoded string.")
@@ -635,7 +635,7 @@ class SpeechToSpeechStreamRequestPath(StrictModel):
 class SpeechToSpeechStreamRequestQuery(StrictModel):
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(default=None, description="Audio encoding format for the response, specified as codec_sample_rate_bitrate. Higher bitrates and sample rates may require elevated subscription tiers.")
 class SpeechToSpeechStreamRequestBody(StrictModel):
-    audio: str = Field(default=..., description="The source audio file containing the content and emotional characteristics that will control the generated speech output.", json_schema_extra={'format': 'binary'})
+    audio: str = Field(default=..., description="Base64-encoded file content for upload. The source audio file containing the content and emotional characteristics that will control the generated speech output.", json_schema_extra={'format': 'byte'})
     model_id: str | None = Field(default=None, description="The model identifier to use for voice conversion. Verify the model supports speech-to-speech conversion via the can_do_voice_conversion property.")
     remove_background_noise: bool | None = Field(default=None, description="Enable background noise removal from the input audio using audio isolation. Only applicable when using the Voice Changer model.", examples=[True])
     voice_settings: str | None = Field(default=None, description="Voice settings overriding stored settings for the given voice. They are applied only on the given request. Needs to be send as a JSON encoded string.")
@@ -758,7 +758,7 @@ class EditVoiceSettingsRequest(StrictModel):
 # Operation: create_voice_sample
 class AddVoiceRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name for this voice, shown in selection dropdowns and voice management interfaces.", examples=['John Smith'])
-    files: list[str] = Field(default=..., description="Audio file paths for voice cloning samples. Provide multiple recordings to improve voice quality and consistency. Order does not affect processing.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] = Field(default=..., description="Base64-encoded file content for upload. Audio file paths for voice cloning samples. Provide multiple recordings to improve voice quality and consistency. Order does not affect processing.")
     remove_background_noise: bool | None = Field(default=None, description="Enable background noise removal using audio isolation processing. Only use if your samples contain background noise, as it may degrade quality for clean recordings.", examples=[True])
     description: str | None = Field(default=None, description="Optional metadata describing the voice characteristics, tone, and intended use cases.", examples=['An old American male voice with a slight hoarseness in his throat. Perfect for news.'])
     labels: dict[str, str] | str | None = Field(default=None, description="Categorical metadata for voice classification. Supports language code, accent variant, gender, and age range to help organize and filter voices.", examples=['{"language": "en", "accent": "en-US", "gender": "male", "age": "middle-aged"}'])
@@ -771,7 +771,7 @@ class EditVoiceRequestPath(StrictModel):
     voice_id: str = Field(default=..., description="The unique identifier of the voice to update.", examples=['21m00Tcm4TlvDq8ikWAM'])
 class EditVoiceRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name for this voice, shown in voice selection dropdowns.", examples=['John Smith'])
-    files: list[str] | None = Field(default=None, description="Audio files to add to the voice. Supported formats include MP3, WAV, and other common audio formats.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(default=None, description="Base64-encoded file content for upload. Audio files to add to the voice. Supported formats include MP3, WAV, and other common audio formats.")
     remove_background_noise: bool | None = Field(default=None, description="Enable automatic background noise removal from audio samples using audio isolation. Only use if samples contain background noise, as it may degrade quality otherwise.", examples=[True])
     description: str | None = Field(default=None, description="A brief description of the voice characteristics, tone, and intended use cases.", examples=['An old American male voice with a slight hoarseness in his throat. Perfect for news.'])
     labels: dict[str, str] | str | None = Field(default=None, description="Metadata labels describing the voice. Supported keys include language (ISO 639-1 code), accent (BCP 47 tag), gender, and age.", examples=['{"language": "en", "accent": "en-US", "gender": "male", "age": "middle-aged"}'])
@@ -845,6 +845,7 @@ class AddProjectRequestBody(StrictModel):
     auto_assign_voices: bool | None = Field(default=None, description="Whether to automatically assign voices to phrases during project creation. This is an alpha feature.")
     source_type: Literal["blank", "book", "article", "genfm", "video", "screenplay"] | None = Field(default=None, description="The initialization type for the project: blank (empty), book (from document), article, genfm, video, or screenplay.", examples=['book'])
     create_publishing_read: bool | None = Field(default=None, description="Whether to create a corresponding read for direct publishing in draft state alongside the project.")
+    from_document: str | None = Field(default=None, description="Base64-encoded file content for upload. An optional .epub, .pdf, .txt or similar file can be provided. If provided, we will initialize the Studio project with its content. If this is set, 'from_url' and 'from_content' must be null. If neither 'from_url', 'from_document', 'from_content' are provided we will initialize the Studio project as blank.", json_schema_extra={'format': 'byte'})
     from_content_json: str | None = Field(default=None, description="\n    An optional content to initialize the Studio project with. If this is set, 'from_url' and 'from_document' must be null. If neither 'from_url', 'from_document', 'from_content' are provided we will initialize the Studio project as blank.\n\n    Example:\n    [{\"name\": \"Chapter A\", \"blocks\": [{\"sub_type\": \"p\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"A\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"B\", \"type\": \"tts_node\"}]}, {\"sub_type\": \"h1\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"C\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"D\", \"type\": \"tts_node\"}]}]}, {\"name\": \"Chapter B\", \"blocks\": [{\"sub_type\": \"p\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"E\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"F\", \"type\": \"tts_node\"}]}, {\"sub_type\": \"h2\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"G\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"H\", \"type\": \"tts_node\"}]}]}]\n    ", examples=['[{"name": "Chapter A", "blocks": [{"sub_type": "p", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "A", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "B", "type": "tts_node"}]}, {"sub_type": "h1", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "C", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "D", "type": "tts_node"}]}]}, {"name": "Chapter B", "blocks": [{"sub_type": "p", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "E", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "F", "type": "tts_node"}]}, {"sub_type": "h2", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "G", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "H", "type": "tts_node"}]}]}]'])
     pronunciation_dictionary_locators: list[str] | None = Field(default=None, description="A list of pronunciation dictionary locators (pronunciation_dictionary_id, version_id) encoded as a list of JSON strings for pronunciation dictionaries to be applied to the text. A list of json encoded strings is required as adding projects may occur through formData as opposed to jsonBody. To specify multiple dictionaries use multiple --form lines in your curl, such as --form 'pronunciation_dictionary_locators=\"{\\\"pronunciation_dictionary_id\\\":\\\"Vmd4Zor6fplcA7WrINey\\\",\\\"version_id\\\":\\\"hRPaxjlTdR7wFMhV4w0b\\\"}\"' --form 'pronunciation_dictionary_locators=\"{\\\"pronunciation_dictionary_id\\\":\\\"JzWtcGQMJ6bnlWwyMo7e\\\",\\\"version_id\\\":\\\"lbmwxiLu4q6txYxgdZqn\\\"}\"'.", examples=[['{"pronunciation_dictionary_id": "21m00Tcm4TlvDq8ikWAM", "version_id": "BdF0s0aZ3oFoKnDYdTox"}']])
     voice_settings: str | None = Field(default=None, description="    Optional voice settings overrides for the project, encoded as a list of JSON strings.\n\n    Example:\n    [\"{\\\"voice_id\\\": \\\"21m00Tcm4TlvDq8ikWAM\\\", \\\"stability\\\": 0.7, \\\"similarity_boost\\\": 0.8, \\\"style\\\": 0.5, \\\"speed\\\": 1.0, \\\"use_speaker_boost\\\": true}\"]\n    ", examples=[['{"voice_id": "21m00Tcm4TlvDq8ikWAM", "stability": 0.7, "similarity_boost": 0.8, "style": 0.5, "speed": 1.0, "use_speaker_boost": true}']])
@@ -889,6 +890,7 @@ class EditProjectContentRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the Studio project to update.", examples=['21m00Tcm4TlvDq8ikWAM'])
 class EditProjectContentRequestBody(StrictModel):
     auto_convert: bool | None = Field(default=None, description="Whether to automatically convert the Studio project to audio format. Defaults to false if not specified.")
+    from_document: str | None = Field(default=None, description="Base64-encoded file content for upload. An optional .epub, .pdf, .txt or similar file can be provided. If provided, we will initialize the Studio project with its content. If this is set, 'from_url' and 'from_content' must be null. If neither 'from_url', 'from_document', 'from_content' are provided we will initialize the Studio project as blank.", json_schema_extra={'format': 'byte'})
     from_content_json: str | None = Field(default=None, description="\n    An optional content to initialize the Studio project with. If this is set, 'from_url' and 'from_document' must be null. If neither 'from_url', 'from_document', 'from_content' are provided we will initialize the Studio project as blank.\n\n    Example:\n    [{\"name\": \"Chapter A\", \"blocks\": [{\"sub_type\": \"p\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"A\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"B\", \"type\": \"tts_node\"}]}, {\"sub_type\": \"h1\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"C\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"D\", \"type\": \"tts_node\"}]}]}, {\"name\": \"Chapter B\", \"blocks\": [{\"sub_type\": \"p\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"E\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"F\", \"type\": \"tts_node\"}]}, {\"sub_type\": \"h2\", \"nodes\": [{\"voice_id\": \"6lCwbsX1yVjD49QmpkT0\", \"text\": \"G\", \"type\": \"tts_node\"}, {\"voice_id\": \"6lCwbsX1yVjD49QmpkT1\", \"text\": \"H\", \"type\": \"tts_node\"}]}]}]\n    ", examples=['[{"name": "Chapter A", "blocks": [{"sub_type": "p", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "A", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "B", "type": "tts_node"}]}, {"sub_type": "h1", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "C", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "D", "type": "tts_node"}]}]}, {"name": "Chapter B", "blocks": [{"sub_type": "p", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "E", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "F", "type": "tts_node"}]}, {"sub_type": "h2", "nodes": [{"voice_id": "6lCwbsX1yVjD49QmpkT0", "text": "G", "type": "tts_node"}, {"voice_id": "6lCwbsX1yVjD49QmpkT1", "text": "H", "type": "tts_node"}]}]}]'])
 class EditProjectContentRequest(StrictModel):
     """Updates the content of a Studio project. Optionally converts the project to audio format during the update."""
@@ -1180,7 +1182,7 @@ class ListDubsRequest(StrictModel):
 
 # Operation: dub_media
 class CreateDubbingRequestBody(StrictModel):
-    csv_file: str | None = Field(default=None, description="CSV file containing transcription and translation metadata for manual dubbing mode. Used to override automatic transcription and provide custom timing and speaker information.", json_schema_extra={'format': 'binary'})
+    csv_file: str | None = Field(default=None, description="Base64-encoded file content for upload. CSV file containing transcription and translation metadata for manual dubbing mode. Used to override automatic transcription and provide custom timing and speaker information.", json_schema_extra={'format': 'byte'})
     name: str | None = Field(default=None, description="Human-readable name for the dubbing project to help organize and identify the job.")
     source_url: str | None = Field(default=None, description="URL pointing to the source video or audio file to be dubbed. Must be publicly accessible.")
     source_lang: str | None = Field(default=None, description="Language code of the source content using ISO 639-1 or ISO 639-3 format. Set to 'auto' to automatically detect the language.")
@@ -1241,6 +1243,7 @@ class CreateAudioNativeProjectRequestBody(StrictModel):
     auto_convert: bool | None = Field(default=None, description="Whether to automatically convert the project content to audio upon creation.")
     apply_text_normalization: Literal["auto", "on", "off", "apply_english"] | None = Field(default=None, description="Controls text normalization behavior. 'auto' lets the system decide, 'on' always applies normalization, 'apply_english' applies normalization assuming English text, and 'off' disables normalization.")
     pronunciation_dictionary_locators: list[str] | None = Field(default=None, description="A list of pronunciation dictionary locators, each containing a pronunciation_dictionary_id and version_id pair. Multiple dictionaries can be applied to customize pronunciation of specific terms.", examples=[['{"pronunciation_dictionary_id": "21m00Tcm4TlvDq8ikWAM", "version_id": "BdF0s0aZ3oFoKnDYdTox"}']])
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. Either txt or HTML input file containing the article content. HTML should be formatted as follows '&lt;html&gt;&lt;body&gt;&lt;div&gt;&lt;p&gt;Your content&lt;/p&gt;&lt;h3&gt;More of your content&lt;/h3&gt;&lt;p&gt;Some more of your content&lt;/p&gt;&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;'", json_schema_extra={'format': 'byte'})
     text_color: dict | None = Field(default=None, description="Text color used in the player. If not provided, default text color set in the Player settings is used.")
     background_color: str | None = Field(default=None, description="Background color used in the player. If not provided, default background color set in the Player settings is used.")
 class CreateAudioNativeProjectRequest(StrictModel):
@@ -1260,6 +1263,7 @@ class AudioNativeProjectUpdateContentEndpointRequestPath(StrictModel):
 class AudioNativeProjectUpdateContentEndpointRequestBody(StrictModel):
     auto_convert: bool | None = Field(default=None, description="Automatically convert the project to audio format after content update.")
     auto_publish: bool | None = Field(default=None, description="Automatically publish a new project snapshot after conversion completes. Only applies when auto_convert is enabled.")
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. Either txt or HTML input file containing the article content. HTML should be formatted as follows '&lt;html&gt;&lt;body&gt;&lt;div&gt;&lt;p&gt;Your content&lt;/p&gt;&lt;h5&gt;More of your content&lt;/h5&gt;&lt;p&gt;Some more of your content&lt;/p&gt;&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;'", json_schema_extra={'format': 'byte'})
 class AudioNativeProjectUpdateContentEndpointRequest(StrictModel):
     """Updates content for an Audio-Native project with optional automatic conversion and publishing. Use this to modify project content and trigger downstream processing workflows."""
     path: AudioNativeProjectUpdateContentEndpointRequestPath
@@ -1297,7 +1301,7 @@ class GetLibraryVoicesRequest(StrictModel):
 
 # Operation: find_similar_voices
 class GetSimilarLibraryVoicesRequestBody(StrictModel):
-    audio_file: str | None = Field(default=None, description="Audio sample file to match against library voices. Used as the reference for similarity comparison.", json_schema_extra={'format': 'binary'})
+    audio_file: str | None = Field(default=None, description="Base64-encoded file content for upload. Audio sample file to match against library voices. Used as the reference for similarity comparison.", json_schema_extra={'format': 'byte'})
     similarity_threshold: float | None = Field(default=None, description="Similarity threshold for filtering results. Lower values return more similar voices. Valid range is 0 to 2.", examples=[0.5])
     top_k: int | None = Field(default=None, description="Maximum number of similar voices to return. If similarity_threshold is also specified, fewer voices may be returned. Valid range is 1 to 100.", examples=[10])
 class GetSimilarLibraryVoicesRequest(StrictModel):
@@ -1321,6 +1325,7 @@ class AddFromFileRequestBody(StrictModel):
     name: str = Field(default=..., description="The name of the pronunciation dictionary used for identification and reference within the system.", examples=['My Dictionary'])
     description: str | None = Field(default=None, description="An optional description of the pronunciation dictionary to provide additional context about its contents or purpose.", examples=["Contains pronunciation's of our character names"])
     workspace_access: Literal["admin", "editor", "commenter", "viewer"] | None = Field(default=None, description="The workspace access level that determines permissions for other users to interact with this dictionary. If not provided, defaults to no access.", examples=['viewer'])
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. A lexicon .pls file which we will use to initialize the project with.", json_schema_extra={'format': 'byte'})
 class AddFromFileRequest(StrictModel):
     """Creates a new pronunciation dictionary from a lexicon .PLS file. The dictionary can be configured with access permissions for workspace collaboration."""
     body: AddFromFileRequestBody
@@ -1549,6 +1554,7 @@ class SpeechToTextRequestBody(StrictModel):
     no_verbatim: bool | None = Field(default=None, description="Whether to remove filler words, false starts, and non-speech sounds from the transcript for a cleaner output. Only supported with the scribe_v2 model.")
     entity_redaction: str | list[str] | None = Field(default=None, description="Entity types or categories to redact from the transcript text. Accepts the same format as entity_detection ('all', specific categories like 'pii' or 'phi', or a list of entity types). Must be a subset of entity_detection if both are specified. When redaction is enabled, the entities field is not returned.")
     keyterms: list[str] | None = Field(default=None, description="List of domain-specific words or phrases to bias the model toward recognizing with higher accuracy. Each keyterm must be under 50 characters and contain at most 5 words. Maximum 1000 keyterms per request. Requests with over 100 keyterms incur a minimum 20-second billable duration. Incurs additional costs.")
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file to transcribe. All major audio and video formats are supported. Exactly one of the file or cloud_storage_url parameters must be provided. The file size must be less than 3.0GB.", json_schema_extra={'format': 'byte'})
 class SpeechToTextRequest(StrictModel):
     """Transcribe audio or video files to text with support for speaker diarization, multi-channel processing, and entity detection. Supports synchronous responses or asynchronous webhook delivery with optional custom metadata for request tracking."""
     body: SpeechToTextRequestBody
@@ -1680,7 +1686,7 @@ class GetAgentAnalyticsRouteRequest(StrictModel):
 
 # Operation: align_audio_to_text
 class ForcedAlignmentRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The audio file to align with the transcript. Supports all major audio formats with a maximum file size of 1GB.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The audio file to align with the transcript. Supports all major audio formats with a maximum file size of 1GB.", json_schema_extra={'format': 'byte'})
     text: str = Field(default=..., description="The text transcript to align with the audio. Can be in any text format; diarization (speaker identification) is not currently supported.")
     enabled_spooled_file: bool | None = Field(default=None, description="Enable streaming processing for large files that cannot fit in memory. When true, the file is streamed to the server and processed in chunks.")
 class ForcedAlignmentRequest(StrictModel):
@@ -1910,7 +1916,7 @@ class GetAgentLinkRouteRequest(StrictModel):
 class PostAgentAvatarRouteRequestPath(StrictModel):
     agent_id: str = Field(default=..., description="The unique identifier of the agent to update with the new avatar image.", examples=['agent_3701k3ttaq12ewp8b7qv5rfyszkz'])
 class PostAgentAvatarRouteRequestBody(StrictModel):
-    avatar_file: str = Field(default=..., description="An image file to use as the agent's avatar. The file will be processed and stored for display in the widget.", json_schema_extra={'format': 'binary'})
+    avatar_file: str = Field(default=..., description="Base64-encoded file content for upload. An image file to use as the agent's avatar. The file will be processed and stored for display in the widget.", json_schema_extra={'format': 'byte'})
 class PostAgentAvatarRouteRequest(StrictModel):
     """Upload and set a profile image for an agent that will be displayed in the chat widget."""
     path: PostAgentAvatarRouteRequestPath
@@ -2309,7 +2315,7 @@ class GetPublicLlmExpectedCostCalculationRequest(StrictModel):
 class UploadFileRouteRequestPath(StrictModel):
     conversation_id: str = Field(default=..., description="The unique identifier of the conversation to which the file will be uploaded.")
 class UploadFileRouteRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The image or PDF file to upload. Supported formats include common image types (JPEG, PNG, etc.) and PDF documents.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The image or PDF file to upload. Supported formats include common image types (JPEG, PNG, etc.) and PDF documents.", json_schema_extra={'format': 'byte'})
 class UploadFileRouteRequest(StrictModel):
     """Upload an image or PDF file to a conversation. Returns a unique file ID for referencing the file in subsequent conversation messages."""
     path: UploadFileRouteRequestPath
@@ -2359,7 +2365,7 @@ class CreateUrlDocumentRouteRequest(StrictModel):
 
 # Operation: upload_knowledge_base_document
 class CreateFileDocumentRouteRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The file content to upload as a knowledge base document. Accepts binary file formats for documentation.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file content to upload as a knowledge base document. Accepts binary file formats for documentation.", json_schema_extra={'format': 'byte'})
     name: str | None = Field(default=None, description="A human-readable name for the document. If not provided, a default name will be generated.", min_length=1)
 class CreateFileDocumentRouteRequest(StrictModel):
     """Upload a file to create a new knowledge base document that the agent can access and reference when interacting with users."""
@@ -3058,7 +3064,7 @@ class StreamComposeRequest(StrictModel):
 
 # Operation: upload_song
 class UploadSongRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The audio file to upload in binary format.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The audio file to upload in binary format.", json_schema_extra={'format': 'byte'})
     extract_composition_plan: bool | None = Field(default=None, description="Whether to generate and return the composition plan for the uploaded song. Enabling this increases response latency.")
 class UploadSongRequest(StrictModel):
     """Upload a music file for use in inpainting workflows. This operation is restricted to enterprise clients with access to the inpainting feature."""
@@ -3068,7 +3074,7 @@ class UploadSongRequest(StrictModel):
 class SeparateSongStemsRequestQuery(StrictModel):
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(default=None, description="Output format for the separated stems, specified as codec_sample_rate_bitrate. MP3 192kbps requires Creator tier or above; PCM 44.1kHz requires Pro tier or above. μ-law format is commonly used for Twilio audio inputs.")
 class SeparateSongStemsRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The audio file to separate into individual stems. Provide the binary audio data.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The audio file to separate into individual stems. Provide the binary audio data.", json_schema_extra={'format': 'byte'})
     stem_variation_id: Literal["two_stems_v1", "six_stems_v1"] | None = Field(default=None, description="The stem separation model variation to use. Two-stem splits into vocals and instruments; six-stem provides more granular separation.")
 class SeparateSongStemsRequest(StrictModel):
     """Separate an audio file into individual musical stems (vocals, drums, bass, etc.). This operation may have high latency depending on audio file length."""
@@ -3102,7 +3108,7 @@ class EditPvcVoiceRequest(StrictModel):
 class AddPvcVoiceSamplesRequestPath(StrictModel):
     voice_id: str = Field(default=..., description="The unique identifier of the PVC voice to add samples to. Use the voices list endpoint to retrieve available voice IDs.", examples=['21m00Tcm4TlvDq8ikWAM'])
 class AddPvcVoiceSamplesRequestBody(StrictModel):
-    files: list[str] = Field(default=..., description="Audio files to add to the voice. Provide one or more audio files in supported formats to expand the voice training dataset.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] = Field(default=..., description="Base64-encoded file content for upload. Audio files to add to the voice. Provide one or more audio files in supported formats to expand the voice training dataset.")
     remove_background_noise: bool | None = Field(default=None, description="Enable automatic background noise removal from audio samples using audio isolation. Disable if samples contain minimal background noise, as processing may reduce quality.", examples=[True])
 class AddPvcVoiceSamplesRequest(StrictModel):
     """Add audio samples to a PVC (Personal Voice Clone) to enhance voice quality and training data. Optionally remove background noise from samples to improve voice clarity."""
@@ -3190,7 +3196,7 @@ class RunPvcVoiceTrainingRequest(StrictModel):
 class RequestPvcManualVerificationRequestPath(StrictModel):
     voice_id: str = Field(default=..., description="The unique identifier of the voice to be verified. Use the voices list endpoint to retrieve available voice IDs.", examples=['21m00Tcm4TlvDq8ikWAM'])
 class RequestPvcManualVerificationRequestBody(StrictModel):
-    files: list[str] = Field(default=..., description="Array of verification document files to submit for manual review. Documents should be in a supported format and clearly demonstrate voice ownership or authorization.")
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] = Field(default=..., description="Base64-encoded file content for upload. Array of verification document files to submit for manual review. Documents should be in a supported format and clearly demonstrate voice ownership or authorization.")
     extra_text: str | None = Field(default=None, description="Optional additional context or information to support the verification request, such as clarification about the voice or usage intent.")
 class RequestPvcManualVerificationRequest(StrictModel):
     """Submit verification documents for manual review of a PVC (Premium Voice Clone) voice. This process validates the voice identity before it can be used in production."""

@@ -1,7 +1,7 @@
 """
 Authentication module for ElevenLabs MCP server.
 
-Generated: 2026-05-05 14:54:05 UTC
+Generated: 2026-05-11 19:45:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

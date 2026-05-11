@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ElevenLabs MCP Server
-Generated: 2026-05-05 14:54:05 UTC
+Generated: 2026-05-11 19:45:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.elevenlabs.io/v1")
 SERVER_NAME = "ElevenLabs"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1118,6 +1149,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1142,6 +1175,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1349,7 +1384,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("ElevenLabs", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: speech-history
-@mcp.tool()
+@mcp.tool(
+    title="List Speech History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_speech_history(
     page_size: int | None = Field(None, description="Maximum number of history items to return per request. Useful for controlling response size and pagination."),
     start_after_history_item_id: str | None = Field(None, description="History item ID to start pagination after. Use this to fetch subsequent pages of results when working with large collections."),
@@ -1396,7 +1437,13 @@ async def list_speech_history(
     return _response_data
 
 # Tags: speech-history
-@mcp.tool()
+@mcp.tool(
+    title="Get Speech History Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_speech_history_item(history_item_id: str = Field(..., description="The unique identifier of the history item to retrieve. You can obtain available history item IDs by calling the list speech history operation.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific speech synthesis history item by its ID. Use this to access details about a previously generated speech synthesis request."""
 
@@ -1432,7 +1479,13 @@ async def get_speech_history_item(history_item_id: str = Field(..., description=
     return _response_data
 
 # Tags: speech-history
-@mcp.tool()
+@mcp.tool(
+    title="Delete History Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_history_item(history_item_id: str = Field(..., description="The unique identifier of the history item to delete. You can retrieve available history item IDs using the list history items endpoint.")) -> dict[str, Any] | ToolResult:
     """Delete a speech history item by its ID. This removes the item from your speech synthesis history."""
 
@@ -1468,7 +1521,13 @@ async def delete_history_item(history_item_id: str = Field(..., description="The
     return _response_data
 
 # Tags: speech-history
-@mcp.tool()
+@mcp.tool(
+    title="Get Speech History Audio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_speech_history_audio(history_item_id: str = Field(..., description="The unique identifier of the speech history item from which to retrieve the audio file.")) -> dict[str, Any] | ToolResult:
     """Retrieve the audio file associated with a specific speech synthesis history item. Use the history item ID obtained from the speech history list to download the generated audio."""
 
@@ -1504,7 +1563,12 @@ async def get_speech_history_audio(history_item_id: str = Field(..., description
     return _response_data
 
 # Tags: speech-history
-@mcp.tool()
+@mcp.tool(
+    title="Download Speech Items",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def download_speech_items(
     history_item_ids: list[str] = Field(..., description="List of history item IDs to download. Retrieve available IDs and metadata from the list speech history endpoint. Order is preserved in the output archive."),
     output_format: str | None = Field(None, description="Audio file format for transcoding. Specify the desired output format for the downloaded audio files."),
@@ -1539,13 +1603,19 @@ async def download_speech_items(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sound-generation
-@mcp.tool()
+@mcp.tool(
+    title="Generate Sound",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_sound(
     text: str = Field(..., description="Detailed text description of the sound effect to generate. Be descriptive about the audio characteristics, environment, and desired qualities."),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio codec, sample rate, and bitrate for the generated sound. Higher bitrates and sample rates require appropriate subscription tiers."),
@@ -1587,14 +1657,20 @@ async def generate_sound(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: audio-isolation
-@mcp.tool()
-async def isolate_audio(audio: str = Field(..., description="The audio file to process for noise removal and vocal/speech isolation. Accepts binary audio data in common formats.")) -> dict[str, Any] | ToolResult:
+@mcp.tool(
+    title="Isolate Audio",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
+async def isolate_audio(audio: str = Field(..., description="Base64-encoded file content for upload. The audio file to process for noise removal and vocal/speech isolation. Accepts binary audio data in common formats.", json_schema_extra={'format': 'byte'})) -> dict[str, Any] | ToolResult:
     """Removes background noise and isolates vocals or speech from an audio file. Returns the cleaned audio with background noise suppressed."""
 
     # Construct request model with validation
@@ -1633,8 +1709,13 @@ async def isolate_audio(audio: str = Field(..., description="The audio file to p
     return _response_data
 
 # Tags: audio-isolation
-@mcp.tool()
-async def isolate_audio_stream(audio: str = Field(..., description="The audio file to process for isolation. The audio data should be provided in binary format.")) -> dict[str, Any] | ToolResult:
+@mcp.tool(
+    title="Isolate Audio Stream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
+async def isolate_audio_stream(audio: str = Field(..., description="Base64-encoded file content for upload. The audio file to process for isolation. The audio data should be provided in binary format.", json_schema_extra={'format': 'byte'})) -> dict[str, Any] | ToolResult:
     """Removes background noise from audio and streams the isolated vocals or speech. Processes the provided audio file and returns the cleaned result as a stream."""
 
     # Construct request model with validation
@@ -1673,7 +1754,13 @@ async def isolate_audio_stream(audio: str = Field(..., description="The audio fi
     return _response_data
 
 # Tags: samples
-@mcp.tool()
+@mcp.tool(
+    title="Delete Voice Sample",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_voice_sample(
     voice_id: str = Field(..., description="The unique identifier of the voice containing the sample to delete."),
     sample_id: str = Field(..., description="The unique identifier of the sample to delete from the specified voice."),
@@ -1712,7 +1799,13 @@ async def delete_voice_sample(
     return _response_data
 
 # Tags: samples
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Voice Sample Audio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_voice_sample_audio(
     voice_id: str = Field(..., description="The unique identifier of the voice containing the sample. You can retrieve available voice IDs from the voices list endpoint."),
     sample_id: str = Field(..., description="The unique identifier of the sample within the specified voice. You can retrieve available sample IDs by fetching the voice details endpoint."),
@@ -1751,7 +1844,12 @@ async def retrieve_voice_sample_audio(
     return _response_data
 
 # Tags: text-to-speech
-@mcp.tool()
+@mcp.tool(
+    title="Generate Speech",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_speech(
     voice_id: str = Field(..., description="The unique identifier of the voice to use for speech generation. Available voices can be retrieved from the voices endpoint."),
     text: str = Field(..., description="The text content to be converted into speech."),
@@ -1803,13 +1901,19 @@ async def generate_speech(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-speech
-@mcp.tool()
+@mcp.tool(
+    title="Generate Speech with Timestamps",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_speech_with_timestamps(
     voice_id: str = Field(..., description="The voice identifier to use for speech generation. Available voices can be retrieved from the voices endpoint."),
     text: str = Field(..., description="The text content to convert into speech audio."),
@@ -1861,13 +1965,19 @@ async def generate_speech_with_timestamps(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-speech
-@mcp.tool()
+@mcp.tool(
+    title="Generate Speech Stream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_speech_stream(
     voice_id: str = Field(..., description="The voice to use for speech generation. Available voices can be retrieved from the voices endpoint."),
     text: str = Field(..., description="The text content to convert into speech."),
@@ -1919,13 +2029,19 @@ async def generate_speech_stream(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-speech
-@mcp.tool()
+@mcp.tool(
+    title="Generate Speech Stream with Timestamps",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_speech_stream_with_timestamps(
     voice_id: str = Field(..., description="The voice identifier to use for speech synthesis. Available voices can be retrieved from the voices endpoint."),
     text: str = Field(..., description="The text content to convert into speech audio."),
@@ -1977,13 +2093,19 @@ async def generate_speech_stream_with_timestamps(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-dialogue
-@mcp.tool()
+@mcp.tool(
+    title="Generate Dialogue",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_dialogue(
     inputs: list[_models.DialogueInput] = Field(..., description="Array of dialogue segments, each containing text and a voice ID. Order is preserved in the output. Maximum of 10 unique voice IDs per request."),
     output_format: Literal["wav_8000", "wav_16000", "wav_22050", "wav_24000", "wav_32000", "wav_44100", "wav_48000"] | Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio output format specified as codec_sample_rate_bitrate (e.g., mp3_44100_128). MP3 192kbps requires Creator tier or above; PCM and WAV at 44.1kHz require Pro tier or above. μ-law format is commonly used for Twilio integrations."),
@@ -2027,13 +2149,19 @@ async def generate_dialogue(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-dialogue
-@mcp.tool()
+@mcp.tool(
+    title="Generate Dialogue Stream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_dialogue_stream(
     inputs: list[_models.DialogueInput] = Field(..., description="Array of dialogue turns, each containing text to speak and the voice ID to use. Order matters—items are processed sequentially to create the dialogue flow. Maximum of 10 unique voice IDs per request."),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio output format specified as codec_sample_rate_bitrate (e.g., mp3_44100_128). Some formats require higher subscription tiers: MP3 192kbps requires Creator tier or above, PCM 44.1kHz requires Pro tier or above. μ-law format is commonly used for Twilio integrations."),
@@ -2077,13 +2205,19 @@ async def generate_dialogue_stream(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-dialogue
-@mcp.tool()
+@mcp.tool(
+    title="Generate Dialogue Stream with Timestamps",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_dialogue_stream_with_timestamps(
     inputs: list[_models.DialogueInput] = Field(..., description="Array of dialogue turn objects, each pairing text content with a voice ID. Processed in order to create sequential dialogue. Maximum of 10 unique voice IDs per request."),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio codec, sample rate, and bitrate configuration. Format is codec_sample_rate_bitrate (e.g., mp3_44100_128). Higher bitrates and PCM formats require elevated subscription tiers."),
@@ -2127,13 +2261,19 @@ async def generate_dialogue_stream_with_timestamps(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-dialogue
-@mcp.tool()
+@mcp.tool(
+    title="Generate Dialogue with Timestamps",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_dialogue_with_timestamps(
     inputs: list[_models.DialogueInput] = Field(..., description="List of dialogue turns, each containing text to be spoken and the voice ID to use for that turn. Maximum of 10 unique voice IDs per request. Turns are processed in order."),
     output_format: Literal["wav_8000", "wav_16000", "wav_22050", "wav_24000", "wav_32000", "wav_44100", "wav_48000"] | Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio codec, sample rate, and bitrate format. Format is specified as codec_sample_rate_bitrate (e.g., mp3_44100_128). Higher bitrates and certain formats require higher subscription tiers."),
@@ -2177,16 +2317,22 @@ async def generate_dialogue_with_timestamps(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: speech-to-speech
-@mcp.tool()
+@mcp.tool(
+    title="Convert Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_voice(
     voice_id: str = Field(..., description="The target voice to apply to the audio. Use the voices endpoint to discover available voices and their characteristics."),
-    audio: str = Field(..., description="The source audio file containing the content and emotional expression to transfer to the target voice."),
+    audio: str = Field(..., description="Base64-encoded file content for upload. The source audio file containing the content and emotional expression to transfer to the target voice.", json_schema_extra={'format': 'byte'}),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio encoding format specified as codec_sample_rate_bitrate (e.g., mp3_44100_128). Higher bitrates and PCM formats require higher subscription tiers."),
     model_id: str | None = Field(None, description="The speech-to-speech model to use for conversion. Query available models to verify speech conversion support via the can_do_voice_conversion property."),
     remove_background_noise: bool | None = Field(None, description="Enable background noise removal from the input audio using audio isolation. Only applicable when using the Voice Changer model."),
@@ -2240,10 +2386,15 @@ async def convert_voice(
     return _response_data
 
 # Tags: speech-to-speech
-@mcp.tool()
+@mcp.tool(
+    title="Convert Speech to Speech Stream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_speech_to_speech_stream(
     voice_id: str = Field(..., description="The target voice identifier to apply to the input audio. Use the voices endpoint to discover available voices."),
-    audio: str = Field(..., description="The source audio file containing the content and emotional characteristics that will control the generated speech output."),
+    audio: str = Field(..., description="Base64-encoded file content for upload. The source audio file containing the content and emotional characteristics that will control the generated speech output.", json_schema_extra={'format': 'byte'}),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio encoding format for the response, specified as codec_sample_rate_bitrate. Higher bitrates and sample rates may require elevated subscription tiers."),
     model_id: str | None = Field(None, description="The model identifier to use for voice conversion. Verify the model supports speech-to-speech conversion via the can_do_voice_conversion property."),
     remove_background_noise: bool | None = Field(None, description="Enable background noise removal from the input audio using audio isolation. Only applicable when using the Voice Changer model."),
@@ -2297,7 +2448,12 @@ async def convert_speech_to_speech_stream(
     return _response_data
 
 # Tags: text-to-voice
-@mcp.tool()
+@mcp.tool(
+    title="Generate Voice Previews",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_voice_previews(
     voice_description: str = Field(..., description="Detailed description of the desired voice characteristics. The system uses this to generate voice previews matching your specifications.", min_length=20, max_length=1000),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio codec, sample rate, and bitrate for the generated preview samples. Higher bitrates and sample rates provide better quality but require higher subscription tiers."),
@@ -2338,13 +2494,19 @@ async def generate_voice_previews(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-voice
-@mcp.tool()
+@mcp.tool(
+    title="Create Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_voice(
     voice_name: str = Field(..., description="The name for the new voice being created."),
     voice_description: str = Field(..., description="A detailed description of the voice characteristics and use case. Must be between 20 and 1000 characters.", min_length=20, max_length=1000),
@@ -2381,13 +2543,19 @@ async def create_voice(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-voice
-@mcp.tool()
+@mcp.tool(
+    title="Design Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def design_voice(
     voice_description: str = Field(..., description="Detailed description of the desired voice characteristics. Used to guide voice generation and should include personality, tone, and acoustic qualities.", min_length=20, max_length=1000),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Audio codec, sample rate, and bitrate for the generated voice samples. Higher bitrates and sample rates require appropriate subscription tiers."),
@@ -2430,13 +2598,19 @@ async def design_voice(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-voice
-@mcp.tool()
+@mcp.tool(
+    title="Remix Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def remix_voice(
     voice_id: str = Field(..., description="The ID of the voice to remix. Use the voices list endpoint to discover available voices."),
     voice_description: str = Field(..., description="Detailed description of the voice modifications to apply. Be specific about desired characteristics such as pitch, tone, pace, or emotional qualities.", min_length=5, max_length=1000),
@@ -2478,13 +2652,20 @@ async def remix_voice(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: text-to-voice
-@mcp.tool()
+@mcp.tool(
+    title="Stream Voice Preview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def stream_voice_preview(generated_voice_id: str = Field(..., description="The unique identifier of the generated voice preview to stream.")) -> dict[str, Any] | ToolResult:
     """Stream audio data for a voice preview that was previously generated using the voice design endpoint. This operation returns the audio content as a continuous stream."""
 
@@ -2520,7 +2701,13 @@ async def stream_voice_preview(generated_voice_id: str = Field(..., description=
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Subscription Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_subscription_info() -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about the user's current subscription, including plan details, billing status, and entitlements."""
 
@@ -2547,7 +2734,13 @@ async def get_subscription_info() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get User Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user() -> dict[str, Any] | ToolResult:
     """Retrieves the authenticated user's profile information and account details."""
 
@@ -2574,7 +2767,13 @@ async def get_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="List Voices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_voices(
     next_page_token: str | None = Field(None, description="Token for retrieving the next page of results. Use this with the has_more flag from the previous response to implement reliable pagination."),
     page_size: int | None = Field(None, description="Maximum number of voices to return per page. Must not exceed 100. Note that page 0 may include additional default voices."),
@@ -2623,7 +2822,13 @@ async def list_voices(
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Default Voice Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_default_voice_settings() -> dict[str, Any] | ToolResult:
     """Retrieve the default voice settings for all voices, including similarity boost (Clarity + Similarity Enhancement) and stability parameters that control voice characteristics."""
 
@@ -2650,7 +2855,13 @@ async def get_default_voice_settings() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Voice Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_voice_settings(voice_id: str = Field(..., description="The unique identifier of the voice whose settings you want to retrieve. Use the list voices endpoint to discover available voice IDs.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration settings for a specific voice, including similarity boost (Clarity + Similarity Enhancement) and stability parameters that control voice quality characteristics."""
 
@@ -2686,7 +2897,13 @@ async def get_voice_settings(voice_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Voice",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_voice(voice_id: str = Field(..., description="The unique identifier of the voice to retrieve. You can list all available voices to discover valid IDs.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific voice, including its properties and configuration. Use this to get information about a voice before using it for text-to-speech synthesis."""
 
@@ -2722,7 +2939,13 @@ async def get_voice(voice_id: str = Field(..., description="The unique identifie
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Delete Voice",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_voice(voice_id: str = Field(..., description="The unique identifier of the voice to delete. You can retrieve available voice IDs from the list voices endpoint.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a voice by its ID. This action cannot be undone."""
 
@@ -2758,7 +2981,13 @@ async def delete_voice(voice_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Configure Voice Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_voice_settings(
     voice_id: str = Field(..., description="The unique identifier of the voice to configure. Use the list voices endpoint to discover available voice IDs."),
     stability: float | None = Field(None, description="Controls voice consistency and emotional range. Lower values (closer to 0) produce more varied emotional expression, while higher values (closer to 1) result in more consistent but potentially monotonous output.", ge=0.0, le=1.0),
@@ -2797,16 +3026,22 @@ async def configure_voice_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Create Voice Sample",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_voice_sample(
     name: str = Field(..., description="The display name for this voice, shown in selection dropdowns and voice management interfaces."),
-    files: list[str] = Field(..., description="Audio file paths for voice cloning samples. Provide multiple recordings to improve voice quality and consistency. Order does not affect processing."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] = Field(..., description="Base64-encoded file content for upload. Audio file paths for voice cloning samples. Provide multiple recordings to improve voice quality and consistency. Order does not affect processing."),
     remove_background_noise: bool | None = Field(None, description="Enable background noise removal using audio isolation processing. Only use if your samples contain background noise, as it may degrade quality for clean recordings."),
     description: str | None = Field(None, description="Optional metadata describing the voice characteristics, tone, and intended use cases."),
     labels: dict[str, str] | str | None = Field(None, description="Categorical metadata for voice classification. Supports language code, accent variant, gender, and age range to help organize and filter voices."),
@@ -2849,11 +3084,17 @@ async def create_voice_sample(
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Update Voice",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_voice(
     voice_id: str = Field(..., description="The unique identifier of the voice to update."),
     name: str = Field(..., description="The display name for this voice, shown in voice selection dropdowns."),
-    files: list[str] | None = Field(None, description="Audio files to add to the voice. Supported formats include MP3, WAV, and other common audio formats."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] | None = Field(None, description="Base64-encoded file content for upload. Audio files to add to the voice. Supported formats include MP3, WAV, and other common audio formats."),
     remove_background_noise: bool | None = Field(None, description="Enable automatic background noise removal from audio samples using audio isolation. Only use if samples contain background noise, as it may degrade quality otherwise."),
     description: str | None = Field(None, description="A brief description of the voice characteristics, tone, and intended use cases."),
     labels: dict[str, str] | str | None = Field(None, description="Metadata labels describing the voice. Supported keys include language (ISO 639-1 code), accent (BCP 47 tag), gender, and age."),
@@ -2897,7 +3138,12 @@ async def update_voice(
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Add Shared Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_shared_voice(
     public_user_id: str = Field(..., description="The public user ID of the ElevenLabs user who owns the shared voice."),
     voice_id: str = Field(..., description="The unique identifier of the voice to add to your collection."),
@@ -2935,13 +3181,19 @@ async def add_shared_voice(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Generate Podcast",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_podcast(
     model_id: str = Field(..., description="The voice model to use for audio generation. Query GET /v1/models to see all available models."),
     mode: _models.PodcastConversationMode | _models.PodcastBulletinMode = Field(..., description="The podcast format type. 'conversation' generates dialogue between two voices (host and guest), while 'bulletin' generates a single-voice monologue."),
@@ -2986,13 +3238,20 @@ async def generate_podcast(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Apply Pronunciation Dictionaries",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def apply_pronunciation_dictionaries(
     project_id: str = Field(..., description="The unique identifier of the Studio project to which pronunciation dictionaries will be applied."),
     pronunciation_dictionary_locators: list[_models.PronunciationDictionaryVersionLocatorDbModel] = Field(..., description="An ordered list of pronunciation dictionary references to apply to the project. Each reference must include the dictionary ID and its version ID. Multiple dictionaries can be specified as separate form entries."),
@@ -3029,13 +3288,20 @@ async def apply_pronunciation_dictionaries(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all Studio projects with their metadata. Use this to discover available projects and their details."""
 
@@ -3062,7 +3328,12 @@ async def list_projects() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Create Studio Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_studio_project(
     name: str = Field(..., description="The name of the Studio project used for identification and display purposes."),
     default_title_voice_id: str | None = Field(None, description="The voice ID to use as the default voice for new titles in this project."),
@@ -3095,6 +3366,7 @@ async def create_studio_project(
     similarity_boost: float | None = Field(None, description="Controls how closely the voice matches the original. Higher values increase similarity. Range: 0.0 to 1.0"),
     style: float | None = Field(None, description="Controls the style exaggeration of the voice. Range: 0.0 to 1.0"),
     use_speaker_boost: bool | None = Field(None, description="Whether to apply speaker boost for enhanced clarity and presence"),
+    from_document: str | None = Field(None, description="Base64-encoded file content for upload. An optional .epub, .pdf, .txt or similar file can be provided. If provided, we will initialize the Studio project with its content. If this is set, 'from_url' and 'from_content' must be null. If neither 'from_url', 'from_document', 'from_content' are provided we will initialize the Studio project as blank.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Creates a new Studio project for audio content generation. Projects can be initialized as blank, from a document, or from a URL, with customizable voices, audio quality, and metadata."""
 
@@ -3106,7 +3378,7 @@ async def create_studio_project(
     # Construct request model with validation
     try:
         _request = _models.AddProjectRequest(
-            body=_models.AddProjectRequestBody(name=name, default_title_voice_id=default_title_voice_id, default_paragraph_voice_id=default_paragraph_voice_id, default_model_id=default_model_id, quality_preset=quality_preset, author=author, description=description, genres=genres, target_audience=target_audience, language=language, content_type=content_type, original_publication_date=original_publication_date, mature_content=mature_content, isbn_number=isbn_number, volume_normalization=volume_normalization, callback_url=callback_url, fiction=fiction, apply_text_normalization=apply_text_normalization, auto_convert=auto_convert, auto_assign_voices=auto_assign_voices, source_type=source_type, create_publishing_read=create_publishing_read, from_content_json=from_content_json, pronunciation_dictionary_locators=pronunciation_dictionary_locators, voice_settings=voice_settings)
+            body=_models.AddProjectRequestBody(name=name, default_title_voice_id=default_title_voice_id, default_paragraph_voice_id=default_paragraph_voice_id, default_model_id=default_model_id, quality_preset=quality_preset, author=author, description=description, genres=genres, target_audience=target_audience, language=language, content_type=content_type, original_publication_date=original_publication_date, mature_content=mature_content, isbn_number=isbn_number, volume_normalization=volume_normalization, callback_url=callback_url, fiction=fiction, apply_text_normalization=apply_text_normalization, auto_convert=auto_convert, auto_assign_voices=auto_assign_voices, source_type=source_type, create_publishing_read=create_publishing_read, from_document=from_document, from_content_json=from_content_json, pronunciation_dictionary_locators=pronunciation_dictionary_locators, voice_settings=voice_settings)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for create_studio_project: {_validation_err}")
@@ -3132,13 +3404,20 @@ async def create_studio_project(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["from_document"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(
     project_id: str = Field(..., description="The unique identifier of the Studio project to retrieve."),
     share_id: str | None = Field(None, description="Optional share identifier to access a shared version of the project."),
@@ -3180,7 +3459,13 @@ async def get_project(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Update Studio Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_studio_project(
     project_id: str = Field(..., description="The unique identifier of the Studio project to update."),
     name: str = Field(..., description="The display name of the Studio project used for identification and organization."),
@@ -3221,13 +3506,20 @@ async def update_studio_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(project_id: str = Field(..., description="The unique identifier of the Studio project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a Studio project and all associated data. This action cannot be undone."""
 
@@ -3263,13 +3555,19 @@ async def delete_project(project_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Content",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_project_content(
     project_id: str = Field(..., description="The unique identifier of the Studio project to update."),
     auto_convert: bool | None = Field(None, description="Whether to automatically convert the Studio project to audio format. Defaults to false if not specified."),
     content_chapters: list[dict[str, Any]] | None = Field(None, description="List of chapter objects, each with 'name' (string) and 'blocks' (list of block objects)"),
     content_blocks: list[dict[str, Any]] | None = Field(None, description="List of block objects, each with 'sub_type' (e.g., 'p', 'h1', 'h2') and 'nodes' (list of node objects)"),
     content_nodes: list[dict[str, Any]] | None = Field(None, description="List of TTS node objects, each with 'type' ('tts_node'), 'text' (string), and 'voice_id' (string)"),
+    from_document: str | None = Field(None, description="Base64-encoded file content for upload. An optional .epub, .pdf, .txt or similar file can be provided. If provided, we will initialize the Studio project with its content. If this is set, 'from_url' and 'from_content' must be null. If neither 'from_url', 'from_document', 'from_content' are provided we will initialize the Studio project as blank.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Updates the content of a Studio project. Optionally converts the project to audio format during the update."""
 
@@ -3280,7 +3578,7 @@ async def update_project_content(
     try:
         _request = _models.EditProjectContentRequest(
             path=_models.EditProjectContentRequestPath(project_id=project_id),
-            body=_models.EditProjectContentRequestBody(auto_convert=auto_convert, from_content_json=from_content_json)
+            body=_models.EditProjectContentRequestBody(auto_convert=auto_convert, from_document=from_document, from_content_json=from_content_json)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_project_content: {_validation_err}")
@@ -3306,13 +3604,19 @@ async def update_project_content(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["from_document"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Convert Studio Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_studio_project(project_id: str = Field(..., description="The unique identifier of the Studio project to convert.")) -> dict[str, Any] | ToolResult:
     """Initiates conversion of a Studio project and all of its associated chapters. This operation processes the entire project structure for conversion."""
 
@@ -3348,7 +3652,13 @@ async def convert_studio_project(project_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="List Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_snapshots(project_id: str = Field(..., description="The unique identifier of the Studio project for which to retrieve snapshots.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of all snapshots for a specified Studio project. Snapshots capture the state of a project at a point in time."""
 
@@ -3384,7 +3694,13 @@ async def list_snapshots(project_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_snapshot(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the snapshot."),
     project_snapshot_id: str = Field(..., description="The unique identifier of the project snapshot to retrieve."),
@@ -3423,7 +3739,12 @@ async def get_snapshot(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Stream Project Snapshot Audio",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def stream_project_snapshot_audio(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the snapshot."),
     project_snapshot_id: str = Field(..., description="The unique identifier of the project snapshot whose audio should be streamed."),
@@ -3460,13 +3781,20 @@ async def stream_project_snapshot_audio(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Download Snapshot Archive",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_snapshot_archive(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the snapshot to archive."),
     project_snapshot_id: str = Field(..., description="The unique identifier of the project snapshot to archive and download."),
@@ -3505,7 +3833,13 @@ async def download_snapshot_archive(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="List Chapters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_chapters(project_id: str = Field(..., description="The unique identifier of the Studio project whose chapters you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all chapters for a specified Studio project. Returns a list of chapters with their metadata and properties."""
 
@@ -3541,7 +3875,12 @@ async def list_chapters(project_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Create Chapter",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project where the chapter will be created."),
     name: str = Field(..., description="The display name for the chapter used for identification and organization within the project."),
@@ -3577,13 +3916,20 @@ async def create_chapter(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Get Chapter",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to retrieve."),
@@ -3622,7 +3968,13 @@ async def get_chapter(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Update Chapter",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to update."),
@@ -3661,13 +4013,20 @@ async def update_chapter(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Delete Chapter",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter to delete."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to delete."),
@@ -3706,7 +4065,12 @@ async def delete_chapter(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Convert Chapter",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_chapter(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter to convert."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter to be converted."),
@@ -3745,7 +4109,13 @@ async def convert_chapter(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="List Chapter Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_chapter_snapshots(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter for which to retrieve snapshots."),
@@ -3784,7 +4154,13 @@ async def list_chapter_snapshots(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Get Chapter Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_chapter_snapshot(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter within the project."),
@@ -3824,7 +4200,12 @@ async def get_chapter_snapshot(
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="Get Chapter Snapshot Audio Stream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_chapter_snapshot_audio(
     project_id: str = Field(..., description="The unique identifier of the Studio project containing the chapter."),
     chapter_id: str = Field(..., description="The unique identifier of the chapter within the project."),
@@ -3862,13 +4243,20 @@ async def get_chapter_snapshot_audio(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: studio
-@mcp.tool()
+@mcp.tool(
+    title="List Muted Tracks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_muted_tracks(project_id: str = Field(..., description="The unique identifier of the Studio project to query for muted tracks.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of chapter IDs that have muted tracks in a Studio project. Use this to identify which chapters contain audio that has been muted."""
 
@@ -3904,7 +4292,13 @@ async def list_muted_tracks(project_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Get Dubbing Resource",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dubbing_resource(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project created from the dubbing endpoint with studio mode enabled.")) -> dict[str, Any] | ToolResult:
     """Retrieves the dubbing resource for a given dubbing project ID that was created with studio enabled. Use this to access the generated dubbing output and associated metadata."""
 
@@ -3940,7 +4334,12 @@ async def get_dubbing_resource(dubbing_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Add Dubbing Language",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_dubbing_language(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to which the language will be added."),
     language: str | None = Field(..., description="The target language code in ElevenLabs Turbo V2/V2.5 format to add to the dubbing resource."),
@@ -3976,13 +4375,19 @@ async def add_dubbing_language(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Create Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_segment(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the speaker."),
     speaker_id: str = Field(..., description="The unique identifier of the speaker within the dubbing project."),
@@ -4021,13 +4426,20 @@ async def create_segment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Update Segment Language",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_segment_language(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segment to modify."),
     segment_id: str = Field(..., description="The unique identifier of the segment within the dubbing project to be updated."),
@@ -4066,13 +4478,19 @@ async def update_segment_language(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Reassign Segments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reassign_segments(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segments to reassign."),
     segment_ids: list[str] = Field(..., description="Array of segment identifiers to reassign to the target speaker. Order is preserved as provided."),
@@ -4109,13 +4527,20 @@ async def reassign_segments(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dubbing Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dubbing_segment(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segment to be deleted."),
     segment_id: str = Field(..., description="The unique identifier of the segment to be deleted from the dubbing project."),
@@ -4154,7 +4579,12 @@ async def delete_dubbing_segment(
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Regenerate Segment Transcriptions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def regenerate_segment_transcriptions(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the segments to transcribe."),
     segments: list[str] = Field(..., description="An array of segment identifiers to regenerate transcriptions for. Order is preserved as provided."),
@@ -4190,13 +4620,19 @@ async def regenerate_segment_transcriptions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Translate Dubbing Segments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def translate_dubbing_segments(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to translate."),
     segments: list[str] = Field(..., description="List of segment identifiers to translate. Only these segments will be processed; order is preserved as provided."),
@@ -4233,13 +4669,19 @@ async def translate_dubbing_segments(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Regenerate Dubs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def regenerate_dubs(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to regenerate dubs for."),
     segments: list[str] = Field(..., description="List of segment identifiers to dub. Only the specified segments will be processed; order is preserved as provided."),
@@ -4276,13 +4718,20 @@ async def regenerate_dubs(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Update Speaker",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_speaker(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the speaker."),
     speaker_id: str = Field(..., description="The unique identifier of the speaker to update."),
@@ -4322,13 +4771,19 @@ async def update_speaker(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Add Speaker",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_speaker(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to which the speaker will be added."),
     speaker_name: str | None = Field(None, description="A human-readable label for this speaker to identify it within the dubbing project."),
@@ -4366,13 +4821,20 @@ async def add_speaker(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="List Similar Voices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_similar_voices(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the speaker."),
     speaker_id: str = Field(..., description="The unique identifier of the speaker within the dubbing project to find similar voices for."),
@@ -4411,7 +4873,12 @@ async def list_similar_voices(
     return _response_data
 
 # Tags: dubbing, dubbing, resource, segment, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Render Dubbing",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def render_dubbing(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to render."),
     language: str = Field(..., description="The target language code for rendering (e.g., 'es' for Spanish). Use 'original' to render the source track."),
@@ -4449,13 +4916,20 @@ async def render_dubbing(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: dubbing, dubbing, dubbing
-@mcp.tool()
+@mcp.tool(
+    title="List Dubs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dubs(
     page_size: int | None = Field(None, description="Maximum number of dubs to return per request. Defaults to 100 if not specified.", ge=1, le=200),
     dubbing_status: Literal["dubbing", "dubbed", "failed"] | None = Field(None, description="Filter results by the current processing state of the dub."),
@@ -4499,9 +4973,14 @@ async def list_dubs(
     return _response_data
 
 # Tags: dubbing, dubbing, dubbing
-@mcp.tool()
+@mcp.tool(
+    title="Dub Media",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def dub_media(
-    csv_file: str | None = Field(None, description="CSV file containing transcription and translation metadata for manual dubbing mode. Used to override automatic transcription and provide custom timing and speaker information."),
+    csv_file: str | None = Field(None, description="Base64-encoded file content for upload. CSV file containing transcription and translation metadata for manual dubbing mode. Used to override automatic transcription and provide custom timing and speaker information.", json_schema_extra={'format': 'byte'}),
     name: str | None = Field(None, description="Human-readable name for the dubbing project to help organize and identify the job."),
     source_url: str | None = Field(None, description="URL pointing to the source video or audio file to be dubbed. Must be publicly accessible."),
     source_lang: str | None = Field(None, description="Language code of the source content using ISO 639-1 or ISO 639-3 format. Set to 'auto' to automatically detect the language."),
@@ -4557,7 +5036,13 @@ async def dub_media(
     return _response_data
 
 # Tags: dubbing, dubbing, dubbing
-@mcp.tool()
+@mcp.tool(
+    title="Get Dubbing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dubbing(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to retrieve metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata about a dubbing project, including its current processing status and completion state."""
 
@@ -4593,7 +5078,13 @@ async def get_dubbing(dubbing_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: dubbing, dubbing, dubbing
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dubbing",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dubbing(dubbing_id: str = Field(..., description="The unique identifier of the dubbing project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a dubbing project and all associated data. This action cannot be undone."""
 
@@ -4629,7 +5120,13 @@ async def delete_dubbing(dubbing_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: dubbing, dubbing, dubbing
-@mcp.tool()
+@mcp.tool(
+    title="Download Dubbed Audio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_dubbed_audio(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the dubbed content."),
     language_code: str = Field(..., description="The language code specifying which dubbed audio track to retrieve."),
@@ -4668,7 +5165,13 @@ async def download_dubbed_audio(
     return _response_data
 
 # Tags: dubbing, dubbing, dubbing
-@mcp.tool()
+@mcp.tool(
+    title="Get Dubbing Transcripts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_transcript_dubbing(
     dubbing_id: str = Field(..., description="The unique identifier of the dubbing project containing the transcript to retrieve."),
     language_code: str = Field(..., description="The language for which to retrieve the transcript. Use 'source' to fetch the original media transcript, or provide an ISO 639 language code."),
@@ -4708,7 +5211,13 @@ async def get_transcript_dubbing(
     return _response_data
 
 # Tags: models
-@mcp.tool()
+@mcp.tool(
+    title="List Models",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_models() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all available models that can be used for API operations."""
 
@@ -4735,7 +5244,12 @@ async def list_models() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: audio-native
-@mcp.tool()
+@mcp.tool(
+    title="Create Audio Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_audio_project(
     name: str = Field(..., description="The name of the audio project."),
     author: str | None = Field(None, description="The author name displayed in the audio player and at the start of the article. Uses the default author from Player settings if not specified."),
@@ -4745,6 +5259,7 @@ async def create_audio_project(
     apply_text_normalization: Literal["auto", "on", "off", "apply_english"] | None = Field(None, description="Controls text normalization behavior. 'auto' lets the system decide, 'on' always applies normalization, 'apply_english' applies normalization assuming English text, and 'off' disables normalization."),
     pronunciation_dictionary_locators: list[str] | None = Field(None, description="A list of pronunciation dictionary locators, each containing a pronunciation_dictionary_id and version_id pair. Multiple dictionaries can be applied to customize pronunciation of specific terms."),
     player_colors: str | None = Field(None, description="Player colors as a comma-separated pair of hex color codes in format 'text_color,background_color' (e.g., '#FFFFFF,#000000'). If not provided, default colors set in Player settings are used."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. Either txt or HTML input file containing the article content. HTML should be formatted as follows '&lt;html&gt;&lt;body&gt;&lt;div&gt;&lt;p&gt;Your content&lt;/p&gt;&lt;h3&gt;More of your content&lt;/h3&gt;&lt;p&gt;Some more of your content&lt;/p&gt;&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;'", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Creates an Audio Native enabled project with optional automatic conversion to audio. Returns a project ID and embeddable HTML snippet for audio playback."""
 
@@ -4754,7 +5269,7 @@ async def create_audio_project(
     # Construct request model with validation
     try:
         _request = _models.CreateAudioNativeProjectRequest(
-            body=_models.CreateAudioNativeProjectRequestBody(name=name, author=author, voice_id=voice_id, model_id=model_id, auto_convert=auto_convert, apply_text_normalization=apply_text_normalization, pronunciation_dictionary_locators=pronunciation_dictionary_locators, text_color=player_colors_parsed.get('text_color') if player_colors_parsed else None, background_color=player_colors_parsed.get('background_color') if player_colors_parsed else None)
+            body=_models.CreateAudioNativeProjectRequestBody(name=name, author=author, voice_id=voice_id, model_id=model_id, auto_convert=auto_convert, apply_text_normalization=apply_text_normalization, pronunciation_dictionary_locators=pronunciation_dictionary_locators, file_=file_, text_color=player_colors_parsed.get('text_color') if player_colors_parsed else None, background_color=player_colors_parsed.get('background_color') if player_colors_parsed else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for create_audio_project: {_validation_err}")
@@ -4780,13 +5295,20 @@ async def create_audio_project(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: audio-native
-@mcp.tool()
+@mcp.tool(
+    title="Get Audio Native Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_audio_native_settings(project_id: str = Field(..., description="The unique identifier of the Studio project for which to retrieve Audio Native settings.")) -> dict[str, Any] | ToolResult:
     """Retrieve player settings and configuration for an Audio Native project. Use this to access the current settings applied to a specific project."""
 
@@ -4822,11 +5344,17 @@ async def get_audio_native_settings(project_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: audio-native
-@mcp.tool()
+@mcp.tool(
+    title="Update Audio Native Content",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_audio_native_content(
     project_id: str = Field(..., description="The unique identifier of the Studio project to update."),
     auto_convert: bool | None = Field(None, description="Automatically convert the project to audio format after content update."),
     auto_publish: bool | None = Field(None, description="Automatically publish a new project snapshot after conversion completes. Only applies when auto_convert is enabled."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. Either txt or HTML input file containing the article content. HTML should be formatted as follows '&lt;html&gt;&lt;body&gt;&lt;div&gt;&lt;p&gt;Your content&lt;/p&gt;&lt;h5&gt;More of your content&lt;/h5&gt;&lt;p&gt;Some more of your content&lt;/p&gt;&lt;/div&gt;&lt;/body&gt;&lt;/html&gt;'", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Updates content for an Audio-Native project with optional automatic conversion and publishing. Use this to modify project content and trigger downstream processing workflows."""
 
@@ -4834,7 +5362,7 @@ async def update_audio_native_content(
     try:
         _request = _models.AudioNativeProjectUpdateContentEndpointRequest(
             path=_models.AudioNativeProjectUpdateContentEndpointRequestPath(project_id=project_id),
-            body=_models.AudioNativeProjectUpdateContentEndpointRequestBody(auto_convert=auto_convert, auto_publish=auto_publish)
+            body=_models.AudioNativeProjectUpdateContentEndpointRequestBody(auto_convert=auto_convert, auto_publish=auto_publish, file_=file_)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_audio_native_content: {_validation_err}")
@@ -4860,13 +5388,19 @@ async def update_audio_native_content(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: audio-native
-@mcp.tool()
+@mcp.tool(
+    title="Update Audio Native Content from URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_audio_native_content_from_url(
     url: str = Field(..., description="The web page URL from which to extract content for the AudioNative project."),
     author: str | None = Field(None, description="Optional author name to display in the player and insert at the start of the article. Uses the default author from Player settings if not provided."),
@@ -4901,13 +5435,20 @@ async def update_audio_native_content_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="List Shared Voices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_voices_shared(
     page_size: int | None = Field(None, description="Maximum number of voices to return per page. Limited to 100 voices maximum."),
     category: Literal["professional", "famous", "high_quality"] | None = Field(None, description="Filter voices by category type."),
@@ -4962,9 +5503,14 @@ async def list_voices_shared(
     return _response_data
 
 # Tags: voices
-@mcp.tool()
+@mcp.tool(
+    title="Find Similar Voices",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def find_similar_voices(
-    audio_file: str | None = Field(None, description="Audio sample file to match against library voices. Used as the reference for similarity comparison."),
+    audio_file: str | None = Field(None, description="Base64-encoded file content for upload. Audio sample file to match against library voices. Used as the reference for similarity comparison.", json_schema_extra={'format': 'byte'}),
     similarity_threshold: float | None = Field(None, description="Similarity threshold for filtering results. Lower values return more similar voices. Valid range is 0 to 2."),
     top_k: int | None = Field(None, description="Maximum number of similar voices to return. If similarity_threshold is also specified, fewer voices may be returned. Valid range is 1 to 100."),
 ) -> dict[str, Any] | ToolResult:
@@ -5006,7 +5552,13 @@ async def find_similar_voices(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Character Usage Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_character_usage_metrics(
     start_unix: int = Field(..., description="Start of the usage window as a UTC Unix timestamp in milliseconds. Use 00:00:00 of the first day to include it in the results."),
     end_unix: int = Field(..., description="End of the usage window as a UTC Unix timestamp in milliseconds. Use 23:59:59 of the last day to include it in the results."),
@@ -5051,18 +5603,24 @@ async def get_character_usage_metrics(
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Create Pronunciation Dictionary",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pronunciation_dictionary(
     name: str = Field(..., description="The name of the pronunciation dictionary used for identification and reference within the system."),
     description: str | None = Field(None, description="An optional description of the pronunciation dictionary to provide additional context about its contents or purpose."),
     workspace_access: Literal["admin", "editor", "commenter", "viewer"] | None = Field(None, description="The workspace access level that determines permissions for other users to interact with this dictionary. If not provided, defaults to no access."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. A lexicon .pls file which we will use to initialize the project with.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Creates a new pronunciation dictionary from a lexicon .PLS file. The dictionary can be configured with access permissions for workspace collaboration."""
 
     # Construct request model with validation
     try:
         _request = _models.AddFromFileRequest(
-            body=_models.AddFromFileRequestBody(name=name, description=description, workspace_access=workspace_access)
+            body=_models.AddFromFileRequestBody(name=name, description=description, workspace_access=workspace_access, file_=file_)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for create_pronunciation_dictionary: {_validation_err}")
@@ -5088,13 +5646,19 @@ async def create_pronunciation_dictionary(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Create Pronunciation Dictionary from Rules",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pronunciation_dictionary_from_rules(
     name: str = Field(..., description="The name of the pronunciation dictionary used for identification and reference purposes."),
     description: str | None = Field(None, description="An optional description of the pronunciation dictionary to provide additional context about its contents or purpose."),
@@ -5135,13 +5699,20 @@ async def create_pronunciation_dictionary_from_rules(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Get Pronunciation Dictionary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pronunciation_dictionary(pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to retrieve metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a specific pronunciation dictionary by its ID. Returns configuration details and properties of the pronunciation dictionary."""
 
@@ -5177,7 +5748,13 @@ async def get_pronunciation_dictionary(pronunciation_dictionary_id: str = Field(
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Update Pronunciation Dictionary",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pronunciation_dictionary(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to update."),
     archived: bool | None = Field(None, description="Set whether the pronunciation dictionary should be archived. Archived dictionaries are retained but no longer active."),
@@ -5214,13 +5791,20 @@ async def update_pronunciation_dictionary(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Replace Pronunciation Rules",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def replace_pronunciation_rules(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to update."),
     rules: list[_models.PronunciationDictionaryAliasRuleRequestModel | _models.PronunciationDictionaryPhonemeRuleRequestModel] = Field(..., description="An ordered list of pronunciation rules to apply. Each rule maps a string to either an alias (another string) or a phoneme (with a specified alphabet such as IPA). All existing rules will be replaced with this list."),
@@ -5256,13 +5840,19 @@ async def replace_pronunciation_rules(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Add Pronunciation Rules",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_pronunciation_rules(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to modify."),
     rules: list[_models.PronunciationDictionaryAliasRuleRequestModel | _models.PronunciationDictionaryPhonemeRuleRequestModel] = Field(..., description="An ordered list of pronunciation rules to add or update. Each rule must be either an alias rule (mapping one string to another alias) or a phoneme rule (mapping a string to a phoneme in a specified alphabet such as IPA)."),
@@ -5298,13 +5888,20 @@ async def add_pronunciation_rules(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pronunciation Rules",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pronunciation_rules(
     pronunciation_dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary from which rules will be removed."),
     rule_strings: list[str] = Field(..., description="An array of rule strings to remove from the pronunciation dictionary. Each string represents a rule to be deleted. Order is not significant."),
@@ -5340,13 +5937,20 @@ async def delete_pronunciation_rules(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="Download Pronunciation Dictionary Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def download_pronunciation_dictionary_version(
     dictionary_id: str = Field(..., description="The unique identifier of the pronunciation dictionary to retrieve."),
     version_id: str = Field(..., description="The unique identifier of the specific version of the pronunciation dictionary to download."),
@@ -5385,7 +5989,13 @@ async def download_pronunciation_dictionary_version(
     return _response_data
 
 # Tags: Pronunciation Dictionary
-@mcp.tool()
+@mcp.tool(
+    title="List Pronunciation Dictionaries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pronunciation_dictionaries(
     page_size: int | None = Field(None, description="Maximum number of pronunciation dictionaries to return per request. Must be between 1 and 100.", ge=1, le=100),
     sort: Literal["creation_time_unix", "name"] | None = Field(None, description="Field to sort the results by. Choose between creation time or alphabetical name ordering."),
@@ -5427,7 +6037,13 @@ async def list_pronunciation_dictionaries(
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="List Service Account API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_account_api_keys(service_account_user_id: str = Field(..., description="The unique identifier of the service account for which to retrieve API keys.")) -> dict[str, Any] | ToolResult:
     """Retrieve all API keys associated with a specific service account. Use this to view and manage authentication credentials for programmatic access."""
 
@@ -5463,7 +6079,12 @@ async def list_service_account_api_keys(service_account_user_id: str = Field(...
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Create Service Account API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_service_account_api_key(
     service_account_user_id: str = Field(..., description="The unique identifier of the service account for which to create the API key."),
     name: str = Field(..., description="A human-readable name for the API key to help identify its purpose or usage context."),
@@ -5501,13 +6122,20 @@ async def create_service_account_api_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Service Account API Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_service_account_api_key(
     service_account_user_id: str = Field(..., description="The unique identifier of the service account that owns the API key to be deleted."),
     api_key_id: str = Field(..., description="The unique identifier of the API key to be revoked and deleted."),
@@ -5546,7 +6174,13 @@ async def revoke_service_account_api_key(
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="List Auth Connections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_auth_connections() -> dict[str, Any] | ToolResult:
     """Retrieve all authentication connections configured for the workspace. Returns a list of all connected auth providers and their configurations."""
 
@@ -5573,7 +6207,13 @@ async def list_auth_connections() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Delete Auth Connection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_auth_connection(auth_connection_id: str = Field(..., description="The unique identifier of the authentication connection to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an authentication connection from the workspace. This removes the stored credentials and configuration for the specified auth connection."""
 
@@ -5609,7 +6249,13 @@ async def delete_auth_connection(auth_connection_id: str = Field(..., descriptio
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="List Service Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all service accounts configured in the workspace. Service accounts are used for programmatic access and automation within the workspace."""
 
@@ -5636,7 +6282,13 @@ async def list_service_accounts() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups() -> dict[str, Any] | ToolResult:
     """Retrieve all groups in the workspace. Returns a complete list of groups available to the authenticated user."""
 
@@ -5663,7 +6315,13 @@ async def list_groups() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Find Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def find_group(name: str = Field(..., description="The name of the user group to search for. The search will match against group names in the workspace.")) -> dict[str, Any] | ToolResult:
     """Searches for user groups in the workspace by name. Returns matching group(s) or an empty result if no groups are found."""
 
@@ -5701,7 +6359,13 @@ async def find_group(name: str = Field(..., description="The name of the user gr
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_member(
     group_id: str = Field(..., description="The unique identifier of the group from which the member will be removed."),
     email: str = Field(..., description="The email address of the workspace member to remove from the group."),
@@ -5737,13 +6401,19 @@ async def remove_group_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Add Group Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_group_member(
     group_id: str = Field(..., description="The unique identifier of the group to which the member will be added."),
     email: str = Field(..., description="The email address of the workspace member to add to the group."),
@@ -5779,13 +6449,19 @@ async def add_group_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Send Workspace Invite",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_workspace_invite(
     email: str = Field(..., description="The email address of the user to invite to the workspace."),
     seat_type: Literal["workspace_admin", "workspace_member", "workspace_lite_member"] | None = Field(None, description="The permission level to assign the invited user within the workspace."),
@@ -5821,13 +6497,19 @@ async def send_workspace_invite(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Send Workspace Invitations",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_workspace_invitations(
     emails: list[str] = Field(..., description="List of email addresses to invite. All emails must belong to verified domains associated with your workspace."),
     seat_type: Literal["workspace_admin", "workspace_member", "workspace_lite_member"] | None = Field(None, description="The permission level to assign to invited users within the workspace."),
@@ -5863,13 +6545,20 @@ async def send_workspace_invitations(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Workspace Invitation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_workspace_invitation(email: str = Field(..., description="The email address of the invitation recipient whose invitation should be revoked.")) -> dict[str, Any] | ToolResult:
     """Revoke an existing workspace invitation by email address. The invitation will remain visible in the recipient's inbox but will no longer be activatable to join the workspace. Only workspace members with WORKSPACE_MEMBERS_INVITE permission can perform this action."""
 
@@ -5901,13 +6590,20 @@ async def revoke_workspace_invitation(email: str = Field(..., description="The e
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Get Resource",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_resource(
     resource_id: str = Field(..., description="The unique identifier of the resource to retrieve."),
     resource_type: Literal["voice", "voice_collection", "pronunciation_dictionary", "dubbing", "project", "convai_agents", "convai_knowledge_base_documents", "convai_tools", "convai_settings", "convai_secrets", "workspace_auth_connections", "convai_phone_numbers", "convai_mcp_servers", "convai_api_integration_connections", "convai_api_integration_trigger_connections", "convai_batch_calls", "convai_agent_response_tests", "convai_test_suite_invocations", "convai_crawl_jobs", "convai_crawl_tasks", "convai_whatsapp_accounts", "convai_agent_versions", "convai_agent_branches", "convai_agent_versions_deployments", "convai_memory_entries", "convai_coaching_proposals", "dashboard", "dashboard_configuration", "convai_agent_drafts", "resource_locators", "assets", "content_generations", "content_templates", "songs"] = Field(..., description="The category of the resource. Determines which resource type's metadata will be returned."),
@@ -5949,7 +6645,12 @@ async def get_resource(
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Grant Resource Access",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def grant_resource_access(
     resource_id: str = Field(..., description="The unique identifier of the resource to share."),
     role: Literal["admin", "editor", "commenter", "viewer"] = Field(..., description="The access level to grant to the principal. Determines what actions the principal can perform on the resource."),
@@ -5989,13 +6690,20 @@ async def grant_resource_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Resource Access",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_resource_access(
     resource_id: str = Field(..., description="The unique identifier of the workspace resource to revoke access from."),
     resource_type: Literal["voice", "voice_collection", "pronunciation_dictionary", "dubbing", "project", "convai_agents", "convai_knowledge_base_documents", "convai_tools", "convai_settings", "convai_secrets", "workspace_auth_connections", "convai_phone_numbers", "convai_mcp_servers", "convai_api_integration_connections", "convai_api_integration_trigger_connections", "convai_batch_calls", "convai_agent_response_tests", "convai_test_suite_invocations", "convai_crawl_jobs", "convai_crawl_tasks", "convai_whatsapp_accounts", "convai_agent_versions", "convai_agent_branches", "convai_agent_versions_deployments", "convai_memory_entries", "convai_coaching_proposals", "dashboard", "dashboard_configuration", "convai_agent_drafts", "resource_locators", "assets", "content_generations", "content_templates", "songs"] = Field(..., description="The category of the workspace resource being modified."),
@@ -6034,13 +6742,20 @@ async def revoke_resource_access(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: workspace
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_webhooks(include_usages: bool | None = Field(None, description="Include active usage statistics for each webhook. Only accessible to workspace administrators.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhooks configured for a workspace. Optionally include active usage statistics for each webhook (admin-only feature)."""
 
@@ -6078,7 +6793,12 @@ async def list_workspace_webhooks(include_usages: bool | None = Field(None, desc
     return _response_data
 
 # Tags: speech-to-text
-@mcp.tool()
+@mcp.tool(
+    title="Transcribe Audio",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def transcribe_audio(
     model_id: Literal["scribe_v1", "scribe_v2"] = Field(..., description="The transcription model to use. Choose between scribe_v1 (standard) or scribe_v2 (enhanced with additional features like verbatim control)."),
     language_code: str | None = Field(None, description="ISO-639-1 or ISO-639-3 language code of the audio content. Providing the language can improve transcription accuracy; if omitted, language is automatically detected."),
@@ -6097,13 +6817,14 @@ async def transcribe_audio(
     no_verbatim: bool | None = Field(None, description="Whether to remove filler words, false starts, and non-speech sounds from the transcript for a cleaner output. Only supported with the scribe_v2 model."),
     entity_redaction: str | list[str] | None = Field(None, description="Entity types or categories to redact from the transcript text. Accepts the same format as entity_detection ('all', specific categories like 'pii' or 'phi', or a list of entity types). Must be a subset of entity_detection if both are specified. When redaction is enabled, the entities field is not returned."),
     keyterms: list[str] | None = Field(None, description="List of domain-specific words or phrases to bias the model toward recognizing with higher accuracy. Each keyterm must be under 50 characters and contain at most 5 words. Maximum 1000 keyterms per request. Requests with over 100 keyterms incur a minimum 20-second billable duration. Incurs additional costs."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. The file to transcribe. All major audio and video formats are supported. Exactly one of the file or cloud_storage_url parameters must be provided. The file size must be less than 3.0GB.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Transcribe audio or video files to text with support for speaker diarization, multi-channel processing, and entity detection. Supports synchronous responses or asynchronous webhook delivery with optional custom metadata for request tracking."""
 
     # Construct request model with validation
     try:
         _request = _models.SpeechToTextRequest(
-            body=_models.SpeechToTextRequestBody(model_id=model_id, language_code=language_code, tag_audio_events=tag_audio_events, num_speakers=num_speakers, timestamps_granularity=timestamps_granularity, diarize=diarize, diarization_threshold=diarization_threshold, additional_formats=additional_formats, cloud_storage_url=cloud_storage_url, webhook=webhook, webhook_id=webhook_id, use_multi_channel=use_multi_channel, webhook_metadata=webhook_metadata, entity_detection=entity_detection, no_verbatim=no_verbatim, entity_redaction=entity_redaction, keyterms=keyterms)
+            body=_models.SpeechToTextRequestBody(model_id=model_id, language_code=language_code, tag_audio_events=tag_audio_events, num_speakers=num_speakers, timestamps_granularity=timestamps_granularity, diarize=diarize, diarization_threshold=diarization_threshold, additional_formats=additional_formats, cloud_storage_url=cloud_storage_url, webhook=webhook, webhook_id=webhook_id, use_multi_channel=use_multi_channel, webhook_metadata=webhook_metadata, entity_detection=entity_detection, no_verbatim=no_verbatim, entity_redaction=entity_redaction, keyterms=keyterms, file_=file_)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for transcribe_audio: {_validation_err}")
@@ -6129,13 +6850,20 @@ async def transcribe_audio(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: speech-to-text
-@mcp.tool()
+@mcp.tool(
+    title="Get Transcript",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_transcript(transcription_id: str = Field(..., description="The unique identifier of the transcript to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a previously generated transcript by its unique identifier. Use this operation to access transcription results after they have been processed."""
 
@@ -6171,7 +6899,13 @@ async def get_transcript(transcription_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: speech-to-text
-@mcp.tool()
+@mcp.tool(
+    title="Delete Transcript",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_transcript(transcription_id: str = Field(..., description="The unique identifier of the transcript to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a transcript by its unique ID. This action cannot be undone."""
 
@@ -6207,7 +6941,13 @@ async def delete_transcript(transcription_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="List Evaluation Criteria",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_evaluation_criteria() -> dict[str, Any] | ToolResult:
     """Retrieve all available evaluation criteria for speech-to-text assessment. Use this to understand the metrics and standards available for evaluating transcription quality."""
 
@@ -6234,7 +6974,13 @@ async def list_evaluation_criteria() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Get Evaluation Criterion",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_evaluation_criterion(criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific evaluation criterion by its ID for speech-to-text evaluation tasks. Use this to fetch detailed information about a criterion used in assessment workflows."""
 
@@ -6270,7 +7016,13 @@ async def get_evaluation_criterion(criterion_id: str = Field(..., description="T
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Update Evaluation Criterion",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_eval_criterion(
     criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to update."),
     fields: list[_models.DataExtractionFieldRequest] = Field(..., description="An array of field identifiers or definitions associated with this evaluation criterion. Specifies which fields are evaluated."),
@@ -6309,13 +7061,20 @@ async def update_eval_criterion(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Delete Evaluation Criterion",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_evaluation_criterion(criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific evaluation criterion from the speech-to-text evaluation system. This operation permanently removes the criterion and cannot be undone."""
 
@@ -6351,7 +7110,13 @@ async def delete_evaluation_criterion(criterion_id: str = Field(..., description
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="List Evaluations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_evaluations(
     agent_id: str | None = Field(None, description="Filter evaluations by the agent ID that created or is associated with the evaluation."),
     eval_criterion_id: str | None = Field(None, description="Filter evaluations by the evaluation criterion ID used to assess performance."),
@@ -6398,7 +7163,12 @@ async def list_evaluations(
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Create Evaluation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_evaluation(
     transcript_id: str = Field(..., description="The unique identifier of the transcript to be evaluated."),
     agent_id: str = Field(..., description="The unique identifier of the agent performing the evaluation."),
@@ -6436,13 +7206,20 @@ async def create_evaluation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Get Evaluation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_evaluation(evaluation_id: str = Field(..., description="The unique identifier of the evaluation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific speech-to-text evaluation by its unique identifier."""
 
@@ -6478,7 +7255,13 @@ async def get_evaluation(evaluation_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="List Human Agents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_human_agents(page_size: int | None = Field(None, description="Number of human agents to return per page. Controls pagination size for the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of human agents available for speech-to-text evaluation tasks. Use pagination to control the number of results returned per request."""
 
@@ -6516,7 +7299,13 @@ async def list_human_agents(page_size: int | None = Field(None, description="Num
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Get Human Agent",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_human_agent(agent_id: str = Field(..., description="The unique identifier of the human agent to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific human agent in the speech-to-text evaluation system. Use this to access agent profiles and evaluation data."""
 
@@ -6552,7 +7341,13 @@ async def get_human_agent(agent_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Delete Human Agent",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_human_agent(agent_id: str = Field(..., description="The unique identifier of the human agent to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a human agent from the speech-to-text evaluation system. This operation permanently deletes the agent and their associated routing configuration."""
 
@@ -6588,7 +7383,13 @@ async def delete_human_agent(agent_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="List Evaluation Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_evaluation_analytics(
     created_after: str | None = Field(None, description="Filter results to include only evaluations created on or after this date. Specify in ISO 8601 format."),
     created_before: str | None = Field(None, description="Filter results to include only evaluations created on or before this date. Specify in ISO 8601 format."),
@@ -6629,7 +7430,13 @@ async def list_evaluation_analytics(
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Get Criterion Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_criterion_analytics(
     criterion_id: str = Field(..., description="The unique identifier of the evaluation criterion to retrieve analytics for."),
     created_after: str | None = Field(None, description="Filter analytics to include only records created on or after this date. Specify in ISO 8601 format."),
@@ -6672,7 +7479,13 @@ async def get_criterion_analytics(
     return _response_data
 
 # Tags: Speech To Text - Evaluation
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_analytics(
     agent_id: str = Field(..., description="The unique identifier of the human agent for which to retrieve analytics."),
     created_after: str | None = Field(None, description="Filter to include only analytics created on or after this date. Specify in ISO 8601 format."),
@@ -6715,9 +7528,14 @@ async def get_agent_analytics(
     return _response_data
 
 # Tags: forced-alignment
-@mcp.tool()
+@mcp.tool(
+    title="Align Audio to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def align_audio_to_text(
-    file_: str = Field(..., alias="file", description="The audio file to align with the transcript. Supports all major audio formats with a maximum file size of 1GB."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The audio file to align with the transcript. Supports all major audio formats with a maximum file size of 1GB.", json_schema_extra={'format': 'byte'}),
     text: str = Field(..., description="The text transcript to align with the audio. Can be in any text format; diarization (speaker identification) is not currently supported."),
     enabled_spooled_file: bool | None = Field(None, description="Enable streaming processing for large files that cannot fit in memory. When true, the file is streamed to the server and processed in chunks."),
 ) -> dict[str, Any] | ToolResult:
@@ -6759,7 +7577,13 @@ async def align_audio_to_text(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Conversation Signed Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_conversation_signed_link(
     agent_id: str = Field(..., description="The unique identifier of the agent with which to start the conversation."),
     include_conversation_id: bool | None = Field(None, description="Whether to include a unique conversation ID in the response. When enabled, the signed URL can only be used once."),
@@ -6801,7 +7625,12 @@ async def get_agent_conversation_signed_link(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Outbound Call",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_outbound_call(
     agent_id: str = Field(..., description="Unique identifier of the AI agent that will handle the call."),
     agent_phone_number_id: str = Field(..., description="Identifier of the Twilio phone number resource to use as the caller."),
@@ -6854,13 +7683,20 @@ async def initiate_outbound_call(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Twilio Call",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def initiate_twilio_call(
     agent_id: str = Field(..., description="Unique identifier of the AI agent that will handle this call."),
     from_number: str = Field(..., description="The phone number initiating the call (caller ID for outbound, destination for inbound)."),
@@ -6913,13 +7749,20 @@ async def initiate_twilio_call(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Initiate WhatsApp Call",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def initiate_whatsapp_call(
     whatsapp_phone_number_id: str = Field(..., description="The WhatsApp Business Account phone number ID that will be used to make the outbound call."),
     whatsapp_user_id: str = Field(..., description="The WhatsApp user ID of the recipient who will receive the outbound call."),
@@ -6973,13 +7816,19 @@ async def initiate_whatsapp_call(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Send WhatsApp Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_whatsapp_message(
     whatsapp_phone_number_id: str = Field(..., description="The WhatsApp phone number ID associated with your business account that will send the message."),
     whatsapp_user_id: str = Field(..., description="The WhatsApp user ID (recipient) who will receive the message."),
@@ -7034,13 +7883,19 @@ async def send_whatsapp_message(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Agent Route",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_agent_route(
     name: str | None = Field(None, description="A name to make the agent easier to find"),
     tags: list[str] | None = Field(None, description="Tags to help classify and filter the agent"),
@@ -7078,13 +7933,20 @@ async def create_agent_route(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Agent Summaries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_agent_summaries(agent_ids: list[str] = Field(..., description="List of agent IDs to retrieve summaries for. Order is not significant. Each ID should be a valid agent identifier.")) -> dict[str, Any] | ToolResult:
     """Retrieve summaries for the specified agents. Provide a list of agent IDs to get their summary information."""
 
@@ -7122,7 +7984,13 @@ async def list_agent_summaries(agent_ids: list[str] = Field(..., description="Li
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent(
     agent_id: str = Field(..., description="The unique identifier of the agent to retrieve."),
     version_id: str | None = Field(None, description="The specific version of the agent to retrieve. If not provided, the latest version is used."),
@@ -7165,7 +8033,13 @@ async def get_agent(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update Agent Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_agent_settings(
     agent_id: str = Field(..., description="The unique identifier of the agent to update."),
     enable_versioning_if_not_enabled: bool | None = Field(None, description="Automatically enable versioning for this agent if not already enabled, allowing you to track and manage configuration changes."),
@@ -7213,13 +8087,20 @@ async def update_agent_settings(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Agent",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_agent(agent_id: str = Field(..., description="The unique identifier of the agent to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an agent and remove it from the system. This action cannot be undone."""
 
@@ -7255,7 +8136,13 @@ async def delete_agent(agent_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Widget Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_widget_config(
     agent_id: str = Field(..., description="The unique identifier of the agent whose widget configuration you want to retrieve."),
     conversation_signature: str | None = Field(None, description="An optional expiring token that enables WebSocket conversation initiation. Generate tokens using the conversation signed URL endpoint."),
@@ -7297,7 +8184,13 @@ async def get_agent_widget_config(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Share Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_share_link(agent_id: str = Field(..., description="The unique identifier of the agent for which to retrieve the share link.")) -> dict[str, Any] | ToolResult:
     """Retrieve the shareable link for an agent that can be used to share the agent with others."""
 
@@ -7333,10 +8226,15 @@ async def get_agent_share_link(agent_id: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Upload Agent Avatar",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_agent_avatar(
     agent_id: str = Field(..., description="The unique identifier of the agent to update with the new avatar image."),
-    avatar_file: str = Field(..., description="An image file to use as the agent's avatar. The file will be processed and stored for display in the widget."),
+    avatar_file: str = Field(..., description="Base64-encoded file content for upload. An image file to use as the agent's avatar. The file will be processed and stored for display in the widget.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload and set a profile image for an agent that will be displayed in the chat widget."""
 
@@ -7377,7 +8275,13 @@ async def upload_agent_avatar(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Agents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_agents(
     page_size: int | None = Field(None, description="Maximum number of agents to return per request. Must be between 1 and 100.", ge=1, le=100),
     archived: bool | None = Field(None, description="Filter results to show only archived or active agents."),
@@ -7421,7 +8325,13 @@ async def list_agents(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Knowledge Base Size",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_knowledge_base_size(agent_id: str = Field(..., description="The unique identifier of the agent whose knowledge base size you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the total number of pages stored in an agent's knowledge base. Use this to understand the size and scope of the knowledge base associated with a specific agent."""
 
@@ -7457,7 +8367,12 @@ async def get_knowledge_base_size(agent_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Estimate Agent LLM Cost",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def estimate_agent_llm_cost(
     agent_id: str = Field(..., description="The unique identifier of the agent for which to calculate expected LLM token usage."),
     prompt_length: int | None = Field(None, description="The length of the input prompt in characters. Used to estimate token consumption for the prompt component."),
@@ -7495,13 +8410,19 @@ async def estimate_agent_llm_cost(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Agent",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_agent(
     agent_id: str = Field(..., description="The unique identifier of the agent to duplicate."),
     name: str | None = Field(None, description="An optional custom name for the duplicated agent to help identify it."),
@@ -7537,13 +8458,19 @@ async def duplicate_agent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Simulate Agent Conversation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def simulate_agent_conversation(
     agent_id: str = Field(..., description="The unique identifier of the agent to simulate. This ID is provided when the agent is created."),
     first_message: str | None = Field(None, description="Optional opening message for the agent to deliver. If provided, the agent speaks first; if empty, the simulated user initiates the conversation."),
@@ -7604,13 +8531,19 @@ async def simulate_agent_conversation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Simulate Conversation Stream",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def simulate_conversation_stream(
     agent_id: str = Field(..., description="The unique identifier of the agent to simulate the conversation with."),
     first_message: str | None = Field(None, description="Optional initial message for the agent to speak. If empty, the agent waits for the simulated user to initiate the conversation."),
@@ -7671,13 +8604,19 @@ async def simulate_conversation_stream(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Agent Test",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_agent_test(
     name: str = Field(..., description="Human-readable name for this test case."),
     from_conversation_metadata: _models.TestFromConversationMetadataInput | None = Field(None, description="Metadata from the source conversation if this test was derived from an existing conversation."),
@@ -7723,13 +8662,20 @@ async def create_agent_test(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Test",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_test(test_id: str = Field(..., description="The unique identifier of the agent response test to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific agent response test by its ID. Use this to fetch details about a previously created test."""
 
@@ -7765,7 +8711,12 @@ async def get_agent_test(test_id: str = Field(..., description="The unique ident
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Agent Test",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_agent_test(
     test_id: str = Field(..., description="The unique identifier of the agent response test to update."),
     name: str = Field(..., description="A descriptive name for the test."),
@@ -7813,13 +8764,20 @@ async def update_agent_test(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Agent Test",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_agent_test(test_id: str = Field(..., description="The unique identifier of the agent response test to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes an agent response test by its ID. This removes the test configuration and associated test data from the system."""
 
@@ -7855,7 +8813,12 @@ async def delete_agent_test(test_id: str = Field(..., description="The unique id
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Fetch Agent Response Test Summaries",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def fetch_agent_response_test_summaries(test_ids: list[str] = Field(..., description="List of unique test IDs to retrieve summaries for. Each ID identifies a specific agent response test.")) -> dict[str, Any] | ToolResult:
     """Retrieve summaries for multiple agent response tests by their IDs. Returns a mapping of test IDs to their corresponding test summary data."""
 
@@ -7887,13 +8850,20 @@ async def fetch_agent_response_test_summaries(test_ids: list[str] = Field(..., d
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Agent Tests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_agent_tests(
     page_size: int | None = Field(None, description="Maximum number of tests to return per request. Must be between 1 and 100.", ge=1, le=100),
     types: list[Literal["llm", "tool", "simulation", "folder"]] | None = Field(None, description="Filter results to include only tests and folders matching the specified types. When provided, only items of these types are returned."),
@@ -7935,7 +8905,13 @@ async def list_agent_tests(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Test Invocations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_test_invocations(
     agent_id: str = Field(..., description="The unique identifier of the agent whose test invocations should be retrieved."),
     page_size: int | None = Field(None, description="Maximum number of test invocations to return per request. Defaults to 30 if not specified.", ge=1, le=100),
@@ -7976,7 +8952,12 @@ async def list_test_invocations(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Run Agent Tests",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_agent_tests(
     agent_id: str = Field(..., description="The unique identifier of the agent to test."),
     tests: list[_models.SingleTestRunRequestModel] = Field(..., description="Array of test configurations to execute. Each test validates specific agent behaviors or criteria.", min_length=1, max_length=1000),
@@ -8014,13 +8995,20 @@ async def run_agent_tests(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Test Invocation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_test_invocation(test_invocation_id: str = Field(..., description="The unique identifier of the test invocation to retrieve. This ID is provided when tests are executed.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific test invocation by its ID. Use this to fetch details about a test invocation that was previously executed."""
 
@@ -8056,7 +9044,13 @@ async def get_test_invocation(test_invocation_id: str = Field(..., description="
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Resubmit Tests",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def resubmit_tests(
     test_invocation_id: str = Field(..., description="The unique identifier of the test invocation containing the test runs to resubmit. This ID is returned when tests are initially executed."),
     test_run_ids: list[str] = Field(..., description="List of test run IDs to resubmit. Each ID identifies a specific test case within the invocation to be re-executed.", min_length=1, max_length=1000),
@@ -8095,13 +9089,20 @@ async def resubmit_tests(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Conversations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversations(
     agent_id: str | None = Field(None, description="Filter conversations to a specific agent by its unique identifier."),
     call_successful: Literal["success", "failure", "unknown"] | None = Field(None, description="Filter conversations by the result of the success evaluation."),
@@ -8156,7 +9157,13 @@ async def list_conversations(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Conversation Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversation_users(
     agent_id: str | None = Field(None, description="The ID of the agent to filter conversations by."),
     branch_id: str | None = Field(None, description="Filter conversations to a specific branch by its ID."),
@@ -8199,7 +9206,13 @@ async def list_conversation_users(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation(conversation_id: str = Field(..., description="The unique identifier of the conversation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full details and history of a specific conversation by its ID. Use this to access conversation metadata, messages, and related information."""
 
@@ -8235,7 +9248,13 @@ async def get_conversation(conversation_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Conversation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_conversation(conversation_id: str = Field(..., description="The unique identifier of the conversation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a conversation and all associated data. This action cannot be undone."""
 
@@ -8271,7 +9290,13 @@ async def delete_conversation(conversation_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation Audio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation_audio(conversation_id: str = Field(..., description="The unique identifier of the conversation whose audio recording you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the audio recording of a specific conversation. Returns the audio file associated with the conversation ID."""
 
@@ -8307,7 +9332,12 @@ async def get_conversation_audio(conversation_id: str = Field(..., description="
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Submit Conversation Feedback",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_conversation_feedback(
     conversation_id: str = Field(..., description="The unique identifier of the conversation to provide feedback for."),
     feedback: Literal["like", "dislike"] | None = Field(None, description="The feedback sentiment for the conversation, either positive or negative."),
@@ -8343,13 +9373,20 @@ async def submit_conversation_feedback(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Search Conversation Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_conversation_messages(
     text_query: str = Field(..., description="The search query text to match against conversation messages using full-text and fuzzy search algorithms."),
     agent_id: str | None = Field(None, description="Filter results to conversations handled by a specific agent."),
@@ -8405,7 +9442,13 @@ async def search_conversation_messages(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Search Conversation Messages Semantically",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_conversation_messages_semantic(
     text_query: str = Field(..., description="The search query text to match against conversation messages using semantic similarity. Accepts natural language queries describing intent, topics, or specific requests."),
     agent_id: str | None = Field(None, description="Filter results to messages from a specific agent. If omitted, searches across all agents in the conversation."),
@@ -8447,7 +9490,13 @@ async def search_conversation_messages_semantic(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Phone Numbers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_phone_numbers() -> dict[str, Any] | ToolResult:
     """Retrieve all phone numbers associated with your account. Returns a complete list of configured phone numbers available for use in voice conversations."""
 
@@ -8474,7 +9523,12 @@ async def list_phone_numbers() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Import Phone Number",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_phone_number(
     phone_number: str = Field(..., description="The phone number to import in E.164 format or provider-specific format."),
     label: str = Field(..., description="A descriptive label for this phone number to identify it in your system."),
@@ -8515,13 +9569,20 @@ async def import_phone_number(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Phone Number",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_phone_number(phone_number_id: str = Field(..., description="The unique identifier of the phone number to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific phone number by its ID. Returns the phone number configuration and associated metadata."""
 
@@ -8557,7 +9618,13 @@ async def get_phone_number(phone_number_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update Phone Number",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_phone_number(
     phone_number_id: str = Field(..., description="The unique identifier of the phone number to update."),
     inbound_trunk_config_credentials_username: str = Field(..., alias="inbound_trunk_configCredentialsUsername", description="Username credential for inbound SIP trunk authentication."),
@@ -8613,13 +9680,20 @@ async def update_phone_number(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Phone Number",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_phone_number(phone_number_id: str = Field(..., description="The unique identifier of the phone number to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a phone number from your ConvAI account by its ID. This action is permanent and cannot be undone."""
 
@@ -8655,7 +9729,12 @@ async def delete_phone_number(phone_number_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Calculate LLM Expected Cost",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def calculate_llm_expected_cost(
     prompt_length: int = Field(..., description="The length of the input prompt in characters. This determines the token consumption for the initial request."),
     number_of_pages: int = Field(..., description="The total number of pages in PDF documents or URLs indexed in the agent's knowledge base. Used to estimate retrieval and processing costs when RAG is enabled."),
@@ -8691,13 +9770,20 @@ async def calculate_llm_expected_cost(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Available LLMs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_llms() -> dict[str, Any] | ToolResult:
     """Retrieve a list of available LLM models that can be used with agents, including their capabilities and deprecation status. The response is filtered based on your deployment's data residency and workspace compliance requirements (e.g., HIPAA)."""
 
@@ -8724,10 +9810,15 @@ async def list_llms() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(
     conversation_id: str = Field(..., description="The unique identifier of the conversation to which the file will be uploaded."),
-    file_: str = Field(..., alias="file", description="The image or PDF file to upload. Supported formats include common image types (JPEG, PNG, etc.) and PDF documents."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The image or PDF file to upload. Supported formats include common image types (JPEG, PNG, etc.) and PDF documents.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload an image or PDF file to a conversation. Returns a unique file ID for referencing the file in subsequent conversation messages."""
 
@@ -8768,7 +9859,13 @@ async def upload_file(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Conversation File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_conversation_file(
     conversation_id: str = Field(..., description="The unique identifier of the conversation containing the file to be deleted."),
     file_id: str = Field(..., description="The unique identifier of the file upload to be removed from the conversation."),
@@ -8807,7 +9904,13 @@ async def delete_conversation_file(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation Live Count",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation_live_count(agent_id: str | None = Field(None, description="Filter the live count to conversations handled by a specific agent. Omit to get the total count across all agents.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current count of active ongoing conversations. Optionally filter results to a specific agent."""
 
@@ -8845,7 +9948,13 @@ async def get_conversation_live_count(agent_id: str | None = Field(None, descrip
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Knowledge Base Summaries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_knowledge_base_summaries(document_ids: list[str] = Field(..., description="List of knowledge base document IDs to retrieve summaries for. IDs must be valid document identifiers from your knowledge base.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Retrieve summaries for multiple knowledge base documents by their IDs. Useful for quickly accessing document metadata and content previews without loading full documents."""
 
@@ -8883,7 +9992,13 @@ async def get_knowledge_base_summaries(document_ids: list[str] = Field(..., desc
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Knowledge Bases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_knowledge_bases(
     page_size: int | None = Field(None, description="Maximum number of documents to return per page. Defaults to 30 documents.", ge=1, le=100),
     created_by_user_id: str | None = Field(None, description="Filter results to documents created by a specific user. Use '@me' to refer to the authenticated user. Takes precedence over ownership filters."),
@@ -8928,7 +10043,12 @@ async def list_knowledge_bases(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Knowledge Base Document from URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_knowledge_base_document_from_url(
     url: str = Field(..., description="The complete URL of the webpage to scrape and add to the knowledge base. Must be a valid, publicly accessible web address."),
     name: str | None = Field(None, description="A human-readable label for this document within the knowledge base. Helps identify and organize the document for agent reference.", min_length=1),
@@ -8963,15 +10083,21 @@ async def create_knowledge_base_document_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Upload Knowledge Base Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_knowledge_base_document(
-    file_: str = Field(..., alias="file", description="The file content to upload as a knowledge base document. Accepts binary file formats for documentation."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file content to upload as a knowledge base document. Accepts binary file formats for documentation.", json_schema_extra={'format': 'byte'}),
     name: str | None = Field(None, description="A human-readable name for the document. If not provided, a default name will be generated.", min_length=1),
 ) -> dict[str, Any] | ToolResult:
     """Upload a file to create a new knowledge base document that the agent can access and reference when interacting with users."""
@@ -9012,7 +10138,12 @@ async def upload_knowledge_base_document(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Add Text Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_text_document(
     text: str = Field(..., description="The text content to be added to the knowledge base. This will be indexed for search and retrieval."),
     name: str | None = Field(None, description="A human-readable name for the document. If not provided, a default name will be generated.", min_length=1),
@@ -9047,13 +10178,19 @@ async def add_text_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Conversational AI
-@mcp.tool()
+@mcp.tool(
+    title="Create Folder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_folder(name: str = Field(..., description="A human-readable name for the folder. Used to identify and organize document groups within the knowledge base.", min_length=1)) -> dict[str, Any] | ToolResult:
     """Create a new folder in the knowledge base for organizing and grouping related documents together."""
 
@@ -9085,13 +10222,20 @@ async def create_folder(name: str = Field(..., description="A human-readable nam
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Knowledge Base Document",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_knowledge_base_document(
     documentation_id: str = Field(..., description="The unique identifier of the document to retrieve from the knowledge base."),
     agent_id: str | None = Field(None, description="Optional agent identifier to scope the knowledge base query to a specific agent."),
@@ -9133,7 +10277,13 @@ async def retrieve_knowledge_base_document(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Rename Document",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rename_document(
     documentation_id: str = Field(..., description="The unique identifier of the document to rename. This ID is provided when the document is initially added to the knowledge base."),
     name: str = Field(..., description="A human-readable name for the document. Must be at least one character long.", min_length=1),
@@ -9169,13 +10319,20 @@ async def rename_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Knowledge Base Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_knowledge_base_document(
     documentation_id: str = Field(..., description="The unique identifier of the document or folder to delete from the knowledge base."),
     force: bool | None = Field(None, description="Force deletion of the document or folder even if it is currently used by agents. When enabled, the document will be removed from all dependent agents, and all child documents and folders within non-empty folders will also be deleted."),
@@ -9217,7 +10374,13 @@ async def delete_knowledge_base_document(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get RAG Index Overview",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rag_index_overview() -> dict[str, Any] | ToolResult:
     """Retrieves metadata about RAG (Retrieval-Augmented Generation) indexes used by the knowledge base, including total size and other index statistics."""
 
@@ -9244,7 +10407,13 @@ async def get_rag_index_overview() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Batch Compute RAG Indexes",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def batch_compute_rag_indexes(items: list[_models.GetOrCreateRagIndexRequestModel] = Field(..., description="Array of RAG index requests for knowledge base documents. Each item specifies a document to index. Order is preserved in the response.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Computes and retrieves RAG (Retrieval-Augmented Generation) indexes for multiple knowledge base documents in a single batch operation. Supports up to 100 documents per request for efficient index creation and retrieval."""
 
@@ -9276,13 +10445,19 @@ async def batch_compute_rag_indexes(items: list[_models.GetOrCreateRagIndexReque
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Knowledge Base Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_knowledge_base_document(documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base to refresh. This ID is provided when the document is initially added.")) -> dict[str, Any] | ToolResult:
     """Manually refresh a URL-based document in the knowledge base by re-fetching its content from the source URL. Use this to update stale or outdated document content."""
 
@@ -9318,7 +10493,13 @@ async def refresh_knowledge_base_document(documentation_id: str = Field(..., des
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List RAG Indexes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rag_indexes(documentation_id: str = Field(..., description="The unique identifier of the knowledge base document for which to retrieve RAG indexes.")) -> dict[str, Any] | ToolResult:
     """Retrieve all RAG indexes associated with a specified knowledge base document. Returns metadata about each index configured for the document."""
 
@@ -9354,7 +10535,12 @@ async def list_rag_indexes(documentation_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Index Knowledge Base Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def index_knowledge_base_document(
     documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base that you want to index or check the indexing status for."),
     model: Literal["e5_mistral_7b_instruct", "multilingual_e5_large_instruct"] = Field(..., description="The embedding model to use for RAG indexing. This determines how the document content will be vectorized for semantic search."),
@@ -9390,13 +10576,20 @@ async def index_knowledge_base_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete RAG Index",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_rag_index(
     documentation_id: str = Field(..., description="The unique identifier of the knowledge base document whose RAG index will be deleted."),
     rag_index_id: str = Field(..., description="The unique identifier of the RAG index to delete for the specified document."),
@@ -9435,7 +10628,13 @@ async def delete_rag_index(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Dependent Agents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependent_agents(
     documentation_id: str = Field(..., description="The unique identifier of the knowledge base document for which to retrieve dependent agents."),
     dependent_type: Literal["direct", "transitive", "all"] | None = Field(None, description="Filter results by dependency relationship type. Use 'direct' for agents directly referencing this document, 'transitive' for agents indirectly depending on it, or 'all' to include both."),
@@ -9478,7 +10677,13 @@ async def list_dependent_agents(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Knowledge Base Document Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_knowledge_base_document_content(documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base, provided when the document was initially added.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete content of a document stored in the knowledge base. Use the documentation ID returned when the document was added to access its full text."""
 
@@ -9514,7 +10719,13 @@ async def retrieve_knowledge_base_document_content(documentation_id: str = Field
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Knowledge Base Source File URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_knowledge_base_source_file_url(documentation_id: str = Field(..., description="The unique identifier of the knowledge base document. This ID is provided when the document is initially added to the knowledge base.")) -> dict[str, Any] | ToolResult:
     """Retrieve a signed URL to download the original source file of a document stored in the knowledge base. The URL is temporary and can be used to access the file directly."""
 
@@ -9550,7 +10761,13 @@ async def get_knowledge_base_source_file_url(documentation_id: str = Field(..., 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Knowledge Base Chunk",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def retrieve_knowledge_base_chunk(
     documentation_id: str = Field(..., description="The unique identifier of the document in the knowledge base. This ID is provided when the document is initially added to the knowledge base."),
     chunk_id: str = Field(..., description="The unique identifier of the specific chunk within the document. Chunks are sequential segments of a document created during RAG processing."),
@@ -9593,7 +10810,12 @@ async def retrieve_knowledge_base_chunk(
     return _response_data
 
 # Tags: Conversational AI
-@mcp.tool()
+@mcp.tool(
+    title="Move Knowledge Base Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_knowledge_base_document(
     document_id: str = Field(..., description="The unique identifier of the document to move within the knowledge base."),
     move_to: str | None = Field(None, description="The destination folder identifier where the document should be moved. Omit this parameter to move the document to the root folder."),
@@ -9629,13 +10851,19 @@ async def move_knowledge_base_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Conversational AI
-@mcp.tool()
+@mcp.tool(
+    title="Move Knowledge Base Entities",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_knowledge_base_entities(
     document_ids: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="The IDs of the documents or folders to move. Accepts between 1 and 20 entity IDs in a single operation.", min_length=1, max_length=20),
     move_to: str | None = Field(None, description="The destination folder ID where entities will be moved. Omit this parameter to move entities to the root folder."),
@@ -9670,13 +10898,20 @@ async def move_knowledge_base_entities(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tools(
     page_size: int | None = Field(None, description="Maximum number of tools to return per request. Must be between 1 and 100.", ge=1, le=100),
     created_by_user_id: str | None = Field(None, description="Filter results to tools created by a specific user. Use '@me' to refer to the authenticated user. Takes precedence over ownership filters."),
@@ -9720,7 +10955,12 @@ async def list_tools(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Tool",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tool(tool_config: _models.WebhookToolConfigInput | _models.ClientToolConfigInput | _models.SystemToolConfigInput | _models.McpToolConfigInput = Field(..., description="The tool configuration object that defines the tool's metadata, input parameters, and behavior. This should include the tool name, description, parameter schema, and any other required configuration properties.")) -> dict[str, Any] | ToolResult:
     """Register a new tool in the workspace to make it available for use in conversations. The tool configuration defines its name, description, parameters, and execution behavior."""
 
@@ -9752,13 +10992,20 @@ async def create_tool(tool_config: _models.WebhookToolConfigInput | _models.Clie
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Tool",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tool(tool_id: str = Field(..., description="The unique identifier of the tool to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific tool available in the workspace by its ID. Use this to fetch tool details and configuration."""
 
@@ -9794,7 +11041,12 @@ async def get_tool(tool_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update Tool",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_tool(
     tool_id: str = Field(..., description="The unique identifier of the tool to be updated."),
     tool_config: _models.WebhookToolConfigInput | _models.ClientToolConfigInput | _models.SystemToolConfigInput | _models.McpToolConfigInput = Field(..., description="The configuration object containing the tool's settings and parameters to be updated."),
@@ -9830,13 +11082,20 @@ async def update_tool(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tool",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tool(
     tool_id: str = Field(..., description="The unique identifier of the tool to delete."),
     force: bool | None = Field(None, description="Force deletion of the tool even if it is currently used by agents or branches. When enabled, the tool will be automatically removed from all dependent agents and branches."),
@@ -9878,7 +11137,13 @@ async def delete_tool(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Dependent Agents for Tool",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dependent_agents_tool(
     tool_id: str = Field(..., description="The unique identifier of the tool for which to retrieve dependent agents."),
     page_size: int | None = Field(None, description="Maximum number of agents to return per request. Useful for pagination control.", ge=1, le=100),
@@ -9920,7 +11185,12 @@ async def list_dependent_agents_tool(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Workspace Secret",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workspace_secret(
     type_: Literal["new"] = Field(..., alias="type", description="The category or classification of the secret (e.g., API key, password, token, connection string). Determines how the secret is handled and validated."),
     name: str = Field(..., description="A unique identifier for the secret within the workspace. Used to reference the secret in configurations and workflows."),
@@ -9956,13 +11226,19 @@ async def create_workspace_secret(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update Secret",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_secret(
     secret_id: str = Field(..., description="The unique identifier of the secret to update."),
     type_: Literal["update"] = Field(..., alias="type", description="The type or category of the secret (e.g., API key, password, token)."),
@@ -10000,13 +11276,20 @@ async def update_secret(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_secret(secret_id: str = Field(..., description="The unique identifier of the secret to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a workspace secret. The secret must not be in use by any active configurations before deletion."""
 
@@ -10042,7 +11325,12 @@ async def delete_secret(secret_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Submit Batch Calls",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_batch_calls(
     call_name: str = Field(..., description="Display name or identifier for this batch call campaign."),
     agent_id: str = Field(..., description="Unique identifier of the conversational AI agent to use for the calls."),
@@ -10085,13 +11373,20 @@ async def submit_batch_calls(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Batch Calls",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_batch_calls(
     limit: int | None = Field(None, description="Maximum number of batch calls to return per request. Controls pagination size for the result set."),
     last_doc: str | None = Field(None, description="Cursor token for pagination. Provide the last document identifier from a previous request to retrieve the next page of results."),
@@ -10132,7 +11427,13 @@ async def list_batch_calls(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Batch Call",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific batch call, including all recipients and their call status."""
 
@@ -10168,7 +11469,13 @@ async def get_batch_call(batch_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Batch Call",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a batch call and all associated recipient records. Note that conversation history will be retained even after deletion."""
 
@@ -10204,7 +11511,13 @@ async def delete_batch_call(batch_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Batch Call",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel a running batch call and set all recipients to cancelled status. This operation terminates the batch calling process immediately."""
 
@@ -10240,7 +11553,13 @@ async def cancel_batch_call(batch_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Retry Batch Call",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def retry_batch_call(batch_id: str = Field(..., description="The unique identifier of the batch call to retry. This specifies which batch's failed and no-response recipients should be called again.")) -> dict[str, Any] | ToolResult:
     """Retry a failed batch call by re-attempting to reach recipients who did not respond or experienced call failures. This operation allows you to reprocess a specific batch without creating a new batch call."""
 
@@ -10276,7 +11595,13 @@ async def retry_batch_call(batch_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Outbound SIP Call",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def initiate_outbound_sip_call(
     agent_id: str = Field(..., description="Unique identifier of the AI agent that will handle the outbound call."),
     agent_phone_number_id: str = Field(..., description="Unique identifier of the phone number resource associated with the agent for this call."),
@@ -10328,13 +11653,20 @@ async def initiate_outbound_sip_call(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List MCP Servers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_mcp_servers() -> dict[str, Any] | ToolResult:
     """Retrieve all MCP server configurations available in the workspace. Returns a list of configured MCP servers with their settings and connection details."""
 
@@ -10361,7 +11693,12 @@ async def list_mcp_servers() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Register MCP Server",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def register_mcp_server(
     url: str | _models.ConvAiSecretLocator = Field(..., description="The HTTPS endpoint URL where the MCP server is hosted. If the URL contains sensitive credentials, store it as a workspace secret reference instead of a plain string."),
     name: str = Field(..., description="Display name for this MCP server configuration. Used to identify the server in your workspace and in agent logs."),
@@ -10410,13 +11747,20 @@ async def register_mcp_server(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get MCP Server",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_mcp_server(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific MCP server configuration from your workspace. Use this to access detailed settings and metadata for a configured MCP server."""
 
@@ -10452,7 +11796,13 @@ async def get_mcp_server(mcp_server_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Configure MCP Server",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def configure_mcp_server(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to configure."),
     secret_id: str = Field(..., description="The secret identifier for credentials or API keys used to authenticate with this MCP server."),
@@ -10498,13 +11848,20 @@ async def configure_mcp_server(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete MCP Server",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_mcp_server(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a specific MCP server configuration from the workspace. This action permanently deletes the server and its associated settings."""
 
@@ -10540,7 +11897,13 @@ async def delete_mcp_server(mcp_server_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List MCP Server Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_mcp_server_tools(mcp_server_id: str = Field(..., description="The unique identifier of the MCP server for which to retrieve available tools.")) -> dict[str, Any] | ToolResult:
     """Retrieve all tools available for a specific MCP server configuration. Returns a complete list of tools that can be invoked through the specified MCP server."""
 
@@ -10576,7 +11939,12 @@ async def list_mcp_server_tools(mcp_server_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Approve MCP Server Tool",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_mcp_server_tool(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP Server to which the tool approval applies."),
     tool_name: str = Field(..., description="The name of the MCP tool being approved for use."),
@@ -10615,13 +11983,20 @@ async def approve_mcp_server_tool(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Revoke MCP Server Tool Approval",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_mcp_server_tool_approval(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP Server from which to revoke tool approval."),
     tool_name: str = Field(..., description="The name of the MCP tool to revoke approval for."),
@@ -10660,7 +12035,12 @@ async def revoke_mcp_server_tool_approval(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Tool Config Override",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tool_config_override(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP server containing the tool to configure."),
     tool_name: str = Field(..., description="The exact name of the MCP tool within the server to apply these configuration overrides to."),
@@ -10703,13 +12083,20 @@ async def create_tool_config_override(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Tool Config Override",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tool_config_override(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP server containing the tool."),
     tool_name: str = Field(..., description="The name of the MCP tool for which to retrieve configuration overrides."),
@@ -10748,7 +12135,13 @@ async def get_tool_config_override(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Override MCP Tool Config",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def override_mcp_tool_config(
     mcp_server_id: str = Field(..., description="The unique identifier of the MCP server containing the tool to configure."),
     tool_name: str = Field(..., description="The name of the MCP tool whose configuration overrides should be updated."),
@@ -10791,13 +12184,20 @@ async def override_mcp_tool_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get WhatsApp Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_whatsapp_account(phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number associated with the account.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific WhatsApp account using its phone number ID. Returns account configuration and status information."""
 
@@ -10833,7 +12233,13 @@ async def get_whatsapp_account(phone_number_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update WhatsApp Account",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_whatsapp_account(
     phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number account to update."),
     assigned_agent_id: str | None = Field(None, description="The ID of the agent to assign to this WhatsApp account for handling conversations."),
@@ -10871,13 +12277,20 @@ async def update_whatsapp_account(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete WhatsApp Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_whatsapp_account(phone_number_id: str = Field(..., description="The unique identifier for the WhatsApp phone number account to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a WhatsApp account and remove it from the ConvAI platform. This action cannot be undone."""
 
@@ -10913,7 +12326,13 @@ async def delete_whatsapp_account(phone_number_id: str = Field(..., description=
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List WhatsApp Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_whatsapp_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all WhatsApp accounts associated with your ConvAI workspace. This operation returns a complete list of configured WhatsApp business accounts available for messaging and automation."""
 
@@ -10940,7 +12359,13 @@ async def list_whatsapp_accounts() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Agent Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_agent_branches(
     agent_id: str = Field(..., description="The unique identifier of the agent whose branches should be retrieved."),
     include_archived: bool | None = Field(None, description="Whether to include archived branches in the results. Defaults to excluding archived branches."),
@@ -10983,7 +12408,12 @@ async def list_agent_branches(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Agent Branch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_agent_branch(
     agent_id: str = Field(..., description="The unique identifier of the agent to create a branch for."),
     parent_version_id: str = Field(..., description="The version ID of the main branch to use as the base for this new branch."),
@@ -11026,13 +12456,20 @@ async def create_agent_branch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Branch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_branch(
     agent_id: str = Field(..., description="The unique identifier of the agent that contains the branch."),
     branch_id: str = Field(..., description="The unique identifier of the branch to retrieve."),
@@ -11071,7 +12508,13 @@ async def get_agent_branch(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update Branch",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_branch(
     agent_id: str = Field(..., description="The unique identifier of the agent that owns the branch."),
     branch_id: str = Field(..., description="The unique identifier of the branch to update."),
@@ -11110,13 +12553,20 @@ async def update_branch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Merge Branch",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_branch(
     agent_id: str = Field(..., description="The unique identifier of the agent containing the branches to merge."),
     source_branch_id: str = Field(..., description="The unique identifier of the source branch to merge from."),
@@ -11157,13 +12607,19 @@ async def merge_branch(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Deploy Agent",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def deploy_agent(
     agent_id: str = Field(..., description="The unique identifier of the agent for which to create or update deployments."),
     requests: list[_models.AgentDeploymentRequestItem] = Field(..., description="An ordered list of deployment configurations, each specifying a branch and its traffic allocation strategy. Order may affect deployment precedence."),
@@ -11199,13 +12655,19 @@ async def deploy_agent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Agent Draft",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_agent_draft(
     agent_id: str = Field(..., description="The unique identifier of the agent for which to create a draft."),
     branch_id: str = Field(..., description="The unique identifier of the agent branch where the draft will be created."),
@@ -11251,13 +12713,20 @@ async def create_agent_draft(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Delete Agent Draft",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_agent_draft(
     agent_id: str = Field(..., description="The unique identifier of the agent whose draft should be deleted."),
     branch_id: str = Field(..., description="The identifier of the agent branch containing the draft to delete."),
@@ -11299,7 +12768,13 @@ async def delete_agent_draft(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environment_variables(
     page_size: int | None = Field(None, description="Maximum number of environment variables to return per request. Useful for pagination when working with large variable sets.", ge=1, le=100),
     label: str | None = Field(None, description="Filter results to return only environment variables matching this exact label value."),
@@ -11341,7 +12816,12 @@ async def list_environment_variables(
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment_variable(
     type_: Literal["string"] = Field(..., alias="type", description="The type or category of the environment variable, determining how it will be processed and used within the workspace."),
     label: str = Field(..., description="A unique identifier label for this environment variable within the workspace. Used to reference the variable in configurations and deployments."),
@@ -11377,13 +12857,20 @@ async def create_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment_variable(env_var_id: str = Field(..., description="The unique identifier of the environment variable to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific environment variable by its unique identifier. Use this to fetch configuration values stored in your environment."""
 
@@ -11419,7 +12906,13 @@ async def get_environment_variable(env_var_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Agents Platform
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment_variable(
     env_var_id: str = Field(..., description="The unique identifier of the environment variable to update."),
     values: dict[str, str | _models.EnvironmentVariableSecretValueRequest | _models.EnvironmentVariableAuthConnectionValueRequest] = Field(..., description="A mapping of environment names to their values. Set an environment's value to null to remove it from the variable (production environment is required and cannot be removed)."),
@@ -11455,13 +12948,19 @@ async def update_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: music-generation
-@mcp.tool()
+@mcp.tool(
+    title="Generate Composition Plan",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_composition_plan(
     prompt: str = Field(..., description="Text prompt describing the desired composition, musical style, mood, and any specific creative direction.", max_length=4100),
     positive_global_styles: list[str] = Field(..., description="Array of musical styles and directions that should be emphasized throughout the entire composition. Specify in English for optimal results.", max_length=50),
@@ -11501,13 +13000,19 @@ async def generate_composition_plan(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: music-generation
-@mcp.tool()
+@mcp.tool(
+    title="Compose Song",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compose_song(
     music_prompt_positive_global_styles: list[str] = Field(..., alias="music_promptPositive_global_styles", description="Array of musical styles and directions to include throughout the entire song. Specify in English for optimal results.", max_length=50),
     composition_plan_positive_global_styles: list[str] = Field(..., alias="composition_planPositive_global_styles", description="Array of musical styles and directions to include throughout the entire song. Specify in English for optimal results.", max_length=50),
@@ -11558,13 +13063,19 @@ async def compose_song(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: music-generation
-@mcp.tool()
+@mcp.tool(
+    title="Compose Song Detailed",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compose_song_detailed(
     music_prompt_positive_global_styles: list[str] = Field(..., alias="music_promptPositive_global_styles", description="Musical styles and directions to include throughout the entire song. Use English language for optimal results.", max_length=50),
     composition_plan_positive_global_styles: list[str] = Field(..., alias="composition_planPositive_global_styles", description="Musical styles and directions to include throughout the entire song when using composition_plan. Use English language for optimal results.", max_length=50),
@@ -11616,13 +13127,19 @@ async def compose_song_detailed(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: music-generation
-@mcp.tool()
+@mcp.tool(
+    title="Compose Music",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compose_music(
     music_prompt_positive_global_styles: list[str] = Field(..., alias="music_promptPositive_global_styles", description="Musical styles and directions to include throughout the entire composition. Use English language for best results.", max_length=50),
     composition_plan_positive_global_styles: list[str] = Field(..., alias="composition_planPositive_global_styles", description="Musical styles and directions to include throughout the entire composition. Use English language for best results.", max_length=50),
@@ -11672,15 +13189,21 @@ async def compose_music(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: music-generation
-@mcp.tool()
+@mcp.tool(
+    title="Upload Song",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_song(
-    file_: str = Field(..., alias="file", description="The audio file to upload in binary format."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The audio file to upload in binary format.", json_schema_extra={'format': 'byte'}),
     extract_composition_plan: bool | None = Field(None, description="Whether to generate and return the composition plan for the uploaded song. Enabling this increases response latency."),
 ) -> dict[str, Any] | ToolResult:
     """Upload a music file for use in inpainting workflows. This operation is restricted to enterprise clients with access to the inpainting feature."""
@@ -11721,9 +13244,14 @@ async def upload_song(
     return _response_data
 
 # Tags: music-generation
-@mcp.tool()
+@mcp.tool(
+    title="Separate Song Stems",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def separate_song_stems(
-    file_: str = Field(..., alias="file", description="The audio file to separate into individual stems. Provide the binary audio data."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The audio file to separate into individual stems. Provide the binary audio data.", json_schema_extra={'format': 'byte'}),
     output_format: Literal["mp3_22050_32", "mp3_24000_48", "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192", "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_32000", "pcm_44100", "pcm_48000", "ulaw_8000", "alaw_8000", "opus_48000_32", "opus_48000_64", "opus_48000_96", "opus_48000_128", "opus_48000_192"] | None = Field(None, description="Output format for the separated stems, specified as codec_sample_rate_bitrate. MP3 192kbps requires Creator tier or above; PCM 44.1kHz requires Pro tier or above. μ-law format is commonly used for Twilio audio inputs."),
     stem_variation_id: Literal["two_stems_v1", "six_stems_v1"] | None = Field(None, description="The stem separation model variation to use. Two-stem splits into vocals and instruments; six-stem provides more granular separation."),
 ) -> dict[str, Any] | ToolResult:
@@ -11768,7 +13296,12 @@ async def separate_song_stems(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Create PVC Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_voice_pvc(
     name: str = Field(..., description="The display name for this voice, shown in voice selection dropdowns and UI.", max_length=100),
     language: str = Field(..., description="The language code for the voice samples and voice model training."),
@@ -11805,13 +13338,19 @@ async def create_voice_pvc(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Update Voice PVC",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_voice_pvc(
     voice_id: str = Field(..., description="The unique identifier of the voice to update."),
     name: str | None = Field(None, description="Display name for the voice as shown in voice selection interfaces.", max_length=100),
@@ -11850,16 +13389,22 @@ async def update_voice_pvc(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Add Voice Samples",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_voice_samples(
     voice_id: str = Field(..., description="The unique identifier of the PVC voice to add samples to. Use the voices list endpoint to retrieve available voice IDs."),
-    files: list[str] = Field(..., description="Audio files to add to the voice. Provide one or more audio files in supported formats to expand the voice training dataset."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] = Field(..., description="Base64-encoded file content for upload. Audio files to add to the voice. Provide one or more audio files in supported formats to expand the voice training dataset."),
     remove_background_noise: bool | None = Field(None, description="Enable automatic background noise removal from audio samples using audio isolation. Disable if samples contain minimal background noise, as processing may reduce quality."),
 ) -> dict[str, Any] | ToolResult:
     """Add audio samples to a PVC (Personal Voice Clone) to enhance voice quality and training data. Optionally remove background noise from samples to improve voice clarity."""
@@ -11901,7 +13446,12 @@ async def add_voice_samples(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Update Voice Sample",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_voice_sample(
     voice_id: str = Field(..., description="The unique identifier of the voice model containing the sample to update."),
     sample_id: str = Field(..., description="The unique identifier of the voice sample to update."),
@@ -11942,13 +13492,20 @@ async def update_voice_sample(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Remove Voice Sample",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_voice_sample(
     voice_id: str = Field(..., description="The unique identifier of the PVC voice from which to remove the sample."),
     sample_id: str = Field(..., description="The unique identifier of the sample to be deleted from the voice."),
@@ -11987,7 +13544,13 @@ async def remove_voice_sample(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Voice Sample Audio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_voice_sample_audio(
     voice_id: str = Field(..., description="The unique identifier of the voice whose sample audio you want to retrieve."),
     sample_id: str = Field(..., description="The unique identifier of the specific voice sample to retrieve."),
@@ -12030,7 +13593,13 @@ async def get_voice_sample_audio(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Voice Sample Waveform",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_voice_sample_waveform(
     voice_id: str = Field(..., description="The unique identifier of the voice whose sample waveform you want to retrieve."),
     sample_id: str = Field(..., description="The unique identifier of the voice sample whose waveform you want to retrieve."),
@@ -12069,7 +13638,13 @@ async def get_voice_sample_waveform(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Speaker Separation Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_speaker_separation_status(
     voice_id: str = Field(..., description="The unique identifier of the voice whose sample is being analyzed."),
     sample_id: str = Field(..., description="The unique identifier of the voice sample undergoing speaker separation analysis."),
@@ -12108,7 +13683,12 @@ async def get_speaker_separation_status(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Separate Speakers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def separate_speakers(
     voice_id: str = Field(..., description="The unique identifier of the voice to be used for the separation process."),
     sample_id: str = Field(..., description="The unique identifier of the audio sample to be processed for speaker separation."),
@@ -12147,7 +13727,13 @@ async def separate_speakers(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Get Speaker Audio",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_speaker_audio(
     voice_id: str = Field(..., description="The unique identifier of the voice. Use the voices list endpoint to discover available voice IDs."),
     sample_id: str = Field(..., description="The unique identifier of the sample within the specified voice."),
@@ -12187,7 +13773,12 @@ async def get_speaker_audio(
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Train Voice",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def train_voice(
     voice_id: str = Field(..., description="The unique identifier of the voice to train. You can retrieve available voices from the voices list endpoint."),
     model_id: str | None = Field(None, description="The AI model version to use for training. Specifies which voice conversion model architecture to apply during the training process."),
@@ -12223,16 +13814,22 @@ async def train_voice(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pvc-voices
-@mcp.tool()
+@mcp.tool(
+    title="Submit Voice Verification",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_voice_verification(
     voice_id: str = Field(..., description="The unique identifier of the voice to be verified. Use the voices list endpoint to retrieve available voice IDs."),
-    files: list[str] = Field(..., description="Array of verification document files to submit for manual review. Documents should be in a supported format and clearly demonstrate voice ownership or authorization."),
+    files: list[Annotated[str, Field(json_schema_extra={'format': 'byte'})]] = Field(..., description="Base64-encoded file content for upload. Array of verification document files to submit for manual review. Documents should be in a supported format and clearly demonstrate voice ownership or authorization."),
     extra_text: str | None = Field(None, description="Optional additional context or information to support the verification request, such as clarification about the voice or usage intent."),
 ) -> dict[str, Any] | ToolResult:
     """Submit verification documents for manual review of a PVC (Premium Voice Clone) voice. This process validates the voice identity before it can be used in production."""
