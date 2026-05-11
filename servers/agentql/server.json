@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.mcparmory/agentql",
   "description": "Query webpages and extract structured data using natural language",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "repository": {
     "url": "https://github.com/mcparmory/registry",
     "source": "github"
@@ -11,7 +11,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcparmory-agentql",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -19,7 +19,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/mcparmory/agentql:1.0.7",
+      "identifier": "ghcr.io/mcparmory/agentql:1.0.8",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"

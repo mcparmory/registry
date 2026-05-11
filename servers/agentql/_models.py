@@ -1,7 +1,7 @@
 """
 Agentql MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:00:27 UTC
+Generated: 2026-05-11 22:50:10 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
