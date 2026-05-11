@@ -1,5 +1,5 @@
 # GitHub - Dependencies
-# Generated: 2026-05-11 19:50:43 UTC
+# Generated: 2026-05-11 21:34:35 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.2.4
 httpx>=0.27.0,<1.0.0

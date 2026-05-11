@@ -7,7 +7,7 @@ API Info:
 - Contact: Support (https://support.github.com/contact?tags=dotcom-rest-api)
 - Terms of Service: https://docs.github.com/articles/github-terms-of-service
 
-Generated: 2026-05-11 19:50:43 UTC
+Generated: 2026-05-11 21:34:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -58,7 +58,7 @@ OPERATION_URL_MAP: dict[str, str] = {
     "upload_release_asset": os.getenv("SERVER_URL_UPLOAD_RELEASE_ASSET", "https://uploads.github.com"),
 }
 SERVER_NAME = "GitHub"
-SERVER_VERSION = "1.0.5"
+SERVER_VERSION = "1.0.6"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
