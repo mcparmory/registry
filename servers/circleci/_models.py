@@ -1,13 +1,13 @@
 """
 Circleci MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:37:07 UTC
+Generated: 2026-05-11 23:15:02 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -544,9 +544,9 @@ class UpdateScheduleRequestPath(StrictModel):
     schedule_id: str = Field(default=..., validation_alias="schedule-id", serialization_alias="schedule-id", description="The unique UUID identifying the schedule to update.", json_schema_extra={'format': 'uuid'})
 class UpdateScheduleRequestBodyTimetable(StrictModel):
     per_hour: int | None = Field(default=None, validation_alias="per-hour", serialization_alias="per-hour", description="How many times the schedule triggers per hour; must be a whole number between 1 and 60. Mutually exclusive with hour-based scheduling fields.", json_schema_extra={'format': 'integer'})
-    hours_of_day: list[int] | None = Field(default=None, validation_alias="hours-of-day", serialization_alias="hours-of-day", description="List of hours within a day (0–23) during which the schedule triggers; order is not significant.")
+    hours_of_day: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] | None = Field(default=None, validation_alias="hours-of-day", serialization_alias="hours-of-day", description="List of hours within a day (0–23) during which the schedule triggers; order is not significant.")
     days_of_week: list[Literal["TUE", "SAT", "SUN", "MON", "THU", "WED", "FRI"]] | None = Field(default=None, validation_alias="days-of-week", serialization_alias="days-of-week", description="List of days of the week on which the schedule triggers (e.g., MON, TUE); mutually exclusive with days-of-month.")
-    days_of_month: list[int] | None = Field(default=None, validation_alias="days-of-month", serialization_alias="days-of-month", description="List of calendar days of the month (1–31) on which the schedule triggers; mutually exclusive with days-of-week.")
+    days_of_month: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] | None = Field(default=None, validation_alias="days-of-month", serialization_alias="days-of-month", description="List of calendar days of the month (1–31) on which the schedule triggers; mutually exclusive with days-of-week.")
     months: list[Literal["MAR", "NOV", "DEC", "JUN", "MAY", "OCT", "FEB", "APR", "SEP", "AUG", "JAN", "JUL"]] | None = Field(default=None, validation_alias="months", serialization_alias="months", description="List of months in which the schedule triggers (e.g., JAN, FEB); order is not significant.")
 class UpdateScheduleRequestBody(StrictModel):
     description: str | None = Field(default=None, description="A human-readable description of the schedule's purpose or behavior.")
@@ -659,7 +659,7 @@ class RerunWorkflowRequestPath(StrictModel):
 class RerunWorkflowRequestBody(StrictModel):
     enable_ssh: bool | None = Field(default=None, description="When true, enables SSH access for the triggering user on the newly rerun job. Requires the jobs parameter to be specified and is mutually exclusive with from_failed.")
     from_failed: bool | None = Field(default=None, description="When true, reruns the workflow starting from the first failed job rather than the beginning. Mutually exclusive with the jobs and sparse_tree parameters.")
-    jobs: list[str] | None = Field(default=None, description="A list of specific job IDs (UUIDs) to rerun within the workflow. Order is not significant. Mutually exclusive with from_failed.")
+    jobs: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="A list of specific job IDs (UUIDs) to rerun within the workflow. Order is not significant. Mutually exclusive with from_failed.")
     sparse_tree: bool | None = Field(default=None, description="When true, applies sparse tree optimization logic during the rerun, improving performance for workflows containing disconnected subgraphs. Requires the jobs parameter and is mutually exclusive with from_failed.")
 class RerunWorkflowRequest(StrictModel):
     """Reruns an existing workflow by its ID, with options to rerun from the first failed job, target specific jobs, or apply sparse tree optimization for complex workflow graphs."""
@@ -927,7 +927,7 @@ class CreateUsageExportRequestPath(StrictModel):
 class CreateUsageExportRequestBody(StrictModel):
     start: str = Field(default=..., description="The start date and time (inclusive) of the export range in ISO 8601 format. Must be no more than one year in the past.", json_schema_extra={'format': 'date-time'})
     end: str = Field(default=..., description="The end date and time (inclusive) of the export range in ISO 8601 format. Must be no more than 31 days after the start date.", json_schema_extra={'format': 'date-time'})
-    shared_org_ids: list[str] | None = Field(default=None, description="A list of additional organization IDs whose usage data should be included in the export, useful for aggregating usage across shared or linked organizations. Order is not significant.")
+    shared_org_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="A list of additional organization IDs whose usage data should be included in the export, useful for aggregating usage across shared or linked organizations. Order is not significant.")
 class CreateUsageExportRequest(StrictModel):
     """Submits a job to export usage data for an organization within a specified date range. The export covers up to 31 days of data and can optionally include usage from shared organizations."""
     path: CreateUsageExportRequestPath
@@ -1224,15 +1224,15 @@ class CreatePipelineDefinitionRequestConfigSourceV1(StrictModel):
 
 class CreateScheduleBodyTimetableV0(PermissiveModel):
     per_hour: int = Field(..., validation_alias="per-hour", serialization_alias="per-hour", description="Number of times a schedule triggers per hour, value must be between 1 and 60", json_schema_extra={'format': 'integer'})
-    hours_of_day: list[int] = Field(..., validation_alias="hours-of-day", serialization_alias="hours-of-day", description="Hours in a day in which the schedule triggers.")
+    hours_of_day: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] = Field(..., validation_alias="hours-of-day", serialization_alias="hours-of-day", description="Hours in a day in which the schedule triggers.")
     days_of_week: list[Literal["TUE", "SAT", "SUN", "MON", "THU", "WED", "FRI"]] = Field(..., validation_alias="days-of-week", serialization_alias="days-of-week", description="Days in a week in which the schedule triggers.")
-    days_of_month: list[int] | None = Field(None, validation_alias="days-of-month", serialization_alias="days-of-month", description="Days in a month in which the schedule triggers. This is mutually exclusive with days in a week.")
+    days_of_month: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] | None = Field(None, validation_alias="days-of-month", serialization_alias="days-of-month", description="Days in a month in which the schedule triggers. This is mutually exclusive with days in a week.")
     months: list[Literal["MAR", "NOV", "DEC", "JUN", "MAY", "OCT", "FEB", "APR", "SEP", "AUG", "JAN", "JUL"]] | None = Field(None, description="Months in which the schedule triggers.")
 
 class CreateScheduleBodyTimetableV1(PermissiveModel):
     per_hour: int = Field(..., validation_alias="per-hour", serialization_alias="per-hour", description="Number of times a schedule triggers per hour, value must be between 1 and 60", json_schema_extra={'format': 'integer'})
-    hours_of_day: list[int] = Field(..., validation_alias="hours-of-day", serialization_alias="hours-of-day", description="Hours in a day in which the schedule triggers.")
-    days_of_month: list[int] = Field(..., validation_alias="days-of-month", serialization_alias="days-of-month", description="Days in a month in which the schedule triggers. This is mutually exclusive with days in a week.")
+    hours_of_day: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] = Field(..., validation_alias="hours-of-day", serialization_alias="hours-of-day", description="Hours in a day in which the schedule triggers.")
+    days_of_month: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] = Field(..., validation_alias="days-of-month", serialization_alias="days-of-month", description="Days in a month in which the schedule triggers. This is mutually exclusive with days in a week.")
     days_of_week: list[Literal["TUE", "SAT", "SUN", "MON", "THU", "WED", "FRI"]] | None = Field(None, validation_alias="days-of-week", serialization_alias="days-of-week", description="Days in a week in which the schedule triggers.")
     months: list[Literal["MAR", "NOV", "DEC", "JUN", "MAY", "OCT", "FEB", "APR", "SEP", "AUG", "JAN", "JUL"]] | None = Field(None, description="Months in which the schedule triggers.")
 

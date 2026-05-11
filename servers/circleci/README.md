@@ -5,7 +5,7 @@ Base URL: https://circleci.com/api/v2
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 108 |
+| **Tools** | 106 |
 | **Auth** | API Key |
 
 ## API Info
@@ -55,6 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (Circle-Token)
+
 Do not commit credentials to version control.
 
 ---

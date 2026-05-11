@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-circleci"
-version = "1.0.3"
+version = "1.0.4"
 description = "Manage CI/CD pipelines, workflows, and job metrics across projects"
 readme = "README.md"
 license = "MIT"
@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.2.4",
     "httpx>=0.27.0,<1.0.0",
+    "mcp",
     "pydantic>=2.0.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0"
 ]

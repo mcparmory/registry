@@ -5,7 +5,7 @@ CircleCI MCP Server
 API Info:
 - API License: MIT (https://opensource.org/license/MIT)
 
-Generated: 2026-05-05 14:37:07 UTC
+Generated: 2026-05-11 23:15:02 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://circleci.com/api/v2")
 SERVER_NAME = "CircleCI"
-SERVER_VERSION = "1.0.3"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1010,6 +1041,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1034,6 +1067,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1241,7 +1276,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("CircleCI", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Workflow Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_workflow_summary(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
     reporting_window: Literal["last-7-days", "last-90-days", "last-24-hours", "last-30-days", "last-60-days"] | None = Field(None, alias="reporting-window", description="The time window over which summary metrics are calculated. Trends are only supported for windows up to 30 days; defaults to last-90-days if omitted."),
@@ -1285,7 +1326,13 @@ async def get_project_workflow_summary(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Job Timeseries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_job_timeseries(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow for which to retrieve job timeseries data."),
@@ -1331,7 +1378,13 @@ async def list_job_timeseries(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_org_summary(
     org_slug: str = Field(..., alias="org-slug", description="The organization slug identifying the target org, combining the VCS provider slug and organization name separated by a forward slash (which may be URL-encoded)."),
     reporting_window: Literal["last-7-days", "last-90-days", "last-24-hours", "last-30-days", "last-60-days"] | None = Field(None, alias="reporting-window", description="The time window over which summary metrics are calculated and trends are derived. Defaults to the last 90 days if not specified."),
@@ -1374,7 +1427,13 @@ async def get_org_summary(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Project Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_branches(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
     workflow_name: str | None = Field(None, alias="workflow-name", description="Filters the returned branches to only those associated with the specified workflow name. When omitted, branches are scoped to the entire project across all workflows."),
@@ -1416,7 +1475,13 @@ async def list_project_branches(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Flaky Tests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flaky_tests(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped.")) -> dict[str, Any] | ToolResult:
     """Retrieves all flaky tests for a given project, where a flaky test is defined as one that both passed and failed within the same commit. Results are branch-agnostic."""
 
@@ -1452,7 +1517,13 @@ async def list_flaky_tests(project_slug: str = Field(..., alias="project-slug", 
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_metrics(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the Organization ID (from Organization Settings) as org-name, and the Project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded."),
     branch: str | None = Field(None, description="Filters metrics to a specific VCS branch by name. If omitted, metrics are scoped to the project's default branch."),
@@ -1495,7 +1566,13 @@ async def list_workflow_metrics(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_runs(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the Organization ID as org-name, and the Project ID as repo-name."),
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow whose runs you want to retrieve, as defined in the project's pipeline configuration."),
@@ -1541,7 +1618,13 @@ async def list_workflow_runs(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Job Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_job_metrics(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the form `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded."),
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow whose job metrics you want to retrieve."),
@@ -1587,7 +1670,13 @@ async def list_workflow_job_metrics(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_summary(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as vcs-slug/org-name/repo-name. For GitLab or GitHub App projects, use 'circleci' as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow for which to retrieve summary metrics."),
@@ -1631,7 +1720,13 @@ async def get_workflow_summary(
     return _response_data
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Test Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_test_metrics(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow for which test metrics should be retrieved."),
@@ -1675,7 +1770,13 @@ async def get_workflow_test_metrics(
     return _response_data
 
 # Tags: Job
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_job(job_id: str = Field(..., alias="job-id", description="The unique identifier of the job to cancel, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Cancels an active job identified by its unique job ID. Use this to stop a job that is pending or in progress before it completes."""
 
@@ -1711,7 +1812,13 @@ async def cancel_job(job_id: str = Field(..., alias="job-id", description="The u
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for the currently authenticated user. Useful for identifying who is signed in and accessing their associated details."""
 
@@ -1738,7 +1845,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="List Collaborations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collaborations() -> dict[str, Any] | ToolResult:
     """Retrieves all organizations where the current user is a member or collaborator, spanning multiple VCS providers (e.g., GitHub, BitBucket), parent organizations of accessible repositories, and the user's own account organization."""
 
@@ -1765,7 +1878,12 @@ async def list_collaborations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Organization
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization(
     name: str | None = Field(None, description="The display name for the organization being created."),
     vcs_type: Literal["github", "bitbucket", "circleci"] | None = Field(None, description="The version control system associated with the organization, or 'circleci' for a standalone organization not tied to a VCS provider."),
@@ -1800,13 +1918,20 @@ async def create_organization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Organization
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a VCS slug in the format `vcs-slug/org-name` (e.g., `gh/` for GitHub, `bb/` for Bitbucket). For GitLab or GitHub App integrations, use `circleci` as the VCS slug and provide the numeric organization ID (found in Organization Settings) in place of the org name.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific organization by its slug or UUID. Supports organizations across GitHub, Bitbucket, and GitLab (via CircleCI VCS slug)."""
 
@@ -1842,7 +1967,13 @@ async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-i
     return _response_data
 
 # Tags: Organization
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The unique identifier for the organization, either as a UUID or a VCS-prefixed slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the VCS slug and the organization ID (found in Organization Settings) as the org name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an organization and all associated projects and build data. This action is irreversible and will remove all resources tied to the organization."""
 
@@ -1878,7 +2009,12 @@ async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-o
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The unique identifier for the organization, either as a UUID or a VCS-based slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App integrations, use `circleci` as the VCS slug and provide the numeric organization ID (available in Organization Settings) in place of the org name."),
     name: str | None = Field(None, description="The display name for the new project. Should be unique within the organization and clearly identify the project."),
@@ -1914,13 +2050,20 @@ async def create_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Organization
-@mcp.tool()
+@mcp.tool(
+    title="List URL Orb Allow List Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_url_orb_allow_list_entries(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the VCS slug and provide the organization ID (available in Organization Settings) in place of the org name.")) -> dict[str, Any] | ToolResult:
     """Retrieves all entries in the URL Orb allow-list for the specified organization. Use this to review which URLs are permitted under the org's URL Orb configuration."""
 
@@ -1956,7 +2099,12 @@ async def list_url_orb_allow_list_entries(org_slug_or_id: str = Field(..., alias
     return _response_data
 
 # Tags: Organization
-@mcp.tool()
+@mcp.tool(
+    title="Create URL Orb Allow List Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_url_orb_allow_list_entry(
     org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the form `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the vcs-slug and the organization ID (found in Organization Settings) as the org-name."),
     name: str | None = Field(None, description="A human-readable label for this allow-list entry to help identify its purpose within the organization."),
@@ -1993,13 +2141,20 @@ async def create_url_orb_allow_list_entry(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Organization
-@mcp.tool()
+@mcp.tool(
+    title="Delete URL Orb Allow List Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_url_orb_allow_list_entry(
     org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the format `vcs-slug/org-name`. For GitLab or GitHub App projects, use `circleci` as the `vcs-slug` and provide the organization ID (found in Organization Settings) as the `org-name`."),
     allow_list_entry_id: str = Field(..., alias="allow-list-entry-id", description="The UUID of the URL orb allow-list entry to remove. This uniquely identifies the specific allow-list entry to be deleted."),
@@ -2038,7 +2193,13 @@ async def delete_url_orb_allow_list_entry(
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="List Pipelines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipelines(
     org_slug: str | None = Field(None, alias="org-slug", description="The organization slug identifying the target organization, formatted as vcs-slug/org-name. For GitLab or GitHub App projects, use 'circleci' as the vcs-slug and supply the organization ID (found in Organization Settings) as the org-name."),
     mine: bool | None = Field(None, description="When set to true, restricts results to only pipelines triggered by the authenticated user."),
@@ -2079,7 +2240,12 @@ async def list_pipelines(
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Continue Pipeline",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def continue_pipeline(
     continuation_key: str | None = Field(None, alias="continuation-key", description="The unique continuation key that identifies the paused pipeline to resume, obtained from the pipeline setup phase."),
     configuration: str | None = Field(None, description="The full pipeline configuration string to apply when continuing the pipeline, used to supply dynamic configuration at runtime."),
@@ -2115,13 +2281,20 @@ async def continue_pipeline(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific pipeline using its unique identifier. Returns the full pipeline configuration and metadata."""
 
@@ -2157,7 +2330,13 @@ async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", descri
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose configuration you want to retrieve. Must be a valid UUID corresponding to an existing pipeline.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full configuration for a specific pipeline by its unique ID. Useful for inspecting pipeline settings, stages, and parameters without modifying them."""
 
@@ -2193,7 +2372,13 @@ async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id",
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose values you want to retrieve, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieves a map of built-in pipeline values (such as pipeline number, trigger parameters, and VCS metadata) for a specific pipeline. Useful for inspecting runtime context associated with a pipeline execution."""
 
@@ -2229,7 +2414,13 @@ async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id",
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Workflows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose workflows you want to retrieve. Must be a valid UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of workflows associated with a specific pipeline. Use this to inspect all workflows belonging to a given pipeline by its unique identifier."""
 
@@ -2265,7 +2456,13 @@ async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the VCS slug, the organization ID (from Organization Settings) as the org name, and the project ID (from Project Settings) as the repo name.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific CircleCI project using its unique project slug. Supports projects hosted on GitHub, GitLab, and Bitbucket, including those using the GitHub App integration."""
 
@@ -2301,7 +2498,13 @@ async def get_project(project_slug: str = Field(..., alias="project-slug", descr
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a project from CircleCI using its unique project slug. This action is irreversible and removes all associated project data."""
 
@@ -2337,7 +2540,13 @@ async def delete_project(project_slug: str = Field(..., alias="project-slug", de
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="List Checkout Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_checkout_keys(
     project_slug: str = Field(..., alias="project-slug", description="The project slug uniquely identifying the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID in place of org-name, and the project ID in place of repo-name; forward slashes may be URL-encoded."),
     digest: Literal["sha256", "md5"] | None = Field(None, description="The hashing algorithm used to format the returned key fingerprints; accepted values are `md5` or `sha256`, defaulting to `md5` if omitted."),
@@ -2379,7 +2588,12 @@ async def list_checkout_keys(
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Create Checkout Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_checkout_key(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as vcs-slug/org-name/repo-name. For GitLab or GitHub App projects, use 'circleci' as the vcs-slug with the organization ID and project ID in place of org-name and repo-name respectively."),
     type_: Literal["user-key", "deploy-key"] | None = Field(None, alias="type", description="The type of checkout key to create: 'deploy-key' grants read-only repository access for deployments, while 'user-key' grants access tied to a specific GitHub user account."),
@@ -2415,13 +2629,20 @@ async def create_checkout_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Get Checkout Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_checkout_key(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     fingerprint: str = Field(..., description="The SSH key fingerprint used to uniquely identify the checkout key, accepted in either MD5 or SHA256 format. SHA256 fingerprints must be URL-encoded."),
@@ -2460,7 +2681,13 @@ async def get_checkout_key(
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Delete Checkout Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_checkout_key(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     fingerprint: str = Field(..., description="The MD5 or SHA256 fingerprint of the SSH checkout key to delete. SHA256 fingerprints must be URL-encoded."),
@@ -2499,7 +2726,13 @@ async def delete_checkout_key(
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_env_vars(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Retrieves all environment variables for a specified CircleCI project. Values are masked, returning only the last four characters prefixed with four 'x' characters, matching the display behavior on the CircleCI website."""
 
@@ -2535,7 +2768,12 @@ async def list_env_vars(project_slug: str = Field(..., alias="project-slug", des
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment Variable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_env_var(
     project_slug: str = Field(..., alias="project-slug", description="The project slug uniquely identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     name: str | None = Field(None, description="The name of the environment variable to create, which must be unique within the project and will be used to reference the variable in pipeline configurations."),
@@ -2572,13 +2810,20 @@ async def create_env_var(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Variable",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_env_var(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
     name: str = Field(..., description="The exact name of the environment variable to retrieve, matching the name as defined in the project's environment variable settings."),
@@ -2617,7 +2862,13 @@ async def get_env_var(
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_env_var(
     project_slug: str = Field(..., alias="project-slug", description="The project slug uniquely identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name; forward slashes may be URL-encoded."),
     name: str = Field(..., description="The exact name of the environment variable to delete, matching the variable's name as it appears in the project's environment variable settings."),
@@ -2656,7 +2907,13 @@ async def delete_env_var(
     return _response_data
 
 # Tags: Job
-@mcp.tool()
+@mcp.tool(
+    title="Get Job Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_job_details(
     job_number: Any = Field(..., alias="job-number", description="The unique numeric identifier of the job to retrieve details for."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug identifying the target project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
@@ -2695,7 +2952,13 @@ async def get_job_details(
     return _response_data
 
 # Tags: Job
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Job by Number",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_job_by_number(
     job_number: Any = Field(..., alias="job-number", description="The unique numeric identifier of the job to cancel within the project."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug identifying the target project, formatted as vcs-slug/org-name/repo-name. For GitLab or GitHub App projects, use circleci as the vcs-slug, the organization ID as org-name, and the project ID as repo-name; forward slashes may be URL-escaped."),
@@ -2734,7 +2997,13 @@ async def cancel_job_by_number(
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="List Project Pipelines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_pipelines(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded."),
     branch: str | None = Field(None, description="Filters returned pipelines to only those triggered on the specified branch name. When omitted, pipelines from all branches are returned."),
@@ -2776,7 +3045,12 @@ async def list_project_pipelines(
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Pipeline",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_pipeline(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`, where forward slashes may be URL-encoded. For GitLab or GitHub App projects, use `circleci` as the vcs-slug with the organization ID and project ID in place of org and repo names."),
     branch: str | None = Field(None, description="The branch to run the pipeline against, using the HEAD commit of that branch. Mutually exclusive with `tag`; only one may be provided. To target a pull request, use `pull/<number>/head` for the PR ref or `pull/<number>/merge` for the merge ref (GitHub only)."),
@@ -2814,13 +3088,20 @@ async def trigger_pipeline(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="List My Pipelines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Retrieves all pipelines for a specified project that were triggered by the authenticated user. Returns results as a sequence ordered by trigger time."""
 
@@ -2856,7 +3137,13 @@ async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug",
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline by Number",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_by_number(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
     pipeline_number: Any = Field(..., alias="pipeline-number", description="The sequential number assigned to the pipeline within the project, uniquely identifying it among all pipelines for that project."),
@@ -2895,7 +3182,13 @@ async def get_pipeline_by_number(
     return _response_data
 
 # Tags: Schedule
-@mcp.tool()
+@mcp.tool(
+    title="List Project Schedules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_schedules(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Retrieves all schedule triggers associated with GitHub OAuth or Bitbucket Cloud pipeline definitions for a given project. Note: schedules for GitHub App pipelines are not included and must be fetched via the List Pipeline Definition Triggers endpoint."""
 
@@ -2931,7 +3224,12 @@ async def list_project_schedules(project_slug: str = Field(..., alias="project-s
     return _response_data
 
 # Tags: Schedule
-@mcp.tool()
+@mcp.tool(
+    title="Create Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schedule(
     project_slug: str = Field(..., alias="project-slug", description="The project identifier in the format `vcs-slug/org-name/repo-name`, where forward slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the vcs-slug with the organization ID and project ID in place of org and repo names."),
     name: str | None = Field(None, description="A human-readable name for the schedule used to identify it within the project."),
@@ -2971,13 +3269,20 @@ async def create_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Job
-@mcp.tool()
+@mcp.tool(
+    title="List Job Artifacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_job_artifacts(
     job_number: Any = Field(..., alias="job-number", description="The unique number identifying the job within the project whose artifacts you want to retrieve."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug uniquely identifying the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
@@ -3016,7 +3321,13 @@ async def list_job_artifacts(
     return _response_data
 
 # Tags: Job
-@mcp.tool()
+@mcp.tool(
+    title="List Job Tests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_job_tests(
     job_number: Any = Field(..., alias="job-number", description="The unique numeric identifier of the job whose test metadata you want to retrieve."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug identifying the target project in the format `vcs-slug/org-name/repo-name`, where URL-escaping of `/` is supported. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
@@ -3055,7 +3366,13 @@ async def list_job_tests(
     return _response_data
 
 # Tags: Schedule
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule(schedule_id: str = Field(..., alias="schedule-id", description="The unique identifier of the schedule to retrieve, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific pipeline schedule by its unique ID. Only available for schedules associated with GitHub OAuth or Bitbucket Cloud pipeline definitions."""
 
@@ -3091,15 +3408,21 @@ async def get_schedule(schedule_id: str = Field(..., alias="schedule-id", descri
     return _response_data
 
 # Tags: Schedule
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule(
     schedule_id: str = Field(..., alias="schedule-id", description="The unique UUID identifying the schedule to update."),
     description: str | None = Field(None, description="A human-readable description of the schedule's purpose or behavior."),
     name: str | None = Field(None, description="The display name of the schedule."),
     per_hour: str | None = Field(None, alias="per-hour", description="How many times the schedule triggers per hour; must be a whole number between 1 and 60. Mutually exclusive with hour-based scheduling fields."),
-    hours_of_day: list[int] | None = Field(None, alias="hours-of-day", description="List of hours within a day (0–23) during which the schedule triggers; order is not significant."),
+    hours_of_day: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] | None = Field(None, alias="hours-of-day", description="List of hours within a day (0–23) during which the schedule triggers; order is not significant."),
     days_of_week: list[Literal["TUE", "SAT", "SUN", "MON", "THU", "WED", "FRI"]] | None = Field(None, alias="days-of-week", description="List of days of the week on which the schedule triggers (e.g., MON, TUE); mutually exclusive with days-of-month."),
-    days_of_month: list[int] | None = Field(None, alias="days-of-month", description="List of calendar days of the month (1–31) on which the schedule triggers; mutually exclusive with days-of-week."),
+    days_of_month: list[Annotated[int, Field(json_schema_extra={'format': 'integer'})]] | None = Field(None, alias="days-of-month", description="List of calendar days of the month (1–31) on which the schedule triggers; mutually exclusive with days-of-week."),
     months: list[Literal["MAR", "NOV", "DEC", "JUN", "MAY", "OCT", "FEB", "APR", "SEP", "AUG", "JAN", "JUL"]] | None = Field(None, description="List of months in which the schedule triggers (e.g., JAN, FEB); order is not significant."),
     attribution_actor: Literal["current", "system"] | None = Field(None, alias="attribution-actor", description="Determines whose permissions are used when the scheduled pipeline runs: 'current' uses the token owner's permissions, 'system' uses a neutral system actor."),
     parameters: dict[str, int | str | bool] | None = Field(None, description="Key-value pairs of pipeline parameters to pass when the schedule triggers; must include either a branch or tag key to specify the target ref."),
@@ -3138,13 +3461,20 @@ async def update_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedule
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", description="The unique identifier of the schedule to delete, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a pipeline schedule by its unique ID. Only available for schedules associated with GitHub OAuth or Bitbucket Cloud pipeline definitions."""
 
@@ -3180,7 +3510,13 @@ async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", des
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user whose information should be retrieved, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for a specific user. Use this to look up user details by their unique identifier."""
 
@@ -3216,7 +3552,13 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(
     scope_id: str = Field(..., alias="scope-id", description="The unique identifier of the scope entity to filter webhooks by. Currently only project IDs are supported."),
     scope_type: Literal["project"] = Field(..., alias="scope-type", description="The type of scope used to filter webhooks. Determines how the scope-id is interpreted; currently only 'project' is supported."),
@@ -3257,7 +3599,12 @@ async def list_webhooks(
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Create Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook(
     name: str | None = Field(None, description="Human-readable name to identify the webhook."),
     events: list[Literal["workflow-completed", "job-completed"]] | None = Field(None, description="List of event types that will trigger this webhook; order is not significant and each item should be a valid event type string."),
@@ -3298,13 +3645,20 @@ async def create_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the outbound webhook to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves the configuration and details of a specific outbound webhook by its unique identifier. Use this to inspect webhook settings such as target URL, events, and status."""
 
@@ -3340,7 +3694,13 @@ async def get_webhook(webhook_id: str = Field(..., alias="webhook-id", descripti
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook(
     webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the webhook to update."),
     name: str | None = Field(None, description="A human-readable label for the webhook, used to identify it in listings and logs."),
@@ -3380,13 +3740,20 @@ async def update_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the outbound webhook to delete, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an outbound webhook, stopping all future event deliveries to its configured endpoint. This action cannot be undone."""
 
@@ -3422,7 +3789,13 @@ async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", descri
     return _response_data
 
 # Tags: Workflow
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to retrieve, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieves summary fields for a specific workflow by its unique identifier. Useful for checking workflow metadata such as name, status, and configuration details."""
 
@@ -3458,7 +3831,12 @@ async def get_workflow(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Workflow
-@mcp.tool()
+@mcp.tool(
+    title="Approve Workflow Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def approve_workflow_job(
     approval_request_id: str = Field(..., description="The unique identifier of the pending approval job to approve, in UUID format."),
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow containing the pending approval job, in UUID format."),
@@ -3497,7 +3875,13 @@ async def approve_workflow_job(
     return _response_data
 
 # Tags: Workflow
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Workflow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to cancel. Must correspond to an existing, currently running workflow.")) -> dict[str, Any] | ToolResult:
     """Cancels a currently running workflow, halting any further execution. Use this to stop a workflow that is in progress before it completes naturally."""
 
@@ -3533,7 +3917,13 @@ async def cancel_workflow(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Workflow
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_jobs(id_: str = Field(..., alias="id", description="The unique identifier of the workflow whose jobs you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the ordered sequence of jobs associated with a specific workflow. Use this to inspect all jobs belonging to a workflow and their current states."""
 
@@ -3569,12 +3959,17 @@ async def list_workflow_jobs(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: Workflow
-@mcp.tool()
+@mcp.tool(
+    title="Rerun Workflow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rerun_workflow(
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow to rerun."),
     enable_ssh: bool | None = Field(None, description="When true, enables SSH access for the triggering user on the newly rerun job. Requires the jobs parameter to be specified and is mutually exclusive with from_failed."),
     from_failed: bool | None = Field(None, description="When true, reruns the workflow starting from the first failed job rather than the beginning. Mutually exclusive with the jobs and sparse_tree parameters."),
-    jobs: list[str] | None = Field(None, description="A list of specific job IDs (UUIDs) to rerun within the workflow. Order is not significant. Mutually exclusive with from_failed."),
+    jobs: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="A list of specific job IDs (UUIDs) to rerun within the workflow. Order is not significant. Mutually exclusive with from_failed."),
     sparse_tree: bool | None = Field(None, description="When true, applies sparse tree optimization logic during the rerun, improving performance for workflows containing disconnected subgraphs. Requires the jobs parameter and is mutually exclusive with from_failed."),
 ) -> dict[str, Any] | ToolResult:
     """Reruns an existing workflow by its ID, with options to rerun from the first failed job, target specific jobs, or apply sparse tree optimization for complex workflow graphs."""
@@ -3608,13 +4003,20 @@ async def rerun_workflow(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OIDC Token Management
-@mcp.tool()
+@mcp.tool(
+    title="List Organization OIDC Custom Claims",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_org_oidc_custom_claims(org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose OIDC custom claims should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the org-level custom claims configured for OIDC identity tokens. Use this to inspect which additional claims are included in tokens issued for the specified organization."""
 
@@ -3650,7 +4052,13 @@ async def list_org_oidc_custom_claims(org_id: str = Field(..., alias="orgID", de
     return _response_data
 
 # Tags: OIDC Token Management
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization OIDC Claims",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_org_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose OIDC custom claims will be updated."),
     audience: list[str] | None = Field(None, description="List of intended recipients (audiences) for the OIDC token; order is not significant and each item should be a valid audience identifier string."),
@@ -3687,13 +4095,20 @@ async def update_org_oidc_claims(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OIDC Token Management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization OIDC Claims",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_org_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose custom OIDC claims will be deleted."),
     claims: str = Field(..., description="Comma-separated list of custom OIDC claim names to delete. Valid values are 'audience' and 'ttl'; multiple values may be combined in a single request."),
@@ -3735,7 +4150,13 @@ async def delete_org_oidc_claims(
     return _response_data
 
 # Tags: OIDC Token Management
-@mcp.tool()
+@mcp.tool(
+    title="Get Project OIDC Custom Claims",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization that owns the project."),
     project_id: str = Field(..., alias="projectID", description="The unique identifier of the project whose custom OIDC claims are being retrieved."),
@@ -3774,7 +4195,13 @@ async def get_project_oidc_claims(
     return _response_data
 
 # Tags: OIDC Token Management
-@mcp.tool()
+@mcp.tool(
+    title="Update Project OIDC Claims",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="Unique identifier of the organization that owns the project."),
     project_id: str = Field(..., alias="projectID", description="Unique identifier of the project whose OIDC custom claims are being created or updated."),
@@ -3812,13 +4239,20 @@ async def update_project_oidc_claims(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OIDC Token Management
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project OIDC Claims",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="Unique identifier of the organization that owns the project."),
     project_id: str = Field(..., alias="projectID", description="Unique identifier of the project whose OIDC custom claims will be deleted."),
@@ -3861,7 +4295,13 @@ async def delete_project_oidc_claims(
     return _response_data
 
 # Tags: Policy Management
-@mcp.tool()
+@mcp.tool(
+    title="List Decision Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_decision_logs(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner whose policy decision logs are being retrieved."),
     context: str = Field(..., description="The policy context scope under which decisions were evaluated and logged."),
@@ -3910,7 +4350,13 @@ async def list_decision_logs(
     return _response_data
 
 # Tags: Policy Management
-@mcp.tool()
+@mcp.tool(
+    title="Get Decision Log",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_decision_log(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner whose decision audit log is being retrieved."),
     context: str = Field(..., description="The context scope under which the decision was recorded, used to namespace or categorize decisions for the given owner."),
@@ -3950,7 +4396,13 @@ async def get_decision_log(
     return _response_data
 
 # Tags: Policy Management
-@mcp.tool()
+@mcp.tool(
+    title="Get Decision Policy Bundle",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_decision_policy_bundle(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner (organization or user) whose decision log is being queried."),
     context: str = Field(..., description="The policy context scope under which the decision was evaluated, used to namespace and organize policies."),
@@ -3990,7 +4442,13 @@ async def get_decision_policy_bundle(
     return _response_data
 
 # Tags: Policy Management
-@mcp.tool()
+@mcp.tool(
+    title="Get Policy Bundle",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_policy_bundle(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner whose policy bundle is being retrieved."),
     context: str = Field(..., description="The context scope under which the policy bundle is organized, used to namespace or categorize policies for the specified owner."),
@@ -4029,7 +4487,13 @@ async def get_policy_bundle(
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="List Contexts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contexts(
     owner_id: str | None = Field(None, alias="owner-id", description="The unique UUID of the organization that owns the contexts. Use this or owner-slug to identify the organization — find both in CircleCI web app under Organization Settings > Overview."),
     owner_slug: str | None = Field(None, alias="owner-slug", description="The slug identifier for the organization that owns the contexts. Use this or owner-id to identify the organization — find both in CircleCI web app under Organization Settings > Overview. Not supported on CircleCI server."),
@@ -4071,7 +4535,12 @@ async def list_contexts(
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Create Context",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_context(
     name: str | None = Field(None, description="The human-readable name to assign to the new context, used to identify it within the organization."),
     owner: _models.CreateContextBodyOwnerV0 | _models.CreateContextBodyOwnerV1 | None = Field(None, description="The owner of the context, typically representing the organization or account under which the context will be created."),
@@ -4106,13 +4575,20 @@ async def create_context(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Get Context",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_context(context_id: str = Field(..., description="The unique identifier of the context to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves basic information about a specific context by its unique identifier. Use this to look up context details when you have a known context ID."""
 
@@ -4148,7 +4624,13 @@ async def get_context(context_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Delete Context",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_context(context_id: str = Field(..., description="The unique identifier of the context to delete. Deleting a context will also remove all environment variables stored within it.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a context and all of its associated environment variables by context ID. This action is irreversible."""
 
@@ -4184,7 +4666,13 @@ async def delete_context(context_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="List Context Environment Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_context_environment_variables(context_id: str = Field(..., description="The unique identifier of the context whose environment variables should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of environment variables defined within a specified context, returning metadata such as names but excluding their values for security."""
 
@@ -4220,7 +4708,13 @@ async def list_context_environment_variables(context_id: str = Field(..., descri
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Set Context Environment Variable",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_context_environment_variable(
     context_id: str = Field(..., description="The unique identifier of the context in which to create or update the environment variable."),
     env_var_name: str = Field(..., description="The name of the environment variable to create or update within the context."),
@@ -4257,13 +4751,20 @@ async def set_context_environment_variable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Delete Context Environment Variable",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_context_environment_variable(
     context_id: str = Field(..., description="The unique identifier of the context from which the environment variable will be deleted."),
     env_var_name: str = Field(..., description="The exact name of the environment variable to delete, matching the name as it was originally stored in the context."),
@@ -4302,7 +4803,13 @@ async def delete_context_environment_variable(
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="List Context Restrictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_context_restrictions(context_id: str = Field(..., description="The unique identifier of the context whose restrictions should be retrieved, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves all project and expression restrictions associated with a specific context. Returns the complete list of restrictions currently applied to the given context."""
 
@@ -4338,7 +4845,12 @@ async def list_context_restrictions(context_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Add Context Restriction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_context_restriction(
     context_id: str = Field(..., description="The unique identifier of the context to which the restriction will be added."),
     restriction_type: Literal["project", "expression", "group"] | None = Field(None, description="The category of restriction to apply: 'project' limits access to a specific project, 'expression' applies a rule-based condition, and 'group' restricts access to a specific group."),
@@ -4375,13 +4887,20 @@ async def add_context_restriction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Context
-@mcp.tool()
+@mcp.tool(
+    title="Delete Context Restriction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_context_restriction(
     context_id: str = Field(..., description="The unique identifier of the context from which the restriction will be deleted."),
     restriction_id: str = Field(..., description="The unique identifier of the specific restriction to delete within the given context."),
@@ -4420,7 +4939,13 @@ async def delete_context_restriction(
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_settings(
     provider: Literal["github", "gh", "bitbucket", "bb", "circleci"] = Field(..., description="The version control or CI provider portion of the project slug, identifying which platform hosts the project."),
     organization: str = Field(..., description="The organization segment of the project slug, which may be an organization name or a unique organization ID depending on the account type."),
@@ -4460,7 +4985,13 @@ async def get_project_settings(
     return _response_data
 
 # Tags: Project
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_settings(
     provider: Literal["github", "gh", "bitbucket", "bb", "circleci"] = Field(..., description="The version control provider for the project, corresponding to the first segment of the project slug visible in Project Settings > Overview."),
     organization: str = Field(..., description="The organization identifier, corresponding to the second segment of the project slug visible in Project Settings > Overview. May be an org name or an org ID depending on the organization type."),
@@ -4507,13 +5038,20 @@ async def update_project_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_groups(
     org_id: str = Field(..., description="The unique identifier of the organization whose groups you want to retrieve."),
     limit: int | None = Field(None, description="The maximum number of group results to return per page. Use this to control pagination when an organization has many groups."),
@@ -4555,7 +5093,12 @@ async def list_organization_groups(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(
     org_id: str = Field(..., description="The unique opaque identifier of the organization under which the group will be created."),
     name: str = Field(..., description="The display name for the new group, used to identify it within the organization."),
@@ -4592,13 +5135,20 @@ async def create_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(
     org_id: str = Field(..., description="The unique opaque identifier of the organization that contains the group."),
     group_id: str = Field(..., description="The unique identifier of the group to retrieve, provided as a UUID."),
@@ -4637,7 +5187,13 @@ async def get_group(
     return _response_data
 
 # Tags: Groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(
     org_id: str = Field(..., description="The unique opaque identifier of the organization that contains the group to be deleted."),
     group_id: str = Field(..., description="The unique UUID identifier of the group to delete. All members and associated role grants will be removed upon deletion."),
@@ -4676,12 +5232,17 @@ async def delete_group(
     return _response_data
 
 # Tags: Usage
-@mcp.tool()
+@mcp.tool(
+    title="Create Usage Export Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_usage_export(
     org_id: str = Field(..., description="The unique identifier of the organization for which the usage export will be generated."),
     start: str = Field(..., description="The start date and time (inclusive) of the export range in ISO 8601 format. Must be no more than one year in the past."),
     end: str = Field(..., description="The end date and time (inclusive) of the export range in ISO 8601 format. Must be no more than 31 days after the start date."),
-    shared_org_ids: list[str] | None = Field(None, description="A list of additional organization IDs whose usage data should be included in the export, useful for aggregating usage across shared or linked organizations. Order is not significant."),
+    shared_org_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="A list of additional organization IDs whose usage data should be included in the export, useful for aggregating usage across shared or linked organizations. Order is not significant."),
 ) -> dict[str, Any] | ToolResult:
     """Submits a job to export usage data for an organization within a specified date range. The export covers up to 31 days of data and can optionally include usage from shared organizations."""
 
@@ -4714,13 +5275,20 @@ async def create_usage_export(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Usage
-@mcp.tool()
+@mcp.tool(
+    title="Get Usage Export Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_usage_export_job(
     org_id: str = Field(..., description="The unique opaque identifier of the organization whose usage export job is being retrieved."),
     usage_export_job_id: str = Field(..., description="The unique UUID identifier of the usage export job to retrieve."),
@@ -4759,7 +5327,12 @@ async def get_usage_export_job(
     return _response_data
 
 # Tags: Pipeline
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Pipeline Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_pipeline_run(
     provider: Literal["github", "gh", "bitbucket", "bb", "circleci"] = Field(..., description="The VCS or platform provider, corresponding to the first segment of the slash-separated project slug found in Project Settings > Overview."),
     organization: str = Field(..., description="The second segment of the slash-separated project slug, representing either a human-readable organization name or an opaque organization ID, as shown in Project Settings > Overview."),
@@ -4804,13 +5377,20 @@ async def trigger_pipeline_run(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipeline Definition
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_definitions(project_id: str = Field(..., description="The unique identifier of the project whose pipeline definitions should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves all pipeline definitions associated with a specified project. Pipeline definitions describe the structure and configuration of pipelines available within the project."""
 
@@ -4846,7 +5426,12 @@ async def list_pipeline_definitions(project_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Pipeline Definition
-@mcp.tool()
+@mcp.tool(
+    title="Create Pipeline Definition",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pipeline_definition(
     project_id: str = Field(..., description="The unique opaque identifier of the project under which the pipeline definition will be created."),
     name: str | None = Field(None, description="A human-readable name for the pipeline definition to distinguish it within the project."),
@@ -4888,13 +5473,20 @@ async def create_pipeline_definition(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipeline Definition
-@mcp.tool()
+@mcp.tool(
+    title="Get Pipeline Definition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pipeline_definition(
     project_id: str = Field(..., description="The unique opaque identifier of the project containing the pipeline definition."),
     pipeline_definition_id: str = Field(..., description="The unique opaque identifier of the pipeline definition to retrieve."),
@@ -4933,7 +5525,13 @@ async def get_pipeline_definition(
     return _response_data
 
 # Tags: Pipeline Definition
-@mcp.tool()
+@mcp.tool(
+    title="Update Pipeline Definition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pipeline_definition(
     project_id: str = Field(..., description="The unique opaque identifier of the project containing the pipeline definition to update."),
     pipeline_definition_id: str = Field(..., description="The unique opaque identifier of the pipeline definition to update."),
@@ -4977,13 +5575,20 @@ async def update_pipeline_definition(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pipeline Definition
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pipeline Definition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pipeline_definition(
     project_id: str = Field(..., description="The unique opaque identifier of the project containing the pipeline definition to delete."),
     pipeline_definition_id: str = Field(..., description="The unique opaque identifier of the pipeline definition to delete."),
@@ -5022,7 +5627,13 @@ async def delete_pipeline_definition(
     return _response_data
 
 # Tags: Trigger
-@mcp.tool()
+@mcp.tool(
+    title="List Pipeline Definition Triggers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pipeline_definition_triggers(
     project_id: str = Field(..., description="The unique identifier of the project containing the pipeline definition."),
     pipeline_definition_id: str = Field(..., description="The unique identifier of the pipeline definition whose triggers you want to list."),
@@ -5061,7 +5672,12 @@ async def list_pipeline_definition_triggers(
     return _response_data
 
 # Tags: Trigger
-@mcp.tool()
+@mcp.tool(
+    title="Create Pipeline Trigger",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pipeline_trigger(
     project_id: str = Field(..., description="The unique opaque identifier of the project in which the pipeline definition resides."),
     pipeline_definition_id: str = Field(..., description="The unique opaque identifier of the pipeline definition for which the trigger will be created."),
@@ -5108,13 +5724,20 @@ async def create_pipeline_trigger(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Trigger
-@mcp.tool()
+@mcp.tool(
+    title="Get Trigger",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trigger(
     project_id: str = Field(..., description="The unique opaque identifier of the project that owns the trigger."),
     trigger_id: str = Field(..., description="The unique opaque identifier of the trigger to retrieve."),
@@ -5153,7 +5776,13 @@ async def get_trigger(
     return _response_data
 
 # Tags: Trigger
-@mcp.tool()
+@mcp.tool(
+    title="Update Trigger",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_trigger(
     project_id: str = Field(..., description="The unique opaque identifier of the project that owns the trigger."),
     trigger_id: str = Field(..., description="The unique opaque identifier of the trigger to update."),
@@ -5196,13 +5825,20 @@ async def update_trigger(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Trigger
-@mcp.tool()
+@mcp.tool(
+    title="Delete Trigger",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_trigger(
     project_id: str = Field(..., description="The unique opaque identifier of the project from which the trigger will be deleted."),
     trigger_id: str = Field(..., description="The unique opaque identifier of the trigger to be deleted."),
@@ -5241,7 +5877,13 @@ async def delete_trigger(
     return _response_data
 
 # Tags: Rollback
-@mcp.tool()
+@mcp.tool(
+    title="Rollback Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def rollback_project(
     project_id: str = Field(..., description="The unique opaque identifier of the project in which the rollback will be performed."),
     component_name: str = Field(..., description="The name of the component within the project to be rolled back."),
@@ -5283,13 +5925,20 @@ async def rollback_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Deploy
-@mcp.tool()
+@mcp.tool(
+    title="List Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments(
     org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose environments you want to list, provided as a UUID."),
     page_size: int = Field(..., alias="page-size", description="The maximum number of environments to return per page. Use this alongside pagination controls to iterate through large result sets."),
@@ -5330,7 +5979,13 @@ async def list_environments(
     return _response_data
 
 # Tags: Deploy
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(environment_id: str = Field(..., description="The unique UUID identifying the deployment environment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific deployment environment by its unique identifier. Use this to inspect environment configuration, status, or metadata for a known environment."""
 
@@ -5366,7 +6021,13 @@ async def get_environment(environment_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: Deploy
-@mcp.tool()
+@mcp.tool(
+    title="List Components",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_components(
     org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose components will be listed."),
     page_size: int = Field(..., alias="page-size", description="The maximum number of components to return in a single page of results. Use in combination with pagination tokens to iterate through all components."),
@@ -5408,7 +6069,13 @@ async def list_components(
     return _response_data
 
 # Tags: Deploy
-@mcp.tool()
+@mcp.tool(
+    title="Get Component",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_component(component_id: str = Field(..., description="The unique opaque identifier of the component to retrieve, as returned when the component was created or listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a deployed component by its unique identifier. Use this to inspect configuration, status, or metadata for a specific component."""
 
@@ -5444,7 +6111,13 @@ async def get_component(component_id: str = Field(..., description="The unique o
     return _response_data
 
 # Tags: Deploy
-@mcp.tool()
+@mcp.tool(
+    title="List Component Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_component_versions(
     component_id: str = Field(..., description="The unique identifier of the component whose versions you want to retrieve."),
     environment_id: str | None = Field(None, alias="environment-id", description="The unique identifier of an environment to filter component versions by, returning only versions relevant to that environment. Must be a valid UUID."),
@@ -5486,7 +6159,13 @@ async def list_component_versions(
     return _response_data
 
 # Tags: OTel
-@mcp.tool()
+@mcp.tool(
+    title="List OTel Exporters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_otel_exporters(org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose OTLP exporter configurations should be retrieved, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves all OpenTelemetry (OTLP) exporter configurations associated with the specified organization. This is an experimental feature and may be subject to change."""
 
@@ -5524,7 +6203,12 @@ async def list_otel_exporters(org_id: str = Field(..., alias="org-id", descripti
     return _response_data
 
 # Tags: OTel
-@mcp.tool()
+@mcp.tool(
+    title="Create OTLP Exporter",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_otlp_exporter(
     org_id: str = Field(..., description="The unique identifier of the organization for which the OTLP exporter will be created."),
     endpoint: str = Field(..., description="The destination OTLP collector endpoint, specified as hostname and port only — omit any scheme prefix such as https:// or grpc://."),
@@ -5562,13 +6246,20 @@ async def create_otlp_exporter(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OTel
-@mcp.tool()
+@mcp.tool(
+    title="Delete OTLP Exporter",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_otlp_exporter(otel_exporter_id: str = Field(..., description="The unique identifier of the OTLP exporter configuration to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an OTLP exporter configuration by its unique identifier. This is an experimental feature and the behavior may change in future releases."""
 
