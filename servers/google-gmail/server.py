@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-05-05 15:11:18 UTC
+Generated: 2026-05-12 11:29:20 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -46,11 +46,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://gmail.googleapis.com")
 SERVER_NAME = "Google Gmail"
-SERVER_VERSION = "1.0.3"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -541,6 +542,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -548,6 +571,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -633,6 +658,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -642,18 +668,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -664,24 +688,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1077,6 +1107,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1101,6 +1133,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1308,7 +1342,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Google Gmail", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_profile(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any] | ToolResult:
     """Retrieves the Gmail profile information for the authenticated user or a specified user, including account details and settings."""
 
@@ -1344,7 +1384,13 @@ async def get_profile(user_id: str = Field(..., alias="userId", description="The
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Drafts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_drafts(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Whether to include draft messages from the SPAM and TRASH folders in the results."),
@@ -1388,7 +1434,12 @@ async def list_drafts(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create Draft",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user."),
     classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the draft message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
@@ -1446,7 +1497,13 @@ async def create_draft(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Draft",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to retrieve."),
@@ -1489,7 +1546,13 @@ async def get_draft(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Draft",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to update."),
@@ -1548,7 +1611,14 @@ async def update_draft(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Draft",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_draft(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose draft should be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to delete."),
@@ -1587,7 +1657,12 @@ async def delete_draft(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Send Draft",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
@@ -1647,7 +1722,13 @@ async def send_draft(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Mailbox History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_mailbox_history(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     history_types: list[Literal["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]] | None = Field(None, alias="historyTypes", description="Types of history events to include in results. When specified, only changes matching these types are returned."),
@@ -1692,7 +1773,13 @@ async def list_mailbox_history(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_labels(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any] | ToolResult:
     """Retrieves all labels in the user's mailbox. Labels are used to organize and categorize emails in Gmail."""
 
@@ -1728,7 +1815,12 @@ async def list_labels(user_id: str = Field(..., alias="userId", description="The
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create Label",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_label(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(None, alias="labelListVisibility", description="Controls whether this label appears in the label list in Gmail's web interface."),
@@ -1767,13 +1859,20 @@ async def create_label(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Label",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_label(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to retrieve."),
@@ -1812,7 +1911,13 @@ async def get_label(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Label",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_label(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to update."),
@@ -1852,13 +1957,20 @@ async def update_label(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Label Partial",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_label_partial(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to update."),
@@ -1898,13 +2010,20 @@ async def update_label_partial(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_label(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to delete."),
@@ -1943,7 +2062,13 @@ async def delete_label(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Messages Batch",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_messages_batch(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     ids: list[str] | None = Field(None, description="An array of message IDs to delete. The order of IDs is not significant."),
@@ -1979,13 +2104,20 @@ async def delete_messages_batch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Message Labels Batch",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_message_labels_batch(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="Label IDs to add to the specified messages. Order is not significant."),
@@ -2023,13 +2155,20 @@ async def update_message_labels_batch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     id_: str = Field(..., alias="id", description="The ID of the message to retrieve, typically obtained from messages.list, messages.insert, or messages.import operations."),
@@ -2073,7 +2212,14 @@ async def get_message(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Message",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_message(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message will be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to delete."),
@@ -2112,7 +2258,13 @@ async def delete_message(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Import Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def import_message(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to reference the authenticated user."),
     deleted: bool | None = Field(None, description="Mark the message as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts."),
@@ -2177,7 +2329,13 @@ async def import_message(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_messages(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include messages from SPAM and TRASH folders in the results. Defaults to false if not specified."),
@@ -2233,7 +2391,12 @@ async def list_messages(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Insert Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def insert_message(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
     deleted: bool | None = Field(None, description="Mark the message as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts."),
@@ -2296,7 +2459,13 @@ async def insert_message(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Message Labels",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_message_labels(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message will be modified. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to modify."),
@@ -2334,13 +2503,19 @@ async def update_message_labels(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Send Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_message(
     user_id: str = Field(..., alias="userId", description="The email address of the user sending the message. Use the special value `me` to refer to the authenticated user."),
     classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification labels to apply to the message for organizational purposes. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
@@ -2398,7 +2573,14 @@ async def send_message(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Move Message to Trash",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def move_message_to_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to reference the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to move to trash."),
@@ -2437,7 +2619,14 @@ async def move_message_to_trash(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Remove Message From Trash",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_message_from_trash(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message should be restored. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to restore from trash."),
@@ -2476,7 +2665,13 @@ async def remove_message_from_trash(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Message Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message_attachment(
     user_id: str = Field(..., alias="userId", description="The email address of the account owner. Use the special value `me` to refer to the authenticated user's account."),
     message_id: str = Field(..., alias="messageId", description="The unique identifier of the message containing the attachment."),
@@ -2516,7 +2711,13 @@ async def get_message_attachment(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Auto Forwarding",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_auto_forwarding(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the email address associated with the account, or use the special value \"me\" to refer to the authenticated user's account.")) -> dict[str, Any] | ToolResult:
     """Retrieves the auto-forwarding configuration for the specified Gmail account. This includes the forwarding address and whether auto-forwarding is enabled."""
 
@@ -2552,7 +2753,13 @@ async def get_auto_forwarding(user_id: str = Field(..., alias="userId", descript
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Vacation Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vacation_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any] | ToolResult:
     """Retrieves the vacation responder settings for a Gmail account, including whether auto-reply is enabled and the message content."""
 
@@ -2588,7 +2795,13 @@ async def get_vacation_settings(user_id: str = Field(..., alias="userId", descri
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List CSE Identities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cse_identities(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of identities to return per page. If not specified, defaults to 20 entries."),
@@ -2630,7 +2843,12 @@ async def list_cse_identities(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create CSE Identity",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_cse_identity(
     user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user."),
     email_address: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user."),
@@ -2666,13 +2884,20 @@ async def create_cse_identity(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get CSE Identity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cse_identity(
     user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to refer to the authenticated user."),
     cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity configuration to retrieve."),
@@ -2711,7 +2936,14 @@ async def get_cse_identity(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete CSE Identity",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cse_identity(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity to be deleted."),
@@ -2750,7 +2982,13 @@ async def delete_cse_identity(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update CSE Identity Keypair",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cse_identity_keypair(
     user_id: str = Field(..., alias="userId", description="The user identifier. Use the special value `me` to refer to the authenticated user, or provide the user's primary email address."),
     email_address: str = Field(..., alias="emailAddress", description="The email address of the client-side encryption identity to update."),
@@ -2787,13 +3025,20 @@ async def update_cse_identity_keypair(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List CSE Keypairs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cse_keypairs(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of key pairs to return per page. If not specified, defaults to 20 entries."),
@@ -2835,7 +3080,12 @@ async def list_cse_keypairs(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create CSE Keypair",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     pkcs7: str | None = Field(None, description="The public key and its certificate chain in PKCS#7 format with PEM encoding and ASCII armor."),
@@ -2872,13 +3122,21 @@ async def create_cse_keypair(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Disable CSE Keypair",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value 'me' to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to disable."),
@@ -2917,7 +3175,13 @@ async def disable_cse_keypair(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Enable CSE Keypair",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def enable_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to reactivate."),
@@ -2956,7 +3220,13 @@ async def enable_cse_keypair(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get CSE Keypair",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair is being retrieved. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the encryption key pair to retrieve."),
@@ -2995,7 +3265,13 @@ async def get_cse_keypair(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete CSE Keypair Permanently",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cse_keypair_permanently(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to permanently delete."),
@@ -3034,7 +3310,13 @@ async def delete_cse_keypair_permanently(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Delegates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_delegates(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide the user's full email address.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of delegates for the specified Gmail account. This operation requires service account credentials with domain-wide delegation authority."""
 
@@ -3070,7 +3352,13 @@ async def list_delegates(user_id: str = Field(..., alias="userId", description="
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Delegate",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_delegate(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose delegates are being queried. Use the special value 'me' to refer to the authenticated user."),
     delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved. Email aliases cannot be used; the primary email address is required."),
@@ -3109,7 +3397,13 @@ async def get_delegate(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_filters(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any] | ToolResult:
     """Retrieves all message filters configured for a Gmail account. Filters define rules for automatically organizing, labeling, or processing incoming messages."""
 
@@ -3145,7 +3439,13 @@ async def list_filters(user_id: str = Field(..., alias="userId", description="Th
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Filter",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_filter(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to refer to the authenticated user, or provide the user's email address."),
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve."),
@@ -3184,7 +3484,14 @@ async def get_filter(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Filter",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_filter(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose filter will be deleted. Use the special value \"me\" to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to be deleted."),
@@ -3223,7 +3530,13 @@ async def delete_filter(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Forwarding Addresses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the authenticated user's email address, or specify 'me' to refer to the currently authenticated user.")) -> dict[str, Any] | ToolResult:
     """Retrieves all forwarding addresses configured for the specified Gmail account. Forwarding addresses are alternative email addresses where incoming messages can be automatically sent."""
 
@@ -3259,7 +3572,13 @@ async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", de
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Forwarding Address",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user's account, or provide the user's full email address."),
     forwarding_email: str = Field(..., alias="forwardingEmail", description="The email address for which forwarding configuration should be retrieved."),
@@ -3298,7 +3617,13 @@ async def get_forwarding_address(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Forwarding Address",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
     forwarding_email: str = Field(..., alias="forwardingEmail", description="The forwarding email address to delete."),
@@ -3337,7 +3662,13 @@ async def delete_forwarding_address(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Send As Aliases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_send_as_aliases(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to reference the authenticated user's account.")) -> dict[str, Any] | ToolResult:
     """Retrieves all send-as aliases configured for the specified Gmail account, including the primary email address and any custom 'from' aliases."""
 
@@ -3373,7 +3704,13 @@ async def list_send_as_aliases(user_id: str = Field(..., alias="userId", descrip
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Send As Alias",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to retrieve."),
@@ -3412,7 +3749,13 @@ async def get_send_as_alias(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Send As Alias",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The Gmail user's email address. Use the special value 'me' to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to be updated."),
@@ -3462,13 +3805,20 @@ async def update_send_as_alias(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Send As Alias Partial",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_send_as_alias_partial(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to refer to the authenticated user, or provide a specific email address."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to update."),
@@ -3518,13 +3868,19 @@ async def update_send_as_alias_partial(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Send Verification Email to Send As Alias",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_verification_email_to_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The send-as alias email address that requires verification."),
@@ -3563,7 +3919,13 @@ async def send_verification_email_to_send_as_alias(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Smime Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_smime_info(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for messages sent using this send-as alias."),
@@ -3603,7 +3965,14 @@ async def get_smime_info(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Send As Smime Config",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_send_as_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for messages sent using this send-as alias."),
@@ -3643,7 +4012,13 @@ async def delete_send_as_smime_config(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Smime Configs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_smime_configs(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address configured as a send-as alias. This is the address that appears in the From header for emails sent using this alias."),
@@ -3682,7 +4057,13 @@ async def list_smime_configs(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Create SMIME Config",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that will appear in the From header for messages sent using this S/MIME alias."),
@@ -3722,13 +4103,19 @@ async def create_smime_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Set Default Smime Config",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def set_default_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for mail sent using this send-as alias."),
@@ -3768,7 +4155,13 @@ async def set_default_smime_config(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get Thread",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_thread(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose thread should be retrieved. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to retrieve."),
@@ -3812,7 +4205,14 @@ async def get_thread(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete Thread",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_thread(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose thread will be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to delete."),
@@ -3851,7 +4251,13 @@ async def delete_thread(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Threads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_threads(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include threads from the SPAM and TRASH folders in the results."),
@@ -3896,7 +4302,13 @@ async def list_threads(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update Thread Labels",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_thread_labels(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The ID of the thread to modify."),
@@ -3934,13 +4346,21 @@ async def update_thread_labels(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Move Thread to Trash",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def move_thread_to_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to reference the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to move to trash."),
@@ -3979,7 +4399,13 @@ async def move_thread_to_trash(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Remove Thread From Trash",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_thread_from_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to restore from trash."),

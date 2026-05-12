@@ -1,7 +1,7 @@
 """
 Authentication module for Google Gmail MCP server.
 
-Generated: 2026-05-05 15:11:18 UTC
+Generated: 2026-05-12 11:29:20 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
