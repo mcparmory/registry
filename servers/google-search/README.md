@@ -1,4 +1,4 @@
-# Google Search API MCP Server
+# Google Search MCP Server
 <!-- mcp-name: com.mcparmory/google-search -->
 
 Base URL: https://www.searchapi.io/api/v1
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ---

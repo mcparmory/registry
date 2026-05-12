@@ -1,7 +1,7 @@
 """
-Google Search Api MCP Server - Pydantic Models
+Google Search MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:14:39 UTC
+Generated: 2026-05-12 11:32:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

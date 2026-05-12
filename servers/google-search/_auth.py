@@ -1,7 +1,7 @@
 """
-Authentication module for Google Search API MCP server.
+Authentication module for Google Search MCP server.
 
-Generated: 2026-05-05 15:14:39 UTC
+Generated: 2026-05-12 11:32:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

@@ -1,4 +1,4 @@
-# Google Search API MCP Server
+# Google Search MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-google-search .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Google Search API MCP Server" \
+LABEL org.opencontainers.image.title="Google Search MCP Server" \
       org.opencontainers.image.vendor="MCP Armory" \
       org.opencontainers.image.source="https://github.com/mcparmory/registry" \
       io.modelcontextprotocol.server.name="com.mcparmory/google-search"
