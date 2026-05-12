@@ -1,7 +1,7 @@
 """
 Authentication module for Google Analytics MCP server.
 
-Generated: 2026-05-05 15:07:54 UTC
+Generated: 2026-05-12 11:27:23 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

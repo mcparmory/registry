@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-05-05 15:07:54 UTC
+Generated: 2026-05-12 11:27:23 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -43,11 +44,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://analyticsdata.googleapis.com")
 SERVER_NAME = "Google Analytics"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1012,6 +1043,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1036,6 +1069,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1243,7 +1278,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Google Analytics", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Run Pivot Reports Batch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_pivot_reports_batch(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Specified in the URL path. This property applies to all reports in the batch, though individual requests may omit or match this value."),
     requests: list[_models.RunPivotReportRequest] | None = Field(None, description="Array of individual pivot report requests to execute. Each request generates a separate pivot report response. Maximum of 5 requests allowed per batch."),
@@ -1279,13 +1319,19 @@ async def run_pivot_reports_batch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Run Reports Batch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_reports_batch(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Specified in the URL path. The property must be consistent across all batch requests."),
     requests: list[_models.RunReportRequest] | None = Field(None, description="Array of individual report requests to execute. Each request generates a separate report response. Order is preserved in the response. Maximum of 5 requests allowed per batch."),
@@ -1321,13 +1367,19 @@ async def run_reports_batch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Validate Report Compatibility",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_report_compatibility(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier (format: properties/PROPERTY_ID) whose events are tracked. Must match the property used in your runReport request."),
     compatibility_filter: Literal["COMPATIBILITY_UNSPECIFIED", "COMPATIBLE", "INCOMPATIBLE"] | None = Field(None, alias="compatibilityFilter", description="Filters the response to return only dimensions and metrics matching this compatibility status."),
@@ -1404,13 +1456,20 @@ async def validate_report_compatibility(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Audience Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_audience_export(name: str = Field(..., description="The resource identifier for the audience export in the format properties/{property}/audienceExports/{audience_export}, where property is your Google Analytics property ID and audience_export is the unique export identifier.")) -> dict[str, Any] | ToolResult:
     """Retrieves configuration metadata for a specific audience export, including its status and settings. Use this to inspect an audience export after creation or to monitor its progress."""
 
@@ -1446,7 +1505,12 @@ async def get_audience_export(name: str = Field(..., description="The resource i
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Generate Pivot Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_pivot_report(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Found in your Google Analytics account settings."),
     accumulate: bool | None = Field(None, description="If true, accumulates results from the first touch day through the end date. Not supported for standard reports."),
@@ -1544,13 +1608,19 @@ async def generate_pivot_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Realtime Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_realtime_report(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Format: properties/{propertyId}. Find your Property ID in your Google Analytics account settings."),
     dimension_filter_or_group_expressions: list[_models.FilterExpression] | None = Field(None, alias="dimensionFilterOrGroupExpressions", description="Filter expressions to apply to dimensions. Multiple expressions are combined with OR logic."),
@@ -1616,13 +1686,19 @@ async def get_realtime_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Run Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_report(
     property_: str = Field(..., alias="property", description="A Google Analytics property identifier whose events are tracked. Specified in the URL path and not the body. To learn more, see [where to find your Property ID](https://developers.google.com/analytics/devguides/reporting/data/v1/property-id). Within a batch request, this property should either be unspecified or consistent with the batch-level property. Example: properties/1234"),
     accumulate: bool | None = Field(None, description="If true, accumulates the result from first touch day to the end day. Not supported in `RunReportRequest`."),
@@ -1715,13 +1791,20 @@ async def run_report(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="List Audience Exports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audience_exports(
     parent: str = Field(..., description="The property for which to list audience exports. Format: properties/{property}"),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of audience exports to return per page. The service may return fewer than specified. Higher values are coerced to the maximum allowed."),
@@ -1764,7 +1847,12 @@ async def list_audience_exports(
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Create Audience Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_audience_export(
     parent: str = Field(..., description="The parent property resource where this audience export will be created. Format: properties/{property}"),
     audience: str | None = Field(None, description="The audience resource to export. This identifies which audience's users will be included in the export. Format: properties/{property}/audiences/{audience}"),
@@ -1801,13 +1889,19 @@ async def create_audience_export(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: properties
-@mcp.tool()
+@mcp.tool(
+    title="Query Audience Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_audience_export(
     name: str = Field(..., description="The resource name of the audience export to query. Format: properties/{property}/audienceExports/{audience_export}"),
     limit: str | None = Field(None, description="Maximum number of rows to return per request. Defaults to 10,000 if unspecified. The API returns a maximum of 250,000 rows regardless of the requested limit. Must be a positive integer."),
@@ -1844,6 +1938,7 @@ async def query_audience_export(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
