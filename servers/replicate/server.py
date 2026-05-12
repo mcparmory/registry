@@ -5,7 +5,7 @@ Replicate MCP Server
 API Info:
 - Terms of Service: https://replicate.com/terms
 
-Generated: 2026-05-05 16:07:24 UTC
+Generated: 2026-05-12 12:24:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.replicate.com/v1")
 SERVER_NAME = "Replicate"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1010,6 +1041,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1034,6 +1067,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1241,7 +1276,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Replicate", middleware=[_JsonCoercionMiddleware()])
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account() -> dict[str, Any] | ToolResult:
     """Retrieve information about the authenticated account associated with the provided API token, including account type, username, display name, and GitHub URL."""
 
@@ -1268,7 +1309,13 @@ async def get_account() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Collections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collections() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of model collections available on Replicate, each containing curated groups of related models organized by use case or capability."""
 
@@ -1295,7 +1342,13 @@ async def list_collections() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collection(collection_slug: str = Field(..., description="The unique identifier slug for the collection (e.g., 'super-resolution', 'image-restoration'). Find available collections at replicate.com/collections.")) -> dict[str, Any] | ToolResult:
     """Retrieve a collection of models by its slug, including the collection metadata and all models within it."""
 
@@ -1331,7 +1384,13 @@ async def get_collection(collection_slug: str = Field(..., description="The uniq
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Deployments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployments() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all deployments associated with your account, sorted by most recent first. Each deployment includes its current release configuration with model, version, and hardware settings."""
 
@@ -1358,7 +1417,12 @@ async def list_deployments() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Deployment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deployment(
     hardware: str = Field(..., description="The hardware SKU to run the model on. Available SKUs can be retrieved from the hardware list endpoint (e.g., gpu-t4, gpu-a40)."),
     max_instances: int = Field(..., description="The maximum number of instances for auto-scaling. Must be between 0 and 20, and should be greater than or equal to min_instances.", ge=0, le=20),
@@ -1397,13 +1461,20 @@ async def create_deployment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment(
     deployment_owner: str = Field(..., description="The username or organization name that owns the deployment."),
     deployment_name: str = Field(..., description="The name of the deployment to retrieve."),
@@ -1442,7 +1513,13 @@ async def get_deployment(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Deployment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_deployment(
     deployment_owner: str = Field(..., description="The username or organization name that owns the deployment."),
     deployment_name: str = Field(..., description="The name of the deployment to update."),
@@ -1482,13 +1559,20 @@ async def update_deployment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Deployment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_deployment(
     deployment_owner: str = Field(..., description="The username or organization name that owns the deployment being deleted."),
     deployment_name: str = Field(..., description="The name of the deployment to delete."),
@@ -1527,7 +1611,12 @@ async def delete_deployment(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Deployment Prediction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deployment_prediction(
     deployment_owner: str = Field(..., description="The username or organization name that owns the deployment."),
     deployment_name: str = Field(..., description="The name of the deployment to run the prediction against."),
@@ -1569,13 +1658,20 @@ async def create_deployment_prediction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_files() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all files created by the user or organization associated with the API token, sorted with the most recent file first."""
 
@@ -1602,9 +1698,14 @@ async def list_files() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file(
-    content: str = Field(..., description="The raw file content to upload. Provide the binary data of the file you want to store."),
+    content: str = Field(..., description="Base64-encoded file content for upload. The raw file content to upload. Provide the binary data of the file you want to store.", json_schema_extra={'format': 'byte'}),
     filename: str | None = Field(None, description="The name of the file being uploaded. Must be valid UTF-8 and not exceed 255 bytes in length.", max_length=255),
     metadata: dict[str, Any] | None = Field(None, description="Optional custom metadata to associate with the file as a JSON object. Defaults to an empty object if not provided."),
     type_: str | None = Field(None, alias="type", description="The MIME type of the file content (e.g., application/zip, application/json, image/png). Defaults to application/octet-stream if not specified."),
@@ -1647,7 +1748,13 @@ async def create_file(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file(file_id: str = Field(..., description="The unique identifier of the file to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata and information about a specific file by its ID."""
 
@@ -1683,7 +1790,13 @@ async def get_file(file_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(file_id: str = Field(..., description="The unique identifier of the file to delete. This ID must correspond to an existing file in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a file by its ID. Once deleted, the file resource will no longer be accessible and subsequent requests will return a 404 Not Found error."""
 
@@ -1719,7 +1832,13 @@ async def delete_file(file_id: str = Field(..., description="The unique identifi
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get File Download",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_download(
     file_id: str = Field(..., description="The unique identifier of the file to download."),
     owner: str = Field(..., description="The username of the user or organization that owns and uploaded the file."),
@@ -1765,7 +1884,13 @@ async def get_file_download(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Available Hardware",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_available_hardware() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all available hardware accelerators and compute resources that can be used for running models on Replicate."""
 
@@ -1792,7 +1917,13 @@ async def list_available_hardware() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Models",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_models(
     sort_by: Literal["model_created_at", "latest_version_created_at"] | None = Field(None, description="Field to sort results by: either model creation date or the date of the model's latest version. Defaults to sorting by latest version creation date."),
     sort_direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending (oldest first) or descending (newest first). Defaults to descending."),
@@ -1833,7 +1964,12 @@ async def list_models(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Model",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_model(
     hardware: str = Field(..., description="The hardware SKU required to run this model. Valid values can be retrieved from the hardware.list endpoint (e.g., 'cpu', 'gpu-t4')."),
     name: str = Field(..., description="The model's name, which must be unique within your user or organization account. Use lowercase alphanumeric characters and hyphens."),
@@ -1875,13 +2011,19 @@ async def create_model(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Models",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_models(body: str = Field(..., description="The search query string to find matching models. Can include model names, descriptions, or keywords.")) -> dict[str, Any] | ToolResult:
     """Search for public models on Replicate using a text query. Returns a paginated list of models matching your search criteria."""
 
@@ -1922,7 +2064,13 @@ async def search_models(body: str = Field(..., description="The search query str
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Model",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_model(
     model_owner: str = Field(..., description="The username or organization name that owns the model."),
     model_name: str = Field(..., description="The unique identifier of the model within the owner's namespace."),
@@ -1961,7 +2109,13 @@ async def get_model(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Model Metadata",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_model_metadata(
     model_owner: str = Field(..., description="The username or organization name that owns the model."),
     model_name: str = Field(..., description="The name of the model to update."),
@@ -2003,13 +2157,20 @@ async def update_model_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Model",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_model(
     model_owner: str = Field(..., description="The username or organization name that owns the model. You can only delete models you own."),
     model_name: str = Field(..., description="The name of the model to delete. The model must be private and have no versions remaining."),
@@ -2048,7 +2209,13 @@ async def delete_model(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Model Examples",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_model_examples(
     model_owner: str = Field(..., description="The username or organization name that owns the model."),
     model_name: str = Field(..., description="The name of the model."),
@@ -2087,7 +2254,12 @@ async def list_model_examples(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Prediction for Official Model",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_prediction_for_official_model(
     model_owner: str = Field(..., description="The username or organization name that owns the official model."),
     model_name: str = Field(..., description="The name of the official model to run."),
@@ -2129,13 +2301,20 @@ async def create_prediction_for_official_model(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Model Readme",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_model_readme(
     model_owner: str = Field(..., description="The username or organization name that owns the model."),
     model_name: str = Field(..., description="The name of the model to retrieve documentation for."),
@@ -2176,7 +2355,13 @@ async def get_model_readme(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Model Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_model_versions(
     model_owner: str = Field(..., description="The username or organization name that owns the model. This identifies the model's owner in the Replicate registry."),
     model_name: str = Field(..., description="The name of the model. Combined with the model owner, this uniquely identifies which model's versions to retrieve."),
@@ -2215,7 +2400,13 @@ async def list_model_versions(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Model Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_model_version(
     model_owner: str = Field(..., description="The username or organization name that owns the model."),
     model_name: str = Field(..., description="The name of the model to retrieve version information for."),
@@ -2255,7 +2446,13 @@ async def get_model_version(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Model Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_model_version(
     model_owner: str = Field(..., description="The username or organization name that owns the model. You must be the owner to delete versions."),
     model_name: str = Field(..., description="The name of the model containing the version to delete."),
@@ -2295,7 +2492,12 @@ async def delete_model_version(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Training",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_training(
     model_owner: str = Field(..., description="The username or organization name that owns the model being trained."),
     model_name: str = Field(..., description="The name of the model to train."),
@@ -2336,13 +2538,20 @@ async def create_training(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Predictions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_predictions(
     created_after: str | None = Field(None, description="Filter to include only predictions created at or after this date-time. Specify in ISO 8601 format (e.g., 2025-01-01T00:00:00Z)."),
     created_before: str | None = Field(None, description="Filter to include only predictions created before this date-time. Specify in ISO 8601 format (e.g., 2025-02-01T00:00:00Z)."),
@@ -2384,7 +2593,12 @@ async def list_predictions(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Prediction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_prediction(
     input_: dict[str, Any] = Field(..., alias="input", description="Required JSON object containing the model's input parameters. Structure depends on the specific model version being run. Files should be passed as HTTP URLs (for files >256KB or reusable files) or data URLs (for small files ≤256KB)."),
     version: str = Field(..., description="Required identifier for the model or version to execute. Accepts three formats: `owner/model` for official models, `owner/model:version_id` for specific versions, or just the 64-character `version_id` alone."),
@@ -2424,13 +2638,20 @@ async def create_prediction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Prediction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_prediction(prediction_id: str = Field(..., description="The unique identifier of the prediction to retrieve. This ID is returned when a prediction is created and can be used to poll for results or access the prediction details.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current state and results of a prediction, including its status, output, logs, and performance metrics."""
 
@@ -2466,7 +2687,13 @@ async def get_prediction(prediction_id: str = Field(..., description="The unique
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Prediction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_prediction(prediction_id: str = Field(..., description="The unique identifier of the prediction to cancel. This must be a valid prediction ID that is currently in a running or queued state.")) -> dict[str, Any] | ToolResult:
     """Cancel an in-progress prediction. This stops the model execution and prevents further processing of the prediction."""
 
@@ -2502,7 +2729,13 @@ async def cancel_prediction(prediction_id: str = Field(..., description="The uni
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Models, Collections, and Docs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_models_collections_and_docs(
     query: str = Field(..., description="The text query to search for models, collections, and docs. Use keywords or phrases relevant to your search intent (e.g., 'nano banana')."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Must be between 1 and 50; defaults to 20 if not specified.", ge=1, le=50),
@@ -2543,7 +2776,13 @@ async def search_models_collections_and_docs(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Trainings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_trainings() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all trainings created by your user account or organization. Results include trainings from both API and web sources, sorted by most recent first, with 100 records per page."""
 
@@ -2570,7 +2809,13 @@ async def list_trainings() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Training",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_training(training_id: str = Field(..., description="The unique identifier of the training job to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current state and results of a training job, including status, metrics, logs, and output artifacts."""
 
@@ -2606,7 +2851,13 @@ async def get_training(training_id: str = Field(..., description="The unique ide
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Training",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_training(training_id: str = Field(..., description="The unique identifier of the training session to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel an active or scheduled training session. Once cancelled, the training will no longer be available and participants will be notified of the cancellation."""
 
@@ -2642,7 +2893,13 @@ async def cancel_training(training_id: str = Field(..., description="The unique 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Default Webhook Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_default_webhook_secret() -> dict[str, Any] | ToolResult:
     """Retrieve the signing secret for the default webhook endpoint. Use this secret to verify that incoming webhook requests are authentically from Replicate."""
 

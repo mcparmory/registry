@@ -1,7 +1,7 @@
 """
 Replicate MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:07:24 UTC
+Generated: 2026-05-12 12:24:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -117,7 +117,7 @@ class DeploymentsPredictionsCreateRequest(StrictModel):
 
 # Operation: create_file
 class FilesCreateRequestBody(StrictModel):
-    content: str = Field(default=..., description="The raw file content to upload. Provide the binary data of the file you want to store.", json_schema_extra={'format': 'binary'})
+    content: str = Field(default=..., description="Base64-encoded file content for upload. The raw file content to upload. Provide the binary data of the file you want to store.", json_schema_extra={'format': 'byte'})
     filename: str | None = Field(default=None, description="The name of the file being uploaded. Must be valid UTF-8 and not exceed 255 bytes in length.", max_length=255)
     metadata: dict[str, Any] | None = Field(default=None, description="Optional custom metadata to associate with the file as a JSON object. Defaults to an empty object if not provided.")
     type_: str | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The MIME type of the file content (e.g., application/zip, application/json, image/png). Defaults to application/octet-stream if not specified.")
