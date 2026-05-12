@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-05-05 15:17:35 UTC
+Generated: 2026-05-12 11:35:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -43,11 +44,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://sheets.googleapis.com")
 SERVER_NAME = "Google Sheets"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1012,6 +1043,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1036,6 +1069,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1252,7 +1287,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Google Sheets", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Apply Spreadsheet Updates",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def apply_spreadsheet_updates(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update."),
     include_spreadsheet_in_response: bool | None = Field(None, alias="includeSpreadsheetInResponse", description="When true, includes the complete spreadsheet resource in the response after updates are applied."),
@@ -1293,13 +1333,19 @@ async def apply_spreadsheet_updates(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Create Spreadsheet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_spreadsheet(
     data_sources: list[_models.DataSource] | None = Field(None, alias="dataSources", description="List of external data sources to connect with the spreadsheet, such as BigQuery or database connections."),
     developer_metadata: list[_models.DeveloperMetadata] | None = Field(None, alias="developerMetadata", description="Developer metadata key-value pairs to associate with the spreadsheet for custom tracking or integration purposes."),
@@ -1393,13 +1439,20 @@ async def create_spreadsheet(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Get Spreadsheet",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spreadsheet(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to retrieve. This ID is required to access the correct spreadsheet."),
     ranges: list[str] | None = Field(None, description="Optional cell ranges to retrieve from the spreadsheet, specified using A1 notation (e.g., A1, A1:D5, or Sheet2!A1:C4). Multiple ranges can be specified to retrieve data from different areas or sheets. When specified, only data intersecting these ranges is returned."),
@@ -1442,7 +1495,12 @@ async def get_spreadsheet(
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Spreadsheet by Data Filter",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def retrieve_spreadsheet_by_data_filter(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to retrieve."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that specify which ranges to return from the spreadsheet. When multiple filters are provided, the response includes data from all matching ranges. If omitted, only spreadsheet metadata is returned without grid data."),
@@ -1481,13 +1539,20 @@ async def retrieve_spreadsheet_by_data_filter(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Get Developer Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_developer_metadata(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet containing the developer metadata you want to retrieve."),
     metadata_id: int = Field(..., alias="metadataId", description="The unique identifier of the developer metadata entry to retrieve. This is a numeric ID assigned when the metadata was created."),
@@ -1529,7 +1594,12 @@ async def get_developer_metadata(
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Search Developer Metadata",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_developer_metadata(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to search for developer metadata."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that define the search criteria. Metadata matching any of the specified filters will be included in the results. Filters can target specific metadata lookups or location regions within the spreadsheet."),
@@ -1568,13 +1638,19 @@ async def search_developer_metadata(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Copy Sheet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_sheet(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet that contains the sheet you want to copy."),
     sheet_id: int = Field(..., alias="sheetId", description="The unique identifier of the sheet to copy. This must be a valid sheet ID within the source spreadsheet."),
@@ -1614,13 +1690,19 @@ async def copy_sheet(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Append Sheet Values",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_sheet_values(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update."),
     range_: str = Field(..., alias="range", description="The range in A1 notation where the operation should search for an existing data table. New values will be appended to the row immediately following the last row of the detected table."),
@@ -1665,13 +1747,20 @@ async def append_sheet_values(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Clear Spreadsheet Values",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def clear_spreadsheet_values(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update. This ID can be found in the spreadsheet URL."),
     ranges: list[str] | None = Field(None, description="One or more cell ranges to clear, specified using A1 notation (e.g., Sheet1!A1:B2) or R1C1 notation. If omitted, no ranges will be cleared. Order of ranges does not affect the operation."),
@@ -1710,13 +1799,20 @@ async def clear_spreadsheet_values(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Clear Spreadsheet Values by Filter",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def clear_spreadsheet_values_by_filter(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update. This ID is typically found in the spreadsheet's URL."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that define which ranges to clear. Each filter is evaluated independently, and all ranges matching any filter will have their values cleared. If not specified, no ranges will be cleared."),
@@ -1755,13 +1851,20 @@ async def clear_spreadsheet_values_by_filter(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Get Spreadsheet Values Batch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spreadsheet_values_batch(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to retrieve data from."),
     date_time_render_option: Literal["SERIAL_NUMBER", "FORMATTED_STRING"] | None = Field(None, alias="dateTimeRenderOption", description="Controls how dates, times, and durations are represented in the output. Choose between serial number format (numeric representation) or formatted string. This setting is ignored if values are returned in formatted value mode. Defaults to serial number format."),
@@ -1807,7 +1910,12 @@ async def get_spreadsheet_values_batch(
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Get Spreadsheet Values by Filter",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_spreadsheet_values_by_filter(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to retrieve data from."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that define which ranges to retrieve. Any ranges matching at least one filter will be included in the response."),
@@ -1849,13 +1957,20 @@ async def get_spreadsheet_values_by_filter(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Batch Update Sheet Values",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_sheet_values_batch(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update."),
     data: list[_models.ValueRange] | None = Field(None, description="An array of value ranges to update, where each range specifies the target cells and the values to write. Order matters as ranges are processed sequentially."),
@@ -1896,13 +2011,20 @@ async def update_sheet_values_batch(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Update Spreadsheet Values by Filter",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_spreadsheet_values_by_filter(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update."),
     data: list[_models.DataFilterValueRange] | None = Field(None, description="Array of data filter value ranges specifying which cells to update and what values to apply. When multiple ranges match a filter, the same values are applied to all matched ranges."),
@@ -1943,13 +2065,20 @@ async def update_spreadsheet_values_by_filter(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Clear Spreadsheet Values Range",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def clear_spreadsheet_values_range(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update. This ID is typically found in the spreadsheet's URL."),
     range_: str = Field(..., alias="range", description="The cells to clear, specified using A1 notation (e.g., Sheet1!A1:B10) or R1C1 notation. Supports single cells, ranges, and multiple ranges."),
@@ -1991,7 +2120,13 @@ async def clear_spreadsheet_values_range(
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Read Spreadsheet Range",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def read_spreadsheet_range(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to read from."),
     range_: str = Field(..., alias="range", description="The cell range to retrieve, specified using A1 notation (e.g., Sheet1!A1:B10) or R1C1 notation."),
@@ -2037,7 +2172,13 @@ async def read_spreadsheet_range(
     return _response_data
 
 # Tags: spreadsheets
-@mcp.tool()
+@mcp.tool(
+    title="Update Sheet Values",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_sheet_values(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update."),
     range_: str = Field(..., alias="range", description="The target range in A1 notation (e.g., 'Sheet1!A1:B10') where values will be written."),
@@ -2081,6 +2222,7 @@ async def update_sheet_values(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 

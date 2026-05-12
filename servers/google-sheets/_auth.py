@@ -1,7 +1,7 @@
 """
 Authentication module for Google Sheets MCP server.
 
-Generated: 2026-05-05 15:17:35 UTC
+Generated: 2026-05-12 11:35:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

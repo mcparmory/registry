@@ -1,13 +1,13 @@
 """
 Google Sheets MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:17:35 UTC
+Generated: 2026-05-12 11:35:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -1403,7 +1403,7 @@ class DataSourceRefreshDailySchedule(PermissiveModel):
 
 class DataSourceRefreshMonthlySchedule(PermissiveModel):
     """A monthly schedule for data to refresh on specific days in the month in a given time interval."""
-    days_of_month: list[int] | None = Field(None, validation_alias="daysOfMonth", serialization_alias="daysOfMonth", description="Days of the month to refresh. Only 1-28 are supported, mapping to the 1st to the 28th day. At least one day must be specified.")
+    days_of_month: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(None, validation_alias="daysOfMonth", serialization_alias="daysOfMonth", description="Days of the month to refresh. Only 1-28 are supported, mapping to the 1st to the 28th day. At least one day must be specified.")
     start_time: TimeOfDay | None = Field(None, validation_alias="startTime", serialization_alias="startTime", description="The start time of a time interval in which a data source refresh is scheduled. Only `hours` part is used. The time interval size defaults to that in the Sheets editor.")
 
 class DataSourceRefreshWeeklySchedule(PermissiveModel):
