@@ -1,4 +1,4 @@
-# Ramp Developer API MCP Server
+# Ramp MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-ramp .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Ramp Developer API MCP Server" \
+LABEL org.opencontainers.image.title="Ramp MCP Server" \
       org.opencontainers.image.vendor="MCP Armory" \
       org.opencontainers.image.source="https://github.com/mcparmory/registry" \
       io.modelcontextprotocol.server.name="com.mcparmory/ramp"

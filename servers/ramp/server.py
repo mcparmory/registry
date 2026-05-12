@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Ramp Developer API MCP Server
-Generated: 2026-05-05 16:05:49 UTC
+Ramp MCP Server
+Generated: 2026-05-12 12:22:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -20,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.ramp.com")
-SERVER_NAME = "Ramp Developer API"
-SERVER_VERSION = "1.0.1"
+SERVER_NAME = "Ramp"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1011,6 +1042,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1035,6 +1068,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1239,10 +1274,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Ramp Developer API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Ramp", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List GL Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_gl_accounts(
     remote_id: str | None = Field(None, description="Filter results to accounts matching this external or remote system identifier."),
     is_active: bool | None = Field(None, description="Filter by account active status: true returns only active accounts, false returns only inactive accounts, omitting this parameter returns all accounts regardless of status."),
@@ -1285,7 +1326,12 @@ async def list_gl_accounts(
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create GL Accounts",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_gl_accounts(gl_accounts: list[_models.GlAccount] = Field(..., description="A list of general ledger accounts to upload for transaction classification. Accepts between 1 and 500 accounts per request. All accounts in the batch must be valid; a single malformed account will cause the entire batch to be rejected.", min_length=1, max_length=500)) -> dict[str, Any] | ToolResult:
     """Batch upload general ledger accounts to classify Ramp transactions. Uploads are all-or-nothing: if any account in the batch is malformed or violates constraints, the entire batch is rejected. Ensure accounts don't already exist on Ramp; use the PATCH endpoint to update existing accounts instead."""
 
@@ -1317,13 +1363,20 @@ async def create_gl_accounts(gl_accounts: list[_models.GlAccount] = Field(..., d
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Get GL Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_gl_account(gl_account_id: str = Field(..., description="The unique identifier (UUID) of the general ledger account to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific general ledger account by its unique identifier. Returns the account details for accounting and financial reporting purposes."""
 
@@ -1359,7 +1412,13 @@ async def get_gl_account(gl_account_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update GL Account",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_gl_account(
     gl_account_id: str = Field(..., description="The unique identifier (UUID) of the general ledger account to update."),
     code: str | None = Field(None, description="The new code for the general ledger account. Provide an empty string to clear the existing code."),
@@ -1397,13 +1456,20 @@ async def update_gl_account(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete GL Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_gl_account(gl_account_id: str = Field(..., description="The unique identifier of the general ledger account to delete, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a general ledger account from the accounting system. This operation removes the account and cannot be undone."""
 
@@ -1439,7 +1505,13 @@ async def delete_gl_account(gl_account_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Accounting Connections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_accounting_connections() -> dict[str, Any] | ToolResult:
     """Retrieve all accounting connections configured for the current business. This returns a complete list of integrated accounting systems and their connection details."""
 
@@ -1466,7 +1538,12 @@ async def list_accounting_connections() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create Accounting Connection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_accounting_connection(
     remote_provider_name: str = Field(..., description="The name of the accounting provider (e.g., QuickBooks, Xero, NetSuite). This identifies which accounting system to connect."),
     settings: _models.PostAccountingConnectionResourceBodySettings | None = Field(None, description="Optional configuration settings specific to the accounting provider's API connection. Settings vary by provider and are only applicable to API-based connections."),
@@ -1501,13 +1578,20 @@ async def create_accounting_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Disconnect Accounting Connection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disconnect_accounting_connection() -> dict[str, Any] | ToolResult:
     """Disconnect an active accounting connection. This operation only supports API-based connections and will remove the integration link between your application and the accounting system."""
 
@@ -1534,7 +1618,13 @@ async def disconnect_accounting_connection() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Get Accounting Connection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_accounting_connection(connection_id: str = Field(..., description="The unique identifier of the accounting connection to retrieve. This ID is used to look up the specific connection record in the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific accounting connection by its unique identifier. Use this to fetch connection settings, status, and configuration details."""
 
@@ -1570,7 +1660,13 @@ async def get_accounting_connection(connection_id: str = Field(..., description=
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Accounting Connection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_accounting_connection(
     connection_id: str = Field(..., description="The unique identifier of the accounting connection to update."),
     settings: _models.PatchAccountingConnectionDetailResourceBodySettings | None = Field(None, description="Configuration settings for the accounting connection. Only applicable to API-based connections; settings vary depending on the connection type and provider requirements."),
@@ -1606,13 +1702,19 @@ async def update_accounting_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Reactivate Accounting Connection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reactivate_accounting_connection(connection_id: str = Field(..., description="The unique identifier (UUID) of the accounting connection to reactivate.")) -> dict[str, Any] | ToolResult:
     """Reactivate a previously disconnected accounting connection, restoring it to active status while preserving all previous field configurations and settings. The business must not have any other active accounting connections at the time of reactivation."""
 
@@ -1648,7 +1750,13 @@ async def reactivate_accounting_connection(connection_id: str = Field(..., descr
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_field_options(
     field_id: str = Field(..., description="The unique identifier (ramp_id) of the custom accounting field whose options you want to retrieve. This is a UUID that must be obtained from custom field endpoints."),
     remote_id: str | None = Field(None, description="Filter results by the external ID of custom accounting field options as they appear in the ERP system."),
@@ -1693,7 +1801,12 @@ async def list_custom_field_options(
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create Custom Field Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_custom_field_options(
     field_id: str = Field(..., description="The UUID of the custom accounting field to which these options belong. This is the ramp_id returned from custom field endpoints."),
     options: list[_models.FieldOption] = Field(..., description="A list of field options to upload for the specified custom accounting field. Must contain between 1 and 500 options. All options in the batch are processed together; if any option is invalid, the entire batch is rejected.", min_length=1, max_length=500),
@@ -1728,13 +1841,20 @@ async def create_custom_field_options(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Field Option",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_field_option(field_option_id: str = Field(..., description="The unique identifier (UUID) of the custom field option to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific custom accounting field option by its unique identifier. Use this to fetch details about a predefined option value for a custom accounting field."""
 
@@ -1770,7 +1890,13 @@ async def get_custom_field_option(field_option_id: str = Field(..., description=
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_field_option(
     field_option_id: str = Field(..., description="The unique identifier (UUID format) of the custom field option to update."),
     code: str | None = Field(None, description="The code identifier for this custom field option. You can provide an empty string to clear the code. Only available for non-ERP integrated systems."),
@@ -1809,13 +1935,20 @@ async def update_custom_field_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_field_option_partial(
     field_option_id: str = Field(..., description="The unique identifier (UUID format) of the custom field option to update."),
     code: str | None = Field(None, description="The code identifier for this custom field option. You can provide an empty string to clear the code. Only available for non-ERP integrated systems."),
@@ -1854,13 +1987,20 @@ async def update_custom_field_option_partial(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Field Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_field_option(field_option_id: str = Field(..., description="The unique identifier (UUID) of the custom field option to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a custom accounting field option by its unique identifier. This operation permanently removes the field option from the accounting system."""
 
@@ -1896,7 +2036,13 @@ async def delete_custom_field_option(field_option_id: str = Field(..., descripti
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Accounting Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_accounting_fields(
     remote_id: str | None = Field(None, description="Filter results to custom accounting fields matching a specific remote or external ID in your ERP system."),
     is_active: bool | None = Field(None, description="Filter by field status: omit to return all fields, true for active fields only, or false for inactive fields only."),
@@ -1938,7 +2084,12 @@ async def list_custom_accounting_fields(
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create Accounting Custom Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_accounting_custom_field(
     id_: str = Field(..., alias="id", description="The unique identifier for this custom field in your ERP system. This ID is used to match and prevent duplicate fields."),
     input_type: Literal["BOOLEAN", "FREE_FORM_TEXT", "SINGLE_CHOICE"] = Field(..., description="The data type for user input: BOOLEAN for true/false values, FREE_FORM_TEXT for open-ended text, or SINGLE_CHOICE for predefined options."),
@@ -1976,13 +2127,20 @@ async def create_accounting_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_field(field_id: str = Field(..., description="The unique identifier (UUID) of the custom accounting field to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a custom accounting field by its unique identifier. Use this to fetch detailed information about a specific custom field configured in your accounting system."""
 
@@ -2018,7 +2176,13 @@ async def get_custom_field(field_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Accounting Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_accounting_field(
     field_id: str = Field(..., description="The unique identifier (UUID) of the custom accounting field to update."),
     is_splittable: bool | None = Field(None, description="Whether this custom field can be split across multiple line items or cost centers."),
@@ -2055,13 +2219,20 @@ async def update_custom_accounting_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_field(field_id: str = Field(..., description="The unique identifier (UUID) of the custom accounting field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom accounting field by its unique identifier. This operation removes the field and its associated data from the accounting system."""
 
@@ -2097,7 +2268,13 @@ async def delete_custom_field(field_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Inventory Item Accounting Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inventory_item_accounting_fields() -> dict[str, Any] | ToolResult:
     """Retrieve the list of available accounting fields for inventory items in the current accounting connection. Use this to understand which fields can be queried or managed for inventory item operations."""
 
@@ -2124,7 +2301,12 @@ async def list_inventory_item_accounting_fields() -> dict[str, Any] | ToolResult
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create Inventory Item Accounting Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_inventory_item_accounting_field(name: str = Field(..., description="The name of the inventory item tracking category. This identifies the type of inventory metric or attribute being tracked (e.g., 'Warehouse Location', 'Serial Number', 'Batch ID').")) -> dict[str, Any] | ToolResult:
     """Create a new inventory item accounting field to track a specific category for inventory items within an accounting connection. Only one active field can exist per accounting connection."""
 
@@ -2156,13 +2338,20 @@ async def create_inventory_item_accounting_field(name: str = Field(..., descript
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Inventory Item Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_inventory_item_field(name: str | None = Field(None, description="The name of the inventory item field to update. Specify which accounting field should be modified.")) -> dict[str, Any] | ToolResult:
     """Update a specific accounting field for an inventory item. Use this to modify individual field values within an inventory item's accounting configuration."""
 
@@ -2194,13 +2383,20 @@ async def update_inventory_item_field(name: str | None = Field(None, description
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Inventory Item Accounting Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_inventory_item_accounting_field() -> dict[str, Any] | ToolResult:
     """Remove a custom accounting field from inventory items. This operation deletes the field definition and its associated data across all inventory items."""
 
@@ -2227,7 +2423,13 @@ async def delete_inventory_item_accounting_field() -> dict[str, Any] | ToolResul
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Inventory Item Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inventory_item_options(
     remote_id: str | None = Field(None, description="Filter results to inventory items matching this external or remote system identifier."),
     is_active: bool | None = Field(None, description="Filter by active status: true returns only active items, false returns only inactive items, and omitting this parameter returns all items regardless of status."),
@@ -2270,7 +2472,12 @@ async def list_inventory_item_options(
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Add Inventory Item Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_inventory_item_options(options: list[_models.InventoryItemOption] = Field(..., description="A list of inventory item options to upload. Must contain between 1 and 500 options. Order is preserved as submitted.", min_length=1, max_length=500)) -> dict[str, Any] | ToolResult:
     """Upload a batch of inventory item options to an active accounting field. Requires an active inventory item accounting field configured for the accounting connection."""
 
@@ -2302,13 +2509,20 @@ async def add_inventory_item_options(options: list[_models.InventoryItemOption] 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Inventory Item Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_inventory_item_option(
     option_id: str = Field(..., description="The unique identifier of the inventory item option to update."),
     name: str | None = Field(None, description="The new name for the inventory item option."),
@@ -2345,13 +2559,20 @@ async def update_inventory_item_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Inventory Item Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_inventory_item_option(option_id: str = Field(..., description="The unique identifier of the inventory item option to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific inventory item option by its ID. This operation removes the option from the system permanently."""
 
@@ -2387,9 +2608,14 @@ async def delete_inventory_item_option(option_id: str = Field(..., description="
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Mark Transactions Ready to Sync",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def mark_transactions_ready_to_sync(
-    object_ids: list[str] = Field(..., description="A list of transaction IDs to mark as ready for sync. Provide between 1 and 500 object IDs per request.", min_length=1, max_length=500),
+    object_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="A list of transaction IDs to mark as ready for sync. Provide between 1 and 500 object IDs per request.", min_length=1, max_length=500),
     object_type: Literal["TRANSACTION"] = Field(..., description="The type of object being marked for sync. Currently supports TRANSACTION objects only."),
 ) -> dict[str, Any] | ToolResult:
     """Mark one or more accounting transactions as ready to sync. This notifies the system that the specified transactions are prepared for synchronization."""
@@ -2422,13 +2648,20 @@ async def mark_transactions_ready_to_sync(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Report Sync Results",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def report_sync_results(
     idempotency_key: str = Field(..., description="A unique identifier for this request, typically a randomly generated UUID. The server uses this to recognize and deduplicate retries of the same request."),
     sync_type: Literal["BILL_PAYMENT_SYNC", "BILL_SYNC", "BROKERAGE_ORDER_SYNC", "REIMBURSEMENT_SYNC", "STATEMENT_CREDIT_SYNC", "TRANSACTION_SYNC", "TRANSFER_SYNC", "WALLET_TRANSFER_SYNC"] = Field(..., description="The category of objects being synced. Must be one of: BILL_PAYMENT_SYNC, BILL_SYNC, BROKERAGE_ORDER_SYNC, REIMBURSEMENT_SYNC, STATEMENT_CREDIT_SYNC, TRANSACTION_SYNC, TRANSFER_SYNC, or WALLET_TRANSFER_SYNC."),
@@ -2465,13 +2698,20 @@ async def report_sync_results(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Get Tax Code Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tax_code_field() -> dict[str, Any] | ToolResult:
     """Retrieve the tax code accounting field configured for the current accounting connection. This field is used to classify transactions for tax reporting purposes."""
 
@@ -2498,7 +2738,12 @@ async def get_tax_code_field() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create Tax Code Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tax_code_field(name: str = Field(..., description="The display name for the tax code accounting field. This name identifies the field within the accounting system.")) -> dict[str, Any] | ToolResult:
     """Create a new tax code accounting field for an accounting connection. Only one active tax code field can exist per connection, so creating a new one will replace any existing field."""
 
@@ -2530,13 +2775,20 @@ async def create_tax_code_field(name: str = Field(..., description="The display 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Tax Code Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tax_code_field(name: str | None = Field(None, description="The new name for the tax code field. This identifier is used to reference the tax code in accounting operations.")) -> dict[str, Any] | ToolResult:
     """Update the name or other properties of a tax code accounting field. Use this operation to modify an existing tax code field's configuration."""
 
@@ -2568,13 +2820,20 @@ async def update_tax_code_field(name: str | None = Field(None, description="The 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tax Code",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tax_code() -> dict[str, Any] | ToolResult:
     """Remove a tax code from the accounting system. This operation deletes the tax code field resource and its associated configuration."""
 
@@ -2601,7 +2860,13 @@ async def delete_tax_code() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Tax Code Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tax_code_options(
     remote_id: str | None = Field(None, description="Filter results to tax codes matching this remote or external identifier from your source system."),
     is_active: bool | None = Field(None, description="Filter by active status: omit to return all tax codes, true for active only, or false for inactive only."),
@@ -2644,7 +2909,12 @@ async def list_tax_code_options(
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Add Tax Code Options",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_tax_code_options(options: list[_models.TaxCodeOption] = Field(..., description="A list of tax code options to upload. Must contain between 1 and 500 options.", min_length=1, max_length=500)) -> dict[str, Any] | ToolResult:
     """Upload tax code options to an active tax code accounting field. Requires an active tax code accounting field to be configured for the accounting connection."""
 
@@ -2676,13 +2946,20 @@ async def add_tax_code_options(options: list[_models.TaxCodeOption] = Field(...,
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Tax Code Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tax_code_option(
     option_id: str = Field(..., description="The unique identifier of the tax code option to update."),
     name: str | None = Field(None, description="The display name for this tax code option."),
@@ -2719,13 +2996,20 @@ async def update_tax_code_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tax Code Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tax_code_option(option_id: str = Field(..., description="The unique identifier of the tax code option to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a tax code option from the accounting system. This action cannot be undone."""
 
@@ -2761,7 +3045,13 @@ async def delete_tax_code_option(option_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Tax Rates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tax_rates(page_size: int | None = Field(None, description="Number of tax rates to return per page. Must be between 2 and 100 results; defaults to 20 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of tax rates configured in the accounting system. Use the page_size parameter to control how many results are returned per page."""
 
@@ -2799,7 +3089,12 @@ async def list_tax_rates(page_size: int | None = Field(None, description="Number
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Upload Tax Rates",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_tax_rates(tax_rates: list[_models.TaxRate] = Field(..., description="A list of tax rates to upload, containing between 1 and 500 rates. Each rate must be properly formatted and not already exist in your Ramp account.", min_length=1, max_length=500)) -> dict[str, Any] | ToolResult:
     """Upload a batch of tax rates to your Ramp account. All rates in the batch are processed together—if any rate is malformed or violates constraints, the entire upload is rejected. Ensure rates are properly formatted and don't already exist in your system."""
 
@@ -2831,13 +3126,20 @@ async def upload_tax_rates(tax_rates: list[_models.TaxRate] = Field(..., descrip
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Tax Rate",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tax_rate(
     tax_rate_id: str = Field(..., description="The unique identifier of the tax rate to update."),
     accounting_gl_account_id: str | None = Field(None, description="The Ramp ID of the GL account to associate with this tax rate. Must be a valid UUID format."),
@@ -2875,13 +3177,20 @@ async def update_tax_rate(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tax Rate",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tax_rate(tax_rate_id: str = Field(..., description="The unique identifier of the tax rate to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a tax rate from the accounting system. This action cannot be undone."""
 
@@ -2917,7 +3226,13 @@ async def delete_tax_rate(tax_rate_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="List Accounting Vendors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendors_accounting(
     remote_id: str | None = Field(None, description="Filter results to vendors matching this remote or external identifier."),
     is_active: bool | None = Field(None, description="Filter by vendor active status: true returns only active vendors, false returns only inactive vendors, and omitting this parameter returns all vendors regardless of status."),
@@ -2960,7 +3275,12 @@ async def list_vendors_accounting(
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Create Vendors",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_vendors(vendors: list[_models.AccountingVendor] = Field(..., description="A list of vendor objects to upload for transaction classification. Between 1 and 500 vendors can be submitted per request. Each vendor must be properly formatted and not already exist in Ramp.", min_length=1, max_length=500)) -> dict[str, Any] | ToolResult:
     """Batch upload vendors to classify Ramp transactions. Uploads are all-or-nothing: if any vendor in the batch is malformed or violates constraints, the entire batch is rejected. Ensure vendors are sanitized and don't already exist in Ramp; use the update endpoint instead for modifying existing vendors."""
 
@@ -2992,13 +3312,20 @@ async def create_vendors(vendors: list[_models.AccountingVendor] = Field(..., de
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Get Vendor Accounting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vendor_accounting(vendor_id: str = Field(..., description="The unique identifier (UUID) of the vendor to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific accounting vendor by its unique identifier."""
 
@@ -3034,7 +3361,13 @@ async def get_vendor_accounting(vendor_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Update Vendor Accounting",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_vendor_accounting(
     vendor_id: str = Field(..., description="The unique identifier of the vendor to update, formatted as a UUID."),
     code: str | None = Field(None, description="The vendor's code identifier. Provide an empty string to clear the existing code."),
@@ -3072,13 +3405,20 @@ async def update_vendor_accounting(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Accounting
-@mcp.tool()
+@mcp.tool(
+    title="Delete Vendor",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_vendor_accounting(vendor_id: str = Field(..., description="The unique identifier (UUID) of the vendor to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an accounting vendor by its unique identifier. This action cannot be undone."""
 
@@ -3114,7 +3454,13 @@ async def delete_vendor_accounting(vendor_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Application
-@mcp.tool()
+@mcp.tool(
+    title="Get Application Resource",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_application_resource() -> dict[str, Any] | ToolResult:
     """Retrieve the active financing application for the business. Each business can have only one active application at a time, so this endpoint returns a single application resource."""
 
@@ -3141,7 +3487,12 @@ async def get_application_resource() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Application
-@mcp.tool()
+@mcp.tool(
+    title="Create Financing Application",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_financing_application(
     applicant: _models.PostApplicationResourceBodyApplicant = Field(..., description="Required information about the applicant, including their contact details and identification."),
     beneficial_owners: list[_models.ApiApplicationPersonParamsRequestBody] | None = Field(None, description="Optional list of individuals who have beneficial ownership in the business. Order may indicate ownership hierarchy or priority."),
@@ -3180,15 +3531,22 @@ async def create_financing_application(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Audit Log
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Log Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_log_events(
-    user_ids: list[str] | None = Field(None, description="Filter results to only include events attributed to specific users. Provide an array of user IDs to narrow the results."),
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter results to only include events attributed to specific users. Provide an array of user IDs to narrow the results."),
     event_actor_types: list[Literal["policy_agent", "ramp", "user"]] | None = Field(None, description="Filter results to only include events from specific actor types (e.g., user, system, service). Provide an array of actor type values."),
     event_types: list[Literal["ABK agent blocked on user", "ABK agent review requested", "ABK agent started", "AI custom field config executed", "Accounting ai auto mark ready", "Activated card", "Added bill field", "Added card acceptance policy", "Added procurement field", "Added user to funds", "Added vendor field", "Admin changed email", "Admin changed phone", "Agent access request resolved", "Agent access requested", "Agent created", "Agent current version changed", "Agent permissions updated", "Agent version created", "Agent version published", "Approval chain updated", "Approval step added", "Approval step approved", "Approval step rejected", "Approval step skipped", "Approval step terminated", "Approved by manager", "Approved card edit request with modifications", "Approved card edit request", "Approved funds edit request with modifications", "Approved funds edit request", "Approved new card request with modifications", "Approved new card request", "Approved procurement change request", "Approved request for new funds with modifications", "Approved request for new funds", "Attendee split", "Bank account updated", "Bill linked to PO", "Bill linked", "Bill pay accepted sync for bank account from vendor network", "Bill pay accepted sync for vendor card acceptance policy from vendor network", "Bill pay accepted sync for vendor check mailing address from vendor network", "Bill pay accepted sync for vendor information from vendor network", "Bill pay accepted sync for vendor tax info from vendor network", "Bill pay accounting manual user action", "Bill pay accounting sync triggered", "Bill pay approval policy updated", "Bill pay automatic card payment no longer eligible", "Bill pay automatic card payment", "Bill pay bank account updated", "Bill pay batch payment initiated", "Bill pay business vendor unlinked from vendor network", "Bill pay card delivery", "Bill pay check address update", "Bill pay check tracking update", "Bill pay deleted bill", "Bill pay delivered payment", "Bill pay dismissed fraud alert", "Bill pay edited payee address", "Bill pay edited payment method", "Bill pay initiated payment refund", "Bill pay mailed check payment", "Bill pay marked as paid", "Bill pay matched transaction to bill", "Bill pay payment failed", "Bill pay payment posted", "Bill pay recurrence info changed for recurring series", "Bill pay rejected sync for bank account from vendor network", "Bill pay rejected sync for vendor card acceptance policy from vendor network", "Bill pay rejected sync for vendor check mailing address from vendor network", "Bill pay rejected sync for vendor information from vendor network", "Bill pay rejected sync for vendor tax info from vendor network", "Bill pay retried payment", "Bill pay returned funds", "Bill unlinked from PO", "Bill unlinked", "Billing config updated", "Blank canvas workflow execution updated", "Blank canvas workflow pause status updated", "Booking request approval policy updated", "Brokerage order updated", "Cancel revision request", "Cancelled by customer", "Cancelled by ramp", "Card delivered", "Card payment initiated", "Cash agent recommendation updated", "Changed bank account on bill", "Changed card holder", "Changed funds user", "Combined contracts with this contract", "Communication sent", "Complete revision", "Created accounting split line item", "Created card", "Created fund from purchase order", "Created merchant error", "Created unrecognized charge", "Created", "Deleted bill field", "Deleted card acceptance policy", "Deleted procurement field", "Deleted vendor field", "Deleted", "Demoted co-owner to member", "Detached funds from spend program", "Document labeled", "Document updated", "Docusign envelope updated", "Draft vendor created", "Draft vendor deleted", "Draft vendor published", "Edited bill field", "Edited card acceptance policy", "Edited contract tracking setting", "Edited procurement field", "Edited spend intent", "Edited tin", "Edited vendor field", "Edited wallet automation", "Email updated", "Emailed purchase order", "Exception given from dispute resolution", "Exception given from repayment", "Exception request approved", "Exception request cancelled", "Exception request denied", "Exception requested", "External ticket created asana", "External ticket created jira", "External ticket created linear", "External ticket created zendesk", "Funds activated from reissued virtual card", "Generated renewal brief for contract", "Ironclad workflow updated", "Issued funds", "Linked funds to spend program", "Locked access to funds", "Locked card", "Managed portfolio transfer updated", "Manager updated", "Mark as accidental", "Matched purchase order to transaction", "Matched transaction to purchase order", "Memo updated", "Merged vendors", "Name updated hris", "Name updated", "New virtual card issued for currency migration", "Notification sent due to purchase order request modification", "Password reset required", "Password reset user", "Password updated user", "Payback cancelled", "Payback payment failed", "Payback payment manually paid", "Payback payment retried", "Payback payment succeeded", "Payback request approved by user", "Payback request cancelled by manager", "Payback request rejected by user", "Payback requested by manager", "Payback triggered by user", "Payee linked to accounting", "Payment run updated", "Payment updated", "Phone updated", "Policy agent suggestion feedback submitted", "Post spend approval policy updated", "Procurement  unmatched purchase order from transaction", "Procurement  unmatched transaction from purchase order", "Procurement agent run completed", "Procurement change request approval policy updated", "Procurement send global form", "Procurement submit global form response", "Procurement vendor onboarding submitted", "Procurement vendor onboarding triggered", "Promoted member to co-owner", "Purchase order accounting sync created vendor", "Purchase order accounting sync failed", "Purchase order accounting sync success", "RFX clarification answered", "RFX clarification question submitted", "RFX closed", "RFX created", "RFX graded", "RFX published", "RFX response redacted", "RFX response submitted", "RFX vendor accepted", "RFX vendor added", "RFX vendor declined", "RFX vendor removed", "Receipt created", "Receipt deleted", "Receipt matched", "Refund cleared", "Refund paid", "Reimbursement bank account updated", "Reimbursement from user", "Reimbursement policy agent suggestion feedback submitted", "Reimbursement submitted", "Reimbursement to user", "Reimbursements disabled", "Reimbursements enabled", "Reissued card", "Rejected card edit request", "Rejected funds edit request", "Rejected new card request", "Rejected procurement change request", "Rejected request for new funds", "Reminded to approve items", "Reminded to upload missing items", "Removed user from funds", "Request revision", "Requested an edit to these funds", "Requested new card", "Requested new funds", "Resolved by ramp", "Review needed", "Reviewed by ramp", "Role updated", "SFTP Authentication Failed", "SFTP Authentication IP and Username Matched", "SFTP Configuration Changed", "Separation of duties disabled", "Separation of duties enabled", "Set member limit on shared fund", "Sourcing event created", "Sourcing event status changed", "Spend allocation change request approval policy updated", "Spend approved", "Spend rejected", "Spend request approval policy updated", "Status updated", "Submitted procurement change request", "Temporarily unlocked access to funds", "Terminated card", "Terminated funds", "Test", "Third party risk management vendor review updated", "This contract was combined with another contract", "Ticket assignee updated", "Ticket status updated", "Totp authenticator created", "Totp authenticator deleted", "Totp authenticator updated", "Transaction approval policy updated", "Transaction cleared", "Transaction entity changed", "Transaction missing item reminder event", "Transaction paid", "Transaction receipt updated", "Transaction submission policy exemption event", "Transferred ownership of funds", "Travel policy selection updated", "Undid marking transaction as accidental", "Unlocked access to funds", "Unlocked card temporarily", "Unlocked card", "Unmark as accidental", "Updated card program", "Updated card", "Updated funds", "Updated spend program", "User accepted invite", "User assigned by external firm", "User assigned through external firm merge", "User created", "User deactivated", "User deleted", "User invited", "User locked", "User login", "User previewed", "User reactivated", "User undeleted", "User unlocked", "Vendor Network updates enabled", "Vendor awarded", "Vendor credit action", "Vendor imported from erp", "Vendor management  vendor added to managed list", "Vendor management  vendor removed from managed list", "Vendor management agreement deleted document", "Vendor management agreement deleted", "Vendor management agreement linked document", "Vendor management agreement linked purchase order", "Vendor management agreement notification type switched", "Vendor management agreement status changed", "Vendor management agreement unlinked document", "Vendor management agreement unlinked purchase order", "Vendor management agreement uploaded document", "Vendor management edited agreement field", "Vendor management expansion request status changed", "Vendor payment approval policy updated", "Vendor profile access created", "Vendor profile access denied", "Vendor profile access edited", "Vendor profile access email sent", "Vendor profile access requested", "Vendor profile access revoked", "Vendor profile all documents downloaded", "Vendor profile document downloaded", "Vendor sync failure", "Viewed sensitive card details", "Violation from manager", "Violation from rule", "Violation from user", "Virtual card reissued", "Workflow restarted due to purchase order request modification"]] | None = Field(None, description="Filter results to only include specific event types (e.g., login, create, delete, update). Provide an array of event type values."),
     page_size: int | None = Field(None, description="Number of results to return per page. Must be between 2 and 100 results; defaults to 20 if not specified."),
@@ -3234,7 +3592,13 @@ async def list_audit_log_events(
     return _response_data
 
 # Tags: Bank Accounts
-@mcp.tool()
+@mcp.tool(
+    title="List Bank Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bank_accounts(page_size: int | None = Field(None, description="Number of bank accounts to return per page. Must be between 2 and 100 results; defaults to 20 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of bank accounts associated with the authenticated user or organization. Results are returned in pages with configurable size."""
 
@@ -3272,7 +3636,13 @@ async def list_bank_accounts(page_size: int | None = Field(None, description="Nu
     return _response_data
 
 # Tags: Bank Accounts
-@mcp.tool()
+@mcp.tool(
+    title="Get Bank Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bank_account(bank_account_id: str = Field(..., description="The unique identifier (UUID) of the bank account to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific bank account by its unique identifier. Returns the complete bank account resource including account details and metadata."""
 
@@ -3308,7 +3678,13 @@ async def get_bank_account(bank_account_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="List Bills with Pagination",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bills_with_pagination(
     entity_id: str | None = Field(None, description="Filter results to bills associated with a specific entity (UUID format)."),
     customer_friendly_payment_id: str | None = Field(None, description="Filter by exact customer-friendly payment ID to retrieve all bills in the same payment or batch payment group."),
@@ -3373,7 +3749,12 @@ async def list_bills_with_pagination(
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Create Bill",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_bill(
     due_at: str = Field(..., description="Due date for payment of the bill in ISO 8601 date format (YYYY-MM-DD)."),
     entity_id: str = Field(..., description="UUID of the business entity associated with this bill."),
@@ -3389,7 +3770,7 @@ async def create_bill(
     memo: str | None = Field(None, description="Internal memo or notes about the bill. Maximum 1000 characters.", max_length=1000),
     payment_details: _models.ApiCreateBankAccountPaymentParamsRequestBody | _models.ApiCreateBillVendorPaymentParamsRequestBody | _models.ApiCreateCardBillPaymentParamsRequestBody | _models.ApiCreateManualBillPaymentParamsRequestBody | None = Field(None, description="Payment method details for the bill. Schema varies based on the payment method selected (e.g., bank transfer, check, credit card)."),
     posting_date: str | None = Field(None, description="Date the bill is posted to the accounting system in ISO 8601 date format (YYYY-MM-DD). If not provided, defaults to the issued date."),
-    purchase_order_ids: list[str] | None = Field(None, description="List of purchase order UUIDs to match and reconcile against this bill for three-way matching."),
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of purchase order UUIDs to match and reconcile against this bill for three-way matching."),
     remote_id: str | None = Field(None, description="External identifier for this bill from your system or ERP. When provided, enable_accounting_sync must be set to true."),
     vendor_contact_id: str | None = Field(None, description="UUID of the vendor contact to receive this bill. Must be associated with the specified vendor unless use_default_vendor_contact is enabled."),
     vendor_memo: str | None = Field(None, description="Message or memo to include for the vendor. Maximum 400 characters.", max_length=400),
@@ -3424,13 +3805,20 @@ async def create_bill(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="List Draft Bills",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_draft_bills(
     entity_id: str | None = Field(None, description="Filter results to draft bills associated with a specific entity, specified as a UUID."),
     invoice_number: str | None = Field(None, description="Filter results to draft bills matching an exact invoice number."),
@@ -3478,7 +3866,12 @@ async def list_draft_bills(
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Create Draft Bill",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_draft_bill(
     vendor_id: str = Field(..., description="UUID of the vendor who issued this bill. Required to create the draft."),
     accounting_field_selections: list[_models.ApiCreateAccountingFieldParamsRequestBody] | None = Field(None, description="List of accounting field selections to code the bill for accounting purposes."),
@@ -3492,7 +3885,7 @@ async def create_draft_bill(
     line_items: list[_models.ApiCreateBillLineItemParamsRequestBody] | None = Field(None, description="List of line items detailing charges on the bill. Providing this replaces all existing line items."),
     memo: str | None = Field(None, description="Internal notes or memo about the bill, up to 1000 characters.", max_length=1000),
     posting_date: str | None = Field(None, description="Date the bill is posted to the accounting system in ISO 8601 date format (YYYY-MM-DD)."),
-    purchase_order_ids: list[str] | None = Field(None, description="List of purchase order UUIDs to match and link to this bill. Providing this replaces all existing linked purchase orders."),
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of purchase order UUIDs to match and link to this bill. Providing this replaces all existing linked purchase orders."),
     remote_id: str | None = Field(None, description="External identifier for this bill from your system, useful for tracking and reconciliation."),
     vendor_contact_id: str | None = Field(None, description="UUID of the vendor contact person associated with this bill; the contact must belong to the specified vendor."),
 ) -> dict[str, Any] | ToolResult:
@@ -3526,13 +3919,20 @@ async def create_draft_bill(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Get Draft Bill",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_draft_bill(draft_bill_id: str = Field(..., description="The unique identifier of the draft bill to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific draft bill by its unique identifier. Use this to view the current state and details of a bill in draft status."""
 
@@ -3568,7 +3968,13 @@ async def get_draft_bill(draft_bill_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Update Draft Bill",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_draft_bill(
     draft_bill_id: str = Field(..., description="The unique identifier of the draft bill to update."),
     accounting_field_selections: list[_models.ApiCreateAccountingFieldParamsRequestBody] | None = Field(None, description="List of accounting field options selected to categorize and code the bill for accounting purposes."),
@@ -3582,7 +3988,7 @@ async def update_draft_bill(
     line_items: list[_models.ApiCreateBillLineItemParamsRequestBody] | None = Field(None, description="List of line items detailing charges, quantities, and amounts on the bill. Providing this list replaces all previously existing line items."),
     memo: str | None = Field(None, description="Internal notes or comments about the bill, up to 1000 characters.", max_length=1000),
     posting_date: str | None = Field(None, description="The date the bill is posted or recorded in the accounting system, specified as a calendar date."),
-    purchase_order_ids: list[str] | None = Field(None, description="List of purchase order identifiers to match and link with this bill. Providing this list replaces all previously linked purchase orders."),
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of purchase order identifiers to match and link with this bill. Providing this list replaces all previously linked purchase orders."),
     remote_id: str | None = Field(None, description="An external identifier or reference number for this bill from your internal system or vendor portal."),
     vendor_contact_id: str | None = Field(None, description="The UUID of the vendor contact person associated with this bill; the contact must belong to the specified vendor."),
     vendor_id: str | None = Field(None, description="The UUID of the vendor issuing this bill."),
@@ -3618,17 +4024,23 @@ async def update_draft_bill(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Add Draft Bill Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_draft_bill_attachment(
     draft_bill_id: str = Field(..., description="The unique identifier of the draft bill to which the attachment will be uploaded."),
     attachment_type: Literal["EMAIL", "FILE", "INVOICE", "VENDOR_CREDIT"] = Field(..., description="The classification of the attachment. Use 'INVOICE' to designate the actual invoice document for the bill; only one INVOICE attachment is permitted per draft bill."),
-    file_: str = Field(..., alias="file", description="The file to upload as a binary attachment. The file should be included in the multipart/form-data request with the part name 'file' and Content-Disposition header set to 'attachment'."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file to upload as a binary attachment. The file should be included in the multipart/form-data request with the part name 'file' and Content-Disposition header set to 'attachment'.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload a file attachment to a draft bill. Only one INVOICE type attachment is allowed per draft bill."""
 
@@ -3669,7 +4081,13 @@ async def add_draft_bill_attachment(
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Get Bill",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bill(bill_id: str = Field(..., description="The unique identifier of the bill to retrieve. This is a required string value that identifies which bill to fetch.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific bill by its unique identifier. Returns the complete bill details including charges, dates, and payment information."""
 
@@ -3705,7 +4123,13 @@ async def get_bill(bill_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Update Bill",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_bill(
     bill_id: str = Field(..., description="The unique identifier of the bill to update."),
     accounting_field_selections: list[_models.ApiCreateAccountingFieldParamsRequestBody] | None = Field(None, description="List of accounting field selections used to code the bill for accounting purposes."),
@@ -3717,7 +4141,7 @@ async def update_bill(
     line_items: list[_models.ApiCreateBillLineItemParamsRequestBody] | None = Field(None, description="List of line items detailing charges on the bill. Providing this replaces all existing line items."),
     memo: str | None = Field(None, description="Internal memo or notes about the bill, up to 1000 characters.", max_length=1000),
     posting_date: str | None = Field(None, description="The date the bill is posted to the accounting system, specified as a date in ISO 8601 format (YYYY-MM-DD)."),
-    purchase_order_ids: list[str] | None = Field(None, description="List of purchase order identifiers to match against this bill. Providing this replaces all existing linked purchase orders."),
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of purchase order identifiers to match against this bill. Providing this replaces all existing linked purchase orders."),
     remote_id: str | None = Field(None, description="An external identifier that uniquely identifies this bill in the client's system."),
     vendor_contact_id: str | None = Field(None, description="The UUID of the vendor contact associated with this bill. The contact must belong to the specified vendor."),
     vendor_id: str | None = Field(None, description="The UUID of the vendor who issued this bill."),
@@ -3754,13 +4178,20 @@ async def update_bill(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Archive Bill",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_bill(bill_id: str = Field(..., description="The unique identifier of the bill to archive. Paid bills and bills belonging to a batch payment cannot be deleted.")) -> dict[str, Any] | ToolResult:
     """Archive a bill and cancel associated inflight payments or terminate attached one-time cards. This is a destructive action that cannot be reversed for paid bills or bills in batch payments."""
 
@@ -3796,11 +4227,16 @@ async def archive_bill(bill_id: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Bill
-@mcp.tool()
+@mcp.tool(
+    title="Add Bill Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_bill_attachment(
     bill_id: str = Field(..., description="The unique identifier of the bill to attach the file to, formatted as a UUID."),
     attachment_type: Literal["EMAIL", "FILE", "INVOICE", "VENDOR_CREDIT"] = Field(..., description="The classification of the attachment. Use 'INVOICE' to designate the actual invoice document for the bill; only one INVOICE attachment is permitted per bill."),
-    file_: str = Field(..., alias="file", description="The binary file content to upload as the attachment."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file content to upload as the attachment.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload a file attachment to an existing bill. Note that only one INVOICE type attachment is allowed per bill."""
 
@@ -3841,7 +4277,13 @@ async def add_bill_attachment(
     return _response_data
 
 # Tags: Business
-@mcp.tool()
+@mcp.tool(
+    title="Get Business",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_business() -> dict[str, Any] | ToolResult:
     """Retrieve the authenticated company's business profile and organizational information."""
 
@@ -3868,7 +4310,13 @@ async def get_business() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Business
-@mcp.tool()
+@mcp.tool(
+    title="Get Business Balance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_business_balance() -> dict[str, Any] | ToolResult:
     """Retrieve the current balance information for your business account, including available funds and account status."""
 
@@ -3895,7 +4343,13 @@ async def get_business_balance() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="List Cards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cards(
     entity_id: str | None = Field(None, description="Filter results to cards belonging to a specific business entity, specified as a UUID."),
     user_id: str | None = Field(None, description="Filter results to cards owned by a specific user, specified as a UUID."),
@@ -3939,7 +4393,13 @@ async def list_cards(
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Create Physical Card",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_physical_card(
     idempotency_key: str = Field(..., description="A unique identifier (typically a UUID) generated by the client to ensure idempotent requests. The server uses this to recognize and deduplicate retries of the same request."),
     user_id: str = Field(..., description="UUID of the user who will own and use the card."),
@@ -3978,13 +4438,20 @@ async def create_physical_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Get Card Deferred Task Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_card_deferred_task_status(task_id: str = Field(..., description="The unique identifier of the deferred task, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a deferred card processing task. Use this to poll for completion of asynchronous card operations."""
 
@@ -4020,7 +4487,13 @@ async def get_card_deferred_task_status(task_id: str = Field(..., description="T
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Create Virtual Card",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_virtual_card(
     idempotency_key: str = Field(..., description="A unique identifier (typically a UUID) generated by the client to prevent duplicate card creation if the request is retried. The server uses this to recognize and deduplicate subsequent attempts of the same request."),
     user_id: str = Field(..., description="UUID of the user who will own and use the card. This is required to identify the cardholder."),
@@ -4058,13 +4531,20 @@ async def create_virtual_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Get Card",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_card(card_id: str = Field(..., description="The unique identifier of the card to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific card by its unique identifier."""
 
@@ -4100,7 +4580,13 @@ async def get_card(card_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Update Card",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_card(
     card_id: str = Field(..., description="The unique identifier of the card to update."),
     entity_id: str | None = Field(None, description="The UUID of the business entity to associate with this card. Use this to reassign the card to a different entity."),
@@ -4139,13 +4625,20 @@ async def update_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Suspend Card",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def suspend_card(
     card_id: str = Field(..., description="The unique identifier of the card to suspend."),
     idempotency_key: str = Field(..., description="A unique identifier generated by the client (typically a UUID) to ensure idempotent behavior. The server uses this to recognize and deduplicate retried requests, preventing duplicate suspensions if the request is sent multiple times."),
@@ -4181,13 +4674,21 @@ async def suspend_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Delete Card",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_card(
     card_id: str = Field(..., description="The unique identifier of the card to terminate."),
     idempotency_key: str = Field(..., description="A unique value generated by the client (typically a UUID) to ensure idempotent behavior. The server uses this key to recognize and deduplicate retried requests, preventing duplicate terminations if the request is sent multiple times."),
@@ -4223,13 +4724,19 @@ async def delete_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Card
-@mcp.tool()
+@mcp.tool(
+    title="Unsuspend Card",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unsuspend_card(
     card_id: str = Field(..., description="The unique identifier of the card to unsuspend."),
     idempotency_key: str = Field(..., description="A unique identifier (typically a UUID) generated by the client to ensure idempotent request handling. The server uses this to recognize and deduplicate retries of the same request."),
@@ -4265,13 +4772,20 @@ async def unsuspend_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Cashback
-@mcp.tool()
+@mcp.tool(
+    title="List Cashbacks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cashbacks(
     sync_status: Literal["NOT_SYNC_READY", "SYNCED", "SYNC_READY"] | None = Field(None, description="Filter results by synchronization status. Use NOT_SYNC_READY for cashbacks pending sync, SYNC_READY for those ready to sync, or SYNCED for already synchronized cashbacks. When provided, this filter takes precedence over other sync-related filters."),
     entity_id: str | None = Field(None, description="Filter cashbacks to those associated with a specific business entity, specified as a UUID."),
@@ -4314,7 +4828,13 @@ async def list_cashbacks(
     return _response_data
 
 # Tags: Cashback
-@mcp.tool()
+@mcp.tool(
+    title="Get Cashback",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cashback(cashback_id: str = Field(..., description="The unique identifier of the cashback payment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific cashback payment by its unique identifier."""
 
@@ -4350,7 +4870,13 @@ async def get_cashback(cashback_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Tables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_tables() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all custom tables available in the developer environment. This operation returns metadata for custom table definitions that can be used to store and manage custom records."""
 
@@ -4377,7 +4903,13 @@ async def list_custom_tables() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Table Columns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_table_columns(custom_table_name: str = Field(..., description="The name of the custom table for which to list columns. This is the identifier of the custom table resource.")) -> dict[str, Any] | ToolResult:
     """Retrieve all columns defined for a specific custom table. Returns the column metadata including names, types, and configurations for the specified custom table."""
 
@@ -4413,7 +4945,13 @@ async def list_custom_table_columns(custom_table_name: str = Field(..., descript
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Table Rows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_table_rows(
     custom_table_name: str = Field(..., description="The name of the custom table to query for rows."),
     external_key: list[str] | None = Field(None, description="Filter results by the external key of custom rows. Accepts one or more external key values to match against."),
@@ -4457,7 +4995,13 @@ async def list_custom_table_rows(
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Table Rows",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_table_rows(
     custom_table_name: str = Field(..., description="The name of the custom table where rows will be inserted or updated."),
     data: list[_models.CustomRowColumnContentsByColumnNameRequestBody] = Field(..., description="An array of row objects to insert or update. All objects must have identical column names; use null to omit setting a value for a specific column in a row."),
@@ -4493,13 +5037,20 @@ async def update_custom_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Table Rows",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_table_rows(
     custom_table_name: str = Field(..., description="The name of the custom table from which rows will be deleted."),
     data: list[_models.CustomRowExternalKeyRequestBody] = Field(..., description="An array of external keys identifying the rows to delete. Each key must correspond to an existing row in the specified custom table."),
@@ -4535,13 +5086,20 @@ async def delete_custom_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Table Row External Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_table_row_external_key(
     custom_table_name: str = Field(..., description="The name of the custom table containing the row to be updated."),
     row_id: str = Field(..., description="The unique identifier of the row whose external key should be changed."),
@@ -4578,13 +5136,19 @@ async def update_custom_table_row_external_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Append Custom Table Rows",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_custom_table_rows(
     table_name: str = Field(..., description="The name of the custom table where rows will be appended or updated."),
     data: list[_models.CustomRowColumnContentsByColumnNameRequestBody] = Field(..., description="An array of row objects to insert or update. All objects in the array must have identical column names; use null for any columns where a value should not be set."),
@@ -4620,13 +5184,20 @@ async def append_custom_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Remove Custom Table Row Cells",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_custom_table_row_cells(
     table_name: str = Field(..., description="The name of the custom table from which cells will be removed. This identifies the target table for the operation."),
     data: list[_models.CustomRowColumnContentsByColumnNameRequestBody] = Field(..., description="An array of row specifications indicating which cells to remove. Each row entry must specify the row identifier and list the column names whose cells should be cleared. All entries must use consistent column naming."),
@@ -4662,13 +5233,20 @@ async def remove_custom_table_row_cells(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Matrix Tables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_matrix_tables() -> dict[str, Any] | ToolResult:
     """Retrieve all Matrix tables configured for your business. Matrix tables are custom data structures used to organize and manage complex, multi-dimensional business data."""
 
@@ -4695,7 +5273,12 @@ async def list_matrix_tables() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Create Matrix Table",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_matrix_table(
     input_columns: list[_models.DeveloperApiMatrixInputColumnDefRequestBody] = Field(..., description="Array of input columns that define the matrix dimensions. Each column can reference existing fields or accept numeric values. The order of columns defines the lookup hierarchy."),
     label: str = Field(..., description="Human-readable display name for the matrix table, shown in the user interface."),
@@ -4732,13 +5315,19 @@ async def create_matrix_table(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Add Result Column to Matrix Table",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_result_column_to_matrix_table(
     table_name: str = Field(..., description="The name of the matrix table to which the result column will be added."),
     cardinality: Literal["many_to_many", "many_to_one"] = Field(..., description="The relationship cardinality for the result column: either many_to_one or many_to_many, defining how the result data relates to the matrix rows."),
@@ -4777,13 +5366,20 @@ async def add_result_column_to_matrix_table(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Rename Matrix Column",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def rename_matrix_column(
     column_name: str = Field(..., description="The current API name of the column to rename within the matrix table."),
     table_name: str = Field(..., description="The name of the matrix table containing the column to rename."),
@@ -4820,13 +5416,19 @@ async def rename_matrix_column(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Matrix Table Rows",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_matrix_table_rows(
     table_name: str = Field(..., description="The name of the matrix table to query."),
     external_keys: list[str] | None = Field(None, description="Optional list of external keys to filter results to specific rows. Only rows matching one of the provided keys are returned."),
@@ -4864,13 +5466,19 @@ async def list_matrix_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Rename Matrix Table",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rename_matrix_table(
     table_name: str = Field(..., description="The current API name of the Matrix table to be renamed. This is the identifier used to reference the table in API operations."),
     new_name: str = Field(..., description="The new API name for the Matrix table. This will become the identifier used to reference the table in subsequent API operations."),
@@ -4906,13 +5514,20 @@ async def rename_matrix_table(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Upsert Matrix Table Rows",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upsert_matrix_table_rows(
     table_name: str = Field(..., description="The name of the matrix table to upsert rows into."),
     data: list[_models.MatrixRowInputByNameRequestBody] = Field(..., description="Array of row objects to create or update. Each row must include an external_key field to identify whether it should be created or updated. Order is not significant."),
@@ -4948,13 +5563,19 @@ async def upsert_matrix_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Append Matrix Table Cells",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_matrix_table_cells(
     table_name: str = Field(..., description="The name of the matrix table where cells will be appended. This identifies which custom record table to update."),
     data: list[_models.MatrixRowInputByNameRequestBody] = Field(..., description="An array of row objects, each containing cells to append to many-to-many result columns. Order is preserved as provided. Each row should specify the target row and the cell values to add."),
@@ -4990,13 +5611,20 @@ async def append_matrix_table_cells(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Remove Matrix Table Cells",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_matrix_table_cells(
     table_name: str = Field(..., description="The name of the matrix table from which cells will be removed."),
     data: list[_models.MatrixRowInputByNameRequestBody] = Field(..., description="An array of row objects specifying which cells to remove from many-to-many result columns. Each row entry identifies the target row and the specific cell values to delete."),
@@ -5032,13 +5660,20 @@ async def remove_matrix_table_cells(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Delete Matrix Row",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_matrix_row(
     row_id: str = Field(..., description="The unique identifier of the matrix table row to delete."),
     table_name: str = Field(..., description="The name of the matrix table containing the row to delete."),
@@ -5077,7 +5712,13 @@ async def delete_matrix_row(
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Native Tables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_native_tables() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all native Ramp tables available in the developer environment. Use this to discover and reference custom record tables for integration purposes."""
 
@@ -5104,7 +5745,13 @@ async def list_native_tables() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Native Table Columns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_native_table_columns(native_table_name: str = Field(..., description="The name of the native Ramp table for which to retrieve custom columns. This identifies the specific table whose column definitions should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom columns defined for a specified native Ramp table. This operation returns the column metadata and configuration for the given native table."""
 
@@ -5140,7 +5787,13 @@ async def list_native_table_columns(native_table_name: str = Field(..., descript
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="List Native Table Rows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_native_table_rows(
     native_table_name: str = Field(..., description="The name of the Native Ramp table to query for rows."),
     include_all_referenced_rows: bool | None = Field(None, description="When enabled, includes all referenced rows within each cell instead of a limited subset. Defaults to false."),
@@ -5184,7 +5837,13 @@ async def list_native_table_rows(
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Update Native Table Rows",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_native_table_rows(
     native_table_name: str = Field(..., description="The name of the Native Ramp table where rows will be inserted or updated."),
     data: list[_models.NativeRowColumnContentsByColumnNameRequestBody] = Field(..., description="An array of row objects to insert or update. All objects must contain the same set of column names; use `null` values for columns that should not be set on specific rows."),
@@ -5220,13 +5879,19 @@ async def update_native_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Append Native Table Rows",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def append_native_table_rows(
     native_table_name: str = Field(..., description="The name of the Native Ramp table where rows will be appended or updated."),
     data: list[_models.NativeRowColumnContentsByColumnNameRequestBody] = Field(..., description="An array of row objects to insert or update. Each row must contain the same set of column names. Use null for any column value that should not be set, allowing partial row updates."),
@@ -5262,13 +5927,20 @@ async def append_native_table_rows(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom Records
-@mcp.tool()
+@mcp.tool(
+    title="Remove Native Table Row Cells",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_native_table_row_cells(
     native_table_name: str = Field(..., description="The name of the native table from which cells will be removed. This identifies the specific Native Ramp table to modify."),
     data: list[_models.NativeRowColumnContentsByColumnNameRequestBody] = Field(..., description="Array of row specifications indicating which cells to remove. Each row entry must specify the row identifier and the column names whose cells should be cleared. All entries must use consistent column naming."),
@@ -5304,13 +5976,20 @@ async def remove_native_table_row_cells(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Department
-@mcp.tool()
+@mcp.tool(
+    title="List Departments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_departments(page_size: int | None = Field(None, description="Number of departments to return per page. Must be between 2 and 100 items; defaults to 20 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all departments. Results are returned in pages with a configurable size to support efficient browsing of large department collections."""
 
@@ -5348,7 +6027,12 @@ async def list_departments(page_size: int | None = Field(None, description="Numb
     return _response_data
 
 # Tags: Department
-@mcp.tool()
+@mcp.tool(
+    title="Create Department",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_department(name: str = Field(..., description="The display name for the department. This identifier is used to reference the department throughout the system.")) -> dict[str, Any] | ToolResult:
     """Create a new department with the specified name. The department will be added to the organization and made available for use in resource allocation and team management."""
 
@@ -5380,13 +6064,20 @@ async def create_department(name: str = Field(..., description="The display name
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Department
-@mcp.tool()
+@mcp.tool(
+    title="Get Department",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_department(department_id: str = Field(..., description="The unique identifier of the department to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific department by its unique identifier."""
 
@@ -5422,7 +6113,13 @@ async def get_department(department_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Department
-@mcp.tool()
+@mcp.tool(
+    title="Update Department",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_department(
     department_id: str = Field(..., description="The unique identifier of the department to update, formatted as a UUID."),
     name: str = Field(..., description="The new name for the department."),
@@ -5458,13 +6155,19 @@ async def update_department(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Embedded Cards
-@mcp.tool()
+@mcp.tool(
+    title="Create Card Embed Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_card_embed_token(
     card_id: str = Field(..., description="The unique identifier of the card for which to create an embed token."),
     parent_origin: str = Field(..., description="The origin URL where the card will be embedded, specified as a valid HTTP or HTTPS URL with hostname (e.g., https://app.example.com/). Localhost origins are not permitted in production environments."),
@@ -5500,13 +6203,20 @@ async def create_card_embed_token(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Business Entities
-@mcp.tool()
+@mcp.tool(
+    title="List Entities with Pagination",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entities_with_pagination(
     currency: Literal["AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BOV", "BRL", "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHE", "CHF", "CHW", "CLF", "CLP", "CNH", "CNY", "COP", "COU", "CRC", "CUC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "EURC", "FJD", "FKP", "GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR", "MVR", "MWK", "MXN", "MXV", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLE", "SLL", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD", "USDB", "USDC", "USN", "UYI", "UYU", "UYW", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAD", "XAF", "XAG", "XAU", "XBA", "XBB", "XBC", "XBD", "XCD", "XCG", "XDR", "XOF", "XPD", "XPF", "XPT", "XSU", "XTS", "XUA", "XXX", "YER", "ZAR", "ZMW", "ZWG", "ZWL"] | None = Field(None, description="Filter results to entities using a specific currency code (e.g., USD, EUR, GBP). Accepts ISO 4217 currency codes and cryptocurrency variants."),
     entity_name: str | None = Field(None, description="Filter results to entities matching a specific name or partial name."),
@@ -5551,7 +6261,13 @@ async def list_entities_with_pagination(
     return _response_data
 
 # Tags: Business Entities
-@mcp.tool()
+@mcp.tool(
+    title="Get Entity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_entity(
     entity_id: str = Field(..., description="The unique identifier of the business entity to retrieve, formatted as a UUID."),
     hide_inactive: bool | None = Field(None, description="When enabled, excludes inactive entities from the results. Defaults to false, returning all entities regardless of active status."),
@@ -5593,7 +6309,13 @@ async def get_entity(
     return _response_data
 
 # Tags: Item Receipts
-@mcp.tool()
+@mcp.tool(
+    title="List Item Receipts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_item_receipts(
     page_size: int | None = Field(None, description="Number of results per page, between 2 and 100. Defaults to 20 if not specified."),
     entity_id: str | None = Field(None, description="Filter results to a specific business entity using its unique identifier (UUID format)."),
@@ -5637,7 +6359,12 @@ async def list_item_receipts(
     return _response_data
 
 # Tags: Item Receipts
-@mcp.tool()
+@mcp.tool(
+    title="Create Item Receipt",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_item_receipt(
     item_receipt_line_items: list[_models.ApiItemReceiptLineItemCreateParamsRequestBody] = Field(..., description="Array of line items included in this receipt, each specifying the items received. Order of items in the array is preserved as submitted."),
     item_receipt_number: str = Field(..., description="Unique identifier for this item receipt, used to reference and track the receipt in your system."),
@@ -5675,13 +6402,20 @@ async def create_item_receipt(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Item Receipts
-@mcp.tool()
+@mcp.tool(
+    title="Get Item Receipt",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_item_receipt(item_receipt_id: str = Field(..., description="The unique identifier of the item receipt to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single item receipt by its unique identifier. Returns the complete receipt details for the specified item receipt."""
 
@@ -5717,7 +6451,13 @@ async def get_item_receipt(item_receipt_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Item Receipts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Item Receipt",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_item_receipt(item_receipt_id: str = Field(..., description="The unique identifier (UUID) of the item receipt to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific item receipt by its unique identifier. This action cannot be undone."""
 
@@ -5753,7 +6493,13 @@ async def delete_item_receipt(item_receipt_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="List Spend Limits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_spend_limits(
     entity_id: str | None = Field(None, description="Filter results to limits associated with a specific business entity, specified as a UUID."),
     spend_program_id: str | None = Field(None, description="Filter results to limits linked to a specific spend program, specified as a UUID."),
@@ -5802,7 +6548,13 @@ async def list_spend_limits(
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Create Spend Limit",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_spend_limit(
     idempotency_key: str = Field(..., description="A unique identifier (UUID) generated by the client to prevent duplicate limit creation if the request is retried. The server uses this to recognize and deduplicate subsequent attempts of the same request."),
     user_id: str = Field(..., description="UUID of the user who owns and is the primary user of this spend limit."),
@@ -5842,13 +6594,20 @@ async def create_spend_limit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Get Spend Limit Deferred Task Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spend_limit_deferred_task_status(task_id: str = Field(..., description="The unique identifier of the deferred task, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a deferred spend limit task. Use this to check the progress and outcome of asynchronous spend limit operations."""
 
@@ -5884,7 +6643,13 @@ async def get_spend_limit_deferred_task_status(task_id: str = Field(..., descrip
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Get Spend Limit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spend_limit(spend_limit_id: str = Field(..., description="The unique identifier of the spending limit to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific spending limit by its ID. Use this to fetch current limit configuration and status."""
 
@@ -5920,7 +6685,13 @@ async def get_spend_limit(spend_limit_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Update Spend Limit",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_spend_limit(
     spend_limit_id: str = Field(..., description="The unique identifier of the spend limit to update."),
     accounting_rules: list[_models.SpendLimitAccountingRulesDataRequestBody] | None = Field(None, description="Set or modify accounting rules that apply to all card transactions and reimbursements under this spend limit."),
@@ -5963,13 +6734,20 @@ async def update_spend_limit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Update Spend Limit",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_spend_limit_partial(
     spend_limit_id: str = Field(..., description="The unique identifier of the spend limit to update."),
     accounting_rules: list[_models.SpendLimitAccountingRulesDataRequestBody] | None = Field(None, description="Set or modify accounting rules that apply to all card transactions and reimbursements under this spend limit."),
@@ -6012,16 +6790,22 @@ async def update_spend_limit_partial(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Add Users to Spend Limit",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_users_to_spend_limit(
     spend_limit_id: str = Field(..., description="The unique identifier (UUID) of the spend limit to which users will be added."),
-    user_ids: list[str] | None = Field(None, description="Array of user identifiers to add to the shared spend limit. Each entry should be a valid user ID in the system."),
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Array of user identifiers to add to the shared spend limit. Each entry should be a valid user ID in the system."),
 ) -> dict[str, Any] | ToolResult:
     """Add one or more users to a shared spend limit, allowing them to access and manage the allocation together."""
 
@@ -6054,13 +6838,20 @@ async def add_users_to_spend_limit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Terminate Spend Limit",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def terminate_spend_limit(
     spend_limit_id: str = Field(..., description="The unique identifier of the spend limit to terminate."),
     idempotency_key: str = Field(..., description="A unique value (typically a UUID) generated by the client to ensure idempotent request handling. The server uses this to recognize and deduplicate retries of the same request."),
@@ -6096,16 +6887,23 @@ async def terminate_spend_limit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Remove Users from Spend Limit",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_users_from_spend_limit(
     spend_limit_id: str = Field(..., description="The unique identifier (UUID) of the spend limit from which users will be removed."),
-    user_ids: list[str] | None = Field(None, description="Array of user identifiers to remove from the spend limit. If omitted, no users are removed."),
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Array of user identifiers to remove from the spend limit. If omitted, no users are removed."),
 ) -> dict[str, Any] | ToolResult:
     """Remove one or more users from a shared spend limit, revoking their access to that limit's budget allocation."""
 
@@ -6138,13 +6936,20 @@ async def remove_users_from_spend_limit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Suspend Spend Limit",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def suspend_spend_limit(spend_limit_id: str = Field(..., description="The unique identifier of the spend limit to suspend.")) -> dict[str, Any] | ToolResult:
     """Suspend an active spend limit to temporarily halt enforcement of spending restrictions without deleting the limit configuration."""
 
@@ -6180,7 +6985,12 @@ async def suspend_spend_limit(spend_limit_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Limit
-@mcp.tool()
+@mcp.tool(
+    title="Unsuspend Spend Limit",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unsuspend_spend_limit(spend_limit_id: str = Field(..., description="The unique identifier of the spend limit to unsuspend.")) -> dict[str, Any] | ToolResult:
     """Reactivate a suspended spending limit, allowing it to enforce restrictions again."""
 
@@ -6216,7 +7026,13 @@ async def unsuspend_spend_limit(spend_limit_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Location
-@mcp.tool()
+@mcp.tool(
+    title="List Locations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_locations(
     entity_id: str | None = Field(None, description="Filter results to locations associated with a specific business entity, specified as a UUID."),
     page_size: int | None = Field(None, description="Number of results per page, between 2 and 100 inclusive. Defaults to 20 if not specified."),
@@ -6257,7 +7073,12 @@ async def list_locations(
     return _response_data
 
 # Tags: Location
-@mcp.tool()
+@mcp.tool(
+    title="Create Location",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_location(
     name: str = Field(..., description="The display name for the location. This is a required field that uniquely identifies the location within its entity."),
     entity_id: str | None = Field(None, description="UUID identifier of the business entity this location belongs to. If not provided, the location may be created under a default or current entity context."),
@@ -6292,13 +7113,20 @@ async def create_location(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Location
-@mcp.tool()
+@mcp.tool(
+    title="Get Location",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_location(location_id: str = Field(..., description="The unique identifier of the location to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific location by its unique identifier. Returns detailed information about the requested location."""
 
@@ -6334,7 +7162,13 @@ async def get_location(location_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Location
-@mcp.tool()
+@mcp.tool(
+    title="Update Location",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_location(
     location_id: str = Field(..., description="The unique identifier of the location to update, formatted as a UUID."),
     name: str = Field(..., description="The updated name for the location."),
@@ -6371,13 +7205,20 @@ async def update_location(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Memo
-@mcp.tool()
+@mcp.tool(
+    title="List Memos",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_memos(
     card_id: str | None = Field(None, description="Filter results to memos associated with a specific card. Provide the card's UUID."),
     department_id: str | None = Field(None, description="Filter results to memos associated with a specific department. Provide the department's UUID."),
@@ -6422,7 +7263,13 @@ async def list_memos(
     return _response_data
 
 # Tags: Memo
-@mcp.tool()
+@mcp.tool(
+    title="Get Memo",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_memo(transaction_id: str = Field(..., description="The unique identifier of the transaction in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieve a transaction memo by its unique identifier. Returns the memo details associated with the specified transaction."""
 
@@ -6458,7 +7305,12 @@ async def get_memo(transaction_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Memo
-@mcp.tool()
+@mcp.tool(
+    title="Create Memo for Transaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_memo_for_transaction(
     transaction_id: str = Field(..., description="The unique identifier of the transaction to which the memo will be attached. Must be a valid UUID format."),
     memo: str = Field(..., description="The text content of the memo. Limited to a maximum of 255 characters.", max_length=255),
@@ -6494,13 +7346,20 @@ async def create_memo_for_transaction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Merchant
-@mcp.tool()
+@mcp.tool(
+    title="List Merchants",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_merchants(
     transaction_from_date: str | None = Field(None, description="Filter results to include only merchants with transactions on or after this date. Specify as an ISO 8601 datetime string."),
     transaction_to_date: str | None = Field(None, description="Filter results to include only merchants with transactions on or before this date. Specify as an ISO 8601 datetime string."),
@@ -6542,7 +7401,13 @@ async def list_merchants(
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="List Purchase Orders",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_purchase_orders(
     creation_source: Literal["ACCOUNTING_PROVIDER", "DEVELOPER_API", "RAMP"] | None = Field(None, description="Filter purchase orders by their creation source: ACCOUNTING_PROVIDER (imported from accounting software), DEVELOPER_API (created via API), or RAMP (created through Ramp platform)."),
     receipt_status: Literal["FULLY_RECEIVED", "NOT_RECEIVED", "OVER_RECEIVED", "PARTIALLY_RECEIVED"] | None = Field(None, description="Filter purchase orders by receipt status: NOT_RECEIVED (no items received), PARTIALLY_RECEIVED (some items received), FULLY_RECEIVED (all items received), or OVER_RECEIVED (more items received than ordered)."),
@@ -6588,7 +7453,12 @@ async def list_purchase_orders(
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Create Purchase Order",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_purchase_order(
     currency: Literal["AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BOV", "BRL", "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHE", "CHF", "CHW", "CLF", "CLP", "CNH", "CNY", "COP", "COU", "CRC", "CUC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "EURC", "FJD", "FKP", "GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR", "MVR", "MWK", "MXN", "MXV", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLE", "SLL", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD", "USDB", "USDC", "USN", "UYI", "UYU", "UYW", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAD", "XAF", "XAG", "XAU", "XBA", "XBB", "XBC", "XBD", "XCD", "XCG", "XDR", "XOF", "XPD", "XPF", "XPT", "XSU", "XTS", "XUA", "XXX", "YER", "ZAR", "ZMW", "ZWG", "ZWL"] = Field(..., description="The currency code for the purchase order amount. Must be a valid ISO 4217 currency code (e.g., USD, EUR, GBP)."),
     entity_id: str = Field(..., description="The UUID of the business entity associated with this purchase order."),
@@ -6633,13 +7503,20 @@ async def create_purchase_order(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Get Purchase Order",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_purchase_order(purchase_order_id: str = Field(..., description="The unique identifier of the purchase order to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single purchase order by its unique identifier. Returns the complete purchase order details including line items, pricing, and status information."""
 
@@ -6675,7 +7552,13 @@ async def get_purchase_order(purchase_order_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Update Purchase Order",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_purchase_order(
     purchase_order_id: str = Field(..., description="The unique identifier of the purchase order to update, formatted as a UUID."),
     accounting_field_selections: list[_models.ApiCreateAccountingFieldParamsRequestBody] | None = Field(None, description="List of accounting field options to assign for coding the purchase order at the body level. Updates are applied in an all-or-nothing manner; typically only a single vendor accounting field is supported per purchase order."),
@@ -6713,13 +7596,20 @@ async def update_purchase_order(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Archive Purchase Order",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_purchase_order(
     purchase_order_id: str = Field(..., description="The unique identifier (UUID) of the purchase order to archive."),
     archived_reason: str | None = Field(None, description="Optional reason documenting why the purchase order is being archived."),
@@ -6755,13 +7645,19 @@ async def archive_purchase_order(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Add Line Items to Purchase Order",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_line_items_to_purchase_order(
     purchase_order_id: str = Field(..., description="The unique identifier of the purchase order to which line items will be added."),
     line_items: list[_models.ApiPurchaseOrderLineItemCreateParamsRequestBody] = Field(..., description="An array of line item objects to add to the purchase order. Each item represents a product or service to be included in the order. The order of items in the array is preserved."),
@@ -6797,13 +7693,20 @@ async def add_line_items_to_purchase_order(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Update Purchase Order Line Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_purchase_order_line_item(
     line_item_id: str = Field(..., description="The unique identifier of the line item to update."),
     purchase_order_id: str = Field(..., description="The unique identifier of the purchase order containing the line item."),
@@ -6843,13 +7746,20 @@ async def update_purchase_order_line_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Purchase Order
-@mcp.tool()
+@mcp.tool(
+    title="Delete Purchase Order Line Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_purchase_order_line_item(
     line_item_id: str = Field(..., description="The unique identifier of the line item to be deleted from the purchase order."),
     purchase_order_id: str = Field(..., description="The unique identifier of the purchase order containing the line item to be deleted."),
@@ -6888,7 +7798,13 @@ async def delete_purchase_order_line_item(
     return _response_data
 
 # Tags: Receipt Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Receipt Integration Opted Out Emails",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_receipt_integration_opted_out_emails(
     email: str | None = Field(None, description="Filter results to a specific email address. Must be a valid email format."),
     id_: str | None = Field(None, alias="id", description="Filter results to a specific receipt integration by its unique identifier (UUID format)."),
@@ -6923,13 +7839,20 @@ async def list_receipt_integration_opted_out_emails(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Receipt Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Remove Opted Out Email from Receipt Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_opted_out_email_from_receipt_integration(mailbox_opted_out_email_uuid: str = Field(..., description="The unique identifier (UUID) of the opted-out email record to remove from the opt-out list.")) -> dict[str, Any] | ToolResult:
     """Remove an email address from the receipt integration opt-out list, allowing it to receive receipt integrations again."""
 
@@ -6965,7 +7888,13 @@ async def remove_opted_out_email_from_receipt_integration(mailbox_opted_out_emai
     return _response_data
 
 # Tags: Receipt
-@mcp.tool()
+@mcp.tool(
+    title="List Receipts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_receipts(
     reimbursement_id: str | None = Field(None, description="Filter results to receipts associated with a specific reimbursement using its unique identifier."),
     transaction_id: str | None = Field(None, description="Filter results to receipts associated with a specific transaction using its unique identifier."),
@@ -7007,7 +7936,13 @@ async def list_receipts(
     return _response_data
 
 # Tags: Receipt
-@mcp.tool()
+@mcp.tool(
+    title="Upload Receipt",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upload_receipt(
     idempotency_key: str = Field(..., description="A unique identifier (UUID) that prevents duplicate uploads. Use a UUID to ensure idempotency across retries."),
     user_id: str = Field(..., description="UUID of the user associated with this receipt. This affects the priority and accuracy of automatic transaction matching."),
@@ -7043,13 +7978,20 @@ async def upload_receipt(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Receipt
-@mcp.tool()
+@mcp.tool(
+    title="Get Receipt",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_receipt(receipt_id: str = Field(..., description="The unique identifier of the receipt to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single receipt by its unique identifier. Returns the complete receipt details for the specified receipt ID."""
 
@@ -7085,7 +8027,13 @@ async def get_receipt(receipt_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Reimbursement
-@mcp.tool()
+@mcp.tool(
+    title="List Reimbursements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_reimbursements(
     direction: Literal["BUSINESS_TO_USER", "USER_TO_BUSINESS"] | None = Field(None, description="Filter reimbursements by direction: BUSINESS_TO_USER for standard reimbursements (default) or USER_TO_BUSINESS for repayments from users back to the business."),
     sync_status: Literal["NOT_SYNC_READY", "SYNCED", "SYNC_READY"] | None = Field(None, description="Filter by synchronization status: NOT_SYNC_READY (not ready for sync), SYNC_READY (ready to sync), or SYNCED (already synchronized)."),
@@ -7139,7 +8087,12 @@ async def list_reimbursements(
     return _response_data
 
 # Tags: Reimbursement
-@mcp.tool()
+@mcp.tool(
+    title="Create Mileage Reimbursement",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_mileage_reimbursement(
     distance: str = Field(..., description="The distance traveled, provided as a numeric value or string. Use distance_units to specify whether this is in kilometers or miles."),
     reimbursee_id: str = Field(..., description="The unique identifier (UUID) of the employee requesting reimbursement."),
@@ -7180,13 +8133,20 @@ async def create_mileage_reimbursement(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Reimbursement
-@mcp.tool()
+@mcp.tool(
+    title="Upload Receipt for Reimbursement",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upload_receipt_for_reimbursement(
     idempotency_key: str = Field(..., description="A unique identifier (UUID) that prevents duplicate receipt uploads. Generate a new UUID for each upload request to ensure idempotency."),
     reimbursee_id: str = Field(..., description="The UUID of the employee or user who will be reimbursed for this receipt."),
@@ -7222,13 +8182,20 @@ async def upload_receipt_for_reimbursement(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Reimbursement
-@mcp.tool()
+@mcp.tool(
+    title="Get Reimbursement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_reimbursement(reimbursement_id: str = Field(..., description="The unique identifier of the reimbursement to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific reimbursement by its unique identifier."""
 
@@ -7264,7 +8231,13 @@ async def get_reimbursement(reimbursement_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Spend Program
-@mcp.tool()
+@mcp.tool(
+    title="List Spend Programs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_spend_programs(page_size: int | None = Field(None, description="Number of spend programs to return per page. Must be between 2 and 100 results; defaults to 20 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of spend programs. Use the page_size parameter to control how many results are returned per page."""
 
@@ -7302,7 +8275,12 @@ async def list_spend_programs(page_size: int | None = Field(None, description="N
     return _response_data
 
 # Tags: Spend Program
-@mcp.tool()
+@mcp.tool(
+    title="Create Spend Program",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_spend_program(
     description: str = Field(..., description="A brief explanation of the spend program's purpose and use case."),
     display_name: str = Field(..., description="The user-facing name of the spend program that will be displayed in interfaces."),
@@ -7343,13 +8321,20 @@ async def create_spend_program(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Spend Program
-@mcp.tool()
+@mcp.tool(
+    title="Get Spend Program",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spend_program(spend_program_id: str = Field(..., description="The unique identifier of the spend program to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific spend program by its unique identifier."""
 
@@ -7385,7 +8370,13 @@ async def get_spend_program(spend_program_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Statement
-@mcp.tool()
+@mcp.tool(
+    title="List Statements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_statements(page_size: int | None = Field(None, description="Number of statements to return per page. Must be between 2 and 100 results; defaults to 20 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of statements. Use the page_size parameter to control how many results are returned per page."""
 
@@ -7423,7 +8414,13 @@ async def list_statements(page_size: int | None = Field(None, description="Numbe
     return _response_data
 
 # Tags: Statement
-@mcp.tool()
+@mcp.tool(
+    title="Get Statement",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_statement(statement_id: str = Field(..., description="The unique identifier of the statement to retrieve. This ID is typically provided when a statement is created or can be obtained from a list of statements.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific statement by its unique identifier. Use this to fetch detailed information about a previously created or stored statement."""
 
@@ -7459,7 +8456,13 @@ async def get_statement(statement_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Transaction
-@mcp.tool()
+@mcp.tool(
+    title="List Transactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_transactions(
     sk_category_id: Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9] | None = Field(None, description="Filter transactions by Ramp expense category code. Valid codes range from 1 to 44."),
     department_id: str | None = Field(None, description="Filter transactions by department using its unique identifier."),
@@ -7524,7 +8527,13 @@ async def list_transactions(
     return _response_data
 
 # Tags: Transaction
-@mcp.tool()
+@mcp.tool(
+    title="Get Transaction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_transaction(
     transaction_id: str = Field(..., description="The unique identifier of the transaction to retrieve."),
     include_merchant_data: bool | None = Field(None, description="When enabled, includes all purchase data provided by the merchant, such as item details, categories, and merchant-specific metadata."),
@@ -7566,7 +8575,13 @@ async def get_transaction(
     return _response_data
 
 # Tags: Transfer Payment
-@mcp.tool()
+@mcp.tool(
+    title="List Transfers with Pagination",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_transfers_with_pagination(
     sync_status: Literal["NOT_SYNC_READY", "SYNCED", "SYNC_READY"] | None = Field(None, description="Filter transfers by their synchronization readiness state. Use NOT_SYNC_READY for transfers not yet ready to sync, SYNC_READY for transfers prepared for synchronization, or SYNCED for transfers already synchronized. This parameter takes precedence over has_no_sync_commits if both are provided."),
     status: Literal["ACH_CONFIRMED", "CANCELED", "COMPLETED", "ERROR", "INITIATED", "NOT_ACKED", "NOT_ENOUGH_FUNDS", "PROCESSING_BY_ODFI", "REJECTED_BY_ODFI", "RETURNED_BY_RDFI", "SUBMITTED_TO_FED", "SUBMITTED_TO_RDFI", "UNNECESSARY", "UPLOADED"] | None = Field(None, description="Filter transfers by their current processing status in the ACH workflow. Refer to the Transfers Guide for detailed definitions of each status value, which range from initial states like INITIATED through final states like COMPLETED or REJECTED_BY_ODFI."),
@@ -7610,7 +8625,13 @@ async def list_transfers_with_pagination(
     return _response_data
 
 # Tags: Transfer Payment
-@mcp.tool()
+@mcp.tool(
+    title="Get Transfer",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_transfer(transfer_id: str = Field(..., description="The unique identifier of the transfer payment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific transfer payment by its unique identifier. Use this to check the status, amount, and other metadata of a completed or pending transfer."""
 
@@ -7646,9 +8667,15 @@ async def get_transfer(transfer_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Trips
-@mcp.tool()
+@mcp.tool(
+    title="List Trips",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_trips(
-    user_ids: list[str] | None = Field(None, description="Filter results to include only trips assigned to specific users. Provide an array of user IDs."),
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter results to include only trips assigned to specific users. Provide an array of user IDs."),
     status: Literal["cancelled", "completed", "ongoing", "upcoming"] | None = Field(None, description="Filter trips by their current status: cancelled, completed, ongoing, or upcoming."),
     min_amount: str | None = Field(None, description="Show only trips with a total amount greater than or equal to this value. Accepts numeric values."),
     max_amount: str | None = Field(None, description="Show only trips with a total amount less than or equal to this value. Accepts numeric values."),
@@ -7694,7 +8721,13 @@ async def list_trips(
     return _response_data
 
 # Tags: Trips
-@mcp.tool()
+@mcp.tool(
+    title="Get Trip",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trip(trip_id: str = Field(..., description="The unique identifier of the trip to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific trip using its unique identifier."""
 
@@ -7730,7 +8763,13 @@ async def get_trip(trip_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     employee_id: str | None = Field(None, description="Filter results to users with a specific employee ID."),
     role: Literal["AUDITOR", "BUSINESS_ADMIN", "BUSINESS_BOOKKEEPER", "BUSINESS_OWNER", "BUSINESS_USER", "GUEST_USER", "IT_ADMIN"] | None = Field(None, description="Filter results to users with a specific role: AUDITOR, BUSINESS_ADMIN, BUSINESS_BOOKKEEPER, BUSINESS_OWNER, BUSINESS_USER, GUEST_USER, or IT_ADMIN."),
@@ -7777,7 +8816,13 @@ async def list_users(
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Send User Invite",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def send_user_invite(
     email: str = Field(..., description="The employee's email address used for sending the invite and account access."),
     first_name: str = Field(..., description="The employee's first name; limited to 255 characters.", max_length=255),
@@ -7820,13 +8865,20 @@ async def send_user_invite(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get Deferred Task Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deferred_task_status(task_id: str = Field(..., description="The unique identifier (UUID) of the deferred task whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a deferred task by its unique identifier. Use this to poll for completion or check the progress of asynchronous operations."""
 
@@ -7862,7 +8914,13 @@ async def get_deferred_task_status(task_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific user's profile and details by their unique identifier."""
 
@@ -7898,7 +8956,13 @@ async def get_user(user_id: str = Field(..., description="The unique identifier 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     user_id: str = Field(..., description="The unique identifier of the user to update, formatted as a UUID."),
     auto_promote: bool | None = Field(None, description="Automatically promote the user's manager to a manager role if they are not already one."),
@@ -7942,13 +9006,20 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Deactivate User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def deactivate_user(user_id: str = Field(..., description="The unique identifier of the user to deactivate, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Deactivate a user account, preventing them from logging in, making card purchases, or receiving notifications from Ramp."""
 
@@ -7984,7 +9055,12 @@ async def deactivate_user(user_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Reactivate User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reactivate_user(user_id: str = Field(..., description="The unique identifier of the user to reactivate, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Reactivate a deactivated user account, restoring their ability to log in, use their issued cards, and receive Ramp notifications."""
 
@@ -8020,7 +9096,12 @@ async def reactivate_user(user_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Card Vault
-@mcp.tool()
+@mcp.tool(
+    title="Create Card Vault",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_card_vault(
     user_id: str = Field(..., description="UUID of the user who will own and use this card. Required to identify the cardholder."),
     accounting_rules: list[_models.SpendLimitAccountingRulesDataRequestBody] | None = Field(None, description="Array of accounting rules to apply to this card and its spend limit. Rules are applied in the order specified."),
@@ -8058,13 +9139,20 @@ async def create_card_vault(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Card Vault
-@mcp.tool()
+@mcp.tool(
+    title="Get Card Vault Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_card_vault_details(card_id: str = Field(..., description="The unique identifier of the card whose sensitive details should be retrieved from the vault.")) -> dict[str, Any] | ToolResult:
     """Retrieve sensitive details for a stored card from the vault. Requires Vault API access permissions to execute."""
 
@@ -8100,12 +9188,18 @@ async def get_card_vault_details(card_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="List Vendors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendors(
     external_vendor_id: str | None = Field(None, description="Filter results to vendors matching this customer-defined external vendor identifier, independent of any accounting system remote IDs."),
     merchant_id: str | None = Field(None, description="Filter results to vendors associated with this specific card merchant, identified by UUID."),
     accounting_vendor_remote_ids: list[str] | None = Field(None, description="Filter results to vendors whose accounting system remote IDs match any in this comma-separated list of strings."),
-    vendor_tracking_category_option_ids: list[str] | None = Field(None, description="Filter results to vendors whose accounting field selection IDs match any in this comma-separated list of UUIDs."),
+    vendor_tracking_category_option_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter results to vendors whose accounting field selection IDs match any in this comma-separated list of UUIDs."),
     sk_category_ids: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="Filter results to vendors whose Ramp category codes match any in this comma-separated list of integers."),
     page_size: int | None = Field(None, description="Number of vendors to return per page; must be between 2 and 100. Defaults to 20 if not specified."),
     vendor_owner_id: str | None = Field(None, description="Filter results to vendors owned by this specific user, identified by UUID."),
@@ -8154,7 +9248,12 @@ async def list_vendors(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Create Vendor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_vendor(
     business_vendor_contacts: _models.PostVendorListResourceBodyBusinessVendorContacts = Field(..., description="Contact information for the vendor, including name, email, phone, and other relevant details. This is required to create the vendor."),
     country: str = Field(..., description="The country where the vendor is located. Required field that determines tax and regulatory context."),
@@ -8197,18 +9296,24 @@ async def create_vendor(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="List Vendor Agreements",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_vendor_agreements(
     agreement_custom_records: _models.PostVendorAgreementListResourceBodyAgreementCustomRecords | None = Field(None, description="JSON object containing custom record field filters to match against agreement custom records."),
     auto_renews: bool | None = Field(None, description="Filter to include only agreements that automatically renew, or exclude them if false."),
-    contract_owner_ids: list[str] | None = Field(None, description="Filter by one or more contract owner IDs to return only agreements owned by specified users."),
-    department_ids: list[str] | None = Field(None, description="Filter by one or more department IDs to return only agreements associated with specified departments."),
+    contract_owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter by one or more contract owner IDs to return only agreements owned by specified users."),
+    department_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter by one or more department IDs to return only agreements associated with specified departments."),
     end_date_range: _models.PostVendorAgreementListResourceBodyEndDateRange | None = Field(None, description="JSON object specifying a relative date range filter for agreement end dates (e.g., within next 30 days)."),
     exclude_snoozed: bool | None = Field(None, description="When true, exclude agreements that have been snoozed from the results."),
     has_end_date: bool | None = Field(None, description="Filter to include only agreements with a defined end date, or exclude them if false."),
@@ -8223,9 +9328,9 @@ async def list_vendor_agreements(
     min_days_remaining: int | None = Field(None, description="Filter to include only agreements with days remaining greater than or equal to this value."),
     min_total_value: str | None = Field(None, description="Filter to include only agreements with total contract value greater than or equal to this amount. Accepts numeric string or number format."),
     page_size: int | None = Field(None, description="Number of results per page; must be between 2 and 100, defaults to 20 if not specified."),
-    payee_agreement_ids: list[str] | None = Field(None, description="Filter by one or more agreement IDs to return only specified agreements."),
-    payee_ids: list[str] | None = Field(None, description="Filter by one or more vendor (payee) IDs to return only agreements with specified vendors."),
-    payee_owner_ids: list[str] | None = Field(None, description="Filter by one or more vendor owner IDs to return only agreements owned by specified vendor contacts."),
+    payee_agreement_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter by one or more agreement IDs to return only specified agreements."),
+    payee_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter by one or more vendor (payee) IDs to return only agreements with specified vendors."),
+    payee_owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Filter by one or more vendor owner IDs to return only agreements owned by specified vendor contacts."),
     renewal_status: list[Literal["CANCELLED", "EXPIRED", "INITIATED", "NOT_STARTED", "REJECTED", "RENEWED"]] | None = Field(None, description="Filter by one or more renewal status values to include only agreements with matching renewal statuses."),
     renewal_status_exclude: list[Literal["CANCELLED", "EXPIRED", "INITIATED", "NOT_STARTED", "REJECTED", "RENEWED"]] | None = Field(None, description="Exclude agreements with any of the specified renewal statuses from results."),
     start_date_range: _models.PostVendorAgreementListResourceBodyStartDateRange | None = Field(None, description="JSON object specifying a relative date range filter for agreement start dates (e.g., within last 90 days)."),
@@ -8260,13 +9365,20 @@ async def list_vendor_agreements(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="List Vendor Credits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendor_credits(
     from_accounting_date: str | None = Field(None, description="Filter results to include only vendor credits with an accounting date on or after this date (inclusive). Use ISO 8601 date format."),
     to_accounting_date: str | None = Field(None, description="Filter results to include only vendor credits with an accounting date on or before this date (inclusive). Use ISO 8601 date format."),
@@ -8309,7 +9421,13 @@ async def list_vendor_credits(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Get Vendor Credit",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vendor_credit(vendor_credit_id: str = Field(..., description="The unique identifier (UUID) of the vendor credit to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific vendor credit by its unique identifier."""
 
@@ -8345,7 +9463,13 @@ async def get_vendor_credit(vendor_credit_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Get Vendor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vendor(vendor_id: str = Field(..., description="The unique identifier of the vendor, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific vendor by its unique identifier."""
 
@@ -8381,7 +9505,13 @@ async def get_vendor(vendor_id: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Update Vendor",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_vendor(
     vendor_id: str = Field(..., description="The unique identifier of the vendor to update, formatted as a UUID."),
     accounting_vendor_remote_id: str | None = Field(None, description="The remote identifier for this vendor in your accounting system. Provide either this or vendor_tracking_category_option_id, but not both."),
@@ -8423,13 +9553,20 @@ async def update_vendor(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Delete Vendor",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_vendor(vendor_id: str = Field(..., description="The unique identifier of the vendor to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Delete a vendor from the system. The vendor must have no associated transactions, bills, contracts, or spend requests to be successfully deleted."""
 
@@ -8465,7 +9602,13 @@ async def delete_vendor(vendor_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="List Vendor Bank Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendor_bank_accounts(
     vendor_id: str = Field(..., description="The unique identifier (UUID) of the vendor whose bank accounts you want to retrieve."),
     page_size: int | None = Field(None, description="The number of bank accounts to return per page. Must be between 2 and 100 results; defaults to 20 if not specified."),
@@ -8507,7 +9650,13 @@ async def list_vendor_bank_accounts(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Get Vendor Bank Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vendor_bank_account(
     bank_account_id: str = Field(..., description="The unique identifier (UUID) of the vendor whose bank account you want to retrieve."),
     vendor_id: str = Field(..., description="The unique identifier (UUID) of the specific bank account to fetch."),
@@ -8546,7 +9695,13 @@ async def get_vendor_bank_account(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Archive Vendor Bank Account",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_vendor_bank_account(
     bank_account_id: str = Field(..., description="The unique identifier (UUID) of the bank account to archive."),
     vendor_id: str = Field(..., description="The unique identifier (UUID) of the vendor that owns the bank account."),
@@ -8583,13 +9738,20 @@ async def archive_vendor_bank_account(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="List Vendor Contacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendor_contacts(
     vendor_id: str = Field(..., description="The unique identifier (UUID) of the vendor whose contacts you want to retrieve."),
     page_size: int | None = Field(None, description="The number of contacts to return per page, between 2 and 100. Defaults to 20 if not specified."),
@@ -8631,7 +9793,13 @@ async def list_vendor_contacts(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Get Vendor Contact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vendor_contact(
     vendor_contact_id: str = Field(..., description="The unique identifier of the vendor contact to retrieve, formatted as a UUID."),
     vendor_id: str = Field(..., description="The unique identifier of the vendor that owns the contact, formatted as a UUID."),
@@ -8670,7 +9838,13 @@ async def get_vendor_contact(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="List Vendor Credits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendor_credits_by_vendor(
     vendor_id: str = Field(..., description="The unique identifier (UUID) of the vendor whose credits should be retrieved."),
     from_accounting_date: str | None = Field(None, description="Filter results to include only vendor credits with an accounting date on or after this date (ISO 8601 format). Optional."),
@@ -8715,7 +9889,12 @@ async def list_vendor_credits_by_vendor(
     return _response_data
 
 # Tags: Vendor
-@mcp.tool()
+@mcp.tool(
+    title="Add Vendor Bank Account",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_vendor_bank_account(
     vendor_id: str = Field(..., description="The unique identifier of the vendor to add the bank account for. Must be a valid UUID."),
     account_nickname: str | None = Field(None, description="An optional human-readable label for this bank account to help identify it among multiple payment methods."),
@@ -8754,13 +9933,20 @@ async def add_vendor_bank_account(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_subscription(webhook_id: str = Field(..., description="The unique identifier (UUID) of the webhook subscription to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific outbound webhook subscription by its unique identifier. Use this to inspect the configuration and status of a webhook."""
 
@@ -8796,7 +9982,13 @@ async def get_webhook_subscription(webhook_id: str = Field(..., description="The
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook subscription to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Delete a webhook subscription by its unique identifier. This permanently removes the webhook and stops it from receiving events."""
 
@@ -8915,7 +10107,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python ramp_developer_api_server.py", file=sys.stderr)
+        print("  python ramp_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -9017,7 +10209,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Ramp Developer API MCP Server")
+    parser = argparse.ArgumentParser(description="Ramp MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -9118,7 +10310,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Ramp Developer API MCP Server")
+    logger.info("Starting Ramp MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

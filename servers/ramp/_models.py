@@ -1,13 +1,13 @@
 """
-Ramp Developer Api MCP Server - Pydantic Models
+Ramp MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:05:49 UTC
+Generated: 2026-05-12 12:22:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -481,7 +481,7 @@ class DeleteInventoryItemFieldOptionResourceRequest(StrictModel):
 
 # Operation: mark_transactions_ready_to_sync
 class PostReadyToSyncResourceRequestBody(StrictModel):
-    object_ids: list[str] = Field(default=..., description="A list of transaction IDs to mark as ready for sync. Provide between 1 and 500 object IDs per request.", min_length=1, max_length=500)
+    object_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(default=..., description="A list of transaction IDs to mark as ready for sync. Provide between 1 and 500 object IDs per request.", min_length=1, max_length=500)
     object_type: Literal["TRANSACTION"] = Field(default=..., description="The type of object being marked for sync. Currently supports TRANSACTION objects only.")
 class PostReadyToSyncResourceRequest(StrictModel):
     """Mark one or more accounting transactions as ready to sync. This notifies the system that the specified transactions are prepared for synchronization."""
@@ -636,7 +636,7 @@ class PostApplicationResourceRequest(StrictModel):
 
 # Operation: list_audit_log_events
 class GetAuditLogEventsListResourceRequestQuery(StrictModel):
-    user_ids: list[str] | None = Field(default=None, description="Filter results to only include events attributed to specific users. Provide an array of user IDs to narrow the results.")
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter results to only include events attributed to specific users. Provide an array of user IDs to narrow the results.")
     event_actor_types: list[Literal["policy_agent", "ramp", "user"]] | None = Field(default=None, description="Filter results to only include events from specific actor types (e.g., user, system, service). Provide an array of actor type values.")
     event_types: list[Literal["ABK agent blocked on user", "ABK agent review requested", "ABK agent started", "AI custom field config executed", "Accounting ai auto mark ready", "Activated card", "Added bill field", "Added card acceptance policy", "Added procurement field", "Added user to funds", "Added vendor field", "Admin changed email", "Admin changed phone", "Agent access request resolved", "Agent access requested", "Agent created", "Agent current version changed", "Agent permissions updated", "Agent version created", "Agent version published", "Approval chain updated", "Approval step added", "Approval step approved", "Approval step rejected", "Approval step skipped", "Approval step terminated", "Approved by manager", "Approved card edit request with modifications", "Approved card edit request", "Approved funds edit request with modifications", "Approved funds edit request", "Approved new card request with modifications", "Approved new card request", "Approved procurement change request", "Approved request for new funds with modifications", "Approved request for new funds", "Attendee split", "Bank account updated", "Bill linked to PO", "Bill linked", "Bill pay accepted sync for bank account from vendor network", "Bill pay accepted sync for vendor card acceptance policy from vendor network", "Bill pay accepted sync for vendor check mailing address from vendor network", "Bill pay accepted sync for vendor information from vendor network", "Bill pay accepted sync for vendor tax info from vendor network", "Bill pay accounting manual user action", "Bill pay accounting sync triggered", "Bill pay approval policy updated", "Bill pay automatic card payment no longer eligible", "Bill pay automatic card payment", "Bill pay bank account updated", "Bill pay batch payment initiated", "Bill pay business vendor unlinked from vendor network", "Bill pay card delivery", "Bill pay check address update", "Bill pay check tracking update", "Bill pay deleted bill", "Bill pay delivered payment", "Bill pay dismissed fraud alert", "Bill pay edited payee address", "Bill pay edited payment method", "Bill pay initiated payment refund", "Bill pay mailed check payment", "Bill pay marked as paid", "Bill pay matched transaction to bill", "Bill pay payment failed", "Bill pay payment posted", "Bill pay recurrence info changed for recurring series", "Bill pay rejected sync for bank account from vendor network", "Bill pay rejected sync for vendor card acceptance policy from vendor network", "Bill pay rejected sync for vendor check mailing address from vendor network", "Bill pay rejected sync for vendor information from vendor network", "Bill pay rejected sync for vendor tax info from vendor network", "Bill pay retried payment", "Bill pay returned funds", "Bill unlinked from PO", "Bill unlinked", "Billing config updated", "Blank canvas workflow execution updated", "Blank canvas workflow pause status updated", "Booking request approval policy updated", "Brokerage order updated", "Cancel revision request", "Cancelled by customer", "Cancelled by ramp", "Card delivered", "Card payment initiated", "Cash agent recommendation updated", "Changed bank account on bill", "Changed card holder", "Changed funds user", "Combined contracts with this contract", "Communication sent", "Complete revision", "Created accounting split line item", "Created card", "Created fund from purchase order", "Created merchant error", "Created unrecognized charge", "Created", "Deleted bill field", "Deleted card acceptance policy", "Deleted procurement field", "Deleted vendor field", "Deleted", "Demoted co-owner to member", "Detached funds from spend program", "Document labeled", "Document updated", "Docusign envelope updated", "Draft vendor created", "Draft vendor deleted", "Draft vendor published", "Edited bill field", "Edited card acceptance policy", "Edited contract tracking setting", "Edited procurement field", "Edited spend intent", "Edited tin", "Edited vendor field", "Edited wallet automation", "Email updated", "Emailed purchase order", "Exception given from dispute resolution", "Exception given from repayment", "Exception request approved", "Exception request cancelled", "Exception request denied", "Exception requested", "External ticket created asana", "External ticket created jira", "External ticket created linear", "External ticket created zendesk", "Funds activated from reissued virtual card", "Generated renewal brief for contract", "Ironclad workflow updated", "Issued funds", "Linked funds to spend program", "Locked access to funds", "Locked card", "Managed portfolio transfer updated", "Manager updated", "Mark as accidental", "Matched purchase order to transaction", "Matched transaction to purchase order", "Memo updated", "Merged vendors", "Name updated hris", "Name updated", "New virtual card issued for currency migration", "Notification sent due to purchase order request modification", "Password reset required", "Password reset user", "Password updated user", "Payback cancelled", "Payback payment failed", "Payback payment manually paid", "Payback payment retried", "Payback payment succeeded", "Payback request approved by user", "Payback request cancelled by manager", "Payback request rejected by user", "Payback requested by manager", "Payback triggered by user", "Payee linked to accounting", "Payment run updated", "Payment updated", "Phone updated", "Policy agent suggestion feedback submitted", "Post spend approval policy updated", "Procurement  unmatched purchase order from transaction", "Procurement  unmatched transaction from purchase order", "Procurement agent run completed", "Procurement change request approval policy updated", "Procurement send global form", "Procurement submit global form response", "Procurement vendor onboarding submitted", "Procurement vendor onboarding triggered", "Promoted member to co-owner", "Purchase order accounting sync created vendor", "Purchase order accounting sync failed", "Purchase order accounting sync success", "RFX clarification answered", "RFX clarification question submitted", "RFX closed", "RFX created", "RFX graded", "RFX published", "RFX response redacted", "RFX response submitted", "RFX vendor accepted", "RFX vendor added", "RFX vendor declined", "RFX vendor removed", "Receipt created", "Receipt deleted", "Receipt matched", "Refund cleared", "Refund paid", "Reimbursement bank account updated", "Reimbursement from user", "Reimbursement policy agent suggestion feedback submitted", "Reimbursement submitted", "Reimbursement to user", "Reimbursements disabled", "Reimbursements enabled", "Reissued card", "Rejected card edit request", "Rejected funds edit request", "Rejected new card request", "Rejected procurement change request", "Rejected request for new funds", "Reminded to approve items", "Reminded to upload missing items", "Removed user from funds", "Request revision", "Requested an edit to these funds", "Requested new card", "Requested new funds", "Resolved by ramp", "Review needed", "Reviewed by ramp", "Role updated", "SFTP Authentication Failed", "SFTP Authentication IP and Username Matched", "SFTP Configuration Changed", "Separation of duties disabled", "Separation of duties enabled", "Set member limit on shared fund", "Sourcing event created", "Sourcing event status changed", "Spend allocation change request approval policy updated", "Spend approved", "Spend rejected", "Spend request approval policy updated", "Status updated", "Submitted procurement change request", "Temporarily unlocked access to funds", "Terminated card", "Terminated funds", "Test", "Third party risk management vendor review updated", "This contract was combined with another contract", "Ticket assignee updated", "Ticket status updated", "Totp authenticator created", "Totp authenticator deleted", "Totp authenticator updated", "Transaction approval policy updated", "Transaction cleared", "Transaction entity changed", "Transaction missing item reminder event", "Transaction paid", "Transaction receipt updated", "Transaction submission policy exemption event", "Transferred ownership of funds", "Travel policy selection updated", "Undid marking transaction as accidental", "Unlocked access to funds", "Unlocked card temporarily", "Unlocked card", "Unmark as accidental", "Updated card program", "Updated card", "Updated funds", "Updated spend program", "User accepted invite", "User assigned by external firm", "User assigned through external firm merge", "User created", "User deactivated", "User deleted", "User invited", "User locked", "User login", "User previewed", "User reactivated", "User undeleted", "User unlocked", "Vendor Network updates enabled", "Vendor awarded", "Vendor credit action", "Vendor imported from erp", "Vendor management  vendor added to managed list", "Vendor management  vendor removed from managed list", "Vendor management agreement deleted document", "Vendor management agreement deleted", "Vendor management agreement linked document", "Vendor management agreement linked purchase order", "Vendor management agreement notification type switched", "Vendor management agreement status changed", "Vendor management agreement unlinked document", "Vendor management agreement unlinked purchase order", "Vendor management agreement uploaded document", "Vendor management edited agreement field", "Vendor management expansion request status changed", "Vendor payment approval policy updated", "Vendor profile access created", "Vendor profile access denied", "Vendor profile access edited", "Vendor profile access email sent", "Vendor profile access requested", "Vendor profile access revoked", "Vendor profile all documents downloaded", "Vendor profile document downloaded", "Vendor sync failure", "Viewed sensitive card details", "Violation from manager", "Violation from rule", "Violation from user", "Virtual card reissued", "Workflow restarted due to purchase order request modification"]] | None = Field(default=None, description="Filter results to only include specific event types (e.g., login, create, delete, update). Provide an array of event type values.")
     page_size: int | None = Field(default=None, description="Number of results to return per page. Must be between 2 and 100 results; defaults to 20 if not specified.")
@@ -702,7 +702,7 @@ class PostBillListWithPaginationRequestBody(StrictModel):
     memo: str | None = Field(default=None, description="Internal memo or notes about the bill. Maximum 1000 characters.", max_length=1000)
     payment_details: ApiCreateBankAccountPaymentParamsRequestBody | ApiCreateBillVendorPaymentParamsRequestBody | ApiCreateCardBillPaymentParamsRequestBody | ApiCreateManualBillPaymentParamsRequestBody | None = Field(default=None, description="Payment method details for the bill. Schema varies based on the payment method selected (e.g., bank transfer, check, credit card).")
     posting_date: str | None = Field(default=None, description="Date the bill is posted to the accounting system in ISO 8601 date format (YYYY-MM-DD). If not provided, defaults to the issued date.", json_schema_extra={'format': 'date'})
-    purchase_order_ids: list[str] | None = Field(default=None, description="List of purchase order UUIDs to match and reconcile against this bill for three-way matching.")
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="List of purchase order UUIDs to match and reconcile against this bill for three-way matching.")
     remote_id: str | None = Field(default=None, description="External identifier for this bill from your system or ERP. When provided, enable_accounting_sync must be set to true.")
     vendor_contact_id: str | None = Field(default=None, description="UUID of the vendor contact to receive this bill. Must be associated with the specified vendor unless use_default_vendor_contact is enabled.", json_schema_extra={'format': 'uuid'})
     vendor_id: str = Field(default=..., description="UUID of the vendor issuing this bill.", json_schema_extra={'format': 'uuid'})
@@ -739,7 +739,7 @@ class PostDraftBillListWithPaginationRequestBody(StrictModel):
     line_items: list[ApiCreateBillLineItemParamsRequestBody] | None = Field(default=None, description="List of line items detailing charges on the bill. Providing this replaces all existing line items.")
     memo: str | None = Field(default=None, description="Internal notes or memo about the bill, up to 1000 characters.", max_length=1000)
     posting_date: str | None = Field(default=None, description="Date the bill is posted to the accounting system in ISO 8601 date format (YYYY-MM-DD).", json_schema_extra={'format': 'date'})
-    purchase_order_ids: list[str] | None = Field(default=None, description="List of purchase order UUIDs to match and link to this bill. Providing this replaces all existing linked purchase orders.")
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="List of purchase order UUIDs to match and link to this bill. Providing this replaces all existing linked purchase orders.")
     remote_id: str | None = Field(default=None, description="External identifier for this bill from your system, useful for tracking and reconciliation.")
     vendor_contact_id: str | None = Field(default=None, description="UUID of the vendor contact person associated with this bill; the contact must belong to the specified vendor.", json_schema_extra={'format': 'uuid'})
     vendor_id: str = Field(default=..., description="UUID of the vendor who issued this bill. Required to create the draft.", json_schema_extra={'format': 'uuid'})
@@ -769,7 +769,7 @@ class PatchDraftBillResourceRequestBody(StrictModel):
     line_items: list[ApiCreateBillLineItemParamsRequestBody] | None = Field(default=None, description="List of line items detailing charges, quantities, and amounts on the bill. Providing this list replaces all previously existing line items.")
     memo: str | None = Field(default=None, description="Internal notes or comments about the bill, up to 1000 characters.", max_length=1000)
     posting_date: str | None = Field(default=None, description="The date the bill is posted or recorded in the accounting system, specified as a calendar date.", json_schema_extra={'format': 'date'})
-    purchase_order_ids: list[str] | None = Field(default=None, description="List of purchase order identifiers to match and link with this bill. Providing this list replaces all previously linked purchase orders.")
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="List of purchase order identifiers to match and link with this bill. Providing this list replaces all previously linked purchase orders.")
     remote_id: str | None = Field(default=None, description="An external identifier or reference number for this bill from your internal system or vendor portal.")
     vendor_contact_id: str | None = Field(default=None, description="The UUID of the vendor contact person associated with this bill; the contact must belong to the specified vendor.", json_schema_extra={'format': 'uuid'})
     vendor_id: str | None = Field(default=None, description="The UUID of the vendor issuing this bill.", json_schema_extra={'format': 'uuid'})
@@ -783,7 +783,7 @@ class PostDraftBillAttachmentUploadResourceRequestPath(StrictModel):
     draft_bill_id: str = Field(default=..., description="The unique identifier of the draft bill to which the attachment will be uploaded.")
 class PostDraftBillAttachmentUploadResourceRequestBody(StrictModel):
     attachment_type: Literal["EMAIL", "FILE", "INVOICE", "VENDOR_CREDIT"] = Field(default=..., description="The classification of the attachment. Use 'INVOICE' to designate the actual invoice document for the bill; only one INVOICE attachment is permitted per draft bill.")
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The file to upload as a binary attachment. The file should be included in the multipart/form-data request with the part name 'file' and Content-Disposition header set to 'attachment'.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file to upload as a binary attachment. The file should be included in the multipart/form-data request with the part name 'file' and Content-Disposition header set to 'attachment'.", json_schema_extra={'format': 'byte'})
 class PostDraftBillAttachmentUploadResourceRequest(StrictModel):
     """Upload a file attachment to a draft bill. Only one INVOICE type attachment is allowed per draft bill."""
     path: PostDraftBillAttachmentUploadResourceRequestPath
@@ -809,7 +809,7 @@ class PatchBillResourceRequestBody(StrictModel):
     line_items: list[ApiCreateBillLineItemParamsRequestBody] | None = Field(default=None, description="List of line items detailing charges on the bill. Providing this replaces all existing line items.")
     memo: str | None = Field(default=None, description="Internal memo or notes about the bill, up to 1000 characters.", max_length=1000)
     posting_date: str | None = Field(default=None, description="The date the bill is posted to the accounting system, specified as a date in ISO 8601 format (YYYY-MM-DD).", json_schema_extra={'format': 'date'})
-    purchase_order_ids: list[str] | None = Field(default=None, description="List of purchase order identifiers to match against this bill. Providing this replaces all existing linked purchase orders.")
+    purchase_order_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="List of purchase order identifiers to match against this bill. Providing this replaces all existing linked purchase orders.")
     remote_id: str | None = Field(default=None, description="An external identifier that uniquely identifies this bill in the client's system.")
     vendor_contact_id: str | None = Field(default=None, description="The UUID of the vendor contact associated with this bill. The contact must belong to the specified vendor.", json_schema_extra={'format': 'uuid'})
     vendor_id: str | None = Field(default=None, description="The UUID of the vendor who issued this bill.", json_schema_extra={'format': 'uuid'})
@@ -831,7 +831,7 @@ class PostBillAttachmentUploadResourceRequestPath(StrictModel):
     bill_id: str = Field(default=..., description="The unique identifier of the bill to attach the file to, formatted as a UUID.", json_schema_extra={'format': 'uuid'})
 class PostBillAttachmentUploadResourceRequestBody(StrictModel):
     attachment_type: Literal["EMAIL", "FILE", "INVOICE", "VENDOR_CREDIT"] = Field(default=..., description="The classification of the attachment. Use 'INVOICE' to designate the actual invoice document for the bill; only one INVOICE attachment is permitted per bill.")
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file content to upload as the attachment.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file content to upload as the attachment.", json_schema_extra={'format': 'byte'})
 class PostBillAttachmentUploadResourceRequest(StrictModel):
     """Upload a file attachment to an existing bill. Note that only one INVOICE type attachment is allowed per bill."""
     path: PostBillAttachmentUploadResourceRequestPath
@@ -1335,7 +1335,7 @@ class PatchSpendLimitResourceRequest(StrictModel):
 class PutSpendAllocationAddUsersRequestPath(StrictModel):
     spend_limit_id: str = Field(default=..., description="The unique identifier (UUID) of the spend limit to which users will be added.", json_schema_extra={'format': 'uuid'})
 class PutSpendAllocationAddUsersRequestBody(StrictModel):
-    user_ids: list[str] | None = Field(default=None, description="Array of user identifiers to add to the shared spend limit. Each entry should be a valid user ID in the system.")
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Array of user identifiers to add to the shared spend limit. Each entry should be a valid user ID in the system.")
 class PutSpendAllocationAddUsersRequest(StrictModel):
     """Add one or more users to a shared spend limit, allowing them to access and manage the allocation together."""
     path: PutSpendAllocationAddUsersRequestPath
@@ -1355,7 +1355,7 @@ class PostSpendLimitTerminationResourceRequest(StrictModel):
 class DeleteSpendAllocationDeleteUsersRequestPath(StrictModel):
     spend_limit_id: str = Field(default=..., description="The unique identifier (UUID) of the spend limit from which users will be removed.", json_schema_extra={'format': 'uuid'})
 class DeleteSpendAllocationDeleteUsersRequestBody(StrictModel):
-    user_ids: list[str] | None = Field(default=None, description="Array of user identifiers to remove from the spend limit. If omitted, no users are removed.")
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Array of user identifiers to remove from the spend limit. If omitted, no users are removed.")
 class DeleteSpendAllocationDeleteUsersRequest(StrictModel):
     """Remove one or more users from a shared spend limit, revoking their access to that limit's budget allocation."""
     path: DeleteSpendAllocationDeleteUsersRequestPath
@@ -1734,7 +1734,7 @@ class GetTransferResourceRequest(StrictModel):
 
 # Operation: list_trips
 class GetTripListResourceRequestQuery(StrictModel):
-    user_ids: list[str] | None = Field(default=None, description="Filter results to include only trips assigned to specific users. Provide an array of user IDs.")
+    user_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter results to include only trips assigned to specific users. Provide an array of user IDs.")
     status: Literal["cancelled", "completed", "ongoing", "upcoming"] | None = Field(default=None, description="Filter trips by their current status: cancelled, completed, ongoing, or upcoming.")
     min_amount: str | None = Field(default=None, description="Show only trips with a total amount greater than or equal to this value. Accepts numeric values.")
     max_amount: str | None = Field(default=None, description="Show only trips with a total amount less than or equal to this value. Accepts numeric values.")
@@ -1850,7 +1850,7 @@ class GetVendorListResourceRequestQuery(StrictModel):
     external_vendor_id: str | None = Field(default=None, description="Filter results to vendors matching this customer-defined external vendor identifier, independent of any accounting system remote IDs.")
     merchant_id: str | None = Field(default=None, description="Filter results to vendors associated with this specific card merchant, identified by UUID.", json_schema_extra={'format': 'uuid'})
     accounting_vendor_remote_ids: list[str] | None = Field(default=None, description="Filter results to vendors whose accounting system remote IDs match any in this comma-separated list of strings.")
-    vendor_tracking_category_option_ids: list[str] | None = Field(default=None, description="Filter results to vendors whose accounting field selection IDs match any in this comma-separated list of UUIDs.")
+    vendor_tracking_category_option_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter results to vendors whose accounting field selection IDs match any in this comma-separated list of UUIDs.")
     sk_category_ids: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(default=None, description="Filter results to vendors whose Ramp category codes match any in this comma-separated list of integers.")
     page_size: int | None = Field(default=None, description="Number of vendors to return per page; must be between 2 and 100. Defaults to 20 if not specified.")
     vendor_owner_id: str | None = Field(default=None, description="Filter results to vendors owned by this specific user, identified by UUID.", json_schema_extra={'format': 'uuid'})
@@ -1881,8 +1881,8 @@ class PostVendorListResourceRequest(StrictModel):
 class PostVendorAgreementListResourceRequestBody(StrictModel):
     agreement_custom_records: PostVendorAgreementListResourceBodyAgreementCustomRecords | None = Field(default=None, description="JSON object containing custom record field filters to match against agreement custom records.")
     auto_renews: bool | None = Field(default=None, description="Filter to include only agreements that automatically renew, or exclude them if false.")
-    contract_owner_ids: list[str] | None = Field(default=None, description="Filter by one or more contract owner IDs to return only agreements owned by specified users.")
-    department_ids: list[str] | None = Field(default=None, description="Filter by one or more department IDs to return only agreements associated with specified departments.")
+    contract_owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter by one or more contract owner IDs to return only agreements owned by specified users.")
+    department_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter by one or more department IDs to return only agreements associated with specified departments.")
     end_date_range: PostVendorAgreementListResourceBodyEndDateRange | None = Field(default=None, description="JSON object specifying a relative date range filter for agreement end dates (e.g., within next 30 days).")
     exclude_snoozed: bool | None = Field(default=None, description="When true, exclude agreements that have been snoozed from the results.")
     has_end_date: bool | None = Field(default=None, description="Filter to include only agreements with a defined end date, or exclude them if false.")
@@ -1897,9 +1897,9 @@ class PostVendorAgreementListResourceRequestBody(StrictModel):
     min_days_remaining: int | None = Field(default=None, description="Filter to include only agreements with days remaining greater than or equal to this value.")
     min_total_value: str | None = Field(default=None, description="Filter to include only agreements with total contract value greater than or equal to this amount. Accepts numeric string or number format.")
     page_size: int | None = Field(default=None, description="Number of results per page; must be between 2 and 100, defaults to 20 if not specified.")
-    payee_agreement_ids: list[str] | None = Field(default=None, description="Filter by one or more agreement IDs to return only specified agreements.")
-    payee_ids: list[str] | None = Field(default=None, description="Filter by one or more vendor (payee) IDs to return only agreements with specified vendors.")
-    payee_owner_ids: list[str] | None = Field(default=None, description="Filter by one or more vendor owner IDs to return only agreements owned by specified vendor contacts.")
+    payee_agreement_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter by one or more agreement IDs to return only specified agreements.")
+    payee_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter by one or more vendor (payee) IDs to return only agreements with specified vendors.")
+    payee_owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Filter by one or more vendor owner IDs to return only agreements owned by specified vendor contacts.")
     renewal_status: list[Literal["CANCELLED", "EXPIRED", "INITIATED", "NOT_STARTED", "REJECTED", "RENEWED"]] | None = Field(default=None, description="Filter by one or more renewal status values to include only agreements with matching renewal statuses.")
     renewal_status_exclude: list[Literal["CANCELLED", "EXPIRED", "INITIATED", "NOT_STARTED", "REJECTED", "RENEWED"]] | None = Field(default=None, description="Exclude agreements with any of the specified renewal statuses from results.")
     start_date_range: PostVendorAgreementListResourceBodyStartDateRange | None = Field(default=None, description="JSON object specifying a relative date range filter for agreement start dates (e.g., within last 90 days).")
@@ -2137,7 +2137,7 @@ class ApiCardAccountingRulesDataRequestBody(PermissiveModel):
 
 class ApiCardPaymentDetailsResource(PermissiveModel):
     spend_limit_id: str | None = Field(None, description="Unique identifier of the spend limit associated with this bill payment.", json_schema_extra={'format': 'uuid'})
-    transaction_ids: list[str] | None = Field(None, description="Array of unique identifiers of transactions associated with this bill payment.")
+    transaction_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Array of unique identifiers of transactions associated with this bill payment.")
 
 class ApiCardSpendingRestrictionsDump(PermissiveModel):
     amount: float | None = Field(None, description="Amount limit total per interval.")
@@ -2385,7 +2385,7 @@ class CurrencyAmount(PermissiveModel):
 class ApiBillInventoryLineItem(PermissiveModel):
     accounting_field_selections: list[ApiAccountingFieldSelection] = Field(..., description="List of accounting field options selected to code the line item.")
     amount: CurrencyAmount = Field(..., description="Amount of the line item, equal to the product of unit quantity and unit price, represented in the lowest denomination of the currency (e.g., cents for USD).")
-    item_receipt_line_item_ids: list[str] = Field(..., description="List of unique identifiers for item receipt line items associated with this bill inventory line item through the purchase order line item")
+    item_receipt_line_item_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="List of unique identifiers for item receipt line items associated with this bill inventory line item through the purchase order line item")
     memo: str | None = Field(None, description="Memo of the line item")
     purchase_order_line_item_id: str | None = Field(..., description="Unique identifier of the matched purchase order line item, if any", json_schema_extra={'format': 'uuid'})
     quantity: float = Field(..., description="Quantity of the line item")
@@ -2394,7 +2394,7 @@ class ApiBillInventoryLineItem(PermissiveModel):
 class ApiBillLineItem(PermissiveModel):
     accounting_field_selections: list[ApiAccountingFieldSelection] = Field(..., description="List of accounting field options selected to code the line item.")
     amount: CurrencyAmount = Field(..., description="Amount of the line item, represented in the lowest denomination of the currency (e.g., cents for USD).")
-    item_receipt_line_item_ids: list[str] = Field(..., description="List of unique identifiers for item receipt line items associated with this bill line item through the purchase order line item")
+    item_receipt_line_item_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="List of unique identifiers for item receipt line items associated with this bill line item through the purchase order line item")
     memo: str | None = Field(None, description="Memo of the line item")
     purchase_order_line_item_id: str | None = Field(..., description="Unique identifier of the matched purchase order line item, if any", json_schema_extra={'format': 'uuid'})
 
@@ -2444,7 +2444,7 @@ class Bill(PermissiveModel):
     invoice_number: str | None = Field(None, description="The invoice number on the bill.")
     invoice_urls: list[str] = Field(..., description="Pre-signed urls to download invoice files.")
     issued_at: str = Field(..., description="The date the bill was issued on invoice.", json_schema_extra={'format': 'date-time'})
-    item_receipt_ids: list[str] = Field(..., description="List of unique identifiers for item receipts associated with this bill through matched purchase orders.")
+    item_receipt_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="List of unique identifiers for item receipts associated with this bill through matched purchase orders.")
     line_items: list[ApiBillLineItem] = Field(..., description="List of line items related to the bill.")
     memo: str | None = Field(None, description="Memo of the bill.")
     paid_at: str | None = Field(None, description="The datetime the bill's payment status is set to PAID. None if the bill's payment status is OPEN", json_schema_extra={'format': 'date-time'})
@@ -2597,8 +2597,8 @@ class PatchCardResourceBodySpendingRestrictions(PermissiveModel):
     lock_date: str | None = Field(None, description="Date to automatically lock the card. If `lock_date` has passed, set to a future date or to null to unlock the card.", json_schema_extra={'format': 'date-time'})
     policy_id: str | None = None
     transaction_amount_limit: str | float | None = Field(None, description="Max amount limit per transaction.", ge=0)
-    vendor_blacklist: list[str] | None = None
-    vendor_whitelist: list[str] | None = None
+    vendor_blacklist: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
+    vendor_whitelist: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
 
 class PatchSpendLimitResourceBodyPermittedSpendTypes(PermissiveModel):
     """Modify permitted spend types. All fields of permitted_spend_types must be given."""
@@ -2618,10 +2618,10 @@ class PatchSpendLimitResourceBodySpendingRestrictionsTransactionAmountLimit(Perm
 class PatchSpendLimitResourceBodySpendingRestrictions(PermissiveModel):
     """Modify spending restrictions. If this field is passed, the entire set of new spending restrictions must be passed (i.e. the given spending restrictions will override all existing spending restrictions)."""
     allowed_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes allowed for the limit.")
-    allowed_vendors: list[str] | None = Field(None, description="List of merchants allowed for the limit.")
+    allowed_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants allowed for the limit.")
     blocked_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes blocked for the limit.")
     blocked_mcc_codes: list[str] | None = None
-    blocked_vendors: list[str] | None = Field(None, description="List of merchants  blocked for the limit.")
+    blocked_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants  blocked for the limit.")
     interval: Literal["ANNUAL", "DAILY", "MONTHLY", "QUARTERLY", "TERTIARY", "TOTAL", "WEEKLY", "YEARLY"] = Field(..., description="Time interval to apply limit to.")
     is_one_time_edit: bool | None = Field(None, description="Dictates whether the spend restriction update is only applicable for the current period. Set to true for a temporary limit increase. Default is false.")
     limit: PatchSpendLimitResourceBodySpendingRestrictionsLimit = Field(..., description="Total amount limit per interval. Currently we expect the currency to be USD and the amount need to be denominated in cents.")
@@ -2722,10 +2722,10 @@ class PostCardVaultCreationBodySpendingRestrictionsTransactionAmountLimit(Permis
 class PostCardVaultCreationBodySpendingRestrictions(PermissiveModel):
     """Specifies the spending restrictions. If spend_program_id is passed, this field is ignored and the limit will inherit the spending restrictions of the spend program."""
     allowed_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes allowed for the limit.")
-    allowed_vendors: list[str] | None = Field(None, description="List of merchants allowed for the limit.")
+    allowed_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants allowed for the limit.")
     blocked_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes blocked for the limit.")
     blocked_mcc_codes: list[str] | None = None
-    blocked_vendors: list[str] | None = Field(None, description="List of merchants  blocked for the limit.")
+    blocked_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants  blocked for the limit.")
     interval: Literal["ANNUAL", "DAILY", "MONTHLY", "QUARTERLY", "TERTIARY", "TOTAL", "WEEKLY", "YEARLY"] = Field(..., description="Time interval to apply limit to.")
     limit: PostCardVaultCreationBodySpendingRestrictionsLimit = Field(..., description="Total amount limit per interval. Currently we expect the currency to be USD and the amount need to be denominated in cents.")
     lock_date: str | None = Field(None, description="Date to automatically lock the card. If lock date has passed, set to a future date or to null to unlock the card.", json_schema_extra={'format': 'date-time'})
@@ -2797,8 +2797,8 @@ class PostPhysicalCardBodySpendingRestrictions(PermissiveModel):
     lock_date: str | None = Field(None, description="Date to automatically lock the card. If `lock_date` has passed, set to a future date or to null to unlock the card. Note that this is different from the actual card expiration date. This date need to conforms to ISO8601 format.", json_schema_extra={'format': 'date-time'})
     policy_id: str | None = None
     transaction_amount_limit: str | float | None = Field(None, description="Max amount limit per transaction.", ge=0)
-    vendor_blacklist: list[str] | None = None
-    vendor_whitelist: list[str] | None = None
+    vendor_blacklist: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
+    vendor_whitelist: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
 
 class PostSpendLimitCreationBodyPermittedSpendTypes(PermissiveModel):
     """Specifies the permitted spend types."""
@@ -2818,10 +2818,10 @@ class PostSpendLimitCreationBodySpendingRestrictionsTransactionAmountLimit(Permi
 class PostSpendLimitCreationBodySpendingRestrictions(PermissiveModel):
     """Specifies the spending restrictions. If spend_program_id is passed, this field is ignored and the limit will inherit the spending restrictions of the spend program."""
     allowed_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes allowed for the limit.")
-    allowed_vendors: list[str] | None = Field(None, description="List of merchants allowed for the limit.")
+    allowed_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants allowed for the limit.")
     blocked_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes blocked for the limit.")
     blocked_mcc_codes: list[str] | None = None
-    blocked_vendors: list[str] | None = Field(None, description="List of merchants  blocked for the limit.")
+    blocked_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants  blocked for the limit.")
     interval: Literal["ANNUAL", "DAILY", "MONTHLY", "QUARTERLY", "TERTIARY", "TOTAL", "WEEKLY", "YEARLY"] = Field(..., description="Time interval to apply limit to.")
     limit: PostSpendLimitCreationBodySpendingRestrictionsLimit = Field(..., description="Total amount limit per interval. Currently we expect the currency to be USD and the amount need to be denominated in cents.")
     lock_date: str | None = Field(None, description="Date to automatically lock the card. If lock date has passed, set to a future date or to null to unlock the card.", json_schema_extra={'format': 'date-time'})
@@ -2830,16 +2830,16 @@ class PostSpendLimitCreationBodySpendingRestrictions(PermissiveModel):
 class PostSpendProgramResourceBodyIssuanceRulesAutomatic(PermissiveModel):
     """Set of rules for having spend programs issued by default to users"""
     applies_to_all: bool | None = Field(False, description="Dictates whether this rule should apply to all employees or not (if True, location_ids, department_ids, and user_custom_field_ids should be null).")
-    department_ids: list[str] | None = Field(None, description="List of departments whose users are able to request or be issued this spend program.")
-    location_ids: list[str] | None = Field(None, description="List of locations whose users are able to request or be issued this spend program.")
-    user_custom_field_ids: list[str] | None = None
+    department_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of departments whose users are able to request or be issued this spend program.")
+    location_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of locations whose users are able to request or be issued this spend program.")
+    user_custom_field_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
 
 class PostSpendProgramResourceBodyIssuanceRulesRequestable(PermissiveModel):
     """Set of rules for users requesting spend programs."""
     applies_to_all: bool | None = Field(False, description="Dictates whether this rule should apply to all employees or not (if True, location_ids, department_ids, and user_custom_field_ids should be null).")
-    department_ids: list[str] | None = Field(None, description="List of departments whose users are able to request or be issued this spend program.")
-    location_ids: list[str] | None = Field(None, description="List of locations whose users are able to request or be issued this spend program.")
-    user_custom_field_ids: list[str] | None = None
+    department_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of departments whose users are able to request or be issued this spend program.")
+    location_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of locations whose users are able to request or be issued this spend program.")
+    user_custom_field_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
 
 class PostSpendProgramResourceBodyIssuanceRules(PermissiveModel):
     """Spend Program Issuance Rules can be set for requests or default issuance of Limits from a program. Set whether a program is requestable or issued by default for a given set of users and their attributes (department, locations, and custom fields). If you'd like to give these permissions to all employees, you can set `applies_to_all` to `True`. Feel free to ignore this if you don't want any custom requestability or issuance logic."""
@@ -2864,10 +2864,10 @@ class PostSpendProgramResourceBodySpendingRestrictionsTransactionAmountLimit(Per
 class PostSpendProgramResourceBodySpendingRestrictions(PermissiveModel):
     """A set of restrictions imposed on the spend program."""
     allowed_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes allowed for the limit.")
-    allowed_vendors: list[str] | None = Field(None, description="List of merchants allowed for the limit.")
+    allowed_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants allowed for the limit.")
     blocked_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes blocked for the limit.")
     blocked_mcc_codes: list[str] | None = None
-    blocked_vendors: list[str] | None = Field(None, description="List of merchants  blocked for the limit.")
+    blocked_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants  blocked for the limit.")
     interval: Literal["ANNUAL", "DAILY", "MONTHLY", "QUARTERLY", "TERTIARY", "TOTAL", "WEEKLY", "YEARLY"] = Field(..., description="Time interval to apply limit to.")
     limit: PostSpendProgramResourceBodySpendingRestrictionsLimit = Field(..., description="Total amount limit per interval. Currently we expect the currency to be USD and the amount need to be denominated in cents.")
     lock_date: str | None = Field(None, description="Date to automatically lock the card. If lock date has passed, set to a future date or to null to unlock the card.", json_schema_extra={'format': 'date-time'})
@@ -2961,8 +2961,8 @@ class PostVirtualCardBodySpendingRestrictions(PermissiveModel):
     lock_date: str | None = Field(None, description="Date to automatically lock the card. If `lock_date` has passed, set to a future date or to null to unlock the card. Note that this is different from the actual card expiration date. This date need to conforms to ISO8601 format.", json_schema_extra={'format': 'date-time'})
     policy_id: str | None = None
     transaction_amount_limit: str | float | None = Field(None, description="Max amount limit per transaction.", ge=0)
-    vendor_blacklist: list[str] | None = None
-    vendor_whitelist: list[str] | None = None
+    vendor_blacklist: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
+    vendor_whitelist: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = None
 
 class PutSpendLimitResourceBodyPermittedSpendTypes(PermissiveModel):
     """Modify permitted spend types. All fields of permitted_spend_types must be given."""
@@ -2982,10 +2982,10 @@ class PutSpendLimitResourceBodySpendingRestrictionsTransactionAmountLimit(Permis
 class PutSpendLimitResourceBodySpendingRestrictions(PermissiveModel):
     """Modify spending restrictions. If this field is passed, the entire set of new spending restrictions must be passed (i.e. the given spending restrictions will override all existing spending restrictions)."""
     allowed_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes allowed for the limit.")
-    allowed_vendors: list[str] | None = Field(None, description="List of merchants allowed for the limit.")
+    allowed_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants allowed for the limit.")
     blocked_categories: list[Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9]] | None = Field(None, description="List of Ramp category codes blocked for the limit.")
     blocked_mcc_codes: list[str] | None = None
-    blocked_vendors: list[str] | None = Field(None, description="List of merchants  blocked for the limit.")
+    blocked_vendors: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="List of merchants  blocked for the limit.")
     interval: Literal["ANNUAL", "DAILY", "MONTHLY", "QUARTERLY", "TERTIARY", "TOTAL", "WEEKLY", "YEARLY"] = Field(..., description="Time interval to apply limit to.")
     is_one_time_edit: bool | None = Field(None, description="Dictates whether the spend restriction update is only applicable for the current period. Set to true for a temporary limit increase. Default is false.")
     limit: PutSpendLimitResourceBodySpendingRestrictionsLimit = Field(..., description="Total amount limit per interval. Currently we expect the currency to be USD and the amount need to be denominated in cents.")
@@ -3022,7 +3022,7 @@ class Reimbursement(PermissiveModel):
     payment_batch_id: str | None = Field(..., description="The unique identifier of the reimbursement payment batch that the reimbursement is associated with.", json_schema_extra={'format': 'uuid'})
     payment_id: str | None = Field(..., description="The unique identifier of the payment batch that the reimbursement is associated with, once paid.")
     payment_processed_at: str | None = Field(..., description="Time of reimbursement payment. Presented in ISO8601 format.", json_schema_extra={'format': 'date-time'})
-    receipts: list[str]
+    receipts: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]]
     spend_limit_id: str | None = Field(..., description="Spend limit to which the reimbursement is attributed, if it exists.", json_schema_extra={'format': 'uuid'})
     start_location: str | None = Field(..., description="Starting location of the trip, for mileage reimbursements.")
     state: Literal["APPROVED", "AWAITING_EXPORT", "AWAITING_PAYMENT", "AWAITING_PUSH_PAYMENT", "CANCELED", "DELETED", "DRAFT", "EXPORTED", "EXPORT_FAILED", "EXPORT_INITIATED", "EXPORT_MARKED_AS_FAILED", "EXPORT_SUCCESSFUL", "FAILED_REIMBURSEMENT", "INIT", "MANUALLY_REIMBURSED", "MISSING_ACH", "PENDING", "PROCESSING", "PUSH_PAYMENT_FAILED", "PUSH_PAYMENT_INITIATED", "REIMBURSED", "REIMBURSED_VIA_PUSH", "REJECTED"] = Field(..., description="current state of the reimbursement.")
@@ -3112,7 +3112,7 @@ class Transaction(PermissiveModel):
     minor_unit_conversion_rate: int | None = Field(..., description="The conversion factor to convert from the integer amount to the actual currency value. Divide amount by this value to get the real currency amount. For USD, this is 100 (e.g., 12034 / 100 = 120.34 USD).")
     original_transaction_amount: CurrencyAmount | None = Field(..., description="the original transaction amount before the currency conversion.")
     policy_violations: list[ApiTransactionPolicyViolation] | None = Field(None, description="A list of policy violations sorted in descending order by their creation time.")
-    receipts: list[str] | None = Field(None, description="Receipts listed in ascending order by their creation time, related to the transaction.")
+    receipts: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Receipts listed in ascending order by their creation time, related to the transaction.")
     requires_accounting_vendor_creation_to_sync: bool | None = Field(None, description="Whether the integrator must create an accounting vendor and code it to this transaction before syncing. True when the connection has transaction_accounting_vendor_creation_on_sync_enabled=true and the transaction has no vendor accounting field selection. Omitted when transaction_accounting_vendor_creation_on_sync_enabled=false.")
     settlement_date: str | None = Field(None, description="Time when funds were moved for a transaction, in ISO8601 format.", json_schema_extra={'format': 'date-time'})
     sk_category_id: Literal[1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 23, 24, 25, 26, 27, 28, 29, 3, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 4, 40, 41, 42, 43, 44, 5, 6, 7, 8, 9] | None = Field(..., description="Ramp category code.")
@@ -3158,7 +3158,7 @@ class Vendor(PermissiveModel):
     accounting_vendor_remote_id: str | None = Field(..., description="The accounting remote id of the vendor.")
     address: ApiAddressResource | None = Field(None, description="The address of the vendor.")
     billing_frequency: Literal["ANNUAL", "MONTHLY", "MULTIPLE", "NA", "OTHER", "QUARTERLY", "ROLLING", "TBD", "TWICE_A_YEAR"] | None = Field(None, description="The billing frequency for this vendor.")
-    contacts: list[str] = Field(..., description="Unique identifiers of contacts associated with this vendor.")
+    contacts: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="Unique identifiers of contacts associated with this vendor.")
     country: str = Field(..., description="The 2-letter country of the vendor.")
     created_at: str = Field(..., description="The date and time when this vendor was created.", json_schema_extra={'format': 'date-time'})
     default_entity_id: str | None = Field(..., description="Unique identifier of the default business entity associated with this vendor.", json_schema_extra={'format': 'uuid'})

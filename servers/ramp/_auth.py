@@ -1,7 +1,7 @@
 """
-Authentication module for Ramp Developer API MCP server.
+Authentication module for Ramp MCP server.
 
-Generated: 2026-05-05 16:05:49 UTC
+Generated: 2026-05-12 12:22:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
