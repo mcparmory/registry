@@ -5,7 +5,7 @@ Base URL: https://app.linklyhq.com
 | | |
 |---|---|
 | **Category** | Analytics |
-| **Tools** | 18 |
+| **Tools** | 17 |
 | **Auth** | API Key |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (api_key)
+
 Do not commit credentials to version control.
 
 ---

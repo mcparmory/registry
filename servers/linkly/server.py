@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Linkly MCP Server
-Generated: 2026-05-05 15:27:26 UTC
+Generated: 2026-05-12 11:46:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.linklyhq.com")
 SERVER_NAME = "Linkly"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1213,7 +1248,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Linkly", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Add Domain to Workspace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_domain_to_workspace(
     workspace_id: int = Field(..., description="The unique identifier of the workspace where the domain will be added."),
     name: str | None = Field(None, description="The name of the custom domain to add to your workspace."),
@@ -1233,6 +1273,7 @@ async def add_domain_to_workspace(
     _http_path = "/api/v1/domains"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_domain_to_workspace")
@@ -1249,12 +1290,19 @@ async def add_domain_to_workspace(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Get Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_link(id_: int = Field(..., alias="id", description="The unique identifier of the link to retrieve (e.g., 24).")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific link by its unique identifier."""
 
@@ -1290,7 +1338,13 @@ async def get_link(id_: int = Field(..., alias="id", description="The unique ide
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_link(
     block_bots: bool | None = Field(None, description="Prevent automated bots and crawlers from accessing this link."),
     body_tags: str | None = Field(None, description="Custom HTML tags to inject into the page body for tracking or functionality purposes."),
@@ -1333,6 +1387,7 @@ async def create_or_update_link(
     _http_path = "/api/v1/link"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_or_update_link")
@@ -1349,12 +1404,19 @@ async def create_or_update_link(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Get Link Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_link_analytics(
     id_: str = Field(..., alias="id", description="The unique identifier of the link to retrieve. Use the link ID provided when the link was created."),
     workspace_id: str | None = Field(None, description="Workspace ID. Optional when using OAuth2 Bearer token."),
@@ -1394,7 +1456,13 @@ async def get_link_analytics(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks for Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks_for_link(link_id: int = Field(..., description="The unique identifier of the link whose webhooks you want to retrieve. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhook subscriptions configured for a specific link. Returns a list of webhooks that are actively monitoring events for the given link."""
 
@@ -1430,7 +1498,13 @@ async def list_webhooks_for_link(link_id: int = Field(..., description="The uniq
     return _response_data
 
 # Tags: Clicks
-@mcp.tool()
+@mcp.tool(
+    title="Get Clicks Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_clicks_analytics(
     workspace_id: str = Field(..., description="The unique identifier of the workspace to retrieve click analytics for."),
     start: str | None = Field(None, description="The start date for filtering clicks, specified in ISO 8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ). If omitted, defaults to the beginning of available data."),
@@ -1480,7 +1554,13 @@ async def get_clicks_analytics(
     return _response_data
 
 # Tags: Clicks
-@mcp.tool()
+@mcp.tool(
+    title="Get Click Counters by Dimension",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_click_counters_by_dimension(
     workspace_id: str = Field(..., description="The workspace identifier that contains the click analytics data."),
     counter: Literal["country", "platform", "browser", "referer", "isp", "link_id", "top_params"] = Field(..., description="The dimension to group clicks by. Choose from: country (geographic location), platform (device type), browser (web browser), referer (HTTP referrer), isp (internet service provider), link_id (specific tracked link), or top_params (query parameters)."),
@@ -1524,7 +1604,13 @@ async def get_click_counters_by_dimension(
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="List Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_domains(workspace_id: str = Field(..., description="The unique identifier of the workspace whose domains you want to list.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom domains configured for a workspace. These domains can be used as targets when creating short links."""
 
@@ -1560,7 +1646,12 @@ async def list_domains(workspace_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Add Domain to Workspace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_domain_to_workspace_by_id(
     workspace_id: str = Field(..., description="The unique identifier of the workspace where the domain will be added."),
     name: str = Field(..., description="The fully qualified domain name to add (e.g., links.example.com). Ensure the corresponding CNAME record is configured in your DNS provider before adding."),
@@ -1581,6 +1672,7 @@ async def add_domain_to_workspace_by_id(
     _http_path = _build_path("/api/v1/workspace/{workspace_id}/domains", _request.path.model_dump(by_alias=True)) if _request.path else "/api/v1/workspace/{workspace_id}/domains"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_domain_to_workspace_by_id")
@@ -1597,12 +1689,19 @@ async def add_domain_to_workspace_by_id(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Delete Domain",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_domain(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the domain to be deleted."),
     domain_id: str = Field(..., description="The unique identifier of the domain to be removed from the workspace."),
@@ -1641,7 +1740,13 @@ async def delete_domain(
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Update Domain Favicon",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_domain_favicon(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the domain. Typically a numeric ID."),
     id_: str = Field(..., alias="id", description="The unique identifier of the domain whose favicon should be updated. Typically a numeric ID."),
@@ -1663,6 +1768,7 @@ async def update_domain_favicon(
     _http_path = _build_path("/api/v1/workspace/{workspace_id}/domains/{id}/favicon", _request.path.model_dump(by_alias=True)) if _request.path else "/api/v1/workspace/{workspace_id}/domains/{id}/favicon"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_domain_favicon")
@@ -1679,12 +1785,19 @@ async def update_domain_favicon(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Links in Batch",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_link_batch(
     workspace_id: str = Field(..., description="The workspace identifier where the link will be created or updated."),
     url: str = Field(..., description="The destination URL where users will be redirected. Must be a valid URI."),
@@ -1734,6 +1847,7 @@ async def create_or_update_link_batch(
     _http_path = _build_path("/api/v1/workspace/{workspace_id}/links", _request.path.model_dump(by_alias=True)) if _request.path else "/api/v1/workspace/{workspace_id}/links"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_or_update_link_batch")
@@ -1750,12 +1864,19 @@ async def create_or_update_link_batch(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Delete Links",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_links(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the links to delete."),
     ids: list[int] | None = Field(None, description="Array of link IDs to delete. If not provided, no links will be deleted."),
@@ -1776,6 +1897,7 @@ async def delete_links(
     _http_path = _build_path("/api/v1/workspace/{workspace_id}/links", _request.path.model_dump(by_alias=True)) if _request.path else "/api/v1/workspace/{workspace_id}/links"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_links")
@@ -1792,12 +1914,19 @@ async def delete_links(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Export Links",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_links(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the links to export."),
     format_: Literal["json", "csv"] | None = Field(None, alias="format", description="The output format for the exported links. Choose between JSON (default) or CSV."),
@@ -1838,7 +1967,13 @@ async def export_links(
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="Delete Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_link(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the link to delete."),
     id_: int = Field(..., alias="id", description="The unique identifier of the link to delete."),
@@ -1877,7 +2012,13 @@ async def delete_link(
     return _response_data
 
 # Tags: Links
-@mcp.tool()
+@mcp.tool(
+    title="List Links",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_links(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the links to retrieve."),
     search: str | None = Field(None, description="Optional search query to filter links by matching against link properties. Searches across relevant link fields to narrow results."),
@@ -1921,7 +2062,13 @@ async def list_links(
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspaces() -> dict[str, Any] | ToolResult:
     """Retrieve all workspaces accessible to the authenticated user. Use this operation to discover available workspace IDs for use in other API calls."""
 
@@ -1948,7 +2095,13 @@ async def list_workspaces() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook from Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook_from_link(
     link_id: int = Field(..., description="The unique identifier of the link from which to remove the webhook subscription."),
     hook_id: str = Field(..., description="The webhook URL to unsubscribe, provided in URL-encoded format (e.g., https%3A%2F%2Fhooks.example.com%2Fabc123)."),

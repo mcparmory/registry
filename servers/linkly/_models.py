@@ -1,7 +1,7 @@
 """
 Linkly MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:27:26 UTC
+Generated: 2026-05-12 11:46:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
