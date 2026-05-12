@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Postman MCP Server
-Generated: 2026-05-05 16:01:50 UTC
+Generated: 2026-05-12 12:15:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.getpostman.com")
 SERVER_NAME = "Postman"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1213,7 +1248,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Postman", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: API
-@mcp.tool()
+@mcp.tool(
+    title="List APIs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_apis(
     workspace: str | None = Field(None, description="Filter results to APIs within a specific workspace. Provide the workspace ID to scope the query."),
     since: str | None = Field(None, description="Filter results to APIs updated on or after this timestamp. Use ISO 8601 date-time format."),
@@ -1263,7 +1304,12 @@ async def list_apis(
     return _response_data
 
 # Tags: API
-@mcp.tool()
+@mcp.tool(
+    title="Create API",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api(
     workspace: str | None = Field(None, description="The workspace ID where the API will be created. If not specified, the API is created in the default workspace."),
     description: str | None = Field(None, description="A detailed description of the API's purpose and functionality."),
@@ -1303,13 +1349,20 @@ async def create_api(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API
-@mcp.tool()
+@mcp.tool(
+    title="Get API",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific API by its ID, including metadata such as name, summary, and description."""
 
@@ -1347,7 +1400,13 @@ async def get_api(api_id: str = Field(..., alias="apiId", description="The uniqu
     return _response_data
 
 # Tags: API
-@mcp.tool()
+@mcp.tool(
+    title="Update API",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_api(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to update."),
     description: str | None = Field(None, description="The updated description for the API. Provide a clear, concise explanation of what the API does."),
@@ -1386,13 +1445,20 @@ async def update_api(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API
-@mcp.tool()
+@mcp.tool(
+    title="Delete API",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_api(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an API by its ID. Returns the deleted API object with its ID for confirmation."""
 
@@ -1430,7 +1496,13 @@ async def delete_api(api_id: str = Field(..., alias="apiId", description="The un
     return _response_data
 
 # Tags: API, API Version
-@mcp.tool()
+@mcp.tool(
+    title="List API Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_versions(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve all versions.")) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a specified API, including detailed metadata for each version."""
 
@@ -1468,7 +1540,12 @@ async def list_api_versions(api_id: str = Field(..., alias="apiId", description=
     return _response_data
 
 # Tags: API, API Version
-@mcp.tool()
+@mcp.tool(
+    title="Create API Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API in which to create the new version."),
     name: str | None = Field(None, description="The name for the new API version (e.g., '1.0', '2.0-beta'). Required when creating a version from scratch."),
@@ -1512,13 +1589,20 @@ async def create_api_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API, API Version
-@mcp.tool()
+@mcp.tool(
+    title="Get API Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the version to retrieve."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version to fetch."),
@@ -1559,7 +1643,13 @@ async def get_api_version(
     return _response_data
 
 # Tags: API, API Version
-@mcp.tool()
+@mcp.tool(
+    title="Update API Version",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the version to update."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version to update."),
@@ -1598,13 +1688,20 @@ async def update_api_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API, API Version
-@mcp.tool()
+@mcp.tool(
+    title="Delete API Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the version to delete."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version to delete."),
@@ -1645,7 +1742,13 @@ async def delete_api_version(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="List Contract Test Relations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contract_test_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to fetch contract test relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version for which to fetch contract test relations."),
@@ -1686,7 +1789,13 @@ async def list_contract_test_relations(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="Get Documentation Relations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_documentation_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to fetch documentation relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to fetch documentation relations."),
@@ -1727,7 +1836,13 @@ async def get_documentation_relations(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Relations for API Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment_relations_for_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve environment relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version for which to retrieve environment relations."),
@@ -1768,7 +1883,13 @@ async def get_environment_relations_for_api_version(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="List Integration Test Relations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_integration_test_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to fetch integration test relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to fetch integration test relations."),
@@ -1809,7 +1930,13 @@ async def list_integration_test_relations(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="List Monitor Relations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_monitor_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to fetch monitor relations."),
@@ -1850,7 +1977,13 @@ async def list_monitor_relations(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="List Linked Relations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_linked_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve linked relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to retrieve linked relations."),
@@ -1891,7 +2024,12 @@ async def list_linked_relations(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="Add Relations to API Version",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_relations_to_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to which relations will be added."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version to which relations will be added."),
@@ -1933,13 +2071,19 @@ async def add_relations_to_api_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API, Schema
-@mcp.tool()
+@mcp.tool(
+    title="Create Schema",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schema(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to which the schema will be added."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version under which the schema will be created."),
@@ -1977,13 +2121,20 @@ async def create_schema(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API, Schema
-@mcp.tool()
+@mcp.tool(
+    title="Get Schema",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schema(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the schema."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version containing the schema."),
@@ -2025,7 +2176,13 @@ async def get_schema(
     return _response_data
 
 # Tags: API, Schema
-@mcp.tool()
+@mcp.tool(
+    title="Update Schema",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schema(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the schema to update."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version containing the schema to update."),
@@ -2066,13 +2223,19 @@ async def update_schema(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API, Schema
-@mcp.tool()
+@mcp.tool(
+    title="Create Collection From Schema",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_collection_from_schema(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to which the collection will be linked."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version to which the collection will be linked."),
@@ -2117,13 +2280,20 @@ async def create_collection_from_schema(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="List Test Suite Relations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_test_suite_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve test suite relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to retrieve test suite relations."),
@@ -2164,7 +2334,13 @@ async def list_test_suite_relations(
     return _response_data
 
 # Tags: API, Relations
-@mcp.tool()
+@mcp.tool(
+    title="Sync Relation with Schema",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def sync_relation_with_schema(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the relation to synchronize."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version whose schema will be used for synchronization."),
@@ -2207,7 +2383,13 @@ async def sync_relation_with_schema(
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="List Collections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collections() -> dict[str, Any] | ToolResult:
     """Retrieve all collections accessible to you, including your own collections and those you have subscribed to. Each collection includes its name, ID, owner, and UID."""
 
@@ -2234,7 +2416,12 @@ async def list_collections() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Create Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_collection(
     description: str | None = Field(None, description="A descriptive label for the collection (e.g., 'This is just a sample collection.'). Helps identify the collection's purpose."),
     name: str | None = Field(None, description="The name of the collection. Supports dynamic variables like {{$randomInt}} for generating unique names."),
@@ -2272,13 +2459,19 @@ async def create_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Create Fork of Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_fork_of_collection(
     collection_uid: str = Field(..., description="The unique identifier of the collection to fork."),
     workspace: str | None = Field(None, description="The ID of the workspace where the forked collection should be created. If not specified, the fork will be created in the default workspace."),
@@ -2327,7 +2520,12 @@ async def create_fork_of_collection(
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Merge Fork to Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_fork_to_collection(
     destination: str | None = Field(None, description="The UID of the destination collection where the fork will be merged into. Required for the merge operation."),
     source: str | None = Field(None, description="The UID of the forked collection to merge. This is the source collection that will be merged into the destination."),
@@ -2363,13 +2561,20 @@ async def merge_fork_to_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collection(collection_uid: str = Field(..., description="The unique identifier (uid) of the collection to retrieve. This is a required string value that uniquely identifies the collection within the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full contents of a specific collection by its unique identifier. You must have access permissions to the collection to retrieve it."""
 
@@ -2405,7 +2610,13 @@ async def get_collection(collection_uid: str = Field(..., description="The uniqu
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Update Collection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_collection(
     collection_uid: str = Field(..., description="The unique identifier of the collection to update. This is a required path parameter that specifies which collection will be replaced."),
     postman_id: str | None = Field(None, description="The Postman internal identifier for the collection, typically a UUID format. Used to maintain collection identity across systems."),
@@ -2446,13 +2657,20 @@ async def update_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Collections
-@mcp.tool()
+@mcp.tool(
+    title="Delete Collection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_collection(collection_uid: str = Field(..., description="The unique identifier of the collection to delete. This identifier is required to specify which collection should be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a collection by its unique identifier. Returns the deleted collection's id and uid upon successful deletion."""
 
@@ -2488,7 +2706,13 @@ async def delete_collection(collection_uid: str = Field(..., description="The un
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="List Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all environments you own, including their names, IDs, owners, and UIDs. Requires API Key authentication."""
 
@@ -2515,7 +2739,12 @@ async def list_environments() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment(
     name: str | None = Field(None, description="The name of the environment to create. Must be between 1 and 254 characters long."),
     values: list[_models.CreateEnvironmentBodyEnvironmentValuesItem] | None = Field(None, description="An array of environment variables to initialize with the environment. Each variable must have a key and value; the enabled flag is optional. Up to 100 variables can be specified per environment."),
@@ -2550,13 +2779,20 @@ async def create_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(environment_uid: str = Field(..., description="The unique identifier of the environment to retrieve. This is a required string value that identifies which environment's contents to access.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full contents of a specific environment by its unique identifier. This operation requires authentication via API Key."""
 
@@ -2592,7 +2828,13 @@ async def get_environment(environment_uid: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment(
     environment_uid: str = Field(..., description="The unique identifier of the environment to update."),
     name: str | None = Field(None, description="The new name for the environment. Must be between 1 and 254 characters."),
@@ -2629,13 +2871,20 @@ async def update_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment(environment_uid: str = Field(..., description="The unique identifier of the environment to delete. This is a required string value that uniquely identifies the environment within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a single environment by its unique identifier. This action cannot be undone."""
 
@@ -2671,7 +2920,13 @@ async def delete_environment(environment_uid: str = Field(..., description="The 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get Authenticated User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the authenticated user, including username, full name, email address, and other profile data. Requires API Key authentication via X-Api-Key header or apikey query parameter."""
 
@@ -2698,7 +2953,13 @@ async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="List Mocks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_mocks() -> dict[str, Any] | ToolResult:
     """Retrieve all mocks you have created. Returns a complete list of your mock configurations for managing and testing API responses."""
 
@@ -2725,7 +2986,12 @@ async def list_mocks() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="Create Mock",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_mock(
     collection: str | None = Field(None, description="The unique identifier of the collection for which to create the mock. Format is a UUID string."),
     environment: str | None = Field(None, description="The unique identifier of an environment to use for resolving variables within the collection. Format is a UUID string. If provided, environment variables will be substituted in the mock."),
@@ -2760,13 +3026,20 @@ async def create_mock(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="Get Mock",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to retrieve. This is a required string value that uniquely identifies the mock resource.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific mock by its unique identifier. Requires API Key authentication via X-Api-Key header or apikey query parameter."""
 
@@ -2802,7 +3075,13 @@ async def get_mock(mock_uid: str = Field(..., description="The unique identifier
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="Update Mock",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_mock(
     mock_uid: str = Field(..., description="The unique identifier of the mock server to update."),
     description: str | None = Field(None, description="A descriptive text explaining the purpose or details of the mock server."),
@@ -2842,13 +3121,20 @@ async def update_mock(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Mock",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to delete. This is a required string value that identifies which mock should be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing mock by its unique identifier. This operation removes the mock and all associated data."""
 
@@ -2884,7 +3170,12 @@ async def delete_mock(mock_uid: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="Publish Mock",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to publish. This is the uid assigned to the mock when it was created.")) -> dict[str, Any] | ToolResult:
     """Publishes a mock that you have created, making it available for use. Requires the mock's unique identifier (uid) and API key authentication."""
 
@@ -2920,7 +3211,13 @@ async def publish_mock(mock_uid: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Mocks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Mock Publication",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_mock_publication(mock_uid: str = Field(..., description="The unique identifier of the mock to unpublish. This is a required string value that identifies which mock should be removed from published state.")) -> dict[str, Any] | ToolResult:
     """Unpublish a mock by its unique identifier. This removes the mock from published state, making it unavailable for use."""
 
@@ -2956,7 +3253,13 @@ async def delete_mock_publication(mock_uid: str = Field(..., description="The un
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="List Monitors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_monitors() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all monitors accessible to you, including their name, ID, owner, and unique identifier. Requires API Key authentication."""
 
@@ -2983,7 +3286,12 @@ async def list_monitors() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Create Monitor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_monitor(
     collection: str | None = Field(None, description="The unique identifier of the Postman collection to monitor. This collection contains the API tests that will be executed on schedule."),
     environment: str | None = Field(None, description="The unique identifier of the Postman environment to use when running the monitor. This provides variables and configuration for the collection execution."),
@@ -3022,13 +3330,20 @@ async def create_monitor(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Get Monitor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to retrieve. This is a required string value that uniquely identifies the monitor in the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific monitor using its unique identifier. This operation requires authentication via API key."""
 
@@ -3064,7 +3379,13 @@ async def get_monitor(monitor_uid: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Update Monitor",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_monitor(
     monitor_uid: str = Field(..., description="The unique identifier of the monitor to update. This is a required path parameter that specifies which monitor will be modified."),
     name: str | None = Field(None, description="The new display name for the monitor. Use this to give the monitor a more descriptive or updated label."),
@@ -3103,13 +3424,20 @@ async def update_monitor(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Monitor",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to delete. This is a required string value that identifies which monitor to remove.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing monitor by its unique identifier. This operation removes the monitor and all associated data."""
 
@@ -3145,7 +3473,12 @@ async def delete_monitor(monitor_uid: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Run Monitor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def run_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to execute.")) -> dict[str, Any] | ToolResult:
     """Executes a monitor immediately and waits for completion, returning the run results. This is a synchronous operation that blocks until the monitor finishes executing."""
 
@@ -3181,7 +3514,12 @@ async def run_monitor(monitor_uid: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Create Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook(
     workspace: str | None = Field(None, description="The workspace ID where the webhook will be created. Required to scope the webhook to the correct workspace context."),
     collection: str | None = Field(None, description="The ID of the collection that will be triggered when this webhook is invoked. This determines which collection executes when the webhook URL is called."),
@@ -3220,13 +3558,20 @@ async def create_webhook(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="List Workspaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspaces() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all workspaces accessible to you, including your own workspaces and those shared with you. Each workspace entry includes its name, ID, and type."""
 
@@ -3253,7 +3598,12 @@ async def list_workspaces() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Create Workspace",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workspace(
     collections_: list[_models.CreateWorkspaceBodyWorkspaceCollectionsItem] | None = Field(None, alias="collections", description="Array of collection UIDs to include in the workspace. Order is preserved as provided."),
     description: str | None = Field(None, description="A descriptive text for the workspace to explain its purpose or contents."),
@@ -3293,13 +3643,20 @@ async def create_workspace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Workspace",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workspace(workspace_id: str = Field(..., description="The unique identifier of the workspace to retrieve. Must be a valid workspace ID that you have access to.")) -> dict[str, Any] | ToolResult:
     """Retrieve a workspace by its ID, including all associated collections, environments, mocks, and monitors that you have access to."""
 
@@ -3335,7 +3692,13 @@ async def get_workspace(workspace_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Update Workspace",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workspace(
     workspace_id: str = Field(..., description="The unique identifier of the workspace to update."),
     collections_: list[_models.UpdateWorkspaceBodyWorkspaceCollectionsItem] | None = Field(None, alias="collections", description="Array of collection UIDs to associate with this workspace. Replaces all existing collections—only specified collections will remain associated after the update."),
@@ -3376,13 +3739,20 @@ async def update_workspace(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workspaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workspace",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workspace(workspace_id: str = Field(..., description="The unique identifier of the workspace to delete. This ID is required to specify which workspace should be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing workspace by its ID. Returns the ID of the deleted workspace upon successful completion."""
 
