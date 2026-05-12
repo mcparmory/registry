@@ -5,7 +5,7 @@ Base URL: https://api.figma.com
 | | |
 |---|---|
 | **Category** | Productivity |
-| **Tools** | 41 |
+| **Tools** | 40 |
 | **Auth** | API Key, OAuth2 |
 
 ## API Info
@@ -81,6 +81,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `ORG_OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `ORG_OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `API_KEY` — API Key Authentication (X-Figma-Token)
+
 Do not commit credentials to version control.
 
 ### OAuth2

@@ -5,7 +5,7 @@ Figma MCP Server
 API Info:
 - Terms of Service: https://www.figma.com/developer-terms/
 
-Generated: 2026-05-05 14:55:51 UTC
+Generated: 2026-05-12 11:21:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.figma.com")
 SERVER_NAME = "Figma"
-SERVER_VERSION = "1.0.5"
+SERVER_VERSION = "1.0.6"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -986,6 +1017,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1010,6 +1043,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1235,7 +1270,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Figma", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Export File as JSON",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def export_file_json(
     file_key: str = Field(..., description="The unique identifier of the file to export. Can be extracted from the Figma file URL (https://www.figma.com/file/{file_key}/{title}) or obtained as a branch key using the branch_data parameter."),
     ids: str | None = Field(None, description="Comma-separated list of node IDs to include in the export. When specified, returns only the requested nodes, their children, and ancestor chains. Top-level canvas nodes are always included regardless of this parameter."),
@@ -1281,7 +1322,13 @@ async def export_file_json(
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Nodes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_nodes(
     file_key: str = Field(..., description="The Figma file identifier to query. Can be either a file key or branch key (obtain branch key via GET /v1/files/:key with branch_data parameter)."),
     ids: str = Field(..., description="Comma-separated list of node IDs to retrieve. The API will return data for each specified node, though some values may be null if a node ID does not exist in the file."),
@@ -1326,7 +1373,13 @@ async def get_file_nodes(
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Render Node Images",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def render_node_images(
     file_key: str = Field(..., description="The file to export images from. Accepts either a file key or branch key. Use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     ids: str = Field(..., description="Comma-separated list of node IDs to render. Multiple node IDs can be specified to render multiple images from the same file."),
@@ -1371,7 +1424,13 @@ async def render_node_images(
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="List Image Fills",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_image_fills(file_key: str = Field(..., description="The Figma file identifier to retrieve images from. Accepts either a file key or branch key; use GET /v1/files/:key with branch_data query parameter to obtain a branch key.")) -> dict[str, Any] | ToolResult:
     """Retrieve download URLs for all images used in image fills within a Figma document. Image URLs are valid for up to 14 days and can be located by their imageRef attribute in Paint objects from the file endpoint."""
 
@@ -1407,7 +1466,13 @@ async def list_image_fills(file_key: str = Field(..., description="The Figma fil
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_metadata(file_key: str = Field(..., description="The unique identifier for the file or branch. Use a file key for standard file metadata or a branch key for branch-specific metadata.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a file or branch. Provide either a file key or branch key to access file information."""
 
@@ -1443,7 +1508,13 @@ async def get_file_metadata(file_key: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Team Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_projects(team_id: str = Field(..., description="The unique identifier of the team. You can find the team ID in the URL of your team page, positioned after 'team' and before your team name.")) -> dict[str, Any] | ToolResult:
     """Retrieve all projects within a specified team that are visible to the authenticated user. Only projects accessible to the token owner or authenticated user will be returned."""
 
@@ -1479,7 +1550,13 @@ async def list_team_projects(team_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_files(
     project_id: str = Field(..., description="The unique identifier of the project from which to retrieve files."),
     branch_data: bool | None = Field(None, description="Include branch metadata in the response for each main file that contains branches within the project."),
@@ -1521,7 +1598,13 @@ async def list_project_files(
     return _response_data
 
 # Tags: Files
-@mcp.tool()
+@mcp.tool(
+    title="List File Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_versions(
     file_key: str = Field(..., description="The file or branch key identifying which file's version history to retrieve. Obtain the branch key using GET /v1/files/:key with the branch_data query parameter."),
     page_size: float | None = Field(None, description="Number of version records to return per page. Defaults to 30 if not specified.", le=50),
@@ -1563,7 +1646,13 @@ async def list_file_versions(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="List File Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_comments(
     file_key: str = Field(..., description="The file or branch identifier to retrieve comments from. Use the file key for the main file, or obtain a branch key via GET /v1/files/:key with the branch_data query parameter to access comments on a specific branch."),
     as_md: bool | None = Field(None, description="When enabled, converts comments to their markdown equivalents where applicable for better formatting compatibility."),
@@ -1605,7 +1694,12 @@ async def list_file_comments(
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Add File Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_file_comment(
     file_key: str = Field(..., description="The file identifier to add the comment to. Can be a file key or branch key; use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     message: str = Field(..., description="The text content of the comment to post."),
@@ -1643,13 +1737,20 @@ async def add_file_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_comment(
     file_key: str = Field(..., description="The file or branch key identifying the file containing the comment. Retrieve the branch key using GET /v1/files/:key with the branch_data query parameter."),
     comment_id: str = Field(..., description="The unique identifier of the comment to delete."),
@@ -1688,7 +1789,13 @@ async def delete_comment(
     return _response_data
 
 # Tags: Comment Reactions
-@mcp.tool()
+@mcp.tool(
+    title="List Comment Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_comment_reactions(
     file_key: str = Field(..., description="The file identifier to retrieve the comment from. Can be either a file key or branch key; use `GET /v1/files/:key` with the `branch_data` query parameter to obtain a branch key if needed."),
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve reactions from."),
@@ -1727,7 +1834,12 @@ async def list_comment_reactions(
     return _response_data
 
 # Tags: Comment Reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Comment Reaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_comment_reaction(
     file_key: str = Field(..., description="The file identifier to add the reaction to. Can be a file key or branch key; use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     comment_id: str = Field(..., description="The unique identifier of the comment to react to."),
@@ -1764,13 +1876,20 @@ async def add_comment_reaction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Comment Reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Comment Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_comment_reaction(
     file_key: str = Field(..., description="The file or branch key containing the comment. Retrieve the branch key using GET /v1/files/:key with the branch_data query parameter."),
     comment_id: str = Field(..., description="The unique identifier of the comment from which to remove the reaction."),
@@ -1813,7 +1932,13 @@ async def remove_comment_reaction(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile and account information for the currently authenticated user. This endpoint requires valid authentication credentials."""
 
@@ -1840,7 +1965,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Components
-@mcp.tool()
+@mcp.tool(
+    title="List Team Components",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_components(
     team_id: str = Field(..., description="The unique identifier of the team whose components you want to list."),
     page_size: float | None = Field(None, description="The number of components to return per page. Specify a value between 1 and 1000 to control result set size."),
@@ -1882,7 +2013,13 @@ async def list_team_components(
     return _response_data
 
 # Tags: Components
-@mcp.tool()
+@mcp.tool(
+    title="List File Components",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_components(file_key: str = Field(..., description="The main file key identifying the file library to retrieve components from. Branch keys are not supported for this operation.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of published components available in a file library. Only main file keys are supported, as components cannot be published from branch files."""
 
@@ -1918,7 +2055,13 @@ async def list_file_components(file_key: str = Field(..., description="The main 
     return _response_data
 
 # Tags: Components
-@mcp.tool()
+@mcp.tool(
+    title="Get Component",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_component(key: str = Field(..., description="The unique identifier that uniquely identifies the component within the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific component using its unique identifier. This operation returns comprehensive information about the component's configuration and properties."""
 
@@ -1954,7 +2097,13 @@ async def get_component(key: str = Field(..., description="The unique identifier
     return _response_data
 
 # Tags: Component Sets
-@mcp.tool()
+@mcp.tool(
+    title="List Component Sets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_component_sets(
     team_id: str = Field(..., description="The unique identifier of the team whose component sets you want to retrieve."),
     page_size: float | None = Field(None, description="The number of component sets to return per page. Useful for controlling response size and implementing pagination."),
@@ -1996,7 +2145,13 @@ async def list_component_sets(
     return _response_data
 
 # Tags: Component Sets
-@mcp.tool()
+@mcp.tool(
+    title="List Component Sets in File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_component_sets_file(file_key: str = Field(..., description="The main file key identifying the library file. Branch keys are not supported as component sets can only be published from main files.")) -> dict[str, Any] | ToolResult:
     """Retrieve all published component sets available in a file library. This operation requires a main file key and cannot be used with branch keys."""
 
@@ -2032,7 +2187,13 @@ async def list_component_sets_file(file_key: str = Field(..., description="The m
     return _response_data
 
 # Tags: Component Sets
-@mcp.tool()
+@mcp.tool(
+    title="Get Component Set",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_component_set(key: str = Field(..., description="The unique identifier that uniquely identifies the component set to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a published component set using its unique identifier. Returns detailed information about the component set configuration and properties."""
 
@@ -2068,7 +2229,13 @@ async def get_component_set(key: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Styles
-@mcp.tool()
+@mcp.tool(
+    title="List Team Styles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_styles(
     team_id: str = Field(..., description="The unique identifier of the team whose styles you want to retrieve."),
     page_size: float | None = Field(None, description="The number of styles to return per page. Adjust this value to control result set size."),
@@ -2110,7 +2277,13 @@ async def list_team_styles(
     return _response_data
 
 # Tags: Styles
-@mcp.tool()
+@mcp.tool(
+    title="List File Styles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_file_styles(file_key: str = Field(..., description="The main file key containing the styles to retrieve. Branch keys are not supported since style publishing is only available for main files.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of published styles available in a file library. Styles can only be published from main files, not from branches."""
 
@@ -2146,7 +2319,13 @@ async def list_file_styles(file_key: str = Field(..., description="The main file
     return _response_data
 
 # Tags: Styles
-@mcp.tool()
+@mcp.tool(
+    title="Get Style",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_style(key: str = Field(..., description="The unique identifier that references the specific style to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific style using its unique identifier. Use this to fetch style configuration and properties."""
 
@@ -2182,7 +2361,13 @@ async def get_style(key: str = Field(..., description="The unique identifier tha
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(
     context_id: str | None = Field(None, description="The unique identifier of the context to retrieve webhooks for. Cannot be used together with plan_api_id."),
     plan_api_id: str | None = Field(None, description="The unique identifier of your plan to retrieve all webhooks across all accessible contexts. Cannot be used together with context_id. Results are paginated when using this parameter."),
@@ -2223,7 +2408,13 @@ async def list_webhooks(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a webhook configuration by its ID. Use this to fetch details about a specific webhook including its URL, events, and status."""
 
@@ -2259,7 +2450,13 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Activity Logs
-@mcp.tool()
+@mcp.tool(
+    title="List Activity Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_activity_logs(
     events: str | None = Field(None, description="Filter results to include only specified event types. Accepts comma-separated values to include multiple event types; all events are returned if unspecified."),
     start_time: float | None = Field(None, description="Unix timestamp marking the start of the time range (inclusive). Defaults to one year ago if unspecified."),
@@ -2303,7 +2500,13 @@ async def list_activity_logs(
     return _response_data
 
 # Tags: Payments
-@mcp.tool()
+@mcp.tool(
+    title="List Payments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_payments(
     user_id: str | None = Field(None, description="The ID of the user whose payment information you want to retrieve. Obtain this by having the user authenticate via OAuth2 to the Figma REST API."),
     community_file_id: str | None = Field(None, description="The ID of the Community file to query. Find this in the file's Community page URL (the number after 'file/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
@@ -2346,7 +2549,13 @@ async def list_payments(
     return _response_data
 
 # Tags: Variables
-@mcp.tool()
+@mcp.tool(
+    title="List Local Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_local_variables(file_key: str = Field(..., description="The file or branch identifier to retrieve variables from. Use the branch key obtained from GET /v1/files/:key with the branch_data query parameter to access branch-specific variables.")) -> dict[str, Any] | ToolResult:
     """Retrieve all local variables created in a file and remote variables referenced within it. This operation is restricted to full members of Enterprise organizations and supports examining variable modes and bound variable details."""
 
@@ -2382,7 +2591,13 @@ async def list_local_variables(file_key: str = Field(..., description="The file 
     return _response_data
 
 # Tags: Variables
-@mcp.tool()
+@mcp.tool(
+    title="List Published Variables",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_published_variables(file_key: str = Field(..., description="The main file key to retrieve published variables from. Branch keys are not supported as variables cannot be published from branches.")) -> dict[str, Any] | ToolResult:
     """Retrieve all variables published from a file, including their subscription IDs and last published timestamps. Available only to full members of Enterprise organizations."""
 
@@ -2418,7 +2633,13 @@ async def list_published_variables(file_key: str = Field(..., description="The m
     return _response_data
 
 # Tags: Variables
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Modify Variables",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_modify_variables(
     file_key: str = Field(..., description="The file to modify variables in. Can be a file key or branch key obtained from GET /v1/files/:key with the branch_data query parameter."),
     variable_collections: list[_models.VariableCollectionChange] | None = Field(None, alias="variableCollections", description="Array of variable collection objects to create, update, or delete. Each object must include an action property (create, update, or delete). Processed first in the request."),
@@ -2457,13 +2678,20 @@ async def bulk_modify_variables(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dev Resources
-@mcp.tool()
+@mcp.tool(
+    title="List Dev Resources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dev_resources(
     file_key: str = Field(..., description="The main file key to retrieve dev resources from. Branch keys are not supported."),
     node_ids: str | None = Field(None, description="Comma-separated list of node identifiers to filter results. When specified, only dev resources attached to these nodes are returned. Omit to retrieve all dev resources in the file."),
@@ -2505,7 +2733,12 @@ async def list_dev_resources(
     return _response_data
 
 # Tags: Dev Resources
-@mcp.tool()
+@mcp.tool(
+    title="Create Dev Resources",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyDevResourcesItem] = Field(..., description="An array of dev resource objects to create. Each resource must reference a valid file_key, have a unique URL per node, and not exceed the 10 dev resource limit per node.")) -> dict[str, Any] | ToolResult:
     """Bulk create dev resources across multiple files. Successfully created resources are returned in the links_created array, while any resources that fail validation appear in the errors array with failure reasons."""
 
@@ -2537,13 +2770,20 @@ async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyD
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dev Resources
-@mcp.tool()
+@mcp.tool(
+    title="Update Dev Resources",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDevResourcesItem] = Field(..., description="An array of dev resource objects to update. Each resource in the array will be processed, and results will be returned indicating which resources were successfully updated and which encountered errors.")) -> dict[str, Any] | ToolResult:
     """Bulk update dev resources across multiple files. Successfully updated resource IDs are returned in the response, while any resources that fail to update are included in an errors array."""
 
@@ -2575,13 +2815,20 @@ async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDe
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Dev Resources
-@mcp.tool()
+@mcp.tool(
+    title="Remove Dev Resource",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_dev_resource(
     file_key: str = Field(..., description="The main file key containing the dev resource to delete. Must be a main file key, not a branch key."),
     dev_resource_id: str = Field(..., description="The unique identifier of the dev resource to delete."),
@@ -2620,7 +2867,13 @@ async def remove_dev_resource(
     return _response_data
 
 # Tags: Library Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Library Component Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_library_component_actions(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve analytics data."),
     group_by: Literal["component", "team"] = Field(..., description="The dimension by which to aggregate the returned analytics data."),
@@ -2664,7 +2917,13 @@ async def list_library_component_actions(
     return _response_data
 
 # Tags: Library Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Library Component Usages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_library_component_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve component usage analytics."),
     group_by: Literal["component", "file"] = Field(..., description="The dimension by which to group the returned usage analytics data."),
@@ -2706,7 +2965,13 @@ async def list_library_component_usages(
     return _response_data
 
 # Tags: Library Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Library Style Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_library_style_actions(
     file_key: str = Field(..., description="The unique identifier of the library for which to fetch style action analytics."),
     group_by: Literal["style", "team"] = Field(..., description="The dimension to group analytics results by. Choose 'style' to aggregate by individual styles or 'team' to aggregate by team."),
@@ -2750,7 +3015,13 @@ async def list_library_style_actions(
     return _response_data
 
 # Tags: Library Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Library Style Usages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_library_style_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve style usage analytics."),
     group_by: Literal["style", "file"] = Field(..., description="The dimension by which to group the returned analytics data. Choose 'style' to see usage broken down by individual styles, or 'file' to see usage broken down by the files that consume those styles."),
@@ -2792,7 +3063,13 @@ async def list_library_style_usages(
     return _response_data
 
 # Tags: Library Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Library Variable Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_library_variable_actions(
     file_key: str = Field(..., description="The unique identifier of the library for which to fetch variable action analytics."),
     group_by: Literal["variable", "team"] = Field(..., description="The dimension by which to group the returned analytics data."),
@@ -2836,7 +3113,13 @@ async def list_library_variable_actions(
     return _response_data
 
 # Tags: Library Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Library Variable Usages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_library_variable_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve variable usage analytics."),
     group_by: Literal["variable", "file"] = Field(..., description="The dimension by which to aggregate the returned variable usage data. Choose 'variable' to group by individual variables, or 'file' to group by source files."),
