@@ -1,7 +1,7 @@
 """
-Pinecone Control Plane Api MCP Server - Pydantic Models
+Pinecone MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:54:49 UTC
+Generated: 2026-05-12 12:12:12 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

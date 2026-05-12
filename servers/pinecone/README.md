@@ -1,4 +1,4 @@
-# Pinecone Control Plane API MCP Server
+# Pinecone MCP Server
 <!-- mcp-name: com.mcparmory/pinecone -->
 
 Base URL: https://api.pinecone.io
@@ -56,6 +56,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (Api-Key)
+
 Do not commit credentials to version control.
 
 ---

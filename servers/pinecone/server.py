@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Pinecone Control Plane API MCP Server
+Pinecone MCP Server
 
 API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 - Contact: Pinecone Support <support@pinecone.io> (https://support.pinecone.io)
 
-Generated: 2026-05-05 15:54:49 UTC
+Generated: 2026-05-12 12:12:12 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.pinecone.io")
-SERVER_NAME = "Pinecone Control Plane API"
-SERVER_VERSION = "1.0.1"
+SERVER_NAME = "Pinecone"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1011,6 +1042,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1035,6 +1068,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1239,10 +1274,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Pinecone Control Plane API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Pinecone", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="List Indexes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_indexes(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for request routing and response formatting. Defaults to 2026-04 if not provided.")) -> dict[str, Any] | ToolResult:
     """Retrieve all indexes in the current project. Returns a list of index configurations and metadata."""
 
@@ -1278,7 +1319,12 @@ async def list_indexes(x_pinecone_api_version: str = Field(..., alias="X-Pinecon
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Create Index",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_index(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version identifier in date format (e.g., 2026-04). Required for all requests to ensure compatibility."),
     name: str = Field(..., description="Unique name for the index (1-45 characters). Must start and end with an alphanumeric character and contain only lowercase letters, numbers, or hyphens.", min_length=1, max_length=45),
@@ -1322,13 +1368,20 @@ async def create_index(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Get Index",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_index(
     index_name: str = Field(..., description="The name of the index to retrieve. Use the exact index name as it appears in your Pinecone project (e.g., 'test-index')."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date in YYYY-MM format. Defaults to 2026-04 if not provided; include this header to ensure compatibility with a specific API version."),
@@ -1368,7 +1421,13 @@ async def get_index(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Update Index",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_index(
     index_name: str = Field(..., description="The name of the index to configure (e.g., 'test-index')."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="Required API version header in date-based format (defaults to 2026-04)."),
@@ -1408,13 +1467,20 @@ async def update_index(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Index",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_index(
     index_name: str = Field(..., description="The name of the index to delete (e.g., 'test-index'). Must match an existing index exactly."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04). Required header for request routing."),
@@ -1454,7 +1520,13 @@ async def delete_index(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="List Index Backups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_index_backups(
     index_name: str = Field(..., description="The name of the index for which to list backups."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04). Required for request routing."),
@@ -1499,7 +1571,12 @@ async def list_index_backups(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Create Backup",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_backup(
     index_name: str = Field(..., description="The name of the index to back up. This identifies which index will be backed up."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="The API version specified as a date-based header (required for all requests). Use the default version 2026-04 unless you need a specific earlier version."),
@@ -1538,13 +1615,20 @@ async def create_backup(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="List Collections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_collections(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests to ensure compatibility with the API specification.")) -> dict[str, Any] | ToolResult:
     """Retrieve all collections in a project. Note that serverless indexes do not support collections."""
 
@@ -1580,7 +1664,12 @@ async def list_collections(x_pinecone_api_version: str = Field(..., alias="X-Pin
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Create Collection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_collection(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header in YYYY-MM format. Defaults to 2026-04 if not provided."),
     name: str = Field(..., description="The name for the new collection. Must be 1-45 characters long, start and end with an alphanumeric character, and contain only lowercase alphanumeric characters or hyphens.", min_length=1, max_length=45),
@@ -1617,13 +1706,19 @@ async def create_collection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Create Index for Model",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_index_for_model(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version identifier in date format (required header for all requests)."),
     name: str = Field(..., description="Unique name for the index. Must be 1-45 characters, start and end with alphanumeric characters, and contain only lowercase letters, numbers, or hyphens.", min_length=1, max_length=45),
@@ -1671,13 +1766,20 @@ async def create_index_for_model(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="List Project Backups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_backups(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based string (defaults to 2026-04). Required header for API compatibility."),
     limit: int | None = Field(None, description="Maximum number of backups to return per page, between 1 and 100. Defaults to 10 results per page.", ge=1, le=100),
@@ -1720,7 +1822,13 @@ async def list_project_backups(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Get Backup",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_backup(
     backup_id: str = Field(..., description="The unique identifier of the backup to retrieve, formatted as a UUID (e.g., 670e8400-e29b-41d4-a716-446655440000)."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header to ensure compatibility with the Pinecone API. Defaults to 2026-04 if not provided."),
@@ -1760,7 +1868,13 @@ async def get_backup(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Backup",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_backup(
     backup_id: str = Field(..., description="The unique identifier of the backup to delete, formatted as a UUID."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04 if not provided)."),
@@ -1800,7 +1914,12 @@ async def delete_backup(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Create Index From Backup",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_index_from_backup(
     backup_id: str = Field(..., description="The unique identifier of the backup to restore from, formatted as a UUID."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (e.g., 2026-04). This header is required to ensure compatibility with the API version."),
@@ -1840,13 +1959,20 @@ async def create_index_from_backup(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="List Restore Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_restore_jobs(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests. Defaults to 2026-04."),
     limit: int | None = Field(None, description="Maximum number of restore jobs to return per page, between 1 and 100 results. Defaults to 10 if not specified.", ge=1, le=100),
@@ -1889,7 +2015,13 @@ async def list_restore_jobs(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Get Restore Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_restore_job(
     job_id: str = Field(..., description="The unique identifier of the restore job to retrieve, formatted as a UUID (e.g., 670e8400-e29b-41d4-a716-446655440000)."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header to ensure compatibility with the Pinecone API. Defaults to 2026-04 if not provided."),
@@ -1929,7 +2061,13 @@ async def get_restore_job(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Get Collection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_collection(
     collection_name: str = Field(..., description="The name of the collection to retrieve information about (e.g., 'tiny-collection')."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header in YYYY-MM format (defaults to 2026-04 if not provided)."),
@@ -1969,7 +2107,13 @@ async def get_collection(
     return _response_data
 
 # Tags: Manage Indexes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Collection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_collection(
     collection_name: str = Field(..., description="The name of the collection to delete (e.g., 'test-collection'). This is a required identifier that specifies which collection will be removed."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="Required API version header in date-based format (defaults to 2026-04). This ensures the request is processed with the correct API specification."),
@@ -2092,7 +2236,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python pinecone_control_plane_api_server.py", file=sys.stderr)
+        print("  python pinecone_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -2194,7 +2338,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Pinecone Control Plane API MCP Server")
+    parser = argparse.ArgumentParser(description="Pinecone MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2295,7 +2439,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Pinecone Control Plane API MCP Server")
+    logger.info("Starting Pinecone MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
