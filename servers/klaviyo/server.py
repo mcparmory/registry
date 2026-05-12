@@ -7,7 +7,7 @@ API Info:
 - Contact: Klaviyo Developer Experience Team <developers@klaviyo.com> (https://developers.klaviyo.com)
 - Terms of Service: https://www.klaviyo.com/legal/api-terms
 
-Generated: 2026-05-05 15:22:41 UTC
+Generated: 2026-05-12 11:41:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -43,11 +44,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://a.klaviyo.com")
 SERVER_NAME = "Klaviyo"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1017,6 +1048,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1041,6 +1074,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1257,7 +1292,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Klaviyo", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Accounts
-@mcp.tool()
+@mcp.tool(
+    title="Get Accounts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_accounts(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     fields_account: list[Literal["contact_information", "contact_information.default_sender_email", "contact_information.default_sender_name", "contact_information.organization_name", "contact_information.street_address", "contact_information.street_address.address1", "contact_information.street_address.address2", "contact_information.street_address.city", "contact_information.street_address.country", "contact_information.street_address.region", "contact_information.street_address.zip", "contact_information.website_url", "industry", "locale", "preferred_currency", "public_api_key", "test_account", "timezone"]] | None = Field(None, alias="fieldsaccount", description="Specify which account fields to include in the response using sparse fieldsets for optimized data retrieval. See API documentation for available field names."),
@@ -1302,7 +1343,13 @@ async def get_accounts(
     return _response_data
 
 # Tags: Accounts
-@mcp.tool()
+@mcp.tool(
+    title="Get Account",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account(
     id_: str = Field(..., alias="id", description="The unique identifier of the account to retrieve (e.g., AbC123)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -1349,7 +1396,13 @@ async def get_account(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="List Campaigns",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_campaigns(
     filter_: str = Field(..., alias="filter", description="Filter expression to narrow campaign results. A channel filter is required—use equals(messages.channel,'email'), equals(messages.channel,'sms'), or equals(messages.channel,'mobile_push'). You can combine with additional filters on id, name (contains), status, archived state, or timestamps (created_at, scheduled_at, updated_at). See API documentation for full filtering syntax."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -1391,7 +1444,13 @@ async def list_campaigns(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -1431,7 +1490,13 @@ async def get_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Update Campaign",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to update."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
@@ -1488,7 +1553,13 @@ async def update_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Delete Campaign",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -1528,7 +1599,13 @@ async def delete_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
@@ -1568,7 +1645,13 @@ async def get_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Update Campaign Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message to update."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -1626,7 +1709,13 @@ async def update_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign Send Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign_send_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign send job to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -1666,7 +1755,13 @@ async def get_campaign_send_job(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Update Campaign Send Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_campaign_send_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign send job to modify."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15."),
@@ -1717,7 +1812,13 @@ async def update_campaign_send_job(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign Recipient Estimation Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign_recipient_estimation_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign recipient estimation job whose status you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -1757,7 +1858,13 @@ async def get_campaign_recipient_estimation_job(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign Recipient Estimation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign_recipient_estimation(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve the estimated recipient count."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -1797,7 +1904,12 @@ async def get_campaign_recipient_estimation(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Clone Campaign",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def clone_campaign(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["campaign"] = Field(..., alias="type", description="The resource type being cloned. Must be set to 'campaign' for this operation."),
@@ -1846,7 +1958,13 @@ async def clone_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Assign Template to Campaign Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def assign_template_to_campaign_message(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15). Defaults to 2026-01-15 if not specified."),
     type_: Literal["campaign-message"] = Field(..., alias="type", description="Resource type identifier for the campaign message. Must be set to 'campaign-message'."),
@@ -1900,7 +2018,12 @@ async def assign_template_to_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Send Campaign",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_campaign(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["campaign-send-job"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be 'campaign-send-job'."),
@@ -1945,7 +2068,12 @@ async def send_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Campaign Recipient Estimation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_campaign_recipient_estimation(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     type_: Literal["campaign-recipient-estimation-job"] = Field(..., alias="type", description="Resource type identifier; must be set to 'campaign-recipient-estimation-job' to specify the job type being created."),
@@ -1990,7 +2118,13 @@ async def trigger_campaign_recipient_estimation(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign for Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the associated campaign."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2030,7 +2164,13 @@ async def get_campaign_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Campaign ID for Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_campaign_id_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the associated campaign ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2070,7 +2210,13 @@ async def get_campaign_id_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Template for Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message whose template you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2110,7 +2256,13 @@ async def get_template_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Template ID for Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template_id_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the related template ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2150,7 +2302,13 @@ async def get_template_id_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Image for Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_image_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message for which to retrieve the associated image."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2190,7 +2348,13 @@ async def get_image_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Get Image ID for Campaign Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_image_id_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message whose related image ID you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2230,7 +2394,13 @@ async def get_image_id_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="Update Image for Campaign Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_image_for_campaign_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign message whose image should be updated."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -2277,7 +2447,13 @@ async def update_image_for_campaign_message(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="List Tags for Campaign",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve tags."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
@@ -2317,7 +2493,13 @@ async def list_tags_for_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="List Tag IDs for Campaign",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_ids_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve associated tag IDs."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -2357,7 +2539,13 @@ async def list_tag_ids_for_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="List Messages for Campaign",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_messages_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign for which to retrieve messages."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
@@ -2397,7 +2585,13 @@ async def list_messages_for_campaign(
     return _response_data
 
 # Tags: Campaigns
-@mcp.tool()
+@mcp.tool(
+    title="List Message IDs for Campaign",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_ids_for_campaign(
     id_: str = Field(..., alias="id", description="The unique identifier of the campaign whose associated message IDs you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2437,7 +2631,13 @@ async def list_message_ids_for_campaign(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_items(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter catalog items by specific criteria. Supports filtering by item IDs (using `any` operator), category ID (exact match), item title (partial match), or published status (exact match). Provide filters in the format specified by the API filtering documentation."),
@@ -2479,7 +2679,12 @@ async def list_catalog_items(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_item(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-item"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'catalog-item' to indicate this is a catalog item resource."),
@@ -2537,7 +2742,13 @@ async def create_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog_item(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog item, formatted as `{integration}:::{catalog}:::{external_id}`. Use `$custom` for the integration type and `$default` for the catalog name, followed by your item's external identifier."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2577,7 +2788,13 @@ async def get_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog_item(
     id_: str = Field(..., alias="id", description="The catalog item's compound ID in format `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your unique external item identifier."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -2636,7 +2853,13 @@ async def update_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog_item(
     id_: str = Field(..., alias="id", description="The unique identifier for the catalog item in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for the integration and `$default` for the catalog, followed by your item's external ID (e.g., `$custom:::$default:::SAMPLE-DATA-ITEM-1`)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
@@ -2676,7 +2899,13 @@ async def delete_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Variants",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_variants(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter variants by specific criteria using supported fields and operators. You can filter by variant IDs (using `any` operator), item ID, SKU, title (partial match), or publication status. Provide filters in the format specified by the API filtering documentation."),
@@ -2718,7 +2947,12 @@ async def list_catalog_variants(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Variant",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_variant(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15."),
     type_: Literal["catalog-variant"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'catalog-variant'."),
@@ -2784,7 +3018,13 @@ async def create_catalog_variant(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog Variant",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog_variant(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog variant, formatted as {integration}:::{catalog}:::{external_id}. Use $custom for the integration type and $default for the catalog name, followed by your external variant identifier."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2824,7 +3064,13 @@ async def get_catalog_variant(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog Variant",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog_variant(
     id_: str = Field(..., alias="id", description="The catalog variant's compound ID in format `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your unique external identifier."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15). Defaults to 2026-01-15."),
@@ -2884,7 +3130,13 @@ async def update_catalog_variant(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog Variant",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog_variant(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog variant in the format {integration}:::{catalog}:::{external_id}. Use $custom as the integration type and $default as the catalog name, followed by your external variant identifier."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -2924,7 +3176,13 @@ async def delete_catalog_variant(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_categories(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using supported fields and operators. You can filter by category IDs using the `any` operator, item IDs using `equals`, or category names using `contains` for partial matching."),
@@ -2966,7 +3224,12 @@ async def list_catalog_categories(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_category(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'catalog-category' for this operation."),
@@ -3018,7 +3281,13 @@ async def create_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog_category(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog category, formatted as `{integration}:::{catalog}:::{external_id}`. Currently supports only the `$custom` integration type and `$default` catalog. The external ID is a custom string that uniquely identifies the category within the catalog."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -3058,7 +3327,13 @@ async def get_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog Category",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: {integration}:::{catalog}:::{external_id}. Use $custom for integration and $default for catalog, followed by your category's external ID (e.g., $custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -3111,7 +3386,13 @@ async def update_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog_category(
     id_: str = Field(..., alias="id", description="The compound identifier for the catalog category, formatted as {integration}:::{catalog}:::{external_id}. Use $custom as the integration and $default as the catalog name."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -3151,7 +3432,13 @@ async def delete_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Create Catalog Items Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_create_catalog_items_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to show only processing jobs). Supports the status field only."),
@@ -3193,7 +3480,12 @@ async def list_bulk_create_catalog_items_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Items Bulk Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_items_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-item-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-item-bulk-create-job' to specify this operation creates catalog items in bulk."),
@@ -3243,7 +3535,13 @@ async def create_catalog_items_bulk_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Create Catalog Items Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_create_catalog_items_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
@@ -3283,7 +3581,13 @@ async def get_bulk_create_catalog_items_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Item Bulk Update Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_item_bulk_update_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports the status field only."),
@@ -3325,7 +3629,12 @@ async def list_catalog_item_bulk_update_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Item Bulk Update Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_item_bulk_update_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-item-bulk-update-job"] = Field(..., alias="type", description="The type of bulk operation job being created. Must be set to 'catalog-item-bulk-update-job' to indicate this is a catalog item update operation."),
@@ -3375,7 +3684,13 @@ async def create_catalog_item_bulk_update_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Update Catalog Items Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_update_catalog_items_job(
     job_id: str = Field(..., description="The unique identifier of the bulk update job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
@@ -3415,7 +3730,13 @@ async def get_bulk_update_catalog_items_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Delete Catalog Items Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_delete_catalog_items_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to show only processing jobs). Omit to retrieve jobs in all statuses."),
@@ -3457,7 +3778,13 @@ async def list_bulk_delete_catalog_items_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Item Bulk Delete Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_catalog_item_bulk_delete_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this operation."),
     type_: Literal["catalog-item-bulk-delete-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-item-bulk-delete-job' to indicate this is a bulk delete operation."),
@@ -3507,7 +3834,13 @@ async def create_catalog_item_bulk_delete_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Delete Catalog Items Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_delete_catalog_items_job(
     job_id: str = Field(..., description="The unique identifier of the bulk delete job to retrieve. This ID is returned when the bulk delete operation is initiated."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -3547,7 +3880,13 @@ async def get_bulk_delete_catalog_items_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Create Variants Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_create_variants_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Omit to return jobs of all statuses."),
@@ -3589,7 +3928,12 @@ async def list_bulk_create_variants_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Variants in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_variants_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-variant-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-variant-bulk-create-job' to specify this operation."),
@@ -3639,7 +3983,13 @@ async def create_catalog_variants_bulk(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Create Variants Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_create_variants_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (format: alphanumeric string)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -3679,7 +4029,13 @@ async def get_bulk_create_variants_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Update Variants Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_update_variants_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports filtering on the status field only."),
@@ -3721,7 +4077,12 @@ async def list_bulk_update_variants_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Variant Bulk Update Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_variant_bulk_update_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-variant-bulk-update-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-variant-bulk-update-job' to indicate this is a bulk variant update operation."),
@@ -3771,7 +4132,13 @@ async def create_catalog_variant_bulk_update_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Update Variants Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_update_variants_job(
     job_id: str = Field(..., description="The unique identifier of the bulk update job to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
@@ -3811,7 +4178,13 @@ async def get_bulk_update_variants_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Delete Variants Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_delete_variants_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to show only processing jobs). Omit to retrieve jobs in all statuses."),
@@ -3853,7 +4226,13 @@ async def list_bulk_delete_variants_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Variant Bulk Delete Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_catalog_variant_bulk_delete_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this operation."),
     type_: Literal["catalog-variant-bulk-delete-job"] = Field(..., alias="type", description="The type of bulk job being created. Must be set to 'catalog-variant-bulk-delete-job' to indicate this is a variant deletion operation."),
@@ -3903,7 +4282,13 @@ async def create_catalog_variant_bulk_delete_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Delete Variants Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_delete_variants_job(
     job_id: str = Field(..., description="The unique identifier of the bulk delete job to retrieve. This ID is returned when the job is initially created."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -3943,7 +4328,13 @@ async def get_bulk_delete_variants_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Create Categories Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_create_categories_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports the status field only."),
@@ -3985,7 +4376,12 @@ async def list_bulk_create_categories_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Categories Bulk Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_categories_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-category-bulk-create-job' to specify this operation creates catalog categories."),
@@ -4035,7 +4431,13 @@ async def create_catalog_categories_bulk_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Create Categories Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_create_categories_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (format: alphanumeric string)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -4075,7 +4477,13 @@ async def get_bulk_create_categories_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Update Categories Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_update_categories_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports filtering on the status field only."),
@@ -4117,7 +4525,12 @@ async def list_bulk_update_categories_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Category Bulk Update Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_category_bulk_update_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category-bulk-update-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'catalog-category-bulk-update-job' to indicate this is a bulk category update operation."),
@@ -4167,7 +4580,13 @@ async def create_catalog_category_bulk_update_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Update Categories Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_update_categories_job(
     job_id: str = Field(..., description="The unique identifier of the bulk update job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -4207,7 +4626,13 @@ async def get_bulk_update_categories_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Delete Categories Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_delete_categories_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Omit to return jobs in all statuses."),
@@ -4249,7 +4674,13 @@ async def list_bulk_delete_categories_jobs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Category Bulk Delete Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_catalog_category_bulk_delete_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["catalog-category-bulk-delete-job"] = Field(..., alias="type", description="The type of bulk job being created. Must be set to 'catalog-category-bulk-delete-job' to indicate this is a catalog category deletion operation."),
@@ -4299,7 +4730,13 @@ async def create_catalog_category_bulk_delete_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Delete Categories Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_delete_categories_job(
     job_id: str = Field(..., description="The unique identifier of the bulk delete job to retrieve. This ID is returned when the bulk delete operation is initiated."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -4339,7 +4776,12 @@ async def get_bulk_delete_categories_job(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Back in Stock Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_back_in_stock_subscription(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     type_: Literal["back-in-stock-subscription"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'back-in-stock-subscription'."),
@@ -4407,7 +4849,13 @@ async def create_back_in_stock_subscription(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Items for Catalog Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_items_for_catalog_category(
     id_: str | None = Field(..., alias="id", description="The catalog category identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your category's external ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (e.g., 2026-01-15). Defaults to the latest stable revision if not specified."),
@@ -4451,7 +4899,13 @@ async def list_items_for_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Item IDs for Catalog Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_item_ids_for_catalog_category(
     id_: str | None = Field(..., alias="id", description="The catalog category identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your external category ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -4495,7 +4949,12 @@ async def list_item_ids_for_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Add Items to Catalog Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_items_to_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for the integration and `$default` for the catalog, followed by your category's external ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -4541,7 +5000,13 @@ async def add_items_to_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Items for Catalog Category",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_items_for_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: {integration}:::{catalog}:::{external_id}. Use integration type `$custom` and catalog `$default` with your external category ID (e.g., `$custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL`)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -4587,7 +5052,13 @@ async def update_items_for_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Items from Catalog Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_items_from_catalog_category(
     id_: str = Field(..., alias="id", description="The catalog category identifier in compound format: {integration}:::{catalog}:::{external_id}. Use $custom as the integration and $default as the catalog, followed by your external category ID (e.g., $custom:::$default:::SAMPLE-DATA-CATEGORY-APPAREL)."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -4633,7 +5104,13 @@ async def remove_items_from_catalog_category(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Variants for Catalog Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_variants_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Currently only `$custom` integration and `$default` catalog are supported (e.g., `$custom:::$default:::SAMPLE-DATA-ITEM-1`)."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
@@ -4677,7 +5154,13 @@ async def list_variants_for_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Variant IDs for Catalog Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_variant_ids_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your external item ID (e.g., `$custom:::$default:::SAMPLE-DATA-ITEM-1`)."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -4721,7 +5204,13 @@ async def list_variant_ids_for_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Categories for Catalog Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_categories_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your item's external ID."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (or with optional suffix). Defaults to the latest stable revision if not specified."),
@@ -4765,7 +5254,13 @@ async def list_categories_for_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Category IDs for Catalog Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_category_ids_for_catalog_item(
     id_: str | None = Field(..., alias="id", description="The catalog item identifier in compound format: `{integration}:::{catalog}:::{external_id}`. Use `$custom` for integration and `$default` for catalog, followed by your item's external ID."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to the latest stable version."),
@@ -4809,7 +5304,12 @@ async def list_category_ids_for_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Add Categories to Catalog Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_categories_to_catalog_item(
     id_: str = Field(..., alias="id", description="The unique identifier for the catalog item, formatted as a compound ID with three colon-separated segments: integration type, catalog name, and external ID (e.g., $custom:::$default:::SAMPLE-DATA-ITEM-1). Currently only the $custom integration and $default catalog are supported."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -4855,7 +5355,13 @@ async def add_categories_to_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Categories for Catalog Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_categories_for_catalog_item(
     id_: str = Field(..., alias="id", description="The unique identifier for the catalog item, formatted as a compound ID with three colon-separated segments: integration type, catalog name, and external ID. Use the format `$custom:::$default:::` followed by your item's external identifier."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -4901,7 +5407,13 @@ async def update_categories_for_catalog_item(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Categories from Catalog Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_categories_from_catalog_item(
     id_: str = Field(..., alias="id", description="The catalog item identifier in compound format: {integration}:::{catalog}:::{external_id}. Use $custom for integration and $default for catalog, followed by your item's external ID (e.g., $custom:::$default:::SAMPLE-DATA-ITEM-1)."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -4947,7 +5459,13 @@ async def remove_categories_from_catalog_item(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="List Coupons",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coupons(revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all coupons in your Klaviyo account. Use this to view your complete coupon inventory and their details."""
 
@@ -4983,7 +5501,12 @@ async def list_coupons(revision: str = Field(..., description="API endpoint revi
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Create Coupon",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_coupon(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
     type_: Literal["coupon"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'coupon' to indicate this operation creates a coupon resource."),
@@ -5033,7 +5556,13 @@ async def create_coupon(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Get Coupon",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to retrieve (e.g., '10OFF'). This ID is consistent across internal and external integration systems."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
@@ -5073,7 +5602,13 @@ async def get_coupon(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Update Coupon",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to update (e.g., '10OFF'). This ID is consistent between the internal system and external integrations."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API contract version to use for this request."),
@@ -5125,7 +5660,13 @@ async def update_coupon(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Delete Coupon",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to delete. This ID matches both the internal system ID and the external ID used in integrations (e.g., '10OFF')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
@@ -5165,7 +5706,13 @@ async def delete_coupon(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="List Coupon Codes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coupon_codes(
     filter_: str = Field(..., alias="filter", description="Filter expression to narrow results by coupon ID(s), profile ID(s), expiration date range, or status. At least one coupon or profile filter is required. Use 'any' operator to match multiple IDs, 'equals' for single matches, and comparison operators (greater-than, less-than, etc.) for date ranges. Format: operator(field,'value') or operator(field,'value1','value2',...)"),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -5207,7 +5754,12 @@ async def list_coupon_codes(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Create Coupon Code",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_coupon_code(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
     type_: Literal["coupon-code"] = Field(..., alias="type", description="Resource type identifier; must be set to 'coupon-code' to indicate this is a coupon code resource."),
@@ -5263,7 +5815,13 @@ async def create_coupon_code(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Get Coupon Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coupon_code(
     id_: str = Field(..., alias="id", description="The combined identifier for the coupon code, consisting of the unique code and its associated coupon ID (e.g., '10OFF-ASD325FHK324UJDOI2M3JNES99')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -5303,7 +5861,13 @@ async def get_coupon_code(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Update Coupon Code",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_coupon_code(
     id_: str = Field(..., alias="id", description="The unique identifier for the coupon code, formatted as the coupon code combined with its associated coupon ID (e.g., '10OFF-ASD325FHK324UJDOI2M3JNES99')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -5355,7 +5919,13 @@ async def update_coupon_code(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Delete Coupon Code",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_coupon_code(
     id_: str = Field(..., alias="id", description="The unique identifier combining the coupon code and its associated coupon ID (e.g., '10OFF-ASD325FHK324UJDOI2M3JNES99')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -5395,7 +5965,13 @@ async def delete_coupon_code(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="List Coupon Code Bulk Create Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coupon_code_bulk_create_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status using the equals operator (e.g., to retrieve only processing jobs). Supports filtering on the status field only."),
@@ -5437,7 +6013,12 @@ async def list_coupon_code_bulk_create_jobs(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Create Coupon Code Bulk Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_coupon_code_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
     type_: Literal["coupon-code-bulk-create-job"] = Field(..., alias="type", description="The job type identifier. Must be set to 'coupon-code-bulk-create-job' to specify this operation."),
@@ -5487,7 +6068,13 @@ async def create_coupon_code_bulk_job(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Get Coupon Code Bulk Create Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coupon_code_bulk_create_job(
     job_id: str = Field(..., description="The unique identifier of the bulk create job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -5527,7 +6114,13 @@ async def get_coupon_code_bulk_create_job(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Get Coupon for Coupon Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coupon_for_coupon_code(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon code to retrieve the associated coupon for (e.g., '10OFF')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -5567,7 +6160,13 @@ async def get_coupon_for_coupon_code(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="Get Coupon Relationship for Coupon Code",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_coupon_relationship_for_coupon_code(
     id_: str = Field(..., alias="id", description="The coupon code ID to look up (e.g., '10OFF'). This is the identifier of the coupon code whose associated coupon you want to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
@@ -5607,7 +6206,13 @@ async def get_coupon_relationship_for_coupon_code(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="List Coupon Codes for Coupon",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coupon_codes_for_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to retrieve associated codes for (e.g., '10OFF')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
@@ -5651,7 +6256,13 @@ async def list_coupon_codes_for_coupon(
     return _response_data
 
 # Tags: Coupons
-@mcp.tool()
+@mcp.tool(
+    title="List Coupon Code IDs for Coupon",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_coupon_code_ids_for_coupon(
     id_: str = Field(..., alias="id", description="The unique identifier of the coupon to retrieve associated coupon codes for (e.g., '10OFF')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (defaults to 2026-01-15). Specify a different revision date if needed for API version compatibility."),
@@ -5695,7 +6306,13 @@ async def list_coupon_code_ids_for_coupon(
     return _response_data
 
 # Tags: Custom Objects
-@mcp.tool()
+@mcp.tool(
+    title="List Data Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_data_sources(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
     fields_data_source: list[Literal["description", "namespace", "title", "visibility"]] | None = Field(None, alias="fieldsdata-source", description="Specify which data source fields to include in the response for sparse fieldset optimization. Omit to return all available fields."),
@@ -5741,7 +6358,12 @@ async def list_data_sources(
     return _response_data
 
 # Tags: Custom Objects
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Source",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_source(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["data-source"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'data-source' to indicate this operation creates a data source."),
@@ -5792,7 +6414,13 @@ async def create_data_source(
     return _response_data
 
 # Tags: Custom Objects
-@mcp.tool()
+@mcp.tool(
+    title="Get Data Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier of the data source to retrieve."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -5839,7 +6467,13 @@ async def get_data_source(
     return _response_data
 
 # Tags: Custom Objects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Data Source",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_data_source(
     id_: str = Field(..., alias="id", description="The unique identifier of the data source to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -5879,7 +6513,12 @@ async def delete_data_source(
     return _response_data
 
 # Tags: Custom Objects
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Source Records in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_source_records_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     type_: Literal["data-source-record-bulk-create-job"] = Field(..., alias="type", description="The type identifier for this operation, which must be 'data-source-record-bulk-create-job'."),
@@ -5936,7 +6575,12 @@ async def create_data_source_records_bulk(
     return _response_data
 
 # Tags: Custom Objects
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Source Record",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_source_record(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     type_: Literal["data-source-record-create-job"] = Field(..., alias="type", description="The type of job being created. Must be 'data-source-record-create-job'."),
@@ -5999,7 +6643,13 @@ async def create_data_source_record(
     return _response_data
 
 # Tags: Data Privacy
-@mcp.tool()
+@mcp.tool(
+    title="Create Profile Deletion Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_profile_deletion_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15."),
     type_: Literal["data-privacy-deletion-job"] = Field(..., alias="type", description="Resource type identifier for the deletion job request. Must be set to 'data-privacy-deletion-job'."),
@@ -6056,7 +6706,13 @@ async def create_profile_deletion_job(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_events(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter events by specific criteria using comparison operators. Supports filtering by metric_id, profile_id, profile relationship, or datetime/timestamp ranges (e.g., events after a specific date). Custom metrics are not supported in metric_id filters. See API documentation for detailed filter syntax."),
@@ -6099,7 +6755,12 @@ async def list_events(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Create Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_event(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     type_: Literal["event"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'event'."),
@@ -6162,7 +6823,13 @@ async def create_event(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -6202,7 +6869,12 @@ async def get_event(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Create Events in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_events_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["event-bulk-create-job"] = Field(..., alias="type", description="The type of bulk job being created. Must be set to 'event-bulk-create-job' to indicate this is an event creation operation."),
@@ -6252,7 +6924,13 @@ async def create_events_bulk(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric for Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event for which to retrieve the associated metric."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -6292,7 +6970,13 @@ async def get_metric_for_event(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Metrics for Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metrics_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event for which to retrieve associated metrics."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -6332,7 +7016,13 @@ async def list_metrics_for_event(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Profile for Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_profile_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event whose associated profile you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -6372,7 +7062,13 @@ async def get_profile_for_event(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Profile ID for Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_profile_id_for_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the event for which you want to retrieve the associated profile relationship."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -6412,7 +7108,13 @@ async def get_profile_id_for_event(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="List Flows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flows(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter flows using comparison operators on specific fields. Supports filtering by id (any match), name (contains, starts-with, ends-with, equals), status (equals), archived status (equals), creation/update timestamps (equals, greater-than, greater-or-equal, less-than, less-or-equal), and trigger_type (equals). See API documentation for filter syntax."),
@@ -6455,7 +7157,13 @@ async def list_flows(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -6495,7 +7203,12 @@ async def get_flow(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Update Flow Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_flow_status(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow to update (e.g., XVTP5Q)."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
@@ -6546,7 +7259,13 @@ async def update_flow_status(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Flow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow to delete (e.g., XVTP5Q)."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specify the revision to ensure compatibility with the intended API version."),
@@ -6586,7 +7305,13 @@ async def delete_flow(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -6626,7 +7351,13 @@ async def get_flow_action(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -6666,7 +7397,13 @@ async def get_flow_message(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="List Actions for Flow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_actions_for_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow for which to retrieve associated actions."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
@@ -6711,7 +7448,13 @@ async def list_actions_for_flow(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="List Action IDs for Flow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_action_ids_for_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow for which to retrieve associated actions."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
@@ -6756,7 +7499,13 @@ async def list_action_ids_for_flow(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Tags for Flow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tags_for_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow for which to retrieve associated tags."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -6796,7 +7545,13 @@ async def get_tags_for_flow(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="List Tag IDs for Flow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_ids_for_flow(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow whose associated tags you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -6836,7 +7591,13 @@ async def list_tag_ids_for_flow(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow for Flow Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow_for_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action for which to retrieve the associated flow."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). This parameter controls which version of the API contract is used for the request."),
@@ -6876,7 +7637,13 @@ async def get_flow_for_flow_action(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow Relationship for Flow Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow_relationship_for_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action for which to retrieve the associated flow."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -6916,7 +7683,13 @@ async def get_flow_relationship_for_flow_action(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="List Flow Action Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flow_action_messages(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action for which to retrieve associated messages."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
@@ -6961,7 +7734,13 @@ async def list_flow_action_messages(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="List Message IDs for Flow Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_ids_for_flow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow action for which to retrieve associated message relationships."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
@@ -7006,7 +7785,13 @@ async def list_message_ids_for_flow_action(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow Action for Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow_action_for_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated flow action."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -7046,7 +7831,13 @@ async def get_flow_action_for_message(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow Action for Flow Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flow_action_for_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated flow action relationship."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -7086,7 +7877,13 @@ async def get_flow_action_for_flow_message(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Template for Flow Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template_for_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated template."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -7126,7 +7923,13 @@ async def get_template_for_flow_message(
     return _response_data
 
 # Tags: Flows
-@mcp.tool()
+@mcp.tool(
+    title="Get Template ID for Flow Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template_id_for_flow_message(
     id_: str = Field(..., alias="id", description="The unique identifier of the flow message for which to retrieve the associated template ID."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use for this request."),
@@ -7166,7 +7969,13 @@ async def get_template_id_for_flow_message(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="List Forms",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_forms(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Required for version compatibility."),
     fields_form: list[Literal["ab_test", "created_at", "name", "status", "updated_at"]] | None = Field(None, alias="fieldsform", description="Specify which form fields to include in the response using sparse fieldsets for optimized data retrieval."),
@@ -7213,7 +8022,12 @@ async def list_forms(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Create Form",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["form"] = Field(..., alias="type", description="The resource type, which must be 'form' for this operation."),
@@ -7267,7 +8081,13 @@ async def create_form(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Get Form",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form(
     id_: str = Field(..., alias="id", description="The unique identifier of the form to retrieve (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format, with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
@@ -7314,7 +8134,13 @@ async def get_form(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form(
     id_: str = Field(..., alias="id", description="The unique identifier of the form to delete (e.g., 'Y6nRLr')"),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
@@ -7354,7 +8180,13 @@ async def delete_form(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the form version to retrieve (e.g., '1234567')."),
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -7401,7 +8233,13 @@ async def get_form_version(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="List Form Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_versions_for_form(
     id_: str | None = Field(..., alias="id", description="The unique identifier of the form whose versions you want to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15."),
@@ -7450,7 +8288,13 @@ async def list_versions_for_form(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="List Form Version IDs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_version_ids_for_form(
     id_: str | None = Field(..., alias="id", description="The unique identifier of the form to retrieve versions for."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
@@ -7495,7 +8339,13 @@ async def list_version_ids_for_form(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Get Form for Form Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_for_form_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the form version you want to retrieve the form for (e.g., '1234567')."),
     revision: str = Field(..., description="The API revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -7542,7 +8392,13 @@ async def get_form_for_form_version(
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Get Form ID for Form Version",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_id_for_form_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the form version for which you want to retrieve the associated form ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -7582,7 +8438,13 @@ async def get_form_id_for_form_version(
     return _response_data
 
 # Tags: Images
-@mcp.tool()
+@mcp.tool(
+    title="List Images",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_images(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using field-specific operators. Supports filtering by ID (any/equals), updated_at (comparison operators), format (any/equals), name (text matching), size (numeric comparison), and hidden status (any/equals). Provide filter expressions in the format: operator(field,'value')."),
@@ -7625,7 +8487,12 @@ async def list_images(
     return _response_data
 
 # Tags: Images
-@mcp.tool()
+@mcp.tool(
+    title="Import Image from URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def import_image_from_url(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["image"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'image' for this operation."),
@@ -7675,7 +8542,13 @@ async def import_image_from_url(
     return _response_data
 
 # Tags: Images
-@mcp.tool()
+@mcp.tool(
+    title="Get Image",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_image(
     id_: str = Field(..., alias="id", description="The unique identifier of the image to retrieve (e.g., '7'). This ID must correspond to an existing image in the system."),
     revision: str = Field(..., description="The API endpoint revision to use for this request, specified in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). This ensures compatibility with specific API versions."),
@@ -7715,7 +8588,13 @@ async def get_image(
     return _response_data
 
 # Tags: Images
-@mcp.tool()
+@mcp.tool(
+    title="Update Image",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_image(
     id_: str = Field(..., alias="id", description="The unique identifier of the image to update (e.g., '7')"),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)"),
@@ -7767,10 +8646,15 @@ async def update_image(
     return _response_data
 
 # Tags: Images
-@mcp.tool()
+@mcp.tool(
+    title="Create Image From File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_image_from_file(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
-    file_: str = Field(..., alias="file", description="The image file to upload as binary data. Supported formats: JPEG, PNG, GIF. Maximum file size is 5MB."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The image file to upload as binary data. Supported formats: JPEG, PNG, GIF. Maximum file size is 5MB.", json_schema_extra={'format': 'byte'}),
     name: str | None = Field(None, description="Optional name for the image. If not provided, defaults to the original filename. If the name matches an existing image, a numeric suffix will be automatically added."),
     hidden: bool | None = Field(None, description="If true, the image will be hidden from the asset library. Defaults to false."),
 ) -> dict[str, Any] | ToolResult:
@@ -7813,7 +8697,13 @@ async def create_image_from_file(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Lists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_lists(
     revision: str = Field(..., description="API version in YYYY-MM-DD format (e.g., 2026-01-15). Defaults to 2026-01-15 if not specified."),
     fields_list: list[Literal["created", "name", "opt_in_process", "updated"]] | None = Field(None, alias="fieldslist", description="Specify which list fields to include in the response for sparse fieldset optimization. Reduces payload size by returning only requested fields."),
@@ -7859,7 +8749,12 @@ async def list_lists(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Create List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_list(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this operation."),
     type_: Literal["list"] = Field(..., alias="type", description="The resource type being created. Must be set to 'list' for this operation."),
@@ -7908,7 +8803,13 @@ async def create_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Get List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_list(
     id_: str = Field(..., alias="id", description="The unique identifier for the list, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
@@ -7955,7 +8856,13 @@ async def get_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Update List",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list to update, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8007,7 +8914,13 @@ async def update_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Delete List",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list to delete, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8047,7 +8960,13 @@ async def delete_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Tags for List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier for the list, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -8087,7 +9006,13 @@ async def list_tags_for_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Tag IDs for List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_ids_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier for the list, generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -8127,7 +9052,13 @@ async def list_tag_ids_for_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Profiles for List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profiles_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list (generated by Klaviyo). Example format: 'Y6nRLr'."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., 2026-01-15). Defaults to the latest version if not specified."),
@@ -8172,7 +9103,13 @@ async def list_profiles_for_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Profile IDs for List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profile_ids_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list. This is a Klaviyo-generated ID (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., '2026-01-15'). Defaults to the latest version if not specified."),
@@ -8217,7 +9154,12 @@ async def list_profile_ids_for_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Add Profiles to List",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_profiles_to_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list to which profiles will be added."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8263,7 +9205,13 @@ async def add_profiles_to_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="Remove Profiles From List",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_profiles_from_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list from which profiles will be removed."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8309,7 +9257,13 @@ async def remove_profiles_from_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Flows Triggered by List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flows_triggered_by_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list (generated by Klaviyo) for which you want to find associated flow triggers."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8349,7 +9303,13 @@ async def list_flows_triggered_by_list(
     return _response_data
 
 # Tags: Lists
-@mcp.tool()
+@mcp.tool(
+    title="List Flow Trigger IDs for List",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flow_trigger_ids_for_list(
     id_: str = Field(..., alias="id", description="The unique identifier of the list, generated by Klaviyo (e.g., 'Y6nRLr'). This ID specifies which list's flow triggers you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -8389,7 +9349,13 @@ async def list_flow_trigger_ids_for_list(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metrics(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter metrics by integration name or category using equality operators. Specify as a filter expression (e.g., equals(integration.name,'value') or equals(integration.category,'value'))."),
@@ -8431,7 +9397,13 @@ async def list_metrics(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -8471,7 +9443,13 @@ async def get_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric property to retrieve (UUID format)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8518,7 +9496,13 @@ async def get_metric_property(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_metrics(revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom metrics configured in your account. This operation requires the metrics:read scope and is subject to rate limits of 3 requests per second (burst) and 60 requests per minute (steady state)."""
 
@@ -8554,7 +9538,12 @@ async def list_custom_metrics(revision: str = Field(..., description="API endpoi
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Create Custom Metric",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_custom_metric(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     type_: Literal["custom-metric"] = Field(..., alias="type", description="Resource type identifier; must be set to 'custom-metric' for this operation."),
@@ -8607,7 +9596,13 @@ async def create_custom_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric to retrieve, formatted as a hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -8647,7 +9642,13 @@ async def get_custom_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric to update, formatted as a 32-character hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -8703,7 +9704,13 @@ async def update_custom_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Metric",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric to delete, formatted as a 32-character hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -8743,7 +9750,13 @@ async def delete_custom_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Mapped Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_mapped_metrics(revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with an optional suffix. Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all mapped metrics configured in your account. This operation returns the complete set of metrics that have been mapped for use in your system."""
 
@@ -8779,7 +9792,13 @@ async def list_mapped_metrics(revision: str = Field(..., description="The API en
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Mapped Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The metric type identifier. Must be one of the supported conversion event types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -8819,7 +9838,13 @@ async def get_mapped_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Update Mapped Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The mapped metric type identifier being updated. Must be one of: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
@@ -8880,7 +9905,12 @@ async def update_mapped_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Query Metric Aggregates",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_metric_aggregates(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15."),
     type_: Literal["metric-aggregate"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'metric-aggregate'."),
@@ -8935,7 +9965,13 @@ async def query_metric_aggregates(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Flows Triggered by Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flows_triggered_by_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric to query for associated flow triggers."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -8975,7 +10011,13 @@ async def list_flows_triggered_by_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Flow IDs Triggered by Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flow_ids_triggered_by_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric for which to retrieve triggered flows."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9015,7 +10057,13 @@ async def list_flow_ids_triggered_by_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_properties(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric to retrieve properties for (e.g., '925e38')."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9062,7 +10110,13 @@ async def get_metric_properties(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Property IDs for Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_property_ids_for_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric (e.g., '925e38'). This ID specifies which metric's properties you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specify a revision to ensure consistent API behavior across requests."),
@@ -9102,7 +10156,13 @@ async def list_property_ids_for_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric for Metric Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_for_metric_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric property. Use the metric property ID to look up its associated metric."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -9142,7 +10202,13 @@ async def get_metric_for_metric_property(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric ID for Metric Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_id_for_metric_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the metric property. Use the metric property ID (a 32-character hexadecimal string) to specify which property's metric relationship you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9182,7 +10248,13 @@ async def get_metric_id_for_metric_property(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metrics for Custom Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metrics_for_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric. Use the custom metric ID returned when the metric was created or retrieved from a list operation."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified, allowing you to control which API version behavior is used."),
@@ -9222,7 +10294,13 @@ async def get_metrics_for_custom_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Metrics for Custom Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metrics_for_custom_metric(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom metric. This is a 32-character hexadecimal string that uniquely identifies the custom metric resource."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified, allowing you to target specific API versions."),
@@ -9262,7 +10340,13 @@ async def list_metrics_for_custom_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric for Mapped Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The mapped metric type identifier. Must be one of the predefined metric mapping types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9302,7 +10386,13 @@ async def get_metric_for_mapped_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric ID for Mapped Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_id_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The type of mapped metric to query. Must be one of the predefined mapping types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9342,7 +10432,13 @@ async def get_metric_id_for_mapped_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Metric for Mapped Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_metric_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The mapped metric type identifier. Must be one of the predefined event types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9382,7 +10478,13 @@ async def get_custom_metric_for_mapped_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Metric ID for Mapped Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_metric_id_for_mapped_metric(
     id_: Literal["added_to_cart", "cancelled_sales", "ordered_product", "refunded_sales", "revenue", "started_checkout", "viewed_product"] = Field(..., alias="id", description="The type of metric mapping to query. Must be one of the predefined mapping types: added_to_cart, cancelled_sales, ordered_product, refunded_sales, revenue, started_checkout, or viewed_product."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9422,7 +10524,13 @@ async def get_custom_metric_id_for_mapped_metric(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Profiles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profiles(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (required; defaults to 2026-01-15)."),
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Specify which push token fields to include in the response using sparse fieldsets for optimized data retrieval."),
@@ -9469,7 +10577,12 @@ async def list_profiles(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Create Profile",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_profile(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
     type_: Literal["profile"] = Field(..., alias="type", description="Profile resource type; must be set to 'profile'."),
@@ -9537,7 +10650,13 @@ async def create_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -9588,7 +10707,13 @@ async def get_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Update Profile",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_profile(
     id_: str = Field(..., alias="id", description="The unique profile identifier (Klaviyo-generated) that specifies which profile to update."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15."),
@@ -9663,7 +10788,13 @@ async def update_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Import Profile Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_import_profiles_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     fields_profile_bulk_import_job: list[Literal["completed_at", "completed_count", "created_at", "expires_at", "failed_count", "started_at", "status", "total_count"]] | None = Field(None, alias="fieldsprofile-bulk-import-job", description="Specify which fields to include in the response for each bulk import job. Supports sparse fieldsets to optimize payload size."),
@@ -9710,7 +10841,12 @@ async def list_bulk_import_profiles_jobs(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Create Profile Bulk Import Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_profile_bulk_import_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     type_: Literal["profile-bulk-import-job"] = Field(..., alias="type", description="Resource type identifier for this operation. Must be set to 'profile-bulk-import-job'."),
@@ -9762,7 +10898,13 @@ async def create_profile_bulk_import_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Import Profiles Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_import_profiles_job(
     job_id: str = Field(..., description="The unique identifier of the bulk import job to retrieve (format: alphanumeric string)."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -9811,7 +10953,13 @@ async def get_bulk_import_profiles_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Suppress Profiles Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_suppress_profiles_jobs(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status, list ID, or segment ID using equality operators. Specify filters in the format `field_name=value` (e.g., `status=processing`)."),
@@ -9853,7 +11001,12 @@ async def list_bulk_suppress_profiles_jobs(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Create Profile Suppression Bulk Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_profile_suppression_bulk_job(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15."),
     type_: Literal["profile-suppression-bulk-create-job"] = Field(..., alias="type", description="Resource type identifier for the bulk suppression job. Must be set to 'profile-suppression-bulk-create-job'."),
@@ -9915,7 +11068,13 @@ async def create_profile_suppression_bulk_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Suppress Profiles Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_suppress_profiles_job(
     job_id: str = Field(..., description="The unique identifier of the bulk suppress profiles job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -9955,7 +11114,13 @@ async def get_bulk_suppress_profiles_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Bulk Unsuppress Profiles Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulk_unsuppress_profiles_jobs(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter results by job status, list ID, or segment ID using equality operators. Specify filters in the format `field_name=value` (e.g., `status=processing` to show only processing jobs)."),
@@ -9997,7 +11162,13 @@ async def list_bulk_unsuppress_profiles_jobs(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Remove Profile Suppressions in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_profile_suppressions_bulk(
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15."),
     type_: Literal["profile-suppression-bulk-delete-job"] = Field(..., alias="type", description="Resource type identifier for the bulk suppression deletion job. Must be 'profile-suppression-bulk-delete-job'."),
@@ -10059,7 +11230,13 @@ async def remove_profile_suppressions_bulk(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Unsuppress Profiles Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_unsuppress_profiles_job(
     job_id: str = Field(..., description="The unique identifier of the bulk unsuppress job to retrieve (e.g., 01GSQPBF74KQ5YTDEPP41T1BZH)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -10099,7 +11276,13 @@ async def get_bulk_unsuppress_profiles_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Push Tokens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_push_tokens(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_push_token: list[Literal["background", "created", "enablement_status", "metadata", "metadata.app_build", "metadata.app_id", "metadata.app_name", "metadata.app_version", "metadata.device_id", "metadata.device_model", "metadata.environment", "metadata.klaviyo_sdk", "metadata.manufacturer", "metadata.os_name", "metadata.os_version", "metadata.sdk_version", "platform", "recorded_date", "token", "vendor"]] | None = Field(None, alias="fieldspush-token", description="Specify which push token fields to include in the response using sparse fieldsets for optimized payload size."),
@@ -10146,7 +11329,13 @@ async def list_push_tokens(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Push Token",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_push_token(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15."),
     type_: Literal["push-token"] = Field(..., alias="type", description="Resource type identifier. Must be 'push-token'."),
@@ -10200,7 +11389,13 @@ async def create_or_update_push_token(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Push Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_push_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the push token to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -10247,7 +11442,13 @@ async def get_push_token(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Push Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_push_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the push token to delete, typically a 32-character hexadecimal string."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -10287,7 +11488,13 @@ async def delete_push_token(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Profile",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_profile(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
     type_: Literal["profile"] = Field(..., alias="type", description="Resource type identifier; must be set to 'profile'."),
@@ -10360,7 +11567,12 @@ async def create_or_update_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Merge Profiles",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_profiles(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     type_: Literal["profile-merge"] = Field(..., alias="type", description="The type of operation being performed. Must be set to 'profile-merge'."),
@@ -10409,7 +11621,12 @@ async def merge_profiles(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Subscribe Profiles in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def subscribe_profiles_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
     type_: Literal["profile-subscription-bulk-create-job"] = Field(..., alias="type", description="Resource type identifier; must be 'profile-subscription-bulk-create-job'."),
@@ -10469,7 +11686,13 @@ async def subscribe_profiles_bulk(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Unsubscribe Profiles",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unsubscribe_profiles_bulk(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     type_: Literal["profile-subscription-bulk-delete-job"] = Field(..., alias="type", description="The type of job being created. Must be 'profile-subscription-bulk-delete-job'."),
@@ -10526,7 +11749,13 @@ async def unsubscribe_profiles_bulk(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Push Tokens for Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_push_tokens_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile whose push tokens should be retrieved."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -10573,7 +11802,13 @@ async def list_push_tokens_for_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Push Token IDs for Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_push_token_ids_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile for which to retrieve associated push token IDs."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -10613,7 +11848,13 @@ async def list_push_token_ids_for_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Lists for Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_lists_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile whose list memberships you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -10660,7 +11901,13 @@ async def list_lists_for_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Lists for Profile Relationship",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_lists_for_profile_relationship(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile to retrieve list memberships for."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -10700,7 +11947,13 @@ async def get_lists_for_profile_relationship(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Segments for Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segments_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile to retrieve segments for."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -10747,7 +12000,13 @@ async def get_segments_for_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Segment IDs for Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segment_ids_for_profile(
     id_: str = Field(..., alias="id", description="The unique identifier of the profile whose segment memberships you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -10787,7 +12046,13 @@ async def list_segment_ids_for_profile(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Lists for Bulk Import Profiles Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_lists_for_bulk_import_profiles_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import profiles job."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -10834,7 +12099,13 @@ async def get_lists_for_bulk_import_profiles_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get List IDs for Bulk Import Profiles Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_list_ids_for_bulk_import_profiles_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk profile import job for which to retrieve associated list IDs."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -10874,7 +12145,13 @@ async def get_list_ids_for_bulk_import_profiles_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Profiles for Bulk Import Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profiles_for_bulk_import_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import job whose profiles you want to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15."),
@@ -10918,7 +12195,13 @@ async def list_profiles_for_bulk_import_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Profile IDs for Bulk Import Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profile_ids_for_bulk_import_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import profiles job."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15."),
@@ -10962,7 +12245,13 @@ async def list_profile_ids_for_bulk_import_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="List Import Errors for Bulk Import Profiles Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_import_errors_for_bulk_import_profiles_job(
     id_: str = Field(..., alias="id", description="The unique identifier of the bulk import job to retrieve errors for."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (default: 2026-01-15). Determines the response schema version."),
@@ -11010,7 +12299,13 @@ async def list_import_errors_for_bulk_import_profiles_job(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Profile for Push Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_profile_for_push_token(
     id_: str = Field(..., alias="id", description="The push token identifier whose associated profile you want to retrieve."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -11050,7 +12345,13 @@ async def get_profile_for_push_token(
     return _response_data
 
 # Tags: Profiles
-@mcp.tool()
+@mcp.tool(
+    title="Get Profile ID for Push Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_profile_id_for_push_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the push token for which you want to retrieve the associated profile ID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -11090,7 +12391,12 @@ async def get_profile_id_for_push_token(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Query Campaign Values Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_campaign_values_report(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["campaign-values-report"] = Field(..., alias="type", description="Report type identifier. Must be set to 'campaign-values-report' to query campaign analytics data."),
@@ -11142,7 +12448,12 @@ async def query_campaign_values_report(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Query Flow Values Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_flow_values_report(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["flow-values-report"] = Field(..., alias="type", description="Report type identifier. Must be set to 'flow-values-report' to query flow analytics data."),
@@ -11194,7 +12505,12 @@ async def query_flow_values_report(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Get Flow Series Analytics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_flow_series_analytics(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.beta). Defaults to 2026-01-15."),
     type_: Literal["flow-series-report"] = Field(..., alias="type", description="The type of report being requested. Must be 'flow-series-report'."),
@@ -11247,7 +12563,12 @@ async def get_flow_series_analytics(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Query Form Values Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_form_values_report(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["form-values-report"] = Field(..., alias="type", description="The type of report to query. Must be 'form-values-report' to retrieve form analytics data."),
@@ -11298,7 +12619,12 @@ async def query_form_values_report(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Series Analytics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_form_series_analytics(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
     type_: Literal["form-series-report"] = Field(..., alias="type", description="The type of report to query; must be 'form-series-report'."),
@@ -11350,7 +12676,12 @@ async def get_form_series_analytics(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment Values Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_segment_values_report(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use."),
     type_: Literal["segment-values-report"] = Field(..., alias="type", description="Report type identifier. Must be set to 'segment-values-report' to query segment analytics data."),
@@ -11400,7 +12731,12 @@ async def get_segment_values_report(
     return _response_data
 
 # Tags: Reporting
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment Series Report",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_segment_series_report(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Controls the API contract version used for this request."),
     type_: Literal["segment-series-report"] = Field(..., alias="type", description="Report type identifier. Must be set to 'segment-series-report' to query segment analytics series data."),
@@ -11451,7 +12787,13 @@ async def get_segment_series_report(
     return _response_data
 
 # Tags: Reviews
-@mcp.tool()
+@mcp.tool(
+    title="List Reviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_reviews(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15."),
     filter_: str | None = Field(None, alias="filter", description="Filter reviews using comparison and matching operators. Supports filtering by creation date (date range), rating (any value, equals, or range), IDs, content keywords, status, review type, and verification status. Use the format specified in the Klaviyo filtering documentation."),
@@ -11494,7 +12836,13 @@ async def list_reviews(
     return _response_data
 
 # Tags: Reviews
-@mcp.tool()
+@mcp.tool(
+    title="Get Review",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_review(
     id_: str = Field(..., alias="id", description="The unique identifier of the review to retrieve (e.g., '2134228')"),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this request."),
@@ -11534,7 +12882,13 @@ async def get_review(
     return _response_data
 
 # Tags: Reviews
-@mcp.tool()
+@mcp.tool(
+    title="Update Review",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_review(
     id_: str = Field(..., alias="id", description="The unique identifier of the review to update. Must match the review ID provided in the request body."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which API version to use for this operation."),
@@ -11585,7 +12939,13 @@ async def update_review(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Segments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segments(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_segment: list[Literal["created", "definition", "definition.condition_groups", "is_active", "is_processing", "is_starred", "name", "updated"]] | None = Field(None, alias="fieldssegment", description="Specify which segment fields to include in the response using sparse fieldsets for optimized data retrieval."),
@@ -11631,7 +12991,12 @@ async def list_segments(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Create Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_segment(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
     type_: Literal["segment"] = Field(..., alias="type", description="The resource type, which must be 'segment' for this operation."),
@@ -11684,7 +13049,13 @@ async def create_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., 2026-01-15), optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -11731,7 +13102,13 @@ async def get_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Segment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment to update."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
@@ -11788,7 +13165,13 @@ async def update_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v2). Defaults to 2026-01-15 if not specified."),
@@ -11828,7 +13211,13 @@ async def delete_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Tags for Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_for_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment for which to retrieve associated tags."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15). Specifies which version of the API contract to use."),
@@ -11868,7 +13257,13 @@ async def list_tags_for_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Tag IDs for Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_ids_for_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment for which to retrieve associated tag IDs."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -11908,7 +13303,13 @@ async def list_tag_ids_for_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Profiles for Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profiles_for_segment(
     id_: str = Field(..., alias="id", description="The unique segment identifier generated by Klaviyo (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (default: 2026-01-15)."),
@@ -11953,7 +13354,13 @@ async def list_profiles_for_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Profile IDs for Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_profile_ids_for_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment. This is a Klaviyo-generated ID (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (e.g., '2026-01-15'). Defaults to the latest stable version."),
@@ -11998,7 +13405,13 @@ async def list_profile_ids_for_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Flows Triggered by Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flows_triggered_by_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment. This is a Klaviyo-generated primary key (e.g., 'Y6nRLr')."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12038,7 +13451,13 @@ async def list_flows_triggered_by_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Flow IDs Triggered by Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flow_ids_triggered_by_segment(
     id_: str = Field(..., alias="id", description="The unique identifier of the segment, generated by Klaviyo (e.g., 'Y6nRLr'). This segment will be checked to find all flows using it as a trigger."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format (or with an optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -12078,7 +13497,13 @@ async def list_flow_ids_triggered_by_segment(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter tags by name using comparison operators (equals, contains, starts-with, ends-with). For example, filter by exact name match or partial name patterns."),
@@ -12120,7 +13545,12 @@ async def list_tags(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     type_: Literal["tag"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'tag'."),
@@ -12175,7 +13605,13 @@ async def create_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag(
     id_: str = Field(..., alias="id", description="The unique identifier for the tag to retrieve, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -12215,7 +13651,13 @@ async def get_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Update Tag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to update, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12266,7 +13708,13 @@ async def update_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to delete, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -12306,7 +13754,13 @@ async def delete_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tag Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_groups(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter tag groups by name (using contains, ends-with, equals, or starts-with matching), exclusivity status, or default status. Provide filter expressions in the format: operator(field,'value')."),
@@ -12348,7 +13802,12 @@ async def list_tag_groups(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag_group(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     type_: Literal["tag-group"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'tag-group' for this operation."),
@@ -12397,7 +13856,13 @@ async def create_tag_group(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group to retrieve, formatted as a UUID (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12437,7 +13902,13 @@ async def get_tag_group(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Update Tag Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group to update, formatted as a UUID."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)."),
@@ -12489,7 +13960,13 @@ async def update_tag_group(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group to delete, formatted as a UUID (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12529,7 +14006,13 @@ async def delete_tag_group(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Flows for Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flows_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12569,7 +14052,12 @@ async def list_flows_for_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Add Flows to Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_flows_to_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with flows, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -12615,7 +14103,13 @@ async def add_flows_to_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Tag From Flows",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_tag_from_flows(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to remove from flows, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12661,7 +14155,13 @@ async def remove_tag_from_flows(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Campaign IDs for Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_campaign_ids_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12701,7 +14201,12 @@ async def list_campaign_ids_for_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Add Campaigns to Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_campaigns_to_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with campaigns. Use UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12747,7 +14252,13 @@ async def add_campaigns_to_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Tag From Campaigns",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_tag_from_campaigns(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to disassociate from campaigns, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12793,7 +14304,13 @@ async def remove_tag_from_campaigns(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Lists for Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_lists_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12833,7 +14350,12 @@ async def list_lists_for_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Associate Lists with Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def associate_lists_with_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with lists, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12879,7 +14401,13 @@ async def associate_lists_with_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Tag From Lists",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_tag_from_lists(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to remove from lists, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -12925,7 +14453,13 @@ async def remove_tag_from_lists(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Segment IDs for Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segment_ids_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag. Must be a valid UUID in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -12965,7 +14499,12 @@ async def list_segment_ids_for_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Add Segments to Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_segments_to_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to associate with segments. Use UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -13011,7 +14550,13 @@ async def add_segments_to_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Tag From Segments",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_tag_from_segments(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to disassociate from segments, formatted as a UUID (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -13057,7 +14602,13 @@ async def remove_tag_from_segments(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag Group for Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag_group_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag in UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -13097,7 +14648,13 @@ async def get_tag_group_for_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag Group ID for Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag_group_id_for_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag in UUID format (e.g., abcd1234-ef56-gh78-ij90-abcdef123456)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -13137,7 +14694,13 @@ async def get_tag_group_id_for_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags for Tag Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_for_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group. Use the tag group ID in UUID format (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -13177,7 +14740,13 @@ async def list_tags_for_tag_group(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tag IDs for Tag Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_ids_for_tag_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag group. Use the tag group ID in UUID format (e.g., zyxw9876-vu54-ts32-rq10-zyxwvu654321)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -13217,7 +14786,13 @@ async def list_tag_ids_for_tag_group(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     filter_: str | None = Field(None, alias="filter", description="Filter templates by id, name, created date, or updated date. Supports exact matching, partial text search, and date range comparisons. See API documentation for filter syntax details."),
@@ -13259,7 +14834,12 @@ async def list_templates(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15."),
     type_: Literal["template"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'template'."),
@@ -13311,7 +14891,13 @@ async def create_template(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to retrieve."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -13351,7 +14937,13 @@ async def get_template(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to update. Must match the ID provided in the request body."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15). Defaults to 2026-01-15 if not specified."),
@@ -13405,7 +14997,13 @@ async def update_template(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to delete."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -13445,7 +15043,13 @@ async def delete_template(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Universal Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_universal_content(
     revision: str = Field(..., description="API revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not provided."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using Klaviyo's filter syntax. Supports filtering by ID, name, creation/update timestamps (with comparison operators), content type, and definition type. See Klaviyo's filtering documentation for syntax details."),
@@ -13488,7 +15092,12 @@ async def list_universal_content(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Universal Content",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_universal_content(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
     type_: Literal["template-universal-content"] = Field(..., alias="type", description="The resource type identifier, must be set to 'template-universal-content'"),
@@ -13537,7 +15146,13 @@ async def create_universal_content(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Universal Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_universal_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the universal content template to retrieve (e.g., 01HWWWKAW4RHXQJCMW4R2KRYR4)."),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
@@ -13577,7 +15192,13 @@ async def get_universal_content(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template Universal Content",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template_universal_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the template universal content to update, formatted as a ULID."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -13629,7 +15250,13 @@ async def update_template_universal_content(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Universal Content",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_universal_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the template universal content to delete. Use the full ID string (e.g., 01HWWWKAW4RHXQJCMW4R2KRYR4)."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally followed by a suffix. Defaults to 2026-01-15 if not specified."),
@@ -13669,7 +15296,12 @@ async def delete_universal_content(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Render Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def render_template(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
     type_: Literal["template"] = Field(..., alias="type", description="Resource type identifier. Must be set to 'template' to specify this operation targets email templates."),
@@ -13718,7 +15350,12 @@ async def render_template(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Template Clone",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template_clone(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     type_: Literal["template"] = Field(..., alias="type", description="Resource type identifier; must be set to 'template' for this operation."),
@@ -13767,7 +15404,13 @@ async def create_template_clone(
     return _response_data
 
 # Tags: Tracking Settings
-@mcp.tool()
+@mcp.tool(
+    title="Get Tracking Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tracking_settings(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to the latest stable revision."),
     fields_tracking_setting: list[Literal["auto_add_parameters", "custom_parameters", "utm_campaign", "utm_campaign.campaign", "utm_campaign.campaign.type", "utm_campaign.campaign.value", "utm_campaign.flow", "utm_campaign.flow.type", "utm_campaign.flow.value", "utm_id", "utm_id.campaign", "utm_id.campaign.type", "utm_id.campaign.value", "utm_id.flow", "utm_id.flow.type", "utm_id.flow.value", "utm_medium", "utm_medium.campaign", "utm_medium.campaign.type", "utm_medium.campaign.value", "utm_medium.flow", "utm_medium.flow.type", "utm_medium.flow.value", "utm_source", "utm_source.campaign", "utm_source.campaign.type", "utm_source.campaign.value", "utm_source.flow", "utm_source.flow.type", "utm_source.flow.value", "utm_term", "utm_term.campaign", "utm_term.campaign.type", "utm_term.campaign.value", "utm_term.flow", "utm_term.flow.type", "utm_term.flow.value"]] | None = Field(None, alias="fieldstracking-setting", description="Specify which fields to include in the response for each tracking setting. Use sparse fieldsets to optimize payload size by requesting only the fields you need."),
@@ -13813,7 +15456,13 @@ async def get_tracking_settings(
     return _response_data
 
 # Tags: Tracking Settings
-@mcp.tool()
+@mcp.tool(
+    title="Get Tracking Setting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tracking_setting(
     id_: str = Field(..., alias="id", description="The account ID of the tracking setting to retrieve (e.g., 'abCdEf')."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -13860,7 +15509,13 @@ async def get_tracking_setting(
     return _response_data
 
 # Tags: Web Feeds
-@mcp.tool()
+@mcp.tool(
+    title="List Web Feeds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_web_feeds(
     revision: str = Field(..., description="API version in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not provided."),
     filter_: str | None = Field(None, alias="filter", description="Filter results using comparison operators on feed name, creation date, or last update date. Supports exact matching, partial text matching, and date range queries. See API documentation for detailed filter syntax."),
@@ -13903,7 +15558,12 @@ async def list_web_feeds(
     return _response_data
 
 # Tags: Web Feeds
-@mcp.tool()
+@mcp.tool(
+    title="Create Web Feed",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_web_feed(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)."),
     type_: Literal["web-feed"] = Field(..., alias="type", description="The resource type identifier; must be set to 'web-feed'."),
@@ -13954,7 +15614,13 @@ async def create_web_feed(
     return _response_data
 
 # Tags: Web Feeds
-@mcp.tool()
+@mcp.tool(
+    title="Get Web Feed",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_web_feed(
     id_: str = Field(..., alias="id", description="The unique identifier of the web feed to retrieve (e.g., '925e385b52fb')"),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
@@ -13994,7 +15660,13 @@ async def get_web_feed(
     return _response_data
 
 # Tags: Web Feeds
-@mcp.tool()
+@mcp.tool(
+    title="Update Web Feed",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_web_feed(
     id_: str = Field(..., alias="id", description="The unique identifier of the web feed to update (e.g., '925e385b52fb')"),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15)"),
@@ -14048,7 +15720,13 @@ async def update_web_feed(
     return _response_data
 
 # Tags: Web Feeds
-@mcp.tool()
+@mcp.tool(
+    title="Delete Web Feed",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_web_feed(
     id_: str = Field(..., alias="id", description="The unique identifier of the web feed to delete (e.g., '925e385b52fb')"),
     revision: str = Field(..., description="The API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15 if not specified)"),
@@ -14088,7 +15766,13 @@ async def delete_web_feed(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (or with optional suffix). Defaults to 2026-01-15 if not specified."),
     fields_webhook: list[Literal["created_at", "description", "enabled", "endpoint_url", "name", "updated_at"]] | None = Field(None, alias="fieldswebhook", description="Specify which webhook fields to include in the response using sparse fieldsets for optimized payload size. Provide as an array of field names."),
@@ -14133,7 +15817,13 @@ async def list_webhooks(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to retrieve."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (optionally with a suffix). Defaults to 2026-01-15 if not specified."),
@@ -14180,7 +15870,12 @@ async def get_webhook(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to update."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15 or 2026-01-15.v1). Defaults to 2026-01-15 if not specified."),
@@ -14237,7 +15932,13 @@ async def update_webhook(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to delete."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, optionally with a suffix. Defaults to 2026-01-15 if not specified."),
@@ -14277,7 +15978,13 @@ async def delete_webhook(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_topics(revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all available webhook topics in a Klaviyo account. Webhook topics define the events that can trigger webhooks for your integration."""
 
@@ -14313,7 +16020,13 @@ async def list_webhook_topics(revision: str = Field(..., description="API endpoi
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Topic",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_topic(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook topic to retrieve (e.g., 'event:klaviyo.sent_sms'). Use this ID to fetch the specific topic's configuration."),
     revision: str = Field(..., description="The API endpoint revision date in YYYY-MM-DD format, with optional suffix. Defaults to 2026-01-15 if not specified, ensuring compatibility with the desired API version."),
@@ -14353,7 +16066,13 @@ async def get_webhook_topic(
     return _response_data
 
 # Tags: Client
-@mcp.tool()
+@mcp.tool(
+    title="List Client Review Values Reports",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_client_review_values_reports(
     company_id: str = Field(..., description="Your Klaviyo Public API Key / Site ID, used to identify your account. See Klaviyo documentation for details on locating this identifier."),
     group_by: Literal["company_id", "product_id"] = Field(..., description="Required grouping dimension for the report. Choose 'company_id' to aggregate across your entire account or 'product_id' to break down metrics by individual product."),
@@ -14404,7 +16123,13 @@ async def list_client_review_values_reports(
     return _response_data
 
 # Tags: Client
-@mcp.tool()
+@mcp.tool(
+    title="List Client Reviews",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_client_reviews(
     company_id: str = Field(..., description="Your Public API Key or Site ID, used to identify your account. See the Klaviyo help article for instructions on locating this value."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),
@@ -14448,7 +16173,12 @@ async def list_client_reviews(
     return _response_data
 
 # Tags: Client
-@mcp.tool()
+@mcp.tool(
+    title="Create Client Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_client_review(
     company_id: str = Field(..., description="Your Public API Key / Site ID used to identify your Klaviyo account. This is required for authentication."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15). Defaults to 2026-01-15 if not specified."),
@@ -14520,7 +16250,12 @@ async def create_client_review(
     return _response_data
 
 # Tags: Client
-@mcp.tool()
+@mcp.tool(
+    title="Create Client Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_client_subscription(
     company_id: str = Field(..., description="Your public API key (site ID) for client-side authentication. Required for all requests to this endpoint."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix. Defaults to 2026-01-15 if not specified."),
@@ -14580,7 +16315,13 @@ async def create_client_subscription(
     return _response_data
 
 # Tags: Client
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Client Profile",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_client_profile(
     company_id: str = Field(..., description="Your public API key (also called Site ID), required to authenticate client-side requests. Obtain this from your Klaviyo account settings."),
     revision: str = Field(..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (e.g., 2026-01-15). Defaults to the latest stable version."),
@@ -14658,7 +16399,12 @@ async def create_or_update_client_profile(
     return _response_data
 
 # Tags: Client
-@mcp.tool()
+@mcp.tool(
+    title="Subscribe Profile to Back in Stock Notifications",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def subscribe_profile_to_back_in_stock_notifications(
     company_id: str = Field(..., description="Your public API key (also called Site ID), which identifies your Klaviyo account. Required for client-side authentication."),
     revision: str = Field(..., description="API endpoint revision date in YYYY-MM-DD format (with optional suffix). Defaults to 2026-01-15 if not specified."),

@@ -1,7 +1,7 @@
 """
 Klaviyo MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:22:41 UTC
+Generated: 2026-05-12 11:41:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -2373,7 +2373,7 @@ class UpdateImageRequest(StrictModel):
 class UploadImageFromFileRequestHeader(StrictModel):
     revision: str = Field(default=..., description="API endpoint revision in YYYY-MM-DD format with optional suffix (defaults to 2026-01-15).")
 class UploadImageFromFileRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The image file to upload as binary data. Supported formats: JPEG, PNG, GIF. Maximum file size is 5MB.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The image file to upload as binary data. Supported formats: JPEG, PNG, GIF. Maximum file size is 5MB.", json_schema_extra={'format': 'byte'})
     name: str | None = Field(default=None, description="Optional name for the image. If not provided, defaults to the original filename. If the name matches an existing image, a numeric suffix will be automatically added.")
     hidden: bool | None = Field(default=None, description="If true, the image will be hidden from the asset library. Defaults to false.")
 class UploadImageFromFileRequest(StrictModel):

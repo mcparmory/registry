@@ -1,7 +1,7 @@
 """
 Authentication module for Klaviyo MCP server.
 
-Generated: 2026-05-05 15:22:41 UTC
+Generated: 2026-05-12 11:41:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
