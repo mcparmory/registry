@@ -5,7 +5,7 @@ Base URL: https://api.datadoghq.com
 | | |
 |---|---|
 | **Category** | Analytics |
-| **Tools** | 770 |
+| **Tools** | 699 |
 | **Auth** | API Key, OAuth2 |
 
 ## API Info
@@ -77,6 +77,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `APP_KEY_AUTH_API_KEY` — API Key Authentication (DD-APPLICATION-KEY)
 - `SERVER_SITE` — The regional site for Datadog customers. (default: `datadoghq.com`)
 - `SERVER_SUBDOMAIN` — The subdomain where the API is deployed. (default: `api`)
+
 Do not commit credentials to version control.
 
 ### OAuth2

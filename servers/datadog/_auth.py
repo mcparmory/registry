@@ -1,7 +1,7 @@
 """
 Authentication module for Datadog MCP server.
 
-Generated: 2026-05-05 14:49:55 UTC
+Generated: 2026-05-12 11:14:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

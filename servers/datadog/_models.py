@@ -1,13 +1,13 @@
 """
 Datadog MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:49:55 UTC
+Generated: 2026-05-12 11:14:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field, RootModel
@@ -8058,7 +8058,7 @@ class EditSecurityMonitoringSignalAssigneeRequest(StrictModel):
 class EditSecurityMonitoringSignalIncidentsRequestPath(StrictModel):
     signal_id: str = Field(default=..., description="The unique identifier of the security signal to update.")
 class EditSecurityMonitoringSignalIncidentsRequestBodyDataAttributes(StrictModel):
-    incident_ids: list[int] = Field(default=..., validation_alias="incident_ids", serialization_alias="incident_ids", description="Array of incident IDs to associate with this signal. Incidents are identified by their numeric IDs.")
+    incident_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(default=..., validation_alias="incident_ids", serialization_alias="incident_ids", description="Array of incident IDs to associate with this signal. Incidents are identified by their numeric IDs.")
 class EditSecurityMonitoringSignalIncidentsRequestBodyData(StrictModel):
     attributes: EditSecurityMonitoringSignalIncidentsRequestBodyDataAttributes
 class EditSecurityMonitoringSignalIncidentsRequestBody(StrictModel):
