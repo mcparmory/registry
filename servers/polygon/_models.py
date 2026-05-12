@@ -1,7 +1,7 @@
 """
-Polygon Api MCP Server - Pydantic Models
+Polygon MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:56:58 UTC
+Generated: 2026-05-12 12:14:04 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

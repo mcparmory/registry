@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Polygon API MCP Server
-Generated: 2026-05-05 15:56:58 UTC
+Polygon MCP Server
+Generated: 2026-05-12 12:14:04 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.massive.com")
-SERVER_NAME = "Polygon API"
-SERVER_VERSION = "1.0.1"
+SERVER_NAME = "Polygon"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1006,6 +1037,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1030,6 +1063,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1234,10 +1269,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Polygon API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Polygon", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Analyst Insights",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_analyst_insights(
     firm_any_of: str | None = Field(None, alias="firm.any_of", description="Filter results to analyst firms matching any of the specified values. Use comma-separated list for multiple firms."),
     firm_gt: str | None = Field(None, alias="firm.gt", description="Filter results to analyst firms lexicographically greater than the specified value."),
@@ -1293,7 +1334,13 @@ async def list_analyst_insights(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Analysts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_analysts(
     firm_name: str | None = Field(None, description="Filter results to analysts from a specific research firm or investment bank. Optional filter that narrows results to a single firm."),
     full_name: str | None = Field(None, description="Filter results to a specific analyst by their full name. Optional filter that narrows results to matching analysts."),
@@ -1336,7 +1383,13 @@ async def list_analysts(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Bulls Bears Say",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bulls_bears_say(
     limit: int | None = Field(None, description="Maximum number of results to return in the response, ranging from 1 to 5000. Defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by ticker in descending order if not specified."),
@@ -1377,7 +1430,13 @@ async def list_bulls_bears_say(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="Get Consensus Ratings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_consensus_ratings(
     ticker: str = Field(..., description="The stock ticker symbol for which to retrieve consensus ratings."),
     limit: int | None = Field(None, description="Maximum number of results to return, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
@@ -1419,7 +1478,13 @@ async def get_consensus_ratings(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Earnings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_earnings(
     date_status_any_of: str | None = Field(None, alias="date_status.any_of", description="Filter results to earnings records with a date_status matching any of the specified values. Use comma-separated values to filter by multiple statuses."),
     date_status_gt: str | None = Field(None, alias="date_status.gt", description="Filter results to earnings records where date_status is strictly greater than the specified value."),
@@ -1475,7 +1540,13 @@ async def list_earnings(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Firms",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_firms(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Defaults to 100 if not specified. Must be between 1 and 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by firm name in ascending order if not specified."),
@@ -1516,7 +1587,13 @@ async def list_firms(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Guidance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_guidance(
     positioning: str | None = Field(None, description="Filter guidance by presentation type: 'primary' for the company's emphasized figure or 'secondary' for supporting or alternate figures."),
     limit: int | None = Field(None, description="Maximum number of results to return, between 1 and 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
@@ -1558,7 +1635,13 @@ async def list_guidance(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="List Analyst Ratings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_analyst_ratings(
     rating_action_any_of: str | None = Field(None, alias="rating_action.any_of", description="Filter ratings by action type. Accepts one or more comma-separated values (e.g., 'upgrade,downgrade,initiate'). Use this to find specific types of rating changes."),
     rating_action_gt: str | None = Field(None, alias="rating_action.gt", description="Filter ratings by action type using greater-than comparison. Useful for alphabetical or numeric ordering of action types."),
@@ -1614,7 +1697,13 @@ async def list_analyst_ratings(
     return _response_data
 
 # Tags: benzinga
-@mcp.tool()
+@mcp.tool(
+    title="Search Financial News",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_financial_news(
     published: str | None = Field(None, description="Filter articles by exact publication date. Accepts ISO 8601 timestamps, RFC 3339 format, or simple date strings (yyyy-mm-dd)."),
     published_gt: str | None = Field(None, alias="published.gt", description="Filter for articles published after this date. Accepts ISO 8601 timestamps, RFC 3339 format, or simple date strings (yyyy-mm-dd)."),
@@ -1671,7 +1760,13 @@ async def search_financial_news(
     return _response_data
 
 # Tags: fable
-@mcp.tool()
+@mcp.tool(
+    title="List Merchant Aggregates EU",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_merchant_aggregates_eu(
     transaction_date_gt: str | None = Field(None, alias="transaction_date.gt", description="Filter transactions occurring after this date (exclusive). Use ISO 8601 format (yyyy-mm-dd)."),
     transaction_date_gte: str | None = Field(None, alias="transaction_date.gte", description="Filter transactions occurring on or after this date (inclusive). Use ISO 8601 format (yyyy-mm-dd)."),
@@ -1721,7 +1816,13 @@ async def list_merchant_aggregates_eu(
     return _response_data
 
 # Tags: fable
-@mcp.tool()
+@mcp.tool(
+    title="List Merchant Hierarchy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_merchant_hierarchy(
     lookup_name_any_of: str | None = Field(None, alias="lookup_name.any_of", description="Filter merchants by exact name match or multiple names using comma-separated values."),
     lookup_name_gt: str | None = Field(None, alias="lookup_name.gt", description="Filter merchants by name lexicographically greater than the specified value."),
@@ -1776,7 +1877,13 @@ async def list_merchant_hierarchy(
     return _response_data
 
 # Tags: etfglobal
-@mcp.tool()
+@mcp.tool(
+    title="List ETF Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_etf_analytics(
     risk_total_score_gt: float | None = Field(None, alias="risk_total_score.gt", description="Filter ETFs with total risk score greater than this value (floating point number)."),
     risk_total_score_gte: float | None = Field(None, alias="risk_total_score.gte", description="Filter ETFs with total risk score greater than or equal to this value (floating point number)."),
@@ -1858,7 +1965,13 @@ async def list_etf_analytics(
     return _response_data
 
 # Tags: etfglobal
-@mcp.tool()
+@mcp.tool(
+    title="List ETF Constituents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_etf_constituents(
     limit: int | None = Field(None, description="Maximum number of constituent records to return per request, ranging from 1 to 5000. Defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of fields to sort results by, with each field suffixed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by composite_ticker in ascending order if not specified."),
@@ -1899,7 +2012,13 @@ async def list_etf_constituents(
     return _response_data
 
 # Tags: etfglobal
-@mcp.tool()
+@mcp.tool(
+    title="List ETF Fund Flows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_etf_fund_flows(
     limit: int | None = Field(None, description="Maximum number of results to return per request, ranging from 1 to 5000. Defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by composite_ticker in ascending order if not specified."),
@@ -1940,7 +2059,13 @@ async def list_etf_fund_flows(
     return _response_data
 
 # Tags: etfglobal
-@mcp.tool()
+@mcp.tool(
+    title="List ETF Profiles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_etf_profiles(
     limit: int | None = Field(None, description="Maximum number of ETF profiles to return in a single response. Must be between 1 and 5000, defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of fields to sort results by, with each field followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by composite_ticker in ascending order if not specified."),
@@ -1981,7 +2106,13 @@ async def list_etf_profiles(
     return _response_data
 
 # Tags: etfglobal
-@mcp.tool()
+@mcp.tool(
+    title="List ETF Taxonomies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_etf_taxonomies(
     limit: int | None = Field(None, description="Maximum number of taxonomy records to return in the response. Defaults to 100 if not specified. Must be between 1 and 5000.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by 'composite_ticker' in ascending order if not specified."),
@@ -2022,7 +2153,13 @@ async def list_etf_taxonomies(
     return _response_data
 
 # Tags: fed
-@mcp.tool()
+@mcp.tool(
+    title="List Inflation Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inflation_metrics(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Accepts values from 1 to 50,000, with a default of 100 results if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by date in ascending order if not specified."),
@@ -2063,7 +2200,13 @@ async def list_inflation_metrics(
     return _response_data
 
 # Tags: fed
-@mcp.tool()
+@mcp.tool(
+    title="List Inflation Expectations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inflation_expectations(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by date in ascending order if not specified."),
@@ -2104,7 +2247,13 @@ async def list_inflation_expectations(
     return _response_data
 
 # Tags: fed
-@mcp.tool()
+@mcp.tool(
+    title="List Labor Market Indicators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_labor_market_indicators(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by date in ascending order if not specified."),
@@ -2145,7 +2294,13 @@ async def list_labor_market_indicators(
     return _response_data
 
 # Tags: fed
-@mcp.tool()
+@mcp.tool(
+    title="List Treasury Yields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_treasury_yields(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Accepts values from 1 to 50,000, with a default of 100 results if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by date in ascending order if not specified."),
@@ -2186,7 +2341,13 @@ async def list_treasury_yields(
     return _response_data
 
 # Tags: futures:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Futures Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_futures_aggregates(
     ticker: str = Field(..., description="The futures contract identifier including base symbol and expiration month/year (e.g., GCJ5 for April 2025 gold futures)."),
     resolution: str | None = Field(None, description="The candle size as a number with unit: seconds (sec), minutes (min), hours (hour), trading sessions (session), weeks (week), months (month), quarters (quarter), or years (year). Each unit has a maximum multiplier (e.g., up to 59min before switching to hours). Defaults to one trading session."),
@@ -2231,7 +2392,13 @@ async def get_futures_aggregates(
     return _response_data
 
 # Tags: futures:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Futures Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_futures_aggregates_vx(
     ticker: str = Field(..., description="The futures contract identifier including base symbol and expiration month/year (e.g., GCJ5 for April 2025 gold futures)."),
     resolution: str | None = Field(None, description="The candle interval size as a number with unit: seconds (sec), minutes (min), hours (hour), trading sessions (session), weeks (week), months (month), quarters (quarter), or years (year). Each unit has a maximum multiplier (e.g., up to 59min before switching to hours). Defaults to one trading session."),
@@ -2276,7 +2443,13 @@ async def get_futures_aggregates_vx(
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Contracts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_contracts(
     active: bool | None = Field(None, description="Filter results to only include contracts that were actively tradeable on the specified date. A contract is active when its first trade date is on or before the query date and its last trade date is on or after the query date."),
     limit: int | None = Field(None, description="Maximum number of results to return per request, ranging from 1 to 1000. Defaults to 100 if not specified.", ge=1, le=1001),
@@ -2318,7 +2491,13 @@ async def list_futures_contracts(
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Exchanges",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_exchanges(limit: int | None = Field(None, description="Maximum number of results to return in the response. Accepts values between 1 and 1,000, with a default of 100 if not specified.", ge=1, le=1000)) -> dict[str, Any] | ToolResult:
     """Retrieve a list of US futures exchanges and trading venues, including major derivatives exchanges (CME, CBOT, NYMEX, COMEX) and other futures market infrastructure for commodity, financial, and derivative contract trading."""
 
@@ -2356,7 +2535,13 @@ async def list_futures_exchanges(limit: int | None = Field(None, description="Ma
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Market Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_market_statuses(limit: int | None = Field(None, description="Maximum number of market status records to return in the response. Must be between 1 and 100, defaults to 10 if not specified.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve the current market status for futures products, including real-time operational indicators (open, pause, close) with exchange and product codes. Use this to monitor market conditions and adjust trading strategies in real-time."""
 
@@ -2394,7 +2579,13 @@ async def list_futures_market_statuses(limit: int | None = Field(None, descripti
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Products",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_products(
     name_any_of: str | None = Field(None, alias="name.any_of", description="Filter products by name. Accepts multiple comma-separated values to match any of the specified product names."),
     sector_any_of: Literal["asia", "base", "biofuels", "coal", "cross_rates", "crude_oil", "custom_index", "dairy", "dj_ubs_ci", "electricity", "emissions", "europe", "fertilizer", "forestry", "grains_and_oilseeds", "intl_index", "liq_nat_gas_lng", "livestock", "long_term_gov", "long_term_non_gov", "majors", "minors", "nat_gas", "nat_gas_liq_petro", "precious", "refined_products", "s_and_p_gsci", "sel_sector_index", "short_term_gov", "short_term_non_gov", "softs", "us", "us_index", "wet_bulk"] | None = Field(None, alias="sector.any_of", description="Filter products by sector classification. Accepts multiple comma-separated values from predefined sectors including commodities (crude oil, natural gas, metals, grains), financials (indices, interest rates, currencies), and specialized categories (emissions, forestry, weather)."),
@@ -2440,7 +2631,13 @@ async def list_futures_products(
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="Get Futures Quotes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_futures_quotes(
     ticker: str = Field(..., description="The futures contract identifier combining the base symbol and expiration month/year (e.g., GCJ5 for April 2025 gold futures)."),
     limit: int | None = Field(None, description="Maximum number of quote records to return, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50000),
@@ -2483,7 +2680,13 @@ async def get_futures_quotes(
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Schedules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_schedules(
     session_end_date_gt: str | None = Field(None, alias="session_end_date.gt", description="Filter schedules to those with session end dates strictly after this date (formatted as yyyy-mm-dd). Use this to find schedules starting from a specific point in time."),
     session_end_date_gte: str | None = Field(None, alias="session_end_date.gte", description="Filter schedules to those with session end dates on or after this date (formatted as yyyy-mm-dd). Use this to include schedules from a specific date forward."),
@@ -2528,7 +2731,13 @@ async def list_futures_schedules(
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_snapshots(
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Must be between 1 and 50,000, defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction. Defaults to sorting by 'ticker' in ascending order if not specified."),
@@ -2569,7 +2778,13 @@ async def list_futures_snapshots(
     return _response_data
 
 # Tags: us_futures
-@mcp.tool()
+@mcp.tool(
+    title="List Futures Trades",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_futures_trades(
     ticker: str = Field(..., description="The futures contract identifier, including the base symbol and contract expiration month/year (e.g., GCJ5 for April 2025 gold contract)."),
     limit: int | None = Field(None, description="Maximum number of trade records to return in the response. Defaults to 10 if not specified; maximum allowed is 49,999 records per request.", ge=1, le=50000),
@@ -2612,7 +2827,13 @@ async def list_futures_trades(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Stock Filings 10-K Sections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stock_filings_10_k_sections(
     section: Literal["business", "risk_factors"] | None = Field(None, description="Filter results by standardized section type. Valid options are 'business' (company operations and segments) or 'risk_factors' (identified business risks). Omit to retrieve all available sections."),
     limit: int | None = Field(None, description="Maximum number of filing sections to return in the response. Must be between 1 and 100, defaults to 10 if not specified.", ge=1, le=100),
@@ -2654,7 +2875,13 @@ async def list_stock_filings_10_k_sections(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Stocks 8-K Filings Text",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stocks_8k_filings_text(
     form_type_gt: str | None = Field(None, alias="form_type.gt", description="Filter results to filings with form_type values greater than the specified value."),
     form_type_gte: str | None = Field(None, alias="form_type.gte", description="Filter results to filings with form_type values greater than or equal to the specified value."),
@@ -2699,7 +2926,13 @@ async def list_stocks_8k_filings_text(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List 13-F Filings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_13f_filings(
     filer_cik: str | None = Field(None, description="SEC Central Index Key (CIK) of the filing entity as a 10-digit zero-padded string. Use this to retrieve all 13F filings from a specific institutional investment manager."),
     accession_number: str | None = Field(None, description="Unique SEC accession number for a specific filing (format: NNNNNNNNNN-YY-NNNNNN). Use this to retrieve a particular 13F filing by its unique identifier."),
@@ -2742,7 +2975,13 @@ async def list_13f_filings(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List SEC Filings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sec_filings(
     form_type_gt: str | None = Field(None, alias="form_type.gt", description="Filter results to form types greater than the specified value (alphabetically)."),
     form_type_gte: str | None = Field(None, alias="form_type.gte", description="Filter results to form types greater than or equal to the specified value (alphabetically)."),
@@ -2787,7 +3026,13 @@ async def list_sec_filings(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Risk Factors from Stock Filings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_risk_factors_from_stock_filings(
     filing_date_any_of: str | None = Field(None, alias="filing_date.any_of", description="Filter results to filings with dates matching any of the specified values. Provide one or more dates as a comma-separated list."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified. Must be between 1 and 50,000.", ge=1, le=50000),
@@ -2829,7 +3074,13 @@ async def list_risk_factors_from_stock_filings(
     return _response_data
 
 # Tags: financials
-@mcp.tool()
+@mcp.tool(
+    title="List Balance Sheets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_balance_sheets(
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Accepts values from 1 to 50,000, with a default of 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by 'period_end' in ascending order if not specified."),
@@ -2870,7 +3121,13 @@ async def list_balance_sheets(
     return _response_data
 
 # Tags: financials
-@mcp.tool()
+@mcp.tool(
+    title="List Cash Flow Statements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cash_flow_statements(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Accepts values from 1 to 50,000, with a default of 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to 'period_end.asc' if not specified."),
@@ -2911,7 +3168,13 @@ async def list_cash_flow_statements(
     return _response_data
 
 # Tags: financials
-@mcp.tool()
+@mcp.tool(
+    title="List Income Statements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_income_statements(
     limit: int | None = Field(None, description="Maximum number of results to return per request, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by period_end in ascending order if not specified."),
@@ -2952,7 +3215,13 @@ async def list_income_statements(
     return _response_data
 
 # Tags: financials
-@mcp.tool()
+@mcp.tool(
+    title="List Stock Financial Ratios",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stock_financial_ratios(
     price_gt: float | None = Field(None, alias="price.gt", description="Filter for stock prices strictly greater than the specified value."),
     price_gte: float | None = Field(None, alias="price.gte", description="Filter for stock prices greater than or equal to the specified value."),
@@ -3073,7 +3342,13 @@ async def list_stock_financial_ratios(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Risk Factor Taxonomies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_risk_factor_taxonomies(
     taxonomy_gt: float | None = Field(None, alias="taxonomy.gt", description="Filter taxonomies with a value strictly greater than the specified number."),
     taxonomy_gte: float | None = Field(None, alias="taxonomy.gte", description="Filter taxonomies with a value greater than or equal to the specified number."),
@@ -3133,7 +3408,13 @@ async def list_risk_factor_taxonomies(
     return _response_data
 
 # Tags: us_stocks_reference
-@mcp.tool()
+@mcp.tool(
+    title="List Stock Dividends",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stock_dividends(
     frequency_gt: str | None = Field(None, alias="frequency.gt", description="Filter results to dividends with a frequency value greater than the specified integer."),
     frequency_gte: str | None = Field(None, alias="frequency.gte", description="Filter results to dividends with a frequency value greater than or equal to the specified integer."),
@@ -3184,7 +3465,13 @@ async def list_stock_dividends(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Short Interest",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_short_interest(
     days_to_cover: float | None = Field(None, description="Filter results by days-to-cover ratio, calculated as short interest divided by average daily volume. Accepts decimal values to represent the estimated number of trading days needed to cover all short positions at current volume levels."),
     settlement_date: str | None = Field(None, description="Filter results by settlement date in YYYY-MM-DD format, typically aligned with exchange reporting schedules when short interest data becomes official."),
@@ -3230,7 +3517,13 @@ async def list_short_interest(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Short Volume by Ticker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_short_volume_by_ticker(
     short_volume_ratio_any_of: str | None = Field(None, alias="short_volume_ratio.any_of", description="Filter results to include only records where the short volume ratio matches any of the specified values. Provide multiple values as a comma-separated list of floating point numbers."),
     short_volume_ratio_gt: float | None = Field(None, alias="short_volume_ratio.gt", description="Filter results to include only records where the short volume ratio is strictly greater than the specified floating point value."),
@@ -3276,7 +3569,13 @@ async def list_short_volume_by_ticker(
     return _response_data
 
 # Tags: us_stocks_reference
-@mcp.tool()
+@mcp.tool(
+    title="List Historical Stock Splits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stock_splits_historical(
     execution_date_gt: str | None = Field(None, alias="execution_date.gt", description="Filter results to splits executed after this date (exclusive). Use ISO 8601 format: yyyy-mm-dd."),
     execution_date_gte: str | None = Field(None, alias="execution_date.gte", description="Filter results to splits executed on or after this date (inclusive). Use ISO 8601 format: yyyy-mm-dd."),
@@ -3322,7 +3621,13 @@ async def list_stock_splits_historical(
     return _response_data
 
 # Tags: reference
-@mcp.tool()
+@mcp.tool(
+    title="List Stocks by Float",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stocks_by_float(
     free_float_percent_gt: float | None = Field(None, alias="free_float_percent.gt", description="Filter results to securities with free float percentage greater than this value. Accepts decimal numbers."),
     free_float_percent_gte: float | None = Field(None, alias="free_float_percent.gte", description="Filter results to securities with free float percentage greater than or equal to this value. Accepts decimal numbers."),
@@ -3367,7 +3672,13 @@ async def list_stocks_by_float(
     return _response_data
 
 # Tags: tmx
-@mcp.tool()
+@mcp.tool(
+    title="List Corporate Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_corporate_events(
     status: str | None = Field(None, description="Filter events by their current status. Valid statuses are: approved, canceled, confirmed, historical, pending_approval, postponed, and unconfirmed."),
     tmx_company_id: str | None = Field(None, description="Filter events by the TMX company identifier. Accepts a specific company ID as a 64-bit integer."),
@@ -3421,7 +3732,13 @@ async def list_corporate_events(
     return _response_data
 
 # Tags: fx:conversion
-@mcp.tool()
+@mcp.tool(
+    title="Get Currency Conversion",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_currency_conversion(
     from_: str = Field(..., alias="from", description="The source currency code (e.g., AUD, USD). Use standard ISO 4217 three-letter currency codes."),
     to: str = Field(..., description="The target currency code (e.g., USD, CAD). Use standard ISO 4217 three-letter currency codes."),
@@ -3465,7 +3782,13 @@ async def get_currency_conversion(
     return _response_data
 
 # Tags: fx:trades
-@mcp.tool()
+@mcp.tool(
+    title="Get Historic Forex Ticks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_historic_forex_ticks(
     from_: str = Field(..., alias="from", description="The source currency code (e.g., USD, AUD, EUR) in the currency pair."),
     to: str = Field(..., description="The target currency code (e.g., JPY, USD, GBP) in the currency pair."),
@@ -3510,7 +3833,13 @@ async def get_historic_forex_ticks(
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto EMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_ema(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The cryptocurrency ticker symbol (e.g., X:BTCUSD for Bitcoin in USD)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -3556,7 +3885,13 @@ async def get_crypto_ema(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex EMA",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_ema(
     fx_ticker: str = Field(..., alias="fxTicker", description="The forex ticker symbol to analyze, formatted as a currency pair (e.g., C:EURUSD for EUR/USD)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before EMA calculation. Options include minute, hour, day, week, month, quarter, or year. Defaults to daily aggregates."),
@@ -3603,7 +3938,13 @@ async def get_forex_ema(
     return _response_data
 
 # Tags: indices:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Exponential Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_exponential_moving_average(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol for the index (e.g., I:NDX for Nasdaq-100). Required to identify which index to calculate EMA for."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating data before calculating EMA. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -3650,7 +3991,13 @@ async def get_exponential_moving_average(
     return _response_data
 
 # Tags: options:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get EMA for Options Ticker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ema_for_options_ticker(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options ticker symbol to analyze, formatted as an options contract identifier (e.g., O:SPY241220P00720000)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating EMA. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -3697,7 +4044,13 @@ async def get_ema_for_options_ticker(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Exponential Moving Average for Stock",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_exponential_moving_average_stock(
     stock_ticker: str = Field(..., alias="stockTicker", description="The stock ticker symbol to retrieve EMA data for (case-sensitive). For example, AAPL for Apple Inc."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating the EMA. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -3744,7 +4097,13 @@ async def get_exponential_moving_average_stock(
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto MACD",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_macd(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The cryptocurrency ticker symbol (e.g., X:BTCUSD for Bitcoin in USD)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for each data point: minute, hour, day, week, month, quarter, or year. Defaults to daily aggregation."),
@@ -3792,7 +4151,13 @@ async def get_crypto_macd(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get MACD Indicator for Forex",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_macd_indicator_forex(
     fx_ticker: str = Field(..., alias="fxTicker", description="The forex ticker symbol to analyze (e.g., C:EURUSD for EUR/USD currency pair)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data: minute, hour, day, week, month, quarter, or year. Defaults to daily aggregates."),
@@ -3841,7 +4206,13 @@ async def get_macd_indicator_forex(
     return _response_data
 
 # Tags: indices:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get MACD for Indices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_macd_for_indices(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol for the indices (e.g., I:NDX for Nasdaq-100). Required to identify which index to retrieve MACD data for."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating MACD. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregation."),
@@ -3890,7 +4261,13 @@ async def get_macd_for_indices(
     return _response_data
 
 # Tags: options:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get MACD for Options Ticker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_macd_for_options_ticker(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options ticker symbol to analyze, formatted as an options contract identifier (e.g., O:SPY241220P00720000)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating MACD. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregation."),
@@ -3939,7 +4316,13 @@ async def get_macd_for_options_ticker(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get MACD Indicator",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_macd_indicator(
     stock_ticker: str = Field(..., alias="stockTicker", description="The stock ticker symbol to retrieve MACD data for (case-sensitive). For example, AAPL for Apple Inc."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data. Defaults to daily candles. Choose from minute, hour, day, week, month, quarter, or year."),
@@ -3988,7 +4371,13 @@ async def get_macd_indicator(
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto RSI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_rsi(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The cryptocurrency ticker symbol (e.g., X:BTCUSD for Bitcoin/USD pair)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data. Defaults to daily aggregates. Choose from minute, hour, day, week, month, quarter, or year intervals."),
@@ -4034,7 +4423,13 @@ async def get_crypto_rsi(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex RSI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_rsi(
     fx_ticker: str = Field(..., alias="fxTicker", description="The forex ticker symbol to analyze, formatted as a currency pair (e.g., C:EURUSD for EUR/USD)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for each data point in the RSI calculation. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily data."),
@@ -4081,7 +4476,13 @@ async def get_forex_rsi(
     return _response_data
 
 # Tags: indices:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get RSI for Indices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rsi_for_indices(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol for the indices (e.g., I:NDX for Nasdaq-100). Required to identify which index to analyze."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating RSI. Defaults to daily candles. Choose from minute, hour, day, week, month, quarter, or year."),
@@ -4128,7 +4529,13 @@ async def get_rsi_for_indices(
     return _response_data
 
 # Tags: options:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Options RSI",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_options_rsi(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options ticker symbol in the format O:SYMBOL (e.g., O:SPY241220P00720000 for a specific options contract)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating RSI. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregation."),
@@ -4175,7 +4582,13 @@ async def get_options_rsi(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get RSI for Stock",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rsi_for_stock(
     stock_ticker: str = Field(..., alias="stockTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). This is case-sensitive."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating RSI. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregation."),
@@ -4222,7 +4635,13 @@ async def get_rsi_for_stock(
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto Simple Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_simple_moving_average(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The cryptocurrency ticker symbol to analyze (e.g., X:BTCUSD for Bitcoin in USD)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating the moving average. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -4268,7 +4687,13 @@ async def get_crypto_simple_moving_average(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Simple Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_simple_moving_average(
     fx_ticker: str = Field(..., alias="fxTicker", description="The forex ticker symbol to analyze, formatted as a currency pair (e.g., C:EURUSD for EUR/USD)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating the moving average. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -4315,7 +4740,13 @@ async def get_forex_simple_moving_average(
     return _response_data
 
 # Tags: indices:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get SMA for Indices",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sma_for_indices(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol for the indices instrument (e.g., I:NDX for Nasdaq-100). Required to identify which index to calculate SMA for."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating data before calculating SMA. Choose from minute, hour, day, week, month, quarter, or year. Defaults to daily aggregates."),
@@ -4362,7 +4793,13 @@ async def get_sma_for_indices(
     return _response_data
 
 # Tags: options:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get SMA for Options Ticker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sma_for_options_ticker(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options ticker symbol to analyze (e.g., O:SPY241220P00720000 for a specific options contract)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating the moving average. Choose from minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -4409,7 +4846,13 @@ async def get_sma_for_options_ticker(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Simple Moving Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_simple_moving_average(
     stock_ticker: str = Field(..., alias="stockTicker", description="The stock ticker symbol to retrieve SMA data for (case-sensitive, e.g., AAPL for Apple Inc.)."),
     timespan: Literal["minute", "hour", "day", "week", "month", "quarter", "year"] | None = Field(None, description="The time interval for aggregating price data before calculating the moving average. Options include minute, hour, day, week, month, quarter, or year intervals. Defaults to daily aggregates."),
@@ -4456,7 +4899,13 @@ async def get_simple_moving_average(
     return _response_data
 
 # Tags: crypto:last:trade
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Trade for Crypto Pair",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_trade_for_crypto_pair(
     from_: str = Field(..., alias="from", description="The source cryptocurrency symbol (e.g., BTC for Bitcoin). Use the standard ticker symbol for the cryptocurrency you want to trade from."),
     to: str = Field(..., description="The target currency or cryptocurrency symbol (e.g., USD for US Dollar). Use the standard ticker symbol for the currency you want to trade to."),
@@ -4495,7 +4944,13 @@ async def get_last_trade_for_crypto_pair(
     return _response_data
 
 # Tags: fx:last:quote
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Quote for Currency Pair",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_quote_for_currency_pair(
     from_: str = Field(..., alias="from", description="The source currency symbol (ISO 4217 code) for the currency pair conversion, such as AUD for Australian Dollar."),
     to: str = Field(..., description="The target currency symbol (ISO 4217 code) to convert into, such as USD for US Dollar."),
@@ -4534,7 +4989,13 @@ async def get_last_quote_for_currency_pair(
     return _response_data
 
 # Tags: reference:stocks:market
-@mcp.tool()
+@mcp.tool(
+    title="Get Market Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_market_status() -> dict[str, Any] | ToolResult:
     """Retrieve the current trading status of all exchanges and overall financial markets, including whether markets are open, closed, or in pre/post-trading sessions."""
 
@@ -4561,7 +5022,13 @@ async def get_market_status() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: reference:stocks:market
-@mcp.tool()
+@mcp.tool(
+    title="List Market Holidays",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_market_holidays() -> dict[str, Any] | ToolResult:
     """Retrieve a list of upcoming market holidays with their corresponding market open and close times. Use this to identify when markets will be closed or have modified trading hours."""
 
@@ -4588,7 +5055,13 @@ async def list_market_holidays() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: crypto:open-close
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto Daily Open Close",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_daily_open_close(
     from_: str = Field(..., alias="from", description="The base cryptocurrency symbol of the trading pair (e.g., BTC for Bitcoin)."),
     to: str = Field(..., description="The quote currency symbol of the trading pair (e.g., USD for US Dollar)."),
@@ -4632,7 +5105,13 @@ async def get_crypto_daily_open_close(
     return _response_data
 
 # Tags: stocks:open-close
-@mcp.tool()
+@mcp.tool(
+    title="Get Index Open Close",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_index_open_close(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol of the index to query, prefixed with 'I:' (e.g., I:NDX for Nasdaq-100)."),
     date: str = Field(..., description="The date for which to retrieve open/close data, formatted as YYYY-MM-DD (e.g., 2023-03-10)."),
@@ -4671,7 +5150,13 @@ async def get_index_open_close(
     return _response_data
 
 # Tags: options:open-close
-@mcp.tool()
+@mcp.tool(
+    title="Get Options Daily Open Close",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_options_daily_open_close(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:UNDERLYING[EXPIRATION][TYPE][STRIKE] (e.g., O:SPY251219C00650000 for SPY call option expiring December 19, 2025 with $650 strike)."),
     date: str = Field(..., description="The date for which to retrieve open/close data, formatted as YYYY-MM-DD (e.g., 2023-01-09)."),
@@ -4714,7 +5199,13 @@ async def get_options_daily_open_close(
     return _response_data
 
 # Tags: stocks:open-close
-@mcp.tool()
+@mcp.tool(
+    title="Get Stock Daily Open Close",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stock_daily_open_close(
     stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be case-sensitive and match the official exchange listing."),
     date: str = Field(..., description="The date for which to retrieve pricing data, formatted as YYYY-MM-DD (e.g., 2023-01-09)."),
@@ -4757,7 +5248,13 @@ async def get_stock_daily_open_close(
     return _response_data
 
 # Tags: reference:sec:filings
-@mcp.tool()
+@mcp.tool(
+    title="List SEC Filings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sec_filings_reference(
     has_xbrl: bool | None = Field(None, description="Filter filings by XBRL instance file availability. When true, returns only filings with XBRL data; when false, returns only filings without XBRL data; when omitted, returns all filings regardless of XBRL status."),
     entities_company_data_cik: str | None = Field(None, alias="entities.company_data.cik", description="Filter filings by the company's Central Index Key (CIK), a unique SEC identifier."),
@@ -4808,7 +5305,13 @@ async def list_sec_filings_reference(
     return _response_data
 
 # Tags: reference:sec:filing
-@mcp.tool()
+@mcp.tool(
+    title="Get Filing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_filing(filing_id: str = Field(..., description="The unique identifier for the SEC filing to retrieve. This ID corresponds to a specific filing record in the SEC database.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific SEC filing document by its unique filing identifier. Returns detailed filing information from the Securities and Exchange Commission database."""
 
@@ -4844,7 +5347,13 @@ async def get_filing(filing_id: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: reference:sec:filing:files
-@mcp.tool()
+@mcp.tool(
+    title="List Filing Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_filing_files(
     filing_id: str = Field(..., description="The unique identifier of the SEC filing for which to retrieve associated files."),
     sequence_gte: str | None = Field(None, alias="sequence.gte", description="Filter results to include only files with a sequence number greater than or equal to this value. Sequence numbers range from 1 to 999."),
@@ -4901,7 +5410,13 @@ async def list_filing_files(
     return _response_data
 
 # Tags: reference:sec:filing:file
-@mcp.tool()
+@mcp.tool(
+    title="Get SEC Filing File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sec_filing_file(
     filing_id: str = Field(..., description="The unique identifier of the SEC filing. This ID specifies which filing submission to retrieve the file from."),
     file_id: str = Field(..., description="The unique identifier of the specific file within the filing. This ID pinpoints the exact document or exhibit to retrieve (e.g., '1' for the first file)."),
@@ -4940,7 +5455,13 @@ async def get_sec_filing_file(
     return _response_data
 
 # Tags: reference:related:companies
-@mcp.tool()
+@mcp.tool(
+    title="List Related Companies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_related_companies(ticker: str = Field(..., description="The stock ticker symbol to find related companies for (e.g., AAPL for Apple Inc.)")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of company tickers related to a given ticker symbol, identified through analysis of news coverage and stock return patterns."""
 
@@ -4976,7 +5497,13 @@ async def list_related_companies(ticker: str = Field(..., description="The stock
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Ticker Summaries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ticker_summaries() -> dict[str, Any] | ToolResult:
     """Retrieve tick-by-tick movement summaries for all tickers, providing all data needed to visualize price and volume changes."""
 
@@ -5003,7 +5530,13 @@ async def get_ticker_summaries() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Grouped Crypto Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_grouped_crypto_aggregates(
     date: str = Field(..., description="The date for which to retrieve cryptocurrency market aggregates, formatted as YYYY-MM-DD (e.g., 2025-11-03)."),
     adjusted: bool | None = Field(None, description="Whether to adjust results for splits. Set to true (default) for split-adjusted prices, or false to receive unadjusted data."),
@@ -5045,7 +5578,13 @@ async def get_grouped_crypto_aggregates(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Grouped Forex Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_grouped_forex_aggregates(
     date: str = Field(..., description="The date for which to retrieve forex market aggregates, formatted as YYYY-MM-DD (e.g., 2025-11-03)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted values."),
@@ -5087,7 +5626,13 @@ async def get_grouped_forex_aggregates(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Grouped Stocks Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_grouped_stocks_aggregates(
     date: str = Field(..., description="The date for which to retrieve market aggregates, formatted as YYYY-MM-DD (e.g., 2025-11-03)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted prices. Defaults to true; set to false to retrieve unadjusted data."),
@@ -5130,7 +5675,13 @@ async def get_grouped_stocks_aggregates(
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Previous Crypto Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_previous_crypto_aggregates(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The ticker symbol representing the cryptocurrency pair (e.g., X:BTCUSD for Bitcoin to US Dollar)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted historical prices."),
@@ -5172,7 +5723,13 @@ async def get_previous_crypto_aggregates(
     return _response_data
 
 # Tags: crypto:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_aggregates(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The cryptocurrency pair ticker symbol (e.g., X:BTCUSD for Bitcoin/USD)."),
     multiplier: int = Field(..., description="The multiplier for the timespan unit. Must be a positive integer that scales the timespan (e.g., multiplier=5 with timespan='minute' produces 5-minute bars)."),
@@ -5220,7 +5777,13 @@ async def get_crypto_aggregates(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Previous Forex Close",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_previous_forex_close(
     forex_ticker: str = Field(..., alias="forexTicker", description="The forex ticker symbol representing a currency pair (e.g., C:EURUSD for Euro/US Dollar)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted historical prices."),
@@ -5262,7 +5825,13 @@ async def get_previous_forex_close(
     return _response_data
 
 # Tags: fx:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_aggregates(
     forex_ticker: str = Field(..., alias="forexTicker", description="The forex ticker symbol for the currency pair (e.g., C:EURUSD for EUR/USD)."),
     multiplier: int = Field(..., description="The multiplier for the timespan unit. Must be a positive integer that scales the timespan (e.g., multiplier=5 with timespan='minute' returns 5-minute bars)."),
@@ -5310,7 +5879,13 @@ async def get_forex_aggregates(
     return _response_data
 
 # Tags: indices:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Previous Index Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_previous_index_aggregates(indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol of the index (e.g., I:NDX for Nasdaq-100). Use the index ticker in the format specified by your data provider.")) -> dict[str, Any] | ToolResult:
     """Retrieve the previous trading day's OHLC (open, high, low, close) aggregate data for a specified index. Useful for comparing current performance against the prior day's closing values."""
 
@@ -5346,7 +5921,13 @@ async def get_previous_index_aggregates(indices_ticker: str = Field(..., alias="
     return _response_data
 
 # Tags: indices:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Indices Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_indices_aggregates(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol of the index (e.g., I:NDX for Nasdaq-100)."),
     multiplier: int = Field(..., description="The multiplier for the timespan unit. Combined with timespan to define the aggregate window size (e.g., multiplier=5 with timespan='minute' creates 5-minute bars)."),
@@ -5393,7 +5974,13 @@ async def get_indices_aggregates(
     return _response_data
 
 # Tags: options:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Previous Close for Options Contract",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_previous_close_for_options_contract(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:{underlying}{expiration}{type}{strike} (e.g., O:SPY251219C00650000 for SPY call option expiring December 19, 2025 at $650 strike)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted historical prices."),
@@ -5435,7 +6022,13 @@ async def get_previous_close_for_options_contract(
     return _response_data
 
 # Tags: options:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Options Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_options_aggregates(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:UNDERLYING[EXPIRATION][TYPE][STRIKE] (e.g., O:SPY251219C00650000 for a SPY call option expiring December 19, 2025 with a $650 strike)."),
     multiplier: int = Field(..., description="The multiplier for the timespan unit. Combined with timespan, this defines the bar size (e.g., multiplier=5 with timespan='minute' produces 5-minute bars). Must be a positive integer."),
@@ -5483,7 +6076,13 @@ async def get_options_aggregates(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Previous Day Stock OHLC",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_previous_day_stock_ohlc(
     stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be an exact, case-sensitive match."),
     adjusted: bool | None = Field(None, description="Whether to adjust results for stock splits. Defaults to true; set to false to retrieve unadjusted prices."),
@@ -5525,7 +6124,13 @@ async def get_previous_day_stock_ohlc(
     return _response_data
 
 # Tags: stocks:aggregates
-@mcp.tool()
+@mcp.tool(
+    title="Get Stock Aggregates by Range",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stock_aggregates_by_range(
     stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be an exact, case-sensitive match."),
     multiplier: int = Field(..., description="The multiplier for the timespan unit. Combined with timespan to define the bar size (e.g., multiplier=5 with timespan='minute' produces 5-minute bars). Must be a positive integer."),
@@ -5573,7 +6178,13 @@ async def get_stock_aggregates_by_range(
     return _response_data
 
 # Tags: stocks:last:quote
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Quote",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_quote(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in case-sensitive format (e.g., AAPL for Apple Inc.).")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent NBBO (National Best Bid and Offer) quote for a specified stock ticker symbol."""
 
@@ -5609,7 +6220,13 @@ async def get_last_quote(stocks_ticker: str = Field(..., alias="stocksTicker", d
     return _response_data
 
 # Tags: options:last:trade
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Trade for Options Contract",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_trade_for_options_contract(options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:{underlying_symbol}{expiration_date}{contract_type}{strike_price} (e.g., O:TSLA210903C00700000 for a Tesla call option expiring September 3, 2021 with a $700 strike).")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent trade execution for a specified options contract. Returns trade details including price, size, and timestamp for the latest transaction."""
 
@@ -5645,7 +6262,13 @@ async def get_last_trade_for_options_contract(options_ticker: str = Field(..., a
     return _response_data
 
 # Tags: stocks:last:trade
-@mcp.tool()
+@mcp.tool(
+    title="Get Last Trade",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_last_trade(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be a valid, case-sensitive ticker symbol.")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent trade execution for a specified stock ticker symbol. Returns the latest trade data including price, size, and timestamp."""
 
@@ -5681,7 +6304,13 @@ async def get_last_trade(stocks_ticker: str = Field(..., alias="stocksTicker", d
     return _response_data
 
 # Tags: reference:news
-@mcp.tool()
+@mcp.tool(
+    title="List News for Ticker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_news_for_ticker(
     published_utc: str | None = Field(None, description="Filter results to articles published on, before, or after a specific date. Use ISO 8601 format for the date specification."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending (oldest first) or descending (newest first). Defaults to descending when used with the sort field."),
@@ -5724,7 +6353,13 @@ async def list_news_for_ticker(
     return _response_data
 
 # Tags: crypto:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Crypto Tickers Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_crypto_tickers_snapshot() -> dict[str, Any] | ToolResult:
     """Retrieve current market snapshot data for all traded cryptocurrency symbols, including minute and day aggregates, previous day comparison, and latest trade/quote information. Data is refreshed from exchanges starting around 4am EST daily, with snapshots cleared at 12am EST."""
 
@@ -5751,7 +6386,13 @@ async def list_crypto_tickers_snapshot() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: crypto:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="Get Crypto Ticker Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crypto_ticker_snapshot(ticker: str = Field(..., description="The cryptocurrency ticker symbol to retrieve snapshot data for, formatted as an exchange prefix and currency pair (e.g., X:BTCUSD for Bitcoin in USD).")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time and aggregate market data for a cryptocurrency ticker, including current minute and day aggregates, previous day comparison, and the latest trade and quote information. Data is refreshed as exchange data arrives and resets daily at 12am EST."""
 
@@ -5787,7 +6428,13 @@ async def get_crypto_ticker_snapshot(ticker: str = Field(..., description="The c
     return _response_data
 
 # Tags: crypto:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Crypto Gainers or Losers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_crypto_gainers_or_losers(direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return top gainers or top losers. Use 'gainers' for tickers with the highest positive percentage change, or 'losers' for tickers with the highest negative percentage change since the previous day's close.")) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 cryptocurrency gainers or losers by percentage change since the previous day's close. Snapshot data resets daily at 12am EST and populates as exchange data arrives."""
 
@@ -5823,7 +6470,13 @@ async def list_crypto_gainers_or_losers(direction: Literal["gainers", "losers"] 
     return _response_data
 
 # Tags: fx:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Snapshot Tickers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_snapshot_tickers() -> dict[str, Any] | ToolResult:
     """Retrieve real-time snapshot data for all traded forex symbols, including current minute and day aggregates, previous day aggregates, and the latest trade and quote information. Note: Snapshot data resets daily at 12am EST and begins populating as early as 4am EST when exchange data arrives."""
 
@@ -5850,7 +6503,13 @@ async def get_forex_snapshot_tickers() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: fx:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="Get Forex Ticker Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_forex_ticker_snapshot(ticker: str = Field(..., description="The forex currency pair ticker symbol (e.g., C:EURUSD for Euro/US Dollar). Use the format C: prefix followed by the three-letter currency codes.")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time forex market data for a currency pair, including current minute and day aggregates, previous day comparison, and the latest trade and quote information. Data is refreshed as exchange data arrives and resets daily at 12am EST."""
 
@@ -5886,7 +6545,13 @@ async def get_forex_ticker_snapshot(ticker: str = Field(..., description="The fo
     return _response_data
 
 # Tags: fx:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Forex Gainers or Losers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_forex_gainers_or_losers(direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return the top gainers or top losers. Use 'gainers' for pairs with the highest positive percentage change, or 'losers' for pairs with the highest negative percentage change since the previous day's close.")) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 forex currency pairs ranked by daily percentage change. Returns either the biggest gainers or losers since the previous day's close, with snapshot data refreshed daily at 12am EST."""
 
@@ -5922,7 +6587,13 @@ async def list_forex_gainers_or_losers(direction: Literal["gainers", "losers"] =
     return _response_data
 
 # Tags: stocks:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Stock Tickers Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stock_tickers_snapshot(include_otc: bool | None = Field(None, description="Set to true to include over-the-counter (OTC) securities in the results; defaults to false to return only exchange-listed stocks.")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time market data snapshot for all traded stock symbols. Data is refreshed continuously from exchanges starting around 4am EST daily, with the previous day's data cleared at 3:30am EST."""
 
@@ -5960,7 +6631,13 @@ async def list_stock_tickers_snapshot(include_otc: bool | None = Field(None, des
     return _response_data
 
 # Tags: stocks:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="Get Stock Snapshot by Ticker",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must match the exact case-sensitive symbol used by the exchange.")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time market data snapshot for a specific stock ticker symbol. Data is refreshed as exchange data arrives, typically starting at 4am EST after the 3:30am EST daily reset."""
 
@@ -5996,7 +6673,13 @@ async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="st
     return _response_data
 
 # Tags: stocks:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Stocks by Direction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stocks_by_direction(
     direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return top gainers or top losers ranked by percentage price change since the previous close."),
     include_otc: bool | None = Field(None, description="Set to true to include over-the-counter (OTC) securities in the results; defaults to false to exclude OTC securities."),
@@ -6038,7 +6721,13 @@ async def list_stocks_by_direction(
     return _response_data
 
 # Tags: stocks:quotes
-@mcp.tool()
+@mcp.tool(
+    title="Get NBBO Quotes for Date",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_nbbo_quotes_for_date(
     ticker: str = Field(..., description="The stock ticker symbol (e.g., AAPL) for which to retrieve quotes."),
     date: str = Field(..., description="The date for which to retrieve quotes, specified in YYYY-MM-DD format (e.g., 2020-10-14)."),
@@ -6083,7 +6772,13 @@ async def get_nbbo_quotes_for_date(
     return _response_data
 
 # Tags: fx:quotes
-@mcp.tool()
+@mcp.tool(
+    title="Get FX Quotes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_fx_quotes(
     fx_ticker: str = Field(..., alias="fxTicker", description="The FX ticker symbol to retrieve quotes for, formatted as a currency pair (e.g., C:EUR-USD)."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: ascending or descending. Defaults to descending order."),
@@ -6127,7 +6822,13 @@ async def get_fx_quotes(
     return _response_data
 
 # Tags: options:quotes
-@mcp.tool()
+@mcp.tool(
+    title="List Options Quotes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_options_quotes(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options ticker symbol to retrieve quotes for, formatted as an OCC options symbol (e.g., O:SPY241220P00720000 for a SPY put option)."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results based on the sort field. Defaults to descending order (newest first)."),
@@ -6171,7 +6872,13 @@ async def list_options_quotes(
     return _response_data
 
 # Tags: stocks:quotes
-@mcp.tool()
+@mcp.tool(
+    title="Get Stock Quotes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stock_quotes(
     stock_ticker: str = Field(..., alias="stockTicker", description="The stock ticker symbol to retrieve quotes for (case-sensitive). For example, AAPL for Apple Inc."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results based on the sort field. Defaults to descending order."),
@@ -6215,7 +6922,13 @@ async def get_stock_quotes(
     return _response_data
 
 # Tags: reference:conditions
-@mcp.tool()
+@mcp.tool(
+    title="List Conditions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conditions(
     data_type: Literal["trade", "bbo", "nbbo"] | None = Field(None, description="Filter results to conditions associated with a specific data type: trade data, best bid-offer quotes, or national best bid-offer quotes."),
     id_: int | None = Field(None, alias="id", description="Filter results to a specific condition by its numeric identifier."),
@@ -6260,7 +6973,13 @@ async def list_conditions(
     return _response_data
 
 # Tags: reference:dividends
-@mcp.tool()
+@mcp.tool(
+    title="List Dividends",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dividends(
     record_date: str | None = Field(None, description="Filter dividends by the record date (the date on which shareholders must be registered to receive the dividend). Use YYYY-MM-DD format."),
     declaration_date: str | None = Field(None, description="Filter dividends by the declaration date (when the dividend was officially announced). Use YYYY-MM-DD format."),
@@ -6307,7 +7026,13 @@ async def list_dividends(
     return _response_data
 
 # Tags: reference:exchanges
-@mcp.tool()
+@mcp.tool(
+    title="List Exchanges",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_exchanges(locale: Literal["us", "global"] | None = Field(None, description="Filter results by geographic region: use 'us' for United States exchanges or 'global' for worldwide exchanges.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all exchanges that Massive has data for, optionally filtered by geographic locale."""
 
@@ -6345,7 +7070,13 @@ async def list_exchanges(locale: Literal["us", "global"] | None = Field(None, de
     return _response_data
 
 # Tags: reference:options:contracts:list
-@mcp.tool()
+@mcp.tool(
+    title="List Options Contracts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_options_contracts(
     underlying_ticker: str | None = Field(None, description="Filter results to contracts for a specific underlying stock ticker symbol (e.g., AAPL, TSLA)."),
     contract_type: Literal["call", "put"] | None = Field(None, description="Filter by contract type: either call options or put options."),
@@ -6391,7 +7122,13 @@ async def list_options_contracts(
     return _response_data
 
 # Tags: reference:options:contract
-@mcp.tool()
+@mcp.tool(
+    title="Get Options Contract",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_options_contract(
     options_ticker: str = Field(..., description="The options ticker symbol identifying the contract (e.g., O:SPY251219C00650000). This follows the standard options ticker format which encodes the underlying symbol, expiration date, option type, and strike price."),
     as_of: str | None = Field(None, description="Historical reference date for the contract data in YYYY-MM-DD format. If not provided, defaults to today's date."),
@@ -6433,7 +7170,13 @@ async def get_options_contract(
     return _response_data
 
 # Tags: reference:stocks
-@mcp.tool()
+@mcp.tool(
+    title="List Stock Splits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stock_splits(
     reverse_split: bool | None = Field(None, description="Filter results to show only reverse stock splits, where the split ratio decreases the number of shares (split_from > split_to). Omit to include all splits."),
     execution_date_gte: str | None = Field(None, alias="execution_date.gte", description="Filter splits executed on or after this date (inclusive). Use ISO 8601 date format (YYYY-MM-DD)."),
@@ -6480,7 +7223,13 @@ async def list_stock_splits(
     return _response_data
 
 # Tags: reference:tickers:list
-@mcp.tool()
+@mcp.tool(
+    title="List Tickers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tickers(
     market: Literal["stocks", "crypto", "fx", "otc", "indices"] | None = Field(None, description="Filter results to a specific market type: stocks, crypto, forex, otc, or indices. Omit to include all markets."),
     exchange: str | None = Field(None, description="Filter by the asset's primary exchange using its ISO 10383 Market Identifier Code (MIC). Leave empty to query all exchanges."),
@@ -6527,7 +7276,13 @@ async def list_tickers(
     return _response_data
 
 # Tags: reference:tickers:types
-@mcp.tool()
+@mcp.tool(
+    title="List Ticker Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ticker_types(locale: Literal["us", "global"] | None = Field(None, description="Filter ticker types by geographic market: use 'us' for United States market or 'global' for worldwide tickers. If omitted, returns all ticker types.")) -> dict[str, Any] | ToolResult:
     """Retrieve all ticker types available in the Massive database. Optionally filter results by geographic locale to see ticker types relevant to a specific market."""
 
@@ -6565,7 +7320,13 @@ async def list_ticker_types(locale: Literal["us", "global"] | None = Field(None,
     return _response_data
 
 # Tags: reference:tickers:get
-@mcp.tool()
+@mcp.tool(
+    title="Get Ticker Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ticker_details(ticker: str = Field(..., description="The ticker symbol to look up, case-sensitive (e.g., AAPL for Apple Inc.). Must be a valid ticker symbol supported by the service.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific ticker symbol, including company data and market details supported by Massive."""
 
@@ -6601,7 +7362,13 @@ async def get_ticker_details(ticker: str = Field(..., description="The ticker sy
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_snapshots(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order direction for results: ascending or descending based on the sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return per request, between 1 and 250 (defaults to 10).", ge=1, le=250),
@@ -6643,7 +7410,13 @@ async def list_snapshots(
     return _response_data
 
 # Tags: indices:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Indices Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_indices_snapshot(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending or descending order based on the sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response, ranging from 1 to 250 (defaults to 10 if not specified).", ge=1, le=250),
@@ -6685,7 +7458,13 @@ async def list_indices_snapshot(
     return _response_data
 
 # Tags: options:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="List Options Chain",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_options_chain(
     underlying_asset: str = Field(..., alias="underlyingAsset", description="The ticker symbol of the underlying asset (e.g., EVRI). This is the security for which you want to retrieve options contracts."),
     contract_type: Literal["call", "put"] | None = Field(None, description="Filter results to only calls or puts. If omitted, both contract types are returned."),
@@ -6730,7 +7509,13 @@ async def list_options_chain(
     return _response_data
 
 # Tags: options:snapshot
-@mcp.tool()
+@mcp.tool(
+    title="Get Option Contract Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_option_contract_snapshot(
     underlying_asset: str = Field(..., alias="underlyingAsset", description="The ticker symbol of the underlying stock (e.g., EVRI). This identifies which equity the option contract is based on."),
     option_contract: str = Field(..., alias="optionContract", description="The unique identifier for the specific option contract (e.g., O:EVRI260116C00015000). This format typically encodes the underlying asset, expiration date, contract type (call/put), and strike price."),
@@ -6769,7 +7554,13 @@ async def get_option_contract_snapshot(
     return _response_data
 
 # Tags: crypto:trades
-@mcp.tool()
+@mcp.tool(
+    title="List Crypto Trades",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_crypto_trades(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The cryptocurrency ticker symbol to retrieve trades for, formatted as an exchange prefix and currency pair (e.g., X:BTC-USD for Bitcoin in US dollars)."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: ascending (oldest first) or descending (newest first). Defaults to descending order."),
@@ -6813,7 +7604,13 @@ async def list_crypto_trades(
     return _response_data
 
 # Tags: options:trades
-@mcp.tool()
+@mcp.tool(
+    title="List Options Trades",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_options_trades(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options ticker symbol identifying the specific contract to retrieve trades for (e.g., O:TSLA210903C00700000)."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results based on the sort field; defaults to descending order (newest first)."),
@@ -6857,7 +7654,13 @@ async def list_options_trades(
     return _response_data
 
 # Tags: stocks:trades
-@mcp.tool()
+@mcp.tool(
+    title="List Trades",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_trades(
     stock_ticker: str = Field(..., alias="stockTicker", description="The stock ticker symbol to retrieve trades for (case-sensitive). For example, AAPL for Apple Inc."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results based on the sort field. Choose ascending or descending order; defaults to descending."),
@@ -6901,7 +7704,13 @@ async def list_trades(
     return _response_data
 
 # Tags: reference:stocks
-@mcp.tool()
+@mcp.tool(
+    title="List Financials",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_financials(
     sic: str | None = Field(None, description="Filter results by Standard Industrial Classification (SIC) code to narrow results to a specific industry sector."),
     company_name_search: str | None = Field(None, alias="company_name.search", description="Search for companies by name using partial text matching."),
@@ -6949,7 +7758,13 @@ async def list_financials(
     return _response_data
 
 # Tags: reference:stocks:ipos
-@mcp.tool()
+@mcp.tool(
+    title="List IPOs Detailed",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ipos_detailed(
     listing_date: str | None = Field(None, description="Filter results to a specific listing date (the first trading date for the newly listed entity). Use ISO 8601 date format."),
     ipo_status: Literal["direct_listing_process", "history", "new", "pending", "postponed", "rumor", "withdrawn"] | None = Field(None, description="Filter results by IPO status: new, pending, rumor, postponed, withdrawn, direct listing process, or historical."),
@@ -6993,7 +7808,13 @@ async def list_ipos_detailed(
     return _response_data
 
 # Tags: reference:tickers:get
-@mcp.tool()
+@mcp.tool(
+    title="List Ticker Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ticker_events(
     id_: str = Field(..., alias="id", description="The security identifier as a ticker symbol (case-sensitive, e.g., AAPL), CUSIP, or Composite FIGI. When using a ticker, events are returned for the entity currently represented by that ticker; use the Ticker Details endpoint to find identifiers for entities previously associated with a ticker."),
     types: str | None = Field(None, description="Filter results by event type using a comma-separated list. Currently supports ticker_change. Omit to return all available event types."),
@@ -7118,7 +7939,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python polygon_api_server.py", file=sys.stderr)
+        print("  python polygon_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -7220,7 +8041,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Polygon API MCP Server")
+    parser = argparse.ArgumentParser(description="Polygon MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -7321,7 +8142,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Polygon API MCP Server")
+    logger.info("Starting Polygon MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
