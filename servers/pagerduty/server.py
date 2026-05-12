@@ -5,7 +5,7 @@ PagerDuty MCP Server
 API Info:
 - Contact: PagerDuty Support <support@pagerduty.com> (http://www.pagerduty.com/support)
 
-Generated: 2026-05-05 15:46:23 UTC
+Generated: 2026-05-12 12:01:59 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.pagerduty.com")
 SERVER_NAME = "PagerDuty"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1023,6 +1054,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1047,6 +1080,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1263,7 +1298,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("PagerDuty", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Add and Remove Tags for Entity",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_and_remove_tags_for_entity(
     entity_type: Literal["users", "teams", "escalation_policies"] = Field(..., description="The type of entity to tag: users, teams, or escalation policies."),
     id_: str = Field(..., alias="id", description="The unique identifier of the entity to modify tags for."),
@@ -1304,13 +1344,20 @@ async def add_and_remove_tags_for_entity(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags for Entity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_for_entity(
     entity_type: Literal["users", "teams", "escalation_policies"] = Field(..., description="The type of entity to retrieve tags for. Must be one of: users, teams, or escalation_policies."),
     id_: str = Field(..., alias="id", description="The unique identifier of the entity (user, team, or escalation policy) to retrieve tags for."),
@@ -1352,7 +1399,13 @@ async def list_tags_for_entity(
     return _response_data
 
 # Tags: Abilities
-@mcp.tool()
+@mcp.tool(
+    title="List Abilities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_abilities(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
@@ -1391,7 +1444,13 @@ async def list_abilities(
     return _response_data
 
 # Tags: Abilities
-@mcp.tool()
+@mcp.tool(
+    title="Check Account Ability",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_account_ability(
     id_: str = Field(..., alias="id", description="The unique identifier of the ability to check (e.g., 'teams'). This determines which account capability is being tested."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version (version 2)."),
@@ -1432,7 +1491,13 @@ async def check_account_ability(
     return _response_data
 
 # Tags: Add-ons
-@mcp.tool()
+@mcp.tool(
+    title="Get Add-on",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_addon(
     id_: str = Field(..., alias="id", description="The unique identifier of the Add-on to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -1473,7 +1538,13 @@ async def get_addon(
     return _response_data
 
 # Tags: Alert Grouping Settings
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert Grouping Setting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert_grouping_setting(
     id_: str = Field(..., alias="id", description="The unique identifier of the Alert Grouping Setting to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -1514,7 +1585,12 @@ async def get_alert_grouping_setting(
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Analytics Aggregated",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_incident_analytics_aggregated(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
@@ -1565,13 +1641,19 @@ async def get_incident_analytics_aggregated(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Escalation Policy Incident Metrics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_escalation_policy_incident_metrics(
     accept: str = Field(..., alias="Accept", description="API versioning header specifying the response format and version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be JSON."),
@@ -1622,13 +1704,19 @@ async def get_escalation_policy_incident_metrics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Aggregated Escalation Policy Incident Metrics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_escalation_policy_incident_metrics_aggregated(
     accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type; must be application/json."),
@@ -1679,13 +1767,19 @@ async def get_escalation_policy_incident_metrics_aggregated(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Incident Analytics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_service_incident_analytics(
     accept: str = Field(..., alias="Accept", description="API versioning header; use application/vnd.pagerduty+json;version=2 for this operation."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be application/json."),
@@ -1736,13 +1830,19 @@ async def get_service_incident_analytics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Aggregated Incident Metrics Across Services",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_aggregated_incident_metrics_across_services(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to ensure compatibility with this endpoint."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
@@ -1793,13 +1893,19 @@ async def get_aggregated_incident_metrics_across_services(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Incident Analytics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_team_incident_analytics(
     accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be application/json."),
@@ -1850,13 +1956,19 @@ async def get_team_incident_analytics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Analytics Metrics for Incidents Across All Teams",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_analytics_metrics_incidents_for_all_teams(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
@@ -1907,13 +2019,19 @@ async def get_analytics_metrics_incidents_for_all_teams(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get PagerDuty Advanced Usage Metrics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_pd_advance_usage_metrics(
     accept: str = Field(..., alias="Accept", description="API versioning header specifying the response format and schema version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be JSON."),
@@ -1963,13 +2081,19 @@ async def get_pd_advance_usage_metrics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Analytics Metrics for All Responders",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_analytics_metrics_for_all_responders(
     accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type; must be application/json."),
@@ -2014,13 +2138,19 @@ async def get_analytics_metrics_for_all_responders(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Analytics Metrics for Responders by Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_analytics_metrics_responders_by_team(
     accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2"),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type; must be application/json"),
@@ -2065,13 +2195,19 @@ async def get_analytics_metrics_responders_by_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Analytics Metrics for All Users",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_analytics_metrics_for_all_users(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
@@ -2117,13 +2253,19 @@ async def get_analytics_metrics_for_all_users(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Analytics Incidents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_analytics_incidents(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
@@ -2171,13 +2313,20 @@ async def list_analytics_incidents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_analytics(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to retrieve analytics for."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -2218,7 +2367,13 @@ async def get_incident_analytics(
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Response Analytics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_response_analytics(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve response analytics."),
     accept: str = Field(..., alias="Accept", description="API versioning header; use application/vnd.pagerduty+json;version=2 for current API version."),
@@ -2259,13 +2414,19 @@ async def get_incident_response_analytics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Responder Incidents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_responder_incidents(
     responder_id: str = Field(..., description="The unique identifier of the responder whose incidents you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
@@ -2314,13 +2475,19 @@ async def list_responder_incidents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Analytics
-@mcp.tool()
+@mcp.tool(
+    title="List Analytics Users",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_analytics_users(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
@@ -2366,13 +2533,20 @@ async def list_analytics_users(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Audit
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_records(
     accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to the PagerDuty v2 JSON media type."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying the request body format as JSON."),
@@ -2422,7 +2596,13 @@ async def list_audit_records(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="List Automation Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automation_actions(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to request the correct API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be `application/json`."),
@@ -2469,7 +2649,12 @@ async def list_automation_actions(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Automation Action",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_automation_action(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json for this operation."),
@@ -2506,13 +2691,20 @@ async def create_automation_action(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation action to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -2553,7 +2745,13 @@ async def get_automation_action(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Automation Action",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_automation_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -2592,13 +2790,20 @@ async def update_automation_action(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Automation Action",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_automation_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -2639,7 +2844,12 @@ async def delete_automation_action(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Invoke Automation Action",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invoke_automation_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation action to invoke."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -2681,13 +2891,20 @@ async def invoke_automation_action(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="List Automation Action Service Associations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automation_action_service_associations(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource whose service associations you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API version 2 with JSON content type."),
@@ -2728,7 +2945,12 @@ async def list_automation_action_service_associations(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Associate Automation Action with Service",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def associate_automation_action_with_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource to associate with a service."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -2767,13 +2989,20 @@ async def associate_automation_action_with_service(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation Action Service Association",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation_action_service_association(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource."),
     service_id: str = Field(..., description="The unique identifier of the service associated with the Automation Action."),
@@ -2815,7 +3044,13 @@ async def get_automation_action_service_association(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Automation Action Service Association",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_automation_action_service_association(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to disassociate."),
     service_id: str = Field(..., description="The unique identifier of the service from which the Automation Action should be removed."),
@@ -2857,7 +3092,13 @@ async def remove_automation_action_service_association(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="List Automation Action Team Associations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automation_action_team_associations(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -2898,7 +3139,12 @@ async def list_automation_action_team_associations(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Add Automation Action Team Association",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_automation_action_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to associate with a team."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Use the default PagerDuty JSON format version 2."),
@@ -2937,13 +3183,20 @@ async def add_automation_action_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation Action Team Association",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation_action_team_association(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource."),
     team_id: str = Field(..., description="The unique identifier of the team associated with the Automation Action."),
@@ -2985,7 +3238,13 @@ async def get_automation_action_team_association(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Automation Action Team Association",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_automation_action_team_association(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource to disassociate."),
     team_id: str = Field(..., description="The unique identifier of the team to disassociate from the Automation Action."),
@@ -3027,7 +3286,13 @@ async def remove_automation_action_team_association(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="List Automation Action Invocations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automation_action_invocations(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default value for standard JSON responses."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body content type as JSON."),
@@ -3072,7 +3337,13 @@ async def list_automation_action_invocations(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation Action Invocation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation_action_invocation(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action Invocation to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -3113,7 +3384,13 @@ async def get_automation_action_invocation(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="List Automation Action Runners",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_automation_action_runners(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to JSON format."),
@@ -3156,7 +3433,12 @@ async def list_automation_action_runners(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Automation Runner",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_automation_runner(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
@@ -3193,13 +3475,20 @@ async def create_automation_runner(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Automation Actions Runner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_automation_actions_runner(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action runner to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -3240,7 +3529,13 @@ async def get_automation_actions_runner(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Automation Actions Runner",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_automation_actions_runner(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action runner to update."),
     accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API version 2 JSON format."),
@@ -3279,13 +3574,20 @@ async def update_automation_actions_runner(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Automation Actions Runner",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_automation_actions_runner(
     id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action runner to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -3326,7 +3628,13 @@ async def delete_automation_actions_runner(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="List Runner Team Associations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_runner_team_associations(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation action runner."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -3367,7 +3675,12 @@ async def list_runner_team_associations(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Associate Runner with Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def associate_runner_with_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation actions runner to associate with a team."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Use the default PagerDuty JSON format version 2."),
@@ -3406,13 +3719,20 @@ async def associate_runner_with_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Runner Team Association",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_runner_team_association(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation action runner resource."),
     team_id: str = Field(..., description="The unique identifier of the team associated with the runner."),
@@ -3454,7 +3774,13 @@ async def get_runner_team_association(
     return _response_data
 
 # Tags: Automation Actions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Runner from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_runner_from_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the automation action runner to disassociate."),
     team_id: str = Field(..., description="The unique identifier of the team to disassociate from the runner."),
@@ -3496,7 +3822,13 @@ async def remove_runner_from_team(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="List Business Services",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_business_services(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty API v2 JSON format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. This is the only supported content type for this operation."),
@@ -3535,7 +3867,12 @@ async def list_business_services(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Create Business Service",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_business_service(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
@@ -3575,13 +3912,20 @@ async def create_business_service(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Business Service",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_business_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
@@ -3622,7 +3966,13 @@ async def get_business_service(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Update Business Service",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_business_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -3664,13 +4014,20 @@ async def update_business_service(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Delete Business Service",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_business_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the business service to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -3711,7 +4068,12 @@ async def delete_business_service(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Subscribe Account to Business Service",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def subscribe_account_to_business_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to subscribe to."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
@@ -3751,7 +4113,13 @@ async def subscribe_account_to_business_service(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Remove Business Service Account Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_business_service_account_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service from which to remove the account subscription."),
     accept: str = Field(..., alias="Accept", description="The API version to use for this request, specified via the Accept header. Defaults to PagerDuty API version 2 if not provided."),
@@ -3791,7 +4159,13 @@ async def remove_business_service_account_subscription(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="List Business Service Subscribers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_business_service_subscribers(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service for which to retrieve subscribers."),
     accept: str = Field(..., alias="Accept", description="The API version to use for this request, specified as a media type. Defaults to PagerDuty API v2 JSON format."),
@@ -3831,7 +4205,12 @@ async def list_business_service_subscribers(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Add Subscribers to Business Service",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_subscribers_to_business_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to which subscribers will be added."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
@@ -3869,13 +4248,20 @@ async def add_subscribers_to_business_service(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="List Supporting Service Impacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_supporting_service_impacts(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service for which to retrieve supporting service impacts."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value `application/vnd.pagerduty+json;version=2` unless a different API version is required."),
@@ -3920,7 +4306,13 @@ async def list_supporting_service_impacts(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Remove Business Service Notification Subscribers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_business_service_notification_subscribers(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service from which subscribers will be unsubscribed."),
     accept: str = Field(..., alias="Accept", description="The API version header for request/response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -3958,13 +4350,20 @@ async def remove_business_service_notification_subscribers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="List Business Service Impactors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_business_service_impactors(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default value unless you require a different API version."),
     ids: str | None = Field(None, description="Filter results to specific Business Services by their IDs. Provide one or more IDs to retrieve Impactors for only those services; omit to retrieve Impactors for all top-level Business Services."),
@@ -4006,7 +4405,13 @@ async def list_business_service_impactors(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="List Business Services by Impact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_business_services_by_impact(
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value 'application/vnd.pagerduty+json;version=2' to request the current API version."),
     additional_fields: Literal["services.highest_impacting_priority", "total_impacted_count"] | None = Field(None, description="Optional additional fields to include in the response: use 'services.highest_impacting_priority' to get the highest priority incident per service, or 'total_impacted_count' to get the total count of impacted resources per service."),
@@ -4049,7 +4454,13 @@ async def list_business_services_by_impact(
     return _response_data
 
 # Tags: Business Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Business Service Priority Thresholds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_business_service_priority_thresholds(accept: str = Field(..., alias="Accept", description="Content type and API version specification. Use the PagerDuty JSON media type with version 2 to ensure compatibility with the current API specification.")) -> dict[str, Any] | ToolResult:
     """Retrieve the global priority threshold that determines when an Incident is considered to impact a Business Service. This threshold applies account-wide, affecting any Business Service that depends on the Service to which an Incident belongs."""
 
@@ -4085,7 +4496,13 @@ async def get_business_service_priority_thresholds(accept: str = Field(..., alia
     return _response_data
 
 # Tags: Change Events
-@mcp.tool()
+@mcp.tool(
+    title="List Change Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_change_events(
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to `application/vnd.pagerduty+json;version=2`."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be `application/json`."),
@@ -4131,7 +4548,12 @@ async def list_change_events(
     return _response_data
 
 # Tags: Change Events
-@mcp.tool()
+@mcp.tool(
+    title="Send Change Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_change_event(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to the PagerDuty V2 JSON media type."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be JSON."),
@@ -4170,7 +4592,13 @@ async def send_change_event(
     return _response_data
 
 # Tags: Change Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Change Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_change_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the Change Event to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -4211,7 +4639,13 @@ async def get_change_event(
     return _response_data
 
 # Tags: Change Events
-@mcp.tool()
+@mcp.tool(
+    title="Update Change Event",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_change_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the Change Event to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request PagerDuty API v2 response format."),
@@ -4250,13 +4684,20 @@ async def update_change_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Escalation Policies
-@mcp.tool()
+@mcp.tool(
+    title="List Escalation Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_escalation_policies(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be application/json."),
@@ -4302,7 +4743,12 @@ async def list_escalation_policies(
     return _response_data
 
 # Tags: Escalation Policies
-@mcp.tool()
+@mcp.tool(
+    title="Create Escalation Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_escalation_policy(
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
@@ -4340,13 +4786,20 @@ async def create_escalation_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Escalation Policies
-@mcp.tool()
+@mcp.tool(
+    title="Get Escalation Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_escalation_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -4391,7 +4844,13 @@ async def get_escalation_policy(
     return _response_data
 
 # Tags: Escalation Policies
-@mcp.tool()
+@mcp.tool(
+    title="Update Escalation Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_escalation_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -4430,13 +4889,20 @@ async def update_escalation_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Escalation Policies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Escalation Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_escalation_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -4477,7 +4943,13 @@ async def delete_escalation_policy(
     return _response_data
 
 # Tags: Escalation Policies
-@mcp.tool()
+@mcp.tool(
+    title="List Escalation Policy Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_escalation_policy_audit_records(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to retrieve audit records for."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the API version."),
@@ -4523,7 +4995,13 @@ async def list_escalation_policy_audit_records(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="List Event Orchestrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_orchestrations(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
@@ -4566,7 +5044,12 @@ async def list_event_orchestrations(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Create Event Orchestration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_event_orchestration(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
@@ -4605,13 +5088,20 @@ async def create_event_orchestration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -4652,7 +5142,13 @@ async def get_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Event Orchestration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API version 2 format."),
@@ -4693,7 +5189,13 @@ async def delete_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="List Integrations for Event Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_integrations_for_event_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration whose integrations you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -4734,7 +5236,12 @@ async def list_integrations_for_event_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Create Integration for Event Orchestration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_integration_for_event_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to associate this integration with."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
@@ -4773,13 +5280,20 @@ async def create_integration_for_event_orchestration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Integration for Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_integration_for_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration."),
     integration_id: str = Field(..., description="The unique identifier of the integration to retrieve."),
@@ -4821,7 +5335,13 @@ async def get_integration_for_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Event Orchestration Integration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event_orchestration_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to update."),
     integration_id: str = Field(..., description="The unique identifier of the Integration within the Event Orchestration."),
@@ -4861,13 +5381,20 @@ async def update_event_orchestration_integration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Orchestration Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_orchestration_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration containing the integration to delete."),
     integration_id: str = Field(..., description="The unique identifier of the Integration to delete from the Event Orchestration."),
@@ -4909,7 +5436,12 @@ async def delete_orchestration_integration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Move Integration Between Orchestrations",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def move_integration_between_orchestrations(
     id_: str = Field(..., alias="id", description="The ID of the target Event Orchestration that will receive and process the Integration."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
@@ -4950,13 +5482,20 @@ async def move_integration_between_orchestrations(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Orchestration Global",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_orchestration_global(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to retrieve global rules for."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -4997,7 +5536,13 @@ async def get_event_orchestration_global(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Orchestration Router",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_orchestration_router(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration whose router configuration you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -5038,7 +5583,13 @@ async def get_event_orchestration_router(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Unrouted Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_unrouted_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to retrieve unrouted rules for."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -5079,7 +5630,13 @@ async def get_unrouted_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service whose orchestration configuration should be retrieved."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -5124,7 +5681,13 @@ async def get_service_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Orchestration Active Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_orchestration_active_status(
     service_id: str = Field(..., description="The unique identifier of the service for which to retrieve the orchestration active status."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -5165,7 +5728,13 @@ async def get_service_orchestration_active_status(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Service Orchestration Active Status",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service_orchestration_active_status(
     service_id: str = Field(..., description="The unique identifier of the service whose orchestration active status should be updated."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version."),
@@ -5204,13 +5773,20 @@ async def update_service_orchestration_active_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="List Cache Variables for Global Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cache_variables_for_global_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
@@ -5251,7 +5827,12 @@ async def list_cache_variables_for_global_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Create Cache Variable for Global Orchestration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_cache_variable_for_global_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration where the cache variable will be created."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2."),
@@ -5290,13 +5871,20 @@ async def create_cache_variable_for_global_orchestration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Cache Variable for Global Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cache_variable_for_global_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to retrieve."),
@@ -5338,7 +5926,13 @@ async def get_cache_variable_for_global_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Cache Variable for Global Orchestration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cache_variable_for_global_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
@@ -5378,13 +5972,20 @@ async def update_cache_variable_for_global_orchestration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Cache Variable from Global Orchestration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cache_variable_from_global_orchestration(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable to delete."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to remove from the orchestration."),
@@ -5426,7 +6027,13 @@ async def delete_cache_variable_from_global_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get External Data Cache Variable Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_external_data_cache_variable_data(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration containing the Cache Variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the Cache Variable to retrieve data from."),
@@ -5468,7 +6075,13 @@ async def get_external_data_cache_variable_data(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Cache Variable External Data",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cache_variable_external_data(
     id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
@@ -5508,13 +6121,20 @@ async def update_cache_variable_external_data(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete External Data Cache Variable Data",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_external_data_cache_variable_data(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration containing the Cache Variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the Cache Variable whose data should be deleted."),
@@ -5556,7 +6176,13 @@ async def delete_external_data_cache_variable_data(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="List Cache Variables for Service Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cache_variables_for_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service whose cache variables you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -5597,7 +6223,12 @@ async def list_cache_variables_for_service_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Create Cache Variable for Service Orchestration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_cache_variable_for_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service for which to create the cache variable."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -5636,13 +6267,20 @@ async def create_cache_variable_for_service_orchestration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Cache Variable for Service Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cache_variable_for_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service containing the event orchestration."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to retrieve."),
@@ -5684,7 +6322,13 @@ async def get_cache_variable_for_service_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Cache Variable for Service Orchestration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cache_variable_for_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service containing the event orchestration."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
@@ -5724,13 +6368,20 @@ async def update_cache_variable_for_service_orchestration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Cache Variable for Service Orchestration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cache_variable_for_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service whose event orchestration contains the cache variable to delete."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to delete from the service's event orchestration."),
@@ -5772,7 +6423,13 @@ async def delete_cache_variable_for_service_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Cache Variable Data on Service Orchestration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cache_variable_data_on_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service containing the cache variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to retrieve data for."),
@@ -5814,7 +6471,13 @@ async def get_cache_variable_data_on_service_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Cache Variable Data",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cache_variable_data(
     service_id: str = Field(..., description="The unique identifier of the service containing the cache variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
@@ -5854,13 +6517,20 @@ async def update_cache_variable_data(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Cache Variable Data on Service Orchestration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cache_variable_data_on_service_orchestration(
     service_id: str = Field(..., description="The unique identifier of the service containing the cache variable."),
     cache_variable_id: str = Field(..., description="The unique identifier of the cache variable whose data should be deleted."),
@@ -5902,7 +6572,13 @@ async def delete_cache_variable_data_on_service_orchestration(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="List Event Orchestration Enablements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_orchestration_enablements(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration for which to list feature enablements."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and structure. Defaults to PagerDuty API version 2."),
@@ -5943,7 +6619,13 @@ async def list_event_orchestration_enablements(
     return _response_data
 
 # Tags: Event Orchestrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Event Orchestration Feature Enablement",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_event_orchestration_feature_enablement(
     id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to update."),
     feature_name: Literal["aiops"] = Field(..., description="The feature addon to enable or disable. Currently only 'aiops' is supported."),
@@ -5983,13 +6665,20 @@ async def update_event_orchestration_feature_enablement(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extension Schemas
-@mcp.tool()
+@mcp.tool(
+    title="List Extension Schemas",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_extension_schemas(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
@@ -6028,7 +6717,13 @@ async def list_extension_schemas(
     return _response_data
 
 # Tags: Extension Schemas
-@mcp.tool()
+@mcp.tool(
+    title="Get Extension Schema",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_extension_schema(
     id_: str = Field(..., alias="id", description="The unique identifier of the extension schema to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
@@ -6069,7 +6764,13 @@ async def get_extension_schema(
     return _response_data
 
 # Tags: Extensions
-@mcp.tool()
+@mcp.tool(
+    title="List Extensions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_extensions(
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to version 2 of the PagerDuty JSON format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
@@ -6114,7 +6815,12 @@ async def list_extensions(
     return _response_data
 
 # Tags: Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Create Extension",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_extension(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
@@ -6151,13 +6857,20 @@ async def create_extension(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Get Extension",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_extension(
     id_: str = Field(..., alias="id", description="The unique identifier of the extension to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 to specify the API version."),
@@ -6202,7 +6915,13 @@ async def get_extension(
     return _response_data
 
 # Tags: Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Update Extension",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_extension(
     id_: str = Field(..., alias="id", description="The unique identifier of the extension to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request API version 2."),
@@ -6241,13 +6960,20 @@ async def update_extension(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Extension",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_extension(
     id_: str = Field(..., alias="id", description="The unique identifier of the extension to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version (version 2)."),
@@ -6288,7 +7014,12 @@ async def delete_extension(
     return _response_data
 
 # Tags: Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Enable Extension",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_extension(
     id_: str = Field(..., alias="id", description="The unique identifier of the extension to enable."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -6329,7 +7060,13 @@ async def enable_extension(
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Workflow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_workflow(
     id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -6370,7 +7107,12 @@ async def delete_incident_workflow(
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Workflow Instance",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_workflow_instance(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident workflow to execute."),
     accept: str = Field(..., alias="Accept", description="The API version header for response formatting. Defaults to version 2 of the PagerDuty JSON format."),
@@ -6413,13 +7155,20 @@ async def create_incident_workflow_instance(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Workflow Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_workflow_actions(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Must be set to the PagerDuty API v2 content type."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. Required for API compatibility."),
@@ -6462,7 +7211,13 @@ async def list_incident_workflow_actions(
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Workflow Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_workflow_action(
     id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow Action to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -6503,7 +7258,13 @@ async def get_incident_workflow_action(
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Workflow Triggers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_workflow_triggers(
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to 'application/vnd.pagerduty+json;version=2' for this operation."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request body format. Must be 'application/json'."),
@@ -6551,7 +7312,13 @@ async def list_incident_workflow_triggers(
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Workflow Trigger",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_workflow_trigger(
     id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow Trigger to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -6592,7 +7359,12 @@ async def delete_incident_workflow_trigger(
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Add Service to Incident Workflow Trigger",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_service_to_incident_workflow_trigger(
     id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow Trigger to associate the service with."),
     accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -6631,13 +7403,20 @@ async def add_service_to_incident_workflow_trigger(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Remove Service from Incident Workflow Trigger",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_service_from_incident_workflow_trigger(
     trigger_id: str = Field(..., description="The unique identifier of the incident workflow trigger from which the service will be removed."),
     service_id: str = Field(..., description="The unique identifier of the service to be dissociated from the trigger."),
@@ -6679,7 +7458,13 @@ async def remove_service_from_incident_workflow_trigger(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Incidents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incidents(
     accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to 'application/vnd.pagerduty+json;version=2'."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying request body format. Must be 'application/json'."),
@@ -6736,7 +7521,12 @@ async def list_incidents(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
@@ -6788,13 +7578,19 @@ async def create_incident(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incidents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_incidents(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
@@ -6832,13 +7628,20 @@ async def update_incidents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 (application/vnd.pagerduty+json;version=2)."),
@@ -6883,7 +7686,13 @@ async def get_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
     accept: str = Field(..., alias="Accept", description="API version header. Use the default PagerDuty v2 JSON format for compatibility."),
@@ -6939,13 +7748,20 @@ async def update_incident(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_alerts(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve alerts."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
@@ -6996,7 +7812,13 @@ async def list_incident_alerts(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Alerts",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_alerts(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to update alerts for."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
@@ -7036,13 +7858,20 @@ async def update_incident_alerts(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_alert(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the alert."),
     alert_id: str = Field(..., description="The unique identifier of the alert to retrieve."),
@@ -7084,7 +7913,12 @@ async def get_incident_alert(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_incident_alert(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the alert to update."),
     alert_id: str = Field(..., description="The unique identifier of the alert to update."),
@@ -7129,13 +7963,20 @@ async def update_incident_alert(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Business Service Impact",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_business_service_impact(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to modify."),
     business_service_id: str = Field(..., description="The unique identifier of the business service whose impact status should be updated."),
@@ -7174,13 +8015,20 @@ async def update_incident_business_service_impact(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Business Services Impacted by Incident",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_business_services_impacted_by_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve impacted business services."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
@@ -7220,7 +8068,13 @@ async def list_business_services_impacted_by_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Custom Field Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_custom_field_values(id_: str = Field(..., alias="id", description="The unique identifier of the incident whose custom field values you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom field values associated with a specific incident. Returns the current values for any custom fields configured for that incident."""
 
@@ -7256,7 +8110,13 @@ async def get_incident_custom_field_values(id_: str = Field(..., alias="id", des
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Custom Field Values",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_custom_field_values(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
     custom_fields: list[_models.CustomFieldsEditableFieldValue] = Field(..., description="An array of custom field assignments to set for the incident. Each item in the array should specify the field and its value."),
@@ -7292,13 +8152,20 @@ async def update_incident_custom_field_values(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Log Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_log_entries(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve log entries."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use this operation."),
@@ -7347,7 +8214,12 @@ async def list_incident_log_entries(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Merge Incidents",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_incidents(
     id_: str = Field(..., alias="id", description="The unique identifier of the target incident that will receive the merged incidents and their alerts."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API v2 format for compatibility."),
@@ -7387,13 +8259,20 @@ async def merge_incidents(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Notes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_notes(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve notes."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -7434,7 +8313,12 @@ async def list_incident_notes(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Add Note to Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_note_to_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to which the note will be added."),
     accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -7474,13 +8358,20 @@ async def add_note_to_incident(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Note",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_note(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the note to update."),
     note_id: str = Field(..., description="The unique identifier of the note to update."),
@@ -7521,13 +8412,20 @@ async def update_incident_note(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Note",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_note(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the note to delete."),
     note_id: str = Field(..., description="The unique identifier of the note to delete."),
@@ -7569,7 +8467,13 @@ async def delete_incident_note(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Get Outlier Incident",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outlier_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident resource to retrieve outlier information for."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -7615,7 +8519,13 @@ async def get_outlier_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Past Incidents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_past_incidents(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve related past incidents."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -7656,7 +8566,13 @@ async def list_past_incidents(
     return _response_data
 
 # Tags: Change Events
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Related Change Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_related_change_events(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve related change events."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and structure. Defaults to PagerDuty API version 2 in JSON format."),
@@ -7697,7 +8613,13 @@ async def list_incident_related_change_events(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Get Related Incidents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_related_incidents(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve related incidents."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -7742,7 +8664,12 @@ async def get_related_incidents(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Send Responder Request for Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_responder_request_for_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to request responders for."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
@@ -7783,13 +8710,20 @@ async def send_responder_request_for_incident(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Incident Responder Requests",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_incident_responder_requests(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which responder requests should be cancelled."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
@@ -7829,13 +8763,19 @@ async def cancel_incident_responder_requests(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Snooze Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def snooze_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to snooze."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
@@ -7875,13 +8815,19 @@ async def snooze_incident(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Status Update",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_status_update(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
     accept: str = Field(..., alias="Accept", description="API version header to specify the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -7923,13 +8869,20 @@ async def create_incident_status_update(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Notification Subscribers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_notification_subscribers(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve notification subscribers."),
     accept: str = Field(..., alias="Accept", description="The API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -7969,7 +8922,12 @@ async def list_incident_notification_subscribers(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Add Incident Status Update Subscribers",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_incident_status_update_subscribers(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to subscribe entities to for status update notifications."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON v2 format."),
@@ -8007,13 +8965,20 @@ async def add_incident_status_update_subscribers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Remove Incident Notification Subscribers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_incident_notification_subscribers(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident from which to remove subscribers."),
     accept: str = Field(..., alias="Accept", description="The API version header for request/response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -8051,13 +9016,20 @@ async def remove_incident_notification_subscribers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_types(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON media type with version 2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
@@ -8100,7 +9072,12 @@ async def list_incident_types(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Type",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_type(
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON."),
@@ -8141,13 +9118,20 @@ async def create_incident_type(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_type(
     type_id_or_name: str = Field(..., description="The unique identifier or display name of the incident type to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -8188,7 +9172,13 @@ async def get_incident_type(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Type",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_type(
     type_id_or_name: str = Field(..., description="The unique identifier or name of the Incident Type to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to application/vnd.pagerduty+json;version=2."),
@@ -8229,13 +9219,20 @@ async def update_incident_type(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Type Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_type_custom_fields(
     type_id_or_name: str = Field(..., description="The unique identifier or display name of the incident type whose custom fields you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 (application/vnd.pagerduty+json;version=2)."),
@@ -8280,7 +9277,12 @@ async def list_incident_type_custom_fields(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Type Custom Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_type_custom_field(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field will be added."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
@@ -8326,13 +9328,20 @@ async def create_incident_type_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Type Custom Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_type_custom_field(
     type_id_or_name: str = Field(..., description="The unique identifier or display name of the incident type to which the custom field belongs."),
     field_id: str = Field(..., description="The unique identifier of the custom field to retrieve."),
@@ -8378,7 +9387,13 @@ async def get_incident_type_custom_field(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Type Custom Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_type_custom_field(
     type_id_or_name: str = Field(..., description="The ID or name of the incident type to which the custom field belongs."),
     field_id: str = Field(..., description="The ID of the custom field to update."),
@@ -8422,13 +9437,20 @@ async def update_incident_type_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Type Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_type_custom_field(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field is attached."),
     field_id: str = Field(..., description="The unique identifier of the custom field to delete."),
@@ -8470,7 +9492,13 @@ async def delete_incident_type_custom_field(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Type Custom Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_type_custom_field_options(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field is attached."),
     field_id: str = Field(..., description="The unique identifier of the custom field whose options you want to list."),
@@ -8512,7 +9540,12 @@ async def list_incident_type_custom_field_options(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Type Custom Field Option",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_type_custom_field_option(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field belongs."),
     field_id: str = Field(..., description="The unique identifier of the custom field within the incident type."),
@@ -8555,13 +9588,20 @@ async def create_incident_type_custom_field_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Type Custom Field Option",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_type_custom_field_option(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field is applied."),
     field_option_id: str = Field(..., description="The unique identifier of the field option to retrieve."),
@@ -8604,7 +9644,13 @@ async def get_incident_type_custom_field_option(
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Type Custom Field Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_type_custom_field_option(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field belongs."),
     field_option_id: str = Field(..., description="The unique identifier of the field option to update."),
@@ -8648,13 +9694,20 @@ async def update_incident_type_custom_field_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Incident Types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Type Custom Field Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_type_custom_field_option(
     type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field belongs. Can be either the unique ID or the human-readable name of the incident type."),
     field_option_id: str = Field(..., description="The unique identifier of the field option to delete. This is the specific choice or value being removed from the custom field."),
@@ -8697,7 +9750,13 @@ async def delete_incident_type_custom_field_option(
     return _response_data
 
 # Tags: Licenses
-@mcp.tool()
+@mcp.tool(
+    title="List License Allocations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_license_allocations(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. This is the only supported content type for this operation."),
@@ -8736,7 +9795,13 @@ async def list_license_allocations(
     return _response_data
 
 # Tags: Licenses
-@mcp.tool()
+@mcp.tool(
+    title="List Licenses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_licenses(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be JSON format."),
@@ -8775,7 +9840,13 @@ async def list_licenses(
     return _response_data
 
 # Tags: Log Entries
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Log Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_log_entries_account(
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to application/vnd.pagerduty+json;version=2 for this operation."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request content type. Must be application/json."),
@@ -8823,7 +9894,13 @@ async def list_incident_log_entries_account(
     return _response_data
 
 # Tags: Log Entries
-@mcp.tool()
+@mcp.tool(
+    title="Get Log Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_log_entry(
     id_: str = Field(..., alias="id", description="The unique identifier of the log entry to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use this operation."),
@@ -8869,7 +9946,13 @@ async def get_log_entry(
     return _response_data
 
 # Tags: Log Entries
-@mcp.tool()
+@mcp.tool(
+    title="Update Log Entry Channel",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_log_entry_channel(
     id_: str = Field(..., alias="id", description="The unique identifier of the log entry resource to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -8910,13 +9993,20 @@ async def update_log_entry_channel(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Maintenance Windows
-@mcp.tool()
+@mcp.tool(
+    title="List Maintenance Windows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_maintenance_windows(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
@@ -8962,7 +10052,12 @@ async def list_maintenance_windows(
     return _response_data
 
 # Tags: Maintenance Windows
-@mcp.tool()
+@mcp.tool(
+    title="Create Maintenance Window",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_maintenance_window(
     accept: str = Field(..., alias="Accept", description="API version header. Use the default PagerDuty v2 JSON format for request and response serialization."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
@@ -9000,13 +10095,20 @@ async def create_maintenance_window(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Maintenance Windows
-@mcp.tool()
+@mcp.tool(
+    title="Get Maintenance Window",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_maintenance_window(
     id_: str = Field(..., alias="id", description="The unique identifier of the maintenance window to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
@@ -9051,7 +10153,13 @@ async def get_maintenance_window(
     return _response_data
 
 # Tags: Maintenance Windows
-@mcp.tool()
+@mcp.tool(
+    title="Update Maintenance Window",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_maintenance_window(
     id_: str = Field(..., alias="id", description="The unique identifier of the maintenance window to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -9090,13 +10198,20 @@ async def update_maintenance_window(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Maintenance Windows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Maintenance Window",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_maintenance_window(
     id_: str = Field(..., alias="id", description="The unique identifier of the maintenance window to delete or end."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version (defaults to PagerDuty API v2)."),
@@ -9137,7 +10252,13 @@ async def delete_maintenance_window(
     return _response_data
 
 # Tags: Notifications
-@mcp.tool()
+@mcp.tool(
+    title="List Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_notifications(
     since: str = Field(..., description="Start of the search date range in ISO 8601 format (date-time). The time component is optional; if omitted, defaults to the start of the day."),
     until: str = Field(..., description="End of the search date range in ISO 8601 format (date-time), matching the format of the since parameter. The date range span must not exceed 3 months."),
@@ -9184,7 +10305,13 @@ async def list_notifications(
     return _response_data
 
 # Tags: OAuth Delegations
-@mcp.tool()
+@mcp.tool(
+    title="Revoke User OAuth Delegations",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_user_oauth_delegations(
     user_id: str = Field(..., description="The unique identifier of the user whose OAuth delegations should be revoked."),
     type_: Literal["mobile", "web"] = Field(..., alias="type", description="The delegation type(s) to revoke: 'mobile' to sign out of the mobile app, 'web' to sign out of the web app, or both types separated by commas (e.g., 'web,mobile')."),
@@ -9228,7 +10355,13 @@ async def revoke_user_oauth_delegations(
     return _response_data
 
 # Tags: On-Calls
-@mcp.tool()
+@mcp.tool(
+    title="List On-Calls",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_oncalls(
     accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to the PagerDuty API version 2 media type."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying the request body format. Must be application/json."),
@@ -9278,7 +10411,13 @@ async def list_oncalls(
     return _response_data
 
 # Tags: Paused Incident Reports
-@mcp.tool()
+@mcp.tool(
+    title="List Paused Incident Report Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_paused_incident_report_alerts(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to 'application/vnd.pagerduty+json;version=2' to request the correct response format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be 'application/json'."),
@@ -9324,7 +10463,13 @@ async def list_paused_incident_report_alerts(
     return _response_data
 
 # Tags: Paused Incident Reports
-@mcp.tool()
+@mcp.tool(
+    title="List Paused Incident Report Counts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_paused_incident_report_counts(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
@@ -9370,7 +10515,13 @@ async def list_paused_incident_report_counts(
     return _response_data
 
 # Tags: Priorities
-@mcp.tool()
+@mcp.tool(
+    title="List Priorities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_priorities(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
@@ -9409,7 +10560,13 @@ async def list_priorities(
     return _response_data
 
 # Tags: Rulesets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Ruleset Event Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_ruleset_event_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the ruleset containing the event rule to delete."),
     rule_id: str = Field(..., description="The unique identifier of the event rule to delete."),
@@ -9451,7 +10608,13 @@ async def delete_ruleset_event_rule(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedules_audit_records(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule for which to retrieve audit records."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the PagerDuty API version."),
@@ -9497,7 +10660,13 @@ async def list_schedules_audit_records(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_users(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to query for on-call users."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to use the current API version."),
@@ -9543,7 +10712,12 @@ async def list_schedule_users(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Preview Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def preview_schedule(
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to application/vnd.pagerduty+json;version=2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request body format. Must be application/json."),
@@ -9586,13 +10760,19 @@ async def preview_schedule(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Service Dependencies
-@mcp.tool()
+@mcp.tool(
+    title="Associate Service Dependencies",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def associate_service_dependencies(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON media type version 2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be JSON."),
@@ -9629,13 +10809,20 @@ async def associate_service_dependencies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Service Dependencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Business Service Dependencies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_business_service_dependencies(
     id_: str = Field(..., alias="id", description="The unique identifier of the Business Service resource."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -9676,7 +10863,13 @@ async def get_business_service_dependencies(
     return _response_data
 
 # Tags: Service Dependencies
-@mcp.tool()
+@mcp.tool(
+    title="Remove Service Dependencies",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_service_dependencies(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
@@ -9713,13 +10906,20 @@ async def remove_service_dependencies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Service Dependencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Technical Service Dependencies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_technical_service_dependencies(
     id_: str = Field(..., alias="id", description="The unique identifier of the technical service for which to retrieve dependencies."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -9760,7 +10960,13 @@ async def get_technical_service_dependencies(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="List Services",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_services(
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Required for all requests. Must be set to `application/vnd.pagerduty+json;version=2`."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request content type. Must be `application/json`."),
@@ -9806,7 +11012,12 @@ async def list_services(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Create Service",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_service(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to 'application/vnd.pagerduty+json;version=2'."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be 'application/json'."),
@@ -9843,13 +11054,20 @@ async def create_service(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Service",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the service to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 in JSON format."),
@@ -9894,7 +11112,13 @@ async def get_service(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Update Service",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the service to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API v2 format for compatibility."),
@@ -9933,13 +11157,20 @@ async def update_service(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Delete Service",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the service to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -9980,7 +11211,13 @@ async def delete_service(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="List Service Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_audit_records(
     id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve audit records."),
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to `application/vnd.pagerduty+json;version=2` for this operation."),
@@ -10026,7 +11263,13 @@ async def list_service_audit_records(
     return _response_data
 
 # Tags: Change Events
-@mcp.tool()
+@mcp.tool(
+    title="List Service Change Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_change_events(
     id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve change events."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2."),
@@ -10074,7 +11317,12 @@ async def list_service_change_events(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Create Service Integration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_service_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the service to which the integration will be added."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -10113,13 +11361,20 @@ async def create_service_integration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the service resource."),
     integration_id: str = Field(..., description="The unique identifier of the integration attached to the service."),
@@ -10165,7 +11420,13 @@ async def get_service_integration(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Update Service Integration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the service containing the integration to update."),
     integration_id: str = Field(..., description="The unique identifier of the integration within the service to update."),
@@ -10205,13 +11466,20 @@ async def update_service_integration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="List Service Event Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_event_rules(
     id_: str = Field(..., alias="id", description="The unique identifier of the service whose event rules you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
@@ -10256,7 +11524,13 @@ async def list_service_event_rules(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Delete Service Event Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_service_event_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the Service from which the Event Rule will be deleted."),
     rule_id: str = Field(..., description="The unique identifier of the Event Rule to be deleted."),
@@ -10298,7 +11572,13 @@ async def delete_service_event_rule(
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="List Service Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_custom_fields(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be set to JSON format."),
@@ -10341,7 +11621,13 @@ async def list_service_custom_fields(
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Custom Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_custom_field(
     field_id: str = Field(..., description="The unique identifier of the custom field to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API v2 format for compatibility."),
@@ -10386,7 +11672,13 @@ async def get_service_custom_field(
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Update Service Custom Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service_custom_field(
     field_id: str = Field(..., description="The unique identifier of the custom field to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -10428,13 +11720,20 @@ async def update_service_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Delete Service Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_service_custom_field(
     field_id: str = Field(..., description="The unique identifier of the custom field to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -10475,7 +11774,13 @@ async def delete_service_custom_field(
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_field_options(
     field_id: str = Field(..., description="The unique identifier of the custom field whose options you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -10516,7 +11821,12 @@ async def list_custom_field_options(
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Create Service Custom Field Option",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_service_custom_field_option(
     field_id: str = Field(..., description="The unique identifier of the custom field to which this option will be added."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version to use."),
@@ -10558,13 +11868,20 @@ async def create_service_custom_field_option(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Custom Field Option",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_custom_field_option(
     field_id: str = Field(..., description="The unique identifier of the custom field that contains the field option."),
     field_option_id: str = Field(..., description="The unique identifier of the specific field option to retrieve."),
@@ -10606,7 +11923,13 @@ async def get_service_custom_field_option(
     return _response_data
 
 # Tags: Service Custom Fields
-@mcp.tool()
+@mcp.tool(
+    title="Delete Service Custom Field Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_service_custom_field_option(
     field_id: str = Field(..., description="The unique identifier of the custom field containing the option to delete."),
     field_option_id: str = Field(..., description="The unique identifier of the field option to delete."),
@@ -10648,7 +11971,13 @@ async def delete_service_custom_field_option(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Custom Field Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_custom_field_values(
     id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve custom field values."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
@@ -10689,7 +12018,13 @@ async def get_service_custom_field_values(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Update Service Custom Field Values",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service_custom_field_values(
     id_: str = Field(..., alias="id", description="The unique identifier of the service resource to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty API version 2 media type."),
@@ -10728,13 +12063,20 @@ async def update_service_custom_field_values(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="List Service Feature Enablements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_service_feature_enablements(
     id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve feature enablements."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -10775,7 +12117,13 @@ async def list_service_feature_enablements(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Update Service Feature Enablement",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service_feature_enablement(
     id_: str = Field(..., alias="id", description="The unique identifier of the service resource to update."),
     feature_name: Literal["aiops"] = Field(..., description="The feature addon identifier to enable or disable. Currently only 'aiops' is supported."),
@@ -10815,13 +12163,20 @@ async def update_service_feature_enablement(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Standards
-@mcp.tool()
+@mcp.tool(
+    title="List Standards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_standards(
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to 'application/vnd.pagerduty+json;version=2' to request the current API version."),
     active: bool | None = Field(None, description="Filter standards to only include active or inactive standards. Omit to retrieve all standards regardless of status."),
@@ -10864,7 +12219,13 @@ async def list_standards(
     return _response_data
 
 # Tags: Standards
-@mcp.tool()
+@mcp.tool(
+    title="Update Standard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_standard(
     id_: str = Field(..., alias="id", description="The unique identifier of the standard to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -10904,13 +12265,20 @@ async def update_standard(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Standards
-@mcp.tool()
+@mcp.tool(
+    title="List Standards Scores for Services",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_standards_scores_for_services(
     resource_type: Literal["technical_services"] = Field(..., description="The type of resource to retrieve standards for. Currently supports technical services only."),
     ids: list[str] = Field(..., description="A list of resource identifiers to fetch standards scores for. Accepts up to 100 IDs per request."),
@@ -10954,7 +12322,13 @@ async def list_standards_scores_for_services(
     return _response_data
 
 # Tags: Standards
-@mcp.tool()
+@mcp.tool(
+    title="List Resource Standards Scores",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_resource_standards_scores(
     id_: str = Field(..., alias="id", description="The unique identifier of the resource to retrieve standards scores for."),
     resource_type: Literal["technical_services"] = Field(..., description="The type of resource being evaluated. Currently supports technical services resources."),
@@ -10995,7 +12369,13 @@ async def list_resource_standards_scores(
     return _response_data
 
 # Tags: Status Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Status Dashboards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_dashboards(accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default PagerDuty JSON v2 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom Status Dashboard views configured for your PagerDuty account. Use this to discover available dashboards for monitoring and status tracking."""
 
@@ -11031,7 +12411,13 @@ async def list_status_dashboards(accept: str = Field(..., alias="Accept", descri
     return _response_data
 
 # Tags: Status Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Dashboard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_dashboard(
     id_: str = Field(..., alias="id", description="The unique PagerDuty identifier for the Status Dashboard resource."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default application/vnd.pagerduty+json;version=2 to ensure compatibility with the current API version."),
@@ -11071,7 +12457,13 @@ async def get_status_dashboard(
     return _response_data
 
 # Tags: Status Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Impacts for Status Dashboard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_impacts_for_status_dashboard(
     id_: str = Field(..., alias="id", description="The unique identifier of the Status Dashboard to retrieve service impacts for."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -11115,7 +12507,13 @@ async def get_service_impacts_for_status_dashboard(
     return _response_data
 
 # Tags: Status Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Dashboard by URL Slug",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_dashboard_by_url_slug(
     url_slug: str = Field(..., description="The human-readable URL slug that uniquely identifies the status dashboard (e.g., 'my-status-page' or 'incident-tracking')"),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty API v2 JSON format."),
@@ -11155,7 +12553,13 @@ async def get_status_dashboard_by_url_slug(
     return _response_data
 
 # Tags: Status Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Impacts for Status Dashboard by URL Slug",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_impacts_for_status_dashboard_by_url_slug(
     url_slug: str = Field(..., description="The URL slug identifier for the Status Dashboard (typically a dash-separated string like 'my-dashboard-name')"),
     accept: str = Field(..., alias="Accept", description="API versioning header; defaults to PagerDuty JSON API version 2"),
@@ -11199,7 +12603,13 @@ async def get_service_impacts_for_status_dashboard_by_url_slug(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_pages(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON v2 format for compatibility."),
     status_page_type: Literal["public", "private"] | None = Field(None, description="Filter status pages by visibility type: 'public' for publicly accessible pages or 'private' for restricted access. Omit to retrieve all status pages regardless of type."),
@@ -11241,7 +12651,13 @@ async def list_status_pages(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Impacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_impacts(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve impacts."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default value to ensure compatibility with the current API version."),
@@ -11285,7 +12701,13 @@ async def list_status_page_impacts(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Impact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_impact(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     impact_id: str = Field(..., description="The unique identifier of the impact record within the status page."),
@@ -11326,7 +12748,13 @@ async def get_status_page_impact(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Services",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_services(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve associated services."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty API v2 JSON format."),
@@ -11366,7 +12794,13 @@ async def list_status_page_services(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Service",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     service_id: str = Field(..., description="The unique identifier of the service within the status page."),
@@ -11407,7 +12841,13 @@ async def get_status_page_service(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Severities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_severities(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve severities."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -11451,7 +12891,13 @@ async def list_status_page_severities(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Severity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_severity(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     severity_id: str = Field(..., description="The unique identifier of the severity level within the status page."),
@@ -11492,7 +12938,13 @@ async def get_status_page_severity(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_statuses(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page whose statuses you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
@@ -11536,7 +12988,13 @@ async def list_status_page_statuses(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_status(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     status_id: str = Field(..., description="The unique identifier of the status entry within the status page."),
@@ -11577,7 +13035,13 @@ async def get_status_page_status(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Posts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_posts(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve posts."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value 'application/vnd.pagerduty+json;version=2' to request the current API version."),
@@ -11623,7 +13087,12 @@ async def list_status_page_posts(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Status Page Post",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page where the post will be created."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
@@ -11670,13 +13139,20 @@ async def create_status_page_post(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Post",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post."),
     post_id: str = Field(..., description="The unique identifier of the post to retrieve from the status page."),
@@ -11721,7 +13197,13 @@ async def get_status_page_post(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Status Page Post",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post to update."),
     post_id: str = Field(..., description="The unique identifier of the specific post within the status page to update."),
@@ -11768,13 +13250,20 @@ async def update_status_page_post(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Status Page Post",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post to delete."),
     post_id: str = Field(..., description="The unique identifier of the post to delete from the status page."),
@@ -11815,7 +13304,13 @@ async def delete_status_page_post(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Post Updates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_post_updates(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post."),
     post_id: str = Field(..., description="The unique identifier of the post within the status page."),
@@ -11860,7 +13355,12 @@ async def list_status_page_post_updates(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Post Update for Status Page Post",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_post_update_for_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id2: str = Field(..., alias="post_id", description="The unique identifier of the severity level for this post update."),
@@ -11912,13 +13412,20 @@ async def create_post_update_for_status_page_post(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Post Update",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_post_update(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id: str = Field(..., description="The unique identifier of the status page post containing the update."),
@@ -11960,7 +13467,13 @@ async def get_post_update(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Status Page Post Update",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_status_page_post_update(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id2: str = Field(..., alias="post_id", description="The unique identifier of the status page post being updated."),
@@ -12013,13 +13526,20 @@ async def update_status_page_post_update(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Post Update",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_post_update(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post."),
     post_id: str = Field(..., description="The unique identifier of the post within the status page."),
@@ -12061,7 +13581,13 @@ async def delete_post_update(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Postmortem for Status Page Post",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_postmortem_for_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id: str = Field(..., description="The unique identifier of the status page post for which to retrieve the postmortem."),
@@ -12102,7 +13628,12 @@ async def get_postmortem_for_post(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Postmortem for Status Page Post",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_postmortem_for_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id2: str = Field(..., alias="post_id", description="The unique identifier of the status page post (path parameter)."),
@@ -12147,13 +13678,19 @@ async def create_postmortem_for_status_page_post(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Update Status Page Post Postmortem",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_status_page_post_postmortem(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id2: str = Field(..., alias="post_id", description="The unique identifier of the status page post being updated."),
@@ -12197,13 +13734,20 @@ async def update_status_page_post_postmortem(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Postmortem for Status Page Post",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_postmortem_for_status_page_post(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     post_id: str = Field(..., description="The unique identifier of the status page post from which to delete the postmortem."),
@@ -12244,7 +13788,13 @@ async def delete_postmortem_for_status_page_post(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_subscriptions(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page whose subscriptions you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default application/vnd.pagerduty+json;version=2 for standard responses."),
@@ -12289,7 +13839,12 @@ async def list_status_page_subscriptions(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Create Status Page Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_status_page_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page to subscribe to."),
     accept: str = Field(..., alias="Accept", description="API version header for response formatting. Must be set to application/vnd.pagerduty+json;version=2."),
@@ -12335,13 +13890,20 @@ async def create_status_page_subscription(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
     subscription_id: str = Field(..., description="The unique identifier of the subscription within the status page."),
@@ -12382,7 +13944,13 @@ async def get_status_page_subscription(
     return _response_data
 
 # Tags: Status Pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Status Page Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_status_page_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the Status Page from which the subscription will be removed."),
     subscription_id: str = Field(..., description="The unique identifier of the subscription to be deleted from the Status Page."),
@@ -12423,7 +13991,13 @@ async def delete_status_page_subscription(
     return _response_data
 
 # Tags: SRE Agent
-@mcp.tool()
+@mcp.tool(
+    title="List SRE Memories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sre_memories(
     accept: str = Field(..., alias="Accept", description="API version header. Use the default PagerDuty JSON format version 2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be JSON."),
@@ -12467,7 +14041,13 @@ async def list_sre_memories(
     return _response_data
 
 # Tags: SRE Agent
-@mcp.tool()
+@mcp.tool(
+    title="Update SRE Memory",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_sre_memory(
     id_: str = Field(..., alias="id", description="The unique identifier of the SRE Agent memory to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -12506,13 +14086,20 @@ async def update_sre_memory(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: SRE Agent
-@mcp.tool()
+@mcp.tool(
+    title="Delete SRE Memory",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sre_memory(
     id_: str = Field(..., alias="id", description="The unique identifier of the SRE Agent memory to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
@@ -12553,7 +14140,13 @@ async def delete_sre_memory(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
@@ -12592,7 +14185,12 @@ async def list_tags(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
@@ -12629,13 +14227,20 @@ async def create_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -12676,7 +14281,13 @@ async def get_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -12717,7 +14328,13 @@ async def delete_tag(
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Entities by Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entities_by_tag(
     id_: str = Field(..., alias="id", description="The unique identifier of the tag resource."),
     entity_type: Literal["users", "teams", "escalation_policies"] = Field(..., description="The type of entity to retrieve. Must be one of: users, teams, or escalation_policies."),
@@ -12759,7 +14376,13 @@ async def list_entities_by_tag(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
@@ -12798,7 +14421,12 @@ async def list_teams(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be JSON."),
@@ -12835,13 +14463,20 @@ async def create_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
@@ -12886,7 +14521,13 @@ async def get_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -12925,13 +14566,20 @@ async def update_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
@@ -12976,7 +14624,13 @@ async def delete_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_audit_records(
     id_: str = Field(..., alias="id", description="The unique identifier of the team for which to retrieve audit records."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to the PagerDuty API v2 content type."),
@@ -13022,7 +14676,13 @@ async def list_teams_audit_records(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Add Escalation Policy to Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_escalation_policy_to_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team resource to which the escalation policy will be added."),
     escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy to associate with the team."),
@@ -13064,7 +14724,13 @@ async def add_escalation_policy_to_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove Escalation Policy from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_escalation_policy_from_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team from which the escalation policy will be removed."),
     escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy to remove from the team."),
@@ -13106,7 +14772,13 @@ async def remove_escalation_policy_from_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_members(
     id_: str = Field(..., alias="id", description="The unique identifier of the team whose members you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -13151,7 +14823,13 @@ async def list_team_members(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Notification Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_notification_subscriptions(
     id_: str = Field(..., alias="id", description="The unique identifier of the team whose notification subscriptions you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API version header to specify the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -13191,7 +14869,13 @@ async def list_team_notification_subscriptions(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team Notification Subscriptions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_notification_subscriptions(
     id_: str = Field(..., alias="id", description="The unique identifier of the team resource to unsubscribe from notifications."),
     accept: str = Field(..., alias="Accept", description="The API version header for request/response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -13229,13 +14913,20 @@ async def remove_team_notification_subscriptions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_user_to_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team to which the user will be added."),
     user_id: str = Field(..., description="The unique identifier of the user to add to the team."),
@@ -13275,13 +14966,20 @@ async def add_user_to_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove User from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the team."),
@@ -13323,7 +15021,13 @@ async def remove_user_from_team(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(
     template_type: str | None = Field(None, description="Filter templates by their type. Defaults to 'status_update' if not specified."),
     sort_by: Literal["name", "name:asc", "name:desc", "created_at", "created_at:asc", "created_at:desc"] | None = Field(None, description="Sort results by a specified field (name or created_at) in ascending or descending order. Use the format 'field:direction' (e.g., 'name:desc'). Defaults to sorting by creation date in ascending order."),
@@ -13367,7 +15071,12 @@ async def list_templates(
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Status Update Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_status_update_template(
     template_type: Literal["status_update"] | None = Field(None, description="The category of template being created. Currently, only `status_update` templates are supported."),
     description: str | None = Field(None, description="A brief description explaining the purpose or use case of this template."),
@@ -13406,13 +15115,20 @@ async def create_status_update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single template from your account by its ID. Returns the complete template details including configuration and metadata."""
 
@@ -13448,7 +15164,13 @@ async def get_template(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to update."),
     template_type: Literal["status_update"] | None = Field(None, description="The category of template. Currently, only `status_update` templates are supported for notifications across email, SMS, push, and Slack channels."),
@@ -13489,13 +15211,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a template from the account. This action cannot be undone."""
 
@@ -13531,7 +15260,12 @@ async def delete_template(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Render Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def render_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to render."),
     body: _models.StatusUpdateTemplateInput = Field(..., description="Template-specific payload containing the data needed to render the template. For status_update templates, include incident_id (string) and status_update object with a message field."),
@@ -13568,13 +15302,20 @@ async def render_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Template Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_template_fields(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request and response content type. Must be JSON format."),
@@ -13613,7 +15354,13 @@ async def list_template_fields(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to application/vnd.pagerduty+json;version=2 for this operation."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request body format. Must be application/json."),
@@ -13657,7 +15404,12 @@ async def list_users(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Create User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user(
     accept: str = Field(..., alias="Accept", description="API versioning header. Use the PagerDuty v2 JSON format for request and response serialization."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
@@ -13695,13 +15447,20 @@ async def create_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
@@ -13746,7 +15505,13 @@ async def get_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the API version."),
@@ -13785,13 +15550,20 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to delete."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -13832,7 +15604,13 @@ async def delete_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Audit Records",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_audit_records(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose audit records you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the API version."),
@@ -13878,7 +15656,13 @@ async def list_user_audit_records(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Contact Methods",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_contact_methods(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact methods you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -13919,7 +15703,12 @@ async def list_user_contact_methods(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Create User Contact Method",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user_contact_method(
     id_: str = Field(..., alias="id", description="The unique identifier of the user for whom the contact method is being created."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2."),
@@ -13958,13 +15747,20 @@ async def create_user_contact_method(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Contact Method",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_contact_method(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact method you want to retrieve."),
     contact_method_id: str = Field(..., description="The unique identifier of the contact method belonging to the specified user."),
@@ -14006,7 +15802,13 @@ async def get_user_contact_method(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User Contact Method",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_contact_method(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact method is being updated."),
     contact_method_id: str = Field(..., description="The unique identifier of the contact method to update on the user."),
@@ -14046,13 +15848,20 @@ async def update_user_contact_method(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Contact Method",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_contact_method(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact method will be deleted."),
     contact_method_id: str = Field(..., description="The unique identifier of the contact method to be removed from the user."),
@@ -14094,7 +15903,13 @@ async def delete_user_contact_method(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User OAuth Delegations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_oauth_delegations(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose delegations you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
@@ -14140,7 +15955,13 @@ async def list_user_oauth_delegations(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User OAuth Delegation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_oauth_delegation(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose delegation you want to retrieve."),
     delegation_id: str = Field(..., description="The unique identifier of the OAuth delegation to retrieve."),
@@ -14182,7 +16003,13 @@ async def get_user_oauth_delegation(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User License",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_license(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose license allocation you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -14223,7 +16050,13 @@ async def get_user_license(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Notification Rules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_notification_rules(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rules you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to 'application/vnd.pagerduty+json;version=2' to use the current API version."),
@@ -14269,7 +16102,13 @@ async def list_user_notification_rules(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Notification Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_notification_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule you want to retrieve."),
     notification_rule_id: str = Field(..., description="The unique identifier of the notification rule to retrieve."),
@@ -14315,7 +16154,13 @@ async def get_user_notification_rule(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User Notification Rule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_notification_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule is being updated."),
     notification_rule_id: str = Field(..., description="The unique identifier of the notification rule to update."),
@@ -14355,13 +16200,20 @@ async def update_user_notification_rule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Notification Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_notification_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule will be deleted."),
     notification_rule_id: str = Field(..., description="The unique identifier of the notification rule to be removed from the user."),
@@ -14403,7 +16255,13 @@ async def delete_user_notification_rule(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List User Notification Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_notification_subscriptions(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification subscriptions you want to retrieve."),
     accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format if not specified."),
@@ -14443,7 +16301,12 @@ async def list_user_notification_subscriptions(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Create User Notification Subscriptions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user_notification_subscriptions(
     id_: str = Field(..., alias="id", description="The unique identifier of the user for whom to create notification subscriptions."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
@@ -14481,13 +16344,20 @@ async def create_user_notification_subscriptions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Remove User Notification Subscriptions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_notification_subscriptions(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to unsubscribe from notifications."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
@@ -14525,13 +16395,20 @@ async def remove_user_notification_subscriptions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User On-Call Handoff Notification Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_oncall_handoff_notification_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the user resource."),
     oncall_handoff_notification_rule_id: str = Field(..., description="The unique identifier of the on-call handoff notification rule associated with the user."),
@@ -14573,7 +16450,13 @@ async def get_user_oncall_handoff_notification_rule(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User On-Call Handoff Notification Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_oncall_handoff_notification_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose handoff notification rule should be deleted."),
     oncall_handoff_notification_rule_id: str = Field(..., description="The unique identifier of the specific handoff notification rule to delete from the user's account."),
@@ -14615,7 +16498,13 @@ async def delete_user_oncall_handoff_notification_rule(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Status Update Notification Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_status_update_notification_rule(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule will be deleted."),
     status_update_notification_rule_id: str = Field(..., description="The unique identifier of the status update notification rule to be removed from the user."),
@@ -14657,7 +16546,13 @@ async def delete_user_status_update_notification_rule(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
@@ -14700,7 +16595,13 @@ async def get_current_user(
     return _response_data
 
 # Tags: Vendors
-@mcp.tool()
+@mcp.tool(
+    title="List Vendors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_vendors(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to application/json."),
@@ -14739,7 +16640,13 @@ async def list_vendors(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="List Schedules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedules(x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API contract. This endpoint is under active development and may change without notice—do not use in production. Must be set to the fixed value `flexible-schedules-early-access`.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of schedule references with lightweight objects. Results are automatically filtered by your read permissions; schedules you cannot access are excluded."""
 
@@ -14775,7 +16682,12 @@ async def list_schedules(x_early_access: Literal["flexible-schedules-early-acces
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Create Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schedule(
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Early access header required to use this API. Must be set to the fixed value `flexible-schedules-early-access`. This endpoint is under active development and may change without notice."),
     name: str = Field(..., description="The name of the schedule. Must be between 1 and 255 characters.", min_length=1, max_length=255),
@@ -14814,13 +16726,20 @@ async def create_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule with Final Assignments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule_with_final_assignments(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API terms. Must be set to 'flexible-schedules-early-access'. This endpoint is under construction and may change without notice."),
@@ -14868,7 +16787,13 @@ async def get_schedule_with_final_assignments(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to update."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to indicate acceptance of potential API changes. Must be set to the fixed value 'flexible-schedules-early-access'. Do not use this endpoint in production."),
@@ -14907,13 +16832,20 @@ async def update_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to delete."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header to access this early-access API endpoint. Must be set to `flexible-schedules-early-access`. This API is under active development and may change without notice—do not use in production."),
@@ -14953,7 +16885,13 @@ async def delete_schedule(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Shifts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_shifts(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve custom shifts for."),
     since: str = Field(..., description="Start of the time range for retrieving shifts, specified in ISO 8601 date-time format (e.g., 2025-01-01T00:00:00Z). Required parameter."),
@@ -15000,7 +16938,12 @@ async def list_custom_shifts(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Create Custom Shifts",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_custom_shifts(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule where custom shifts will be created."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of Early Access API terms. Must be set to the fixed value 'flexible-schedules-early-access'. Do not use this endpoint in production as it may change without notice."),
@@ -15038,13 +16981,20 @@ async def create_custom_shifts(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Shift",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_shift(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the custom shift."),
     custom_shift_id: str = Field(..., description="The unique identifier of the custom shift to retrieve."),
@@ -15085,7 +17035,13 @@ async def get_custom_shift(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Shift",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_shift(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the custom shift."),
     custom_shift_id: str = Field(..., description="The unique identifier of the custom shift to update."),
@@ -15126,13 +17082,20 @@ async def update_custom_shift(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Shift",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_shift(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the custom shift."),
     custom_shift_id: str = Field(..., description="The unique identifier of the custom shift to delete."),
@@ -15173,7 +17136,13 @@ async def delete_custom_shift(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Overrides",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_overrides(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve overrides for."),
     since: str = Field(..., description="Start of the time range for retrieving overrides, specified in ISO 8601 date-time format (e.g., 2025-01-01T00:00:00Z)."),
@@ -15220,7 +17189,12 @@ async def list_schedule_overrides(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Create Schedule Overrides",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schedule_overrides(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule for which to create overrides."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required Early Access header that must be set to 'flexible-schedules-early-access' to use this endpoint. This API is under construction and may change at any time."),
@@ -15258,13 +17232,20 @@ async def create_schedule_overrides(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Get Override",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_override(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the override."),
     override_id: str = Field(..., description="The unique identifier of the override to retrieve."),
@@ -15305,7 +17286,13 @@ async def get_override(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule Override",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule_override(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the override to update."),
     override_id: str = Field(..., description="The unique identifier of the override to update."),
@@ -15350,13 +17337,20 @@ async def update_schedule_override(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule Override",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule_override(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the override to delete."),
     override_id: str = Field(..., description="The unique identifier of the override to delete."),
@@ -15397,7 +17391,13 @@ async def delete_schedule_override(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="List Rotations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rotations(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule for which to retrieve rotations."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to acknowledge this API is under construction and may change. Must be set to the fixed value `flexible-schedules-early-access`."),
@@ -15437,7 +17437,12 @@ async def list_rotations(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Create Rotation for Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_rotation_for_schedule(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to which the rotation will be added."),
     x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of Early Access API terms. Must be set to the specified value to proceed with the request."),
@@ -15476,13 +17481,20 @@ async def create_rotation_for_schedule(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Get Rotation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_rotation(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation to retrieve."),
@@ -15528,7 +17540,13 @@ async def get_rotation(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Delete Rotation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_rotation(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation to delete."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation to delete."),
@@ -15569,7 +17587,13 @@ async def delete_rotation(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="List Rotation Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_rotation_events(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation within the schedule."),
@@ -15610,7 +17634,12 @@ async def list_rotation_events(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Create Rotation Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_rotation_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation within the schedule."),
@@ -15664,13 +17693,20 @@ async def create_rotation_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Get Event in Rotation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_in_rotation(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation containing the event."),
@@ -15717,7 +17753,13 @@ async def get_event_in_rotation(
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Update Rotation Event",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_rotation_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation containing the event to update."),
@@ -15771,13 +17813,20 @@ async def update_rotation_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Schedules_v3
-@mcp.tool()
+@mcp.tool(
+    title="Delete Rotation Event",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_rotation_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
     rotation_id: str = Field(..., description="The unique identifier of the rotation containing the event to delete."),
@@ -15819,7 +17868,13 @@ async def delete_rotation_event(
     return _response_data
 
 # Tags: Vendors
-@mcp.tool()
+@mcp.tool(
+    title="Get Vendor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_vendor(
     id_: str = Field(..., alias="id", description="The unique identifier of the vendor to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
@@ -15860,7 +17915,13 @@ async def get_vendor(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Subscriptions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_subscriptions(
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version."),
     filter_type: Literal["account", "service", "team"] | None = Field(None, description="Filter subscriptions by resource type. When set to 'service' or 'team', the filter_id parameter becomes required to specify which resource to filter by."),
@@ -15903,7 +17964,13 @@ async def list_webhook_subscriptions(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
@@ -15943,7 +18010,13 @@ async def get_webhook_subscription(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook Subscription",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to update."),
     accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2."),
@@ -15987,13 +18060,19 @@ async def update_webhook_subscription(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Enable Webhook Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_webhook_subscription(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to enable."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
@@ -16033,7 +18112,12 @@ async def enable_webhook_subscription(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Send Webhook Subscription Test Ping",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_webhook_subscription_test_ping(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to test."),
     accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
@@ -16073,7 +18157,13 @@ async def send_webhook_subscription_test_ping(
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_integrations(
     accept: str = Field(..., alias="Accept", description="Specifies the API version for the response format. Use the default application/vnd.pagerduty+json;version=2 for standard responses."),
     include_deprecated: bool | None = Field(None, description="Set to true to include integrations that have been deprecated and are no longer actively maintained. By default, only active integrations are returned."),
@@ -16115,7 +18205,13 @@ async def list_workflow_integrations(
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_integration(
     id_: str = Field(..., alias="id", description="The unique identifier of the Workflow Integration resource to retrieve."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2 for compatibility."),
@@ -16155,7 +18251,13 @@ async def get_workflow_integration(
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Integration Connections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_integration_connections(accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default PagerDuty JSON format version 2.")) -> dict[str, Any] | ToolResult:
     """Retrieve all configured workflow integration connections. Returns a list of all active connections between workflows and external integrations."""
 
@@ -16191,7 +18293,13 @@ async def list_workflow_integration_connections(accept: str = Field(..., alias="
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Integration Connections for Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_integration_connections_for_integration(
     integration_id: str = Field(..., description="The unique identifier of the workflow integration whose connections you want to list."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
@@ -16231,7 +18339,12 @@ async def list_workflow_integration_connections_for_integration(
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Create Workflow Integration Connection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workflow_integration_connection(
     integration_id: str = Field(..., description="The unique identifier of the Workflow Integration for which this connection is being created."),
     accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to ensure compatibility."),
@@ -16279,13 +18392,20 @@ async def create_workflow_integration_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Integration Connection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_integration_connection(
     integration_id: str = Field(..., description="The unique identifier of the workflow integration that contains the connection."),
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow integration connection to retrieve."),
@@ -16326,7 +18446,13 @@ async def get_workflow_integration_connection(
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Workflow Integration Connection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workflow_integration_connection(
     integration_id: str = Field(..., description="The unique identifier of the workflow integration that owns this connection."),
     id_: str = Field(..., alias="id", description="The unique identifier of the connection resource to update."),
@@ -16375,13 +18501,20 @@ async def update_workflow_integration_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Workflow Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow Integration Connection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow_integration_connection(
     integration_id: str = Field(..., description="The unique identifier of the workflow integration that contains the connection to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the connection resource to delete."),
