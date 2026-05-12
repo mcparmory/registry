@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Resend MCP Server
-Generated: 2026-05-05 16:08:58 UTC
+Generated: 2026-05-12 12:27:18 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.resend.com")
 SERVER_NAME = "Resend"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1213,7 +1248,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Resend", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="List Emails",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_emails(limit: int | None = Field(None, description="Maximum number of emails to return in this request. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of emails. Use the limit parameter to control how many emails are returned in a single request."""
 
@@ -1251,7 +1292,12 @@ async def list_emails(limit: int | None = Field(None, description="Maximum numbe
     return _response_data
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="Send Email",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_email(
     from_: str = Field(..., alias="from", description="Sender email address. Include a friendly name using the format 'Your Name <sender@domain.com>' to display a custom sender name."),
     to: str | list[str] = Field(..., description="Recipient email address or array of addresses. Supports up to 50 recipients; provide as a single string for one recipient or an array of strings for multiple."),
@@ -1298,13 +1344,20 @@ async def send_email(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="Get Email",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_email(email_id: str = Field(..., description="The unique identifier of the email to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single email message by its unique identifier. Returns the complete email record including headers, body, and metadata."""
 
@@ -1340,7 +1393,13 @@ async def get_email(email_id: str = Field(..., description="The unique identifie
     return _response_data
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Email",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_email(email_id: str = Field(..., description="The unique identifier of the email to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel the scheduled delivery of an email. This prevents a scheduled email from being sent."""
 
@@ -1376,7 +1435,12 @@ async def cancel_email(email_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="Send Emails Batch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_emails_batch(body: list[_models.SendEmailRequest] | None = Field(None, description="Array of email objects to send, with a maximum of 100 items per request. Each item in the array represents a single email configuration with its own recipient, subject, and content details.")) -> dict[str, Any] | ToolResult:
     """Send up to 100 emails in a single batch request. This operation allows efficient bulk email delivery by processing multiple email configurations simultaneously."""
 
@@ -1409,13 +1473,20 @@ async def send_emails_batch(body: list[_models.SendEmailRequest] | None = Field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="List Attachments for Email",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_attachments_for_email(
     email_id: str = Field(..., description="The unique identifier of the email, formatted as a UUID."),
     limit: int | None = Field(None, description="The maximum number of attachments to return in the response. Useful for pagination or limiting results."),
@@ -1457,7 +1528,13 @@ async def list_attachments_for_email(
     return _response_data
 
 # Tags: Emails
-@mcp.tool()
+@mcp.tool(
+    title="Get Email Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_email_attachment(
     email_id: str = Field(..., description="The unique identifier of the email containing the attachment. Must be a valid UUID."),
     attachment_id: str = Field(..., description="The unique identifier of the attachment to retrieve. Must be a valid UUID."),
@@ -1496,7 +1573,13 @@ async def get_email_attachment(
     return _response_data
 
 # Tags: Receiving Emails
-@mcp.tool()
+@mcp.tool(
+    title="List Receiving Emails",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_emails_receiving(limit: int | None = Field(None, description="Maximum number of received emails to return in a single response. Limits the size of the result set to improve performance and reduce payload size.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of received emails from your inbox. Use the limit parameter to control how many emails are returned in the response."""
 
@@ -1534,7 +1617,13 @@ async def list_emails_receiving(limit: int | None = Field(None, description="Max
     return _response_data
 
 # Tags: Receiving Emails
-@mcp.tool()
+@mcp.tool(
+    title="Get Received Email",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_received_email(email_id: str = Field(..., description="The unique identifier of the received email, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single received email by its unique identifier. Use this to fetch the full details of a specific email in your inbox."""
 
@@ -1570,7 +1659,13 @@ async def get_received_email(email_id: str = Field(..., description="The unique 
     return _response_data
 
 # Tags: Receiving Emails
-@mcp.tool()
+@mcp.tool(
+    title="List Email Attachments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_email_attachments(
     email_id: str = Field(..., description="The unique identifier of the received email, formatted as a UUID."),
     limit: int | None = Field(None, description="The maximum number of attachments to return in the response. Useful for pagination or limiting results when dealing with emails containing many files."),
@@ -1612,7 +1707,13 @@ async def list_email_attachments(
     return _response_data
 
 # Tags: Receiving Emails
-@mcp.tool()
+@mcp.tool(
+    title="Get Received Email Attachment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_received_email_attachment(
     email_id: str = Field(..., description="The unique identifier (UUID) of the received email containing the attachment."),
     attachment_id: str = Field(..., description="The unique identifier (UUID) of the attachment to retrieve."),
@@ -1651,7 +1752,13 @@ async def get_received_email_attachment(
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="List Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_domains(limit: int | None = Field(None, description="Maximum number of domains to return in this request. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of domains. Use the limit parameter to control the number of results returned in a single request."""
 
@@ -1689,7 +1796,12 @@ async def list_domains(limit: int | None = Field(None, description="Maximum numb
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Create Domain",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_domain(
     name: str = Field(..., description="The domain name to create (e.g., mail.example.com). This will be used as your sending domain."),
     region: Literal["us-east-1", "eu-west-1", "sa-east-1", "ap-northeast-1"] | None = Field(None, description="The AWS region where emails will be sent from. Defaults to us-east-1 if not specified. Choose from: us-east-1 (N. Virginia), eu-west-1 (Ireland), sa-east-1 (São Paulo), or ap-northeast-1 (Tokyo)."),
@@ -1728,13 +1840,20 @@ async def create_domain(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Get Domain",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_domain(domain_id: str = Field(..., description="The unique identifier of the domain to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific domain by its unique identifier."""
 
@@ -1770,7 +1889,13 @@ async def get_domain(domain_id: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Update Domain",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_domain(
     domain_id: str = Field(..., description="The unique identifier of the domain to update."),
     open_tracking: bool | None = Field(None, description="Enable or disable tracking of email open rates. When enabled, the system monitors whether recipients open emails sent from this domain."),
@@ -1808,13 +1933,20 @@ async def update_domain(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Delete Domain",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_domain(domain_id: str = Field(..., description="The unique identifier of the domain to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a domain from the system. This action cannot be undone."""
 
@@ -1850,7 +1982,12 @@ async def delete_domain(domain_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Domains
-@mcp.tool()
+@mcp.tool(
+    title="Verify Domain",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def verify_domain(domain_id: str = Field(..., description="The unique identifier of the domain to verify.")) -> dict[str, Any] | ToolResult:
     """Verify ownership or configuration of an existing domain by triggering validation checks against the specified domain."""
 
@@ -1886,7 +2023,13 @@ async def verify_domain(domain_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: API Keys
-@mcp.tool()
+@mcp.tool(
+    title="List API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_keys(limit: int | None = Field(None, description="Maximum number of API keys to return in the response. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of API keys for the authenticated user or organization. Use the limit parameter to control the number of results returned."""
 
@@ -1924,7 +2067,12 @@ async def list_api_keys(limit: int | None = Field(None, description="Maximum num
     return _response_data
 
 # Tags: API Keys
-@mcp.tool()
+@mcp.tool(
+    title="Create API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_key(
     name: str = Field(..., description="A descriptive name for the API key to help identify its purpose and usage."),
     permission: Literal["full_access", "sending_access"] | None = Field(None, description="The access level for the API key: full_access grants permissions to create, delete, get, and update any resource, while sending_access restricts the key to only sending emails."),
@@ -1960,13 +2108,20 @@ async def create_api_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: API Keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete API Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_api_key(api_key_id: str = Field(..., description="The unique identifier of the API key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently remove an API key by its ID. Once deleted, the key can no longer be used for authentication and cannot be recovered."""
 
@@ -2002,7 +2157,13 @@ async def delete_api_key(api_key_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(limit: int | None = Field(None, description="Maximum number of templates to return in the response. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available templates. Use the limit parameter to control the number of results returned."""
 
@@ -2040,7 +2201,12 @@ async def list_templates(limit: int | None = Field(None, description="Maximum nu
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     name: str = Field(..., description="The display name for this template. Used to identify and reference the template when sending emails."),
     html: str = Field(..., description="The HTML content of the template. This is the main body rendered in email clients that support HTML. Supports variable substitution using defined variables."),
@@ -2080,13 +2246,20 @@ async def create_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template(id_: str = Field(..., alias="id", description="The unique identifier or alias of the template to retrieve. Can be either the template's ID or a human-readable alias if supported by the API.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single template by its ID or alias. Use this operation to fetch the full details of a specific template for viewing or further processing."""
 
@@ -2122,7 +2295,13 @@ async def get_template(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     id_: str = Field(..., alias="id", description="The unique identifier or alias of the template to update."),
     name: str | None = Field(None, description="The display name for the template."),
@@ -2163,13 +2342,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(id_: str = Field(..., alias="id", description="The unique identifier or alias of the template to delete. Can be either the template's ID or a configured alias.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a template by its ID or alias. This action cannot be undone."""
 
@@ -2205,7 +2391,12 @@ async def delete_template(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Publish Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_template(id_: str = Field(..., alias="id", description="The unique identifier or alias of the template to publish. Can be either the template's ID or a configured alias.")) -> dict[str, Any] | ToolResult:
     """Publish a template to make it available for use. Once published, the template can be accessed and utilized by users or systems."""
 
@@ -2241,7 +2432,12 @@ async def publish_template(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: Templates
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_template(id_: str = Field(..., alias="id", description="The unique identifier or alias of the template to duplicate. Can be either the template's ID or a configured alias.")) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing template, allowing you to reuse template configurations with a new instance."""
 
@@ -2277,7 +2473,13 @@ async def duplicate_template(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="List Contacts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contacts(
     segment_id: str | None = Field(None, description="Filter the returned contacts to only those belonging to a specific segment. Omit to retrieve contacts from all segments."),
     limit: int | None = Field(None, description="Maximum number of contacts to return in the response. Must be between 1 and 100 items.", ge=1, le=100),
@@ -2318,7 +2520,12 @@ async def list_contacts(
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="Create Contact",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_contact(
     email: str = Field(..., description="Email address uniquely identifying the contact (e.g., steve.wozniak@gmail.com). Required to create the contact."),
     first_name: str | None = Field(None, description="First name of the contact for personalization and identification purposes."),
@@ -2358,13 +2565,20 @@ async def create_contact(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="Get Contact",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_contact(id_: str = Field(..., alias="id", description="The unique identifier for the contact or the contact's email address. Either format is accepted to retrieve the contact record.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single contact by its unique identifier or email address. Use this operation to fetch detailed information about a specific contact."""
 
@@ -2400,7 +2614,13 @@ async def get_contact(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="Update Contact",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_contact(
     id_: str = Field(..., alias="id", description="The unique identifier for the contact, either as a Contact ID or email address."),
     email: str | None = Field(None, description="The contact's email address in standard email format (e.g., user@example.com)."),
@@ -2440,13 +2660,20 @@ async def update_contact(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Contact",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_contact(id_: str = Field(..., alias="id", description="The unique identifier for the contact, provided as either the contact ID or the email address associated with the contact.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a contact from the system by specifying either its unique ID or email address."""
 
@@ -2482,7 +2709,13 @@ async def delete_contact(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Broadcasts
-@mcp.tool()
+@mcp.tool(
+    title="List Broadcasts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_broadcasts(limit: int | None = Field(None, description="Maximum number of broadcasts to return in the response. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of broadcasts. Use the limit parameter to control how many broadcasts are returned in a single request."""
 
@@ -2520,7 +2753,12 @@ async def list_broadcasts(limit: int | None = Field(None, description="Maximum n
     return _response_data
 
 # Tags: Broadcasts
-@mcp.tool()
+@mcp.tool(
+    title="Create Broadcast",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_broadcast(
     segment_id: str = Field(..., description="The unique identifier of the audience segment that will receive this broadcast. This parameter determines who the email will be sent to."),
     from_: str = Field(..., alias="from", description="The email address that will appear as the sender of this broadcast."),
@@ -2564,13 +2802,20 @@ async def create_broadcast(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Broadcasts
-@mcp.tool()
+@mcp.tool(
+    title="Get Broadcast",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_broadcast(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific broadcast by its unique identifier."""
 
@@ -2606,7 +2851,13 @@ async def get_broadcast(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Broadcasts
-@mcp.tool()
+@mcp.tool(
+    title="Update Broadcast",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_broadcast(
     id_: str = Field(..., alias="id", description="The unique identifier of the broadcast to update."),
     name: str | None = Field(None, description="The display name for the broadcast."),
@@ -2648,13 +2899,20 @@ async def update_broadcast(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Broadcasts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Broadcast",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_broadcast(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast to delete. Must reference a broadcast in draft status.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a broadcast that is currently in draft status. Only draft broadcasts can be deleted; published or scheduled broadcasts cannot be removed through this operation."""
 
@@ -2690,7 +2948,12 @@ async def delete_broadcast(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: Broadcasts
-@mcp.tool()
+@mcp.tool(
+    title="Send Broadcast",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_broadcast(
     id_: str = Field(..., alias="id", description="The unique identifier of the broadcast to send or schedule."),
     scheduled_at: str | None = Field(None, description="Optional ISO 8601 formatted date and time to schedule the broadcast for future delivery. If omitted, the broadcast will be sent immediately."),
@@ -2726,13 +2989,20 @@ async def send_broadcast(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(limit: int | None = Field(None, description="Maximum number of webhooks to return in the response. Useful for pagination and controlling response size.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of webhooks configured for this API. Use the limit parameter to control the maximum number of results returned."""
 
@@ -2770,7 +3040,12 @@ async def list_webhooks(limit: int | None = Field(None, description="Maximum num
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Create Webhook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_webhook(
     endpoint: str = Field(..., description="The HTTPS URL endpoint where webhook event notifications will be delivered. Must be a valid, publicly accessible URL that can receive POST requests."),
     events: list[str] = Field(..., description="A list of one or more event types to subscribe to. Each event type is a string identifier (e.g., 'email.sent', 'email.delivered'). At least one event type is required. Order does not matter.", min_length=1),
@@ -2805,13 +3080,20 @@ async def create_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific webhook by its unique identifier. Use this to inspect webhook configuration, status, and settings."""
 
@@ -2847,7 +3129,13 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook(
     webhook_id: str = Field(..., description="The unique identifier of the webhook to update, formatted as a UUID."),
     endpoint: str | None = Field(None, description="The HTTPS URL where webhook events will be delivered. This endpoint must be publicly accessible and capable of receiving POST requests."),
@@ -2885,13 +3173,20 @@ async def update_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a webhook by its unique identifier. This action cannot be undone."""
 
@@ -2927,7 +3222,13 @@ async def delete_webhook(webhook_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Segments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segments(limit: int | None = Field(None, description="Maximum number of segments to return per request. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of segments. Use the limit parameter to control the number of results returned in a single request."""
 
@@ -2965,7 +3266,12 @@ async def list_segments(limit: int | None = Field(None, description="Maximum num
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Create Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_segment(
     name: str = Field(..., description="The display name for the segment. Used to identify and reference the segment in the system."),
     filter_: dict[str, Any] | None = Field(None, alias="filter", description="Optional filter conditions that define which records belong to this segment. Specify filter criteria as a structured object to narrow the segment's scope."),
@@ -3000,13 +3306,20 @@ async def create_segment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segment(id_: str = Field(..., alias="id", description="The unique identifier of the segment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single segment by its unique identifier. Returns the complete segment details including configuration and metadata."""
 
@@ -3042,7 +3355,13 @@ async def get_segment(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_segment(id_: str = Field(..., alias="id", description="The unique identifier of the segment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a segment by its ID. This action cannot be undone."""
 
@@ -3078,7 +3397,13 @@ async def delete_segment(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Topics
-@mcp.tool()
+@mcp.tool(
+    title="List Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_topics(limit: int | None = Field(None, description="Maximum number of topics to return in the response. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available topics. Use the limit parameter to control the number of results returned."""
 
@@ -3116,7 +3441,12 @@ async def list_topics(limit: int | None = Field(None, description="Maximum numbe
     return _response_data
 
 # Tags: Topics
-@mcp.tool()
+@mcp.tool(
+    title="Create Topic",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_topic(
     name: str = Field(..., description="The topic name, up to 50 characters. Used to identify the topic in subscription management interfaces.", max_length=50),
     default_subscription: Literal["opt_in", "opt_out"] = Field(..., description="The default subscription behavior for new contacts: 'opt_in' requires explicit subscription, 'opt_out' subscribes by default. This setting is permanent and cannot be changed after topic creation."),
@@ -3153,13 +3483,20 @@ async def create_topic(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Topics
-@mcp.tool()
+@mcp.tool(
+    title="Get Topic",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_topic(id_: str = Field(..., alias="id", description="The unique identifier of the topic to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single topic by its unique identifier. Returns the complete topic details including metadata and content."""
 
@@ -3195,7 +3532,13 @@ async def get_topic(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Topics
-@mcp.tool()
+@mcp.tool(
+    title="Update Topic",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_topic(
     id_: str = Field(..., alias="id", description="The unique identifier of the topic to update."),
     name: str | None = Field(None, description="The new name for the topic. Must not exceed 50 characters.", max_length=50),
@@ -3233,13 +3576,20 @@ async def update_topic(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Topics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Topic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_topic(id_: str = Field(..., alias="id", description="The unique identifier of the topic to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a topic by its ID. This action cannot be undone."""
 
@@ -3275,7 +3625,13 @@ async def delete_topic(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Contact Properties
-@mcp.tool()
+@mcp.tool(
+    title="List Contact Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contact_properties(limit: int | None = Field(None, description="Maximum number of contact properties to return per request. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available contact properties. Use the limit parameter to control the number of properties returned in a single request."""
 
@@ -3313,7 +3669,12 @@ async def list_contact_properties(limit: int | None = Field(None, description="M
     return _response_data
 
 # Tags: Contact Properties
-@mcp.tool()
+@mcp.tool(
+    title="Create Contact Property",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_contact_property(
     key: str = Field(..., description="A unique identifier for the property using only alphanumeric characters and underscores, up to 50 characters in length."),
     type_: Literal["string", "number"] = Field(..., alias="type", description="The data type for this property, either string or number, which determines the format of values stored and the type required for the fallback value."),
@@ -3349,13 +3710,20 @@ async def create_contact_property(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Contact Properties
-@mcp.tool()
+@mcp.tool(
+    title="Get Contact Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_contact_property(id_: str = Field(..., alias="id", description="The unique identifier of the contact property to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single contact property by its unique identifier. Use this to fetch detailed information about a specific contact property."""
 
@@ -3391,7 +3759,13 @@ async def get_contact_property(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Contact Properties
-@mcp.tool()
+@mcp.tool(
+    title="Update Contact Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_contact_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the contact property to update."),
     fallback_value: str | None = Field(None, description="The default value to use when this property is not set for a contact. Must be compatible with the property's data type (string or number)."),
@@ -3427,13 +3801,20 @@ async def update_contact_property(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Contact Properties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Contact Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_contact_property(id_: str = Field(..., alias="id", description="The unique identifier of the contact property to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a contact property from the system by its ID. This action cannot be undone."""
 
@@ -3469,7 +3850,13 @@ async def delete_contact_property(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="List Contact Segments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contact_segments(
     contact_id: str = Field(..., description="The unique identifier for the contact. Accepts either the contact's ID or email address."),
     limit: int | None = Field(None, description="Maximum number of segments to return in the response. Must be between 1 and 100 items.", ge=1, le=100),
@@ -3511,7 +3898,12 @@ async def list_contact_segments(
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="Add Contact to Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_contact_to_segment(
     contact_id: str = Field(..., description="The unique identifier or email address of the contact to add to the segment."),
     segment_id: str = Field(..., description="The unique identifier of the segment to which the contact will be added."),
@@ -3550,7 +3942,13 @@ async def add_contact_to_segment(
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="Remove Contact From Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_contact_from_segment(
     contact_id: str = Field(..., description="The unique identifier for the contact, provided as either the Contact ID or the contact's email address."),
     segment_id: str = Field(..., description="The unique identifier for the segment from which the contact should be removed."),
@@ -3589,7 +3987,13 @@ async def remove_contact_from_segment(
     return _response_data
 
 # Tags: Contacts
-@mcp.tool()
+@mcp.tool(
+    title="List Contact Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_contact_topics(
     contact_id: str = Field(..., description="The unique identifier for the contact, which can be either the contact ID or the contact's email address."),
     limit: int | None = Field(None, description="Maximum number of topics to return in the response. Must be between 1 and 100 items.", ge=1, le=100),
@@ -3631,7 +4035,13 @@ async def list_contact_topics(
     return _response_data
 
 # Tags: Logs
-@mcp.tool()
+@mcp.tool(
+    title="List Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_logs(limit: int | None = Field(None, description="Maximum number of log entries to return in the response. Must be between 1 and 100 items.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of logs from the system. Use the limit parameter to control how many log entries are returned in a single request."""
 
@@ -3669,7 +4079,13 @@ async def list_logs(limit: int | None = Field(None, description="Maximum number 
     return _response_data
 
 # Tags: Logs
-@mcp.tool()
+@mcp.tool(
+    title="Get Log",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_log(log_id: str = Field(..., description="The unique identifier of the log to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single log entry by its unique identifier. Returns the complete log record matching the provided ID."""
 

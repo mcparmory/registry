@@ -1,7 +1,7 @@
 """
 Resend MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:08:58 UTC
+Generated: 2026-05-12 12:27:18 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
