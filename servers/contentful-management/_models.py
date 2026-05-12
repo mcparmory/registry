@@ -1,7 +1,7 @@
 """
 Contentful Management MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:43:42 UTC
+Generated: 2026-05-12 11:07:24 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

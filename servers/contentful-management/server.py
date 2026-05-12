@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Contentful Management MCP Server
-Generated: 2026-05-05 14:43:42 UTC
+Generated: 2026-05-12 11:07:24 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.contentful.com")
 SERVER_NAME = "Contentful Management"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1222,7 +1257,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Contentful Management", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="List Spaces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_spaces() -> dict[str, Any] | ToolResult:
     """Retrieve all spaces accessible to your account across organizations. Spaces are containers for content types and content; use this to discover available spaces before accessing their content."""
 
@@ -1249,7 +1290,12 @@ async def list_spaces() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Create Space",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_space(x_contentful_organization: str | None = Field(None, alias="X-Contentful-Organization", description="The ID of the Contentful organization where the space will be created. Required to route the request to the correct organization context.")) -> dict[str, Any] | ToolResult:
     """Create a new space in Contentful by specifying its name and default locale. A space is a container for content types, entries, and assets within your Contentful organization."""
 
@@ -1285,7 +1331,13 @@ async def create_space(x_contentful_organization: str | None = Field(None, alias
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Get Space",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_space(space_id: str = Field(..., description="The unique identifier of the space to retrieve. This is a required string that identifies which Contentful space you want to access.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific Contentful space by its ID. This returns the space's configuration, settings, and metadata."""
 
@@ -1321,7 +1373,13 @@ async def get_space(space_id: str = Field(..., description="The unique identifie
     return _response_data
 
 # Tags: Spaces
-@mcp.tool()
+@mcp.tool(
+    title="Delete Space",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_space(space_id: str = Field(..., description="The unique identifier of the space to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a space and all its associated content. This action cannot be undone."""
 
@@ -1357,7 +1415,13 @@ async def delete_space(space_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: Enviroments
-@mcp.tool()
+@mcp.tool(
+    title="List Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments(space_id: str = Field(..., description="The unique identifier of the Contentful space containing the environments you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all environments within a Contentful space. Environments allow you to manage different versions of your content (e.g., staging, production)."""
 
@@ -1393,7 +1457,12 @@ async def list_environments(space_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Enviroments
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment(
     space_id: str = Field(..., description="The unique identifier of the space where the environment will be created."),
     x_contentful_source_environment: str | None = Field(None, alias="X-Contentful-Source-Environment", description="Optional identifier of an existing environment to clone as the source for the new environment's content and structure."),
@@ -1433,7 +1502,13 @@ async def create_environment(
     return _response_data
 
 # Tags: Enviroments
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the environment."),
     environment_id: str = Field(..., description="The unique identifier of the environment to retrieve."),
@@ -1472,7 +1547,13 @@ async def get_environment(
     return _response_data
 
 # Tags: Enviroments
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the environment to update."),
     environment_id: str = Field(..., description="The unique identifier of the environment to update."),
@@ -1511,7 +1592,13 @@ async def update_environment(
     return _response_data
 
 # Tags: Enviroments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the environment to delete."),
     environment_id: str = Field(..., description="The unique identifier of the environment to delete. Common examples include 'master' for the default environment."),
@@ -1550,7 +1637,13 @@ async def delete_environment(
     return _response_data
 
 # Tags: Environment alias
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Aliases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environment_aliases(space_id: str = Field(..., description="The unique identifier of the space containing the environment aliases you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all environment aliases configured for a specific space in Contentful. Environment aliases allow you to reference environments by custom names in addition to their IDs."""
 
@@ -1586,7 +1679,13 @@ async def list_environment_aliases(space_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: Environment alias
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment Alias",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment_alias(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment alias."),
     environment_alias_id: str = Field(..., description="The unique identifier of the environment alias to retrieve."),
@@ -1625,7 +1724,13 @@ async def get_environment_alias(
     return _response_data
 
 # Tags: Environment alias
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Environment Alias",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_environment_alias(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the environment alias."),
     environment_alias_id: str = Field(..., description="The unique identifier of the environment alias to create or update."),
@@ -1664,7 +1769,13 @@ async def create_or_update_environment_alias(
     return _response_data
 
 # Tags: Environment alias
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment Alias",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment_alias(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment alias to delete."),
     environment_alias_id: str = Field(..., description="The unique identifier of the environment alias to delete."),
@@ -1703,7 +1814,13 @@ async def delete_environment_alias(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations() -> dict[str, Any] | ToolResult:
     """Retrieve all organizations that your account has access to. This returns a collection of organizations you can manage or collaborate within."""
 
@@ -1730,7 +1847,13 @@ async def list_organizations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="List Content Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_types(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment and content types."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to retrieve content types."),
@@ -1769,7 +1892,12 @@ async def list_content_types(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="Create Content Type",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_content_type(
     space_id: str = Field(..., description="The unique identifier of the space where the content type will be created."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the content type will be created."),
@@ -1808,7 +1936,13 @@ async def create_content_type(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_type(
     space_id: str = Field(..., description="The unique identifier of the space containing the content type. Example format: alphanumeric string like '5nvk6q4s3ttw'."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space. Typically 'master' for the default environment, but can be any environment name."),
@@ -1848,7 +1982,13 @@ async def get_content_type(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Content Type",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_content_type(
     space_id: str = Field(..., description="The unique identifier of the space containing the content type."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the content type will be created or updated."),
@@ -1888,7 +2028,13 @@ async def create_or_update_content_type(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="Delete Content Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_content_type(
     space_id: str = Field(..., description="The unique identifier of the space containing the content type to delete."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the content type is located."),
@@ -1928,7 +2074,13 @@ async def delete_content_type(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="Publish Content Type",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def publish_content_type(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the content type."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the content type will be published."),
@@ -1968,7 +2120,13 @@ async def publish_content_type(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="Deactivate Content Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def deactivate_content_type(
     space_id: str = Field(..., description="The unique identifier of the space containing the content type."),
     environment_id: str = Field(..., description="The unique identifier of the environment where the content type is published."),
@@ -2008,7 +2166,13 @@ async def deactivate_content_type(
     return _response_data
 
 # Tags: Content Types
-@mcp.tool()
+@mcp.tool(
+    title="List Published Content Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_types_published(
     space_id: str = Field(..., description="The unique identifier of the space containing the content types you want to retrieve."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to fetch activated content types."),
@@ -2047,7 +2211,13 @@ async def list_content_types_published(
     return _response_data
 
 # Tags: UI Extensions
-@mcp.tool()
+@mcp.tool(
+    title="List Extensions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_extensions(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment and extensions."),
     environment_id: str = Field(..., description="The unique identifier of the environment from which to retrieve extensions."),
@@ -2086,7 +2256,13 @@ async def list_extensions(
     return _response_data
 
 # Tags: UI Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Get Extension",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_extension(
     space_id: str = Field(..., description="The unique identifier of the space containing the extension."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the extension is configured."),
@@ -2126,7 +2302,13 @@ async def get_extension(
     return _response_data
 
 # Tags: UI Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Extension",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_extension(
     space_id: str = Field(..., description="The unique identifier of the Contentful space where the extension will be created or updated."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the extension will be created or updated."),
@@ -2166,7 +2348,13 @@ async def create_or_update_extension(
     return _response_data
 
 # Tags: UI Extensions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Extension",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_extension(
     space_id: str = Field(..., description="The unique identifier of the space containing the extension to delete."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the extension is located."),
@@ -2206,7 +2394,13 @@ async def delete_extension(
     return _response_data
 
 # Tags: Entries collection
-@mcp.tool()
+@mcp.tool(
+    title="List Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entries(
     space_id: str = Field(..., description="The unique identifier of the space containing the entries to retrieve."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to fetch entries."),
@@ -2249,7 +2443,12 @@ async def list_entries(
     return _response_data
 
 # Tags: Entries collection
-@mcp.tool()
+@mcp.tool(
+    title="Create Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_entry(
     space_id: str = Field(..., description="The unique identifier of the Contentful space where the entry will be created."),
     environment_id: str = Field(..., description="The environment within the space where the entry will be created. Defaults to 'master' for the main environment."),
@@ -2290,7 +2489,13 @@ async def create_entry(
     return _response_data
 
 # Tags: Entry
-@mcp.tool()
+@mcp.tool(
+    title="Get Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_entry(
     space_id: str = Field(..., description="The unique identifier of the Contentful space (e.g., '5nvk6q4s3ttw'). This identifies which space contains the entry."),
     environment_id: str = Field(..., description="The environment identifier within the space, typically 'master' for the main environment. Specifies which environment version of the entry to retrieve."),
@@ -2330,7 +2535,13 @@ async def get_entry(
     return _response_data
 
 # Tags: Entry
-@mcp.tool()
+@mcp.tool(
+    title="Upsert Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upsert_entry(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry. This is the workspace where your content is organized."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space. Environments allow you to manage different versions of your content (e.g., draft, published)."),
@@ -2372,7 +2583,13 @@ async def upsert_entry(
     return _response_data
 
 # Tags: Entry
-@mcp.tool()
+@mcp.tool(
+    title="Update Entry",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_entry(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry to update."),
     environment_id: str = Field(..., description="The environment identifier where the entry resides. Typically 'master' for the default environment."),
@@ -2414,7 +2631,13 @@ async def update_entry(
     return _response_data
 
 # Tags: Entry
-@mcp.tool()
+@mcp.tool(
+    title="Delete Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_entry(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry to delete."),
     environment_id: str = Field(..., description="The environment within the space where the entry exists. Typically 'master' for the main environment."),
@@ -2454,7 +2677,13 @@ async def delete_entry(
     return _response_data
 
 # Tags: Entry references
-@mcp.tool()
+@mcp.tool(
+    title="List Entry References",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entry_references(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry (e.g., '5nvk6q4s3ttw')."),
     environment_id: str = Field(..., description="The environment identifier within the space, typically 'master' for the default environment."),
@@ -2494,7 +2723,12 @@ async def list_entry_references(
     return _response_data
 
 # Tags: Entry publishing
-@mcp.tool()
+@mcp.tool(
+    title="Publish Entry",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_entry(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry to publish."),
     environment_id: str = Field(..., description="The environment where the entry will be published. Typically 'master' for the main environment."),
@@ -2534,7 +2768,13 @@ async def publish_entry(
     return _response_data
 
 # Tags: Entry publishing
-@mcp.tool()
+@mcp.tool(
+    title="Unpublish Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unpublish_entry(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry to unpublish."),
     environment_id: str = Field(..., description="The environment identifier where the entry exists. Typically 'master' for the default environment."),
@@ -2574,7 +2814,13 @@ async def unpublish_entry(
     return _response_data
 
 # Tags: Entry archiving
-@mcp.tool()
+@mcp.tool(
+    title="Archive Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_entry(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry to archive."),
     environment_id: str = Field(..., description="The environment identifier where the entry resides. Typically 'master' for the default environment."),
@@ -2614,7 +2860,13 @@ async def archive_entry(
     return _response_data
 
 # Tags: Entry archiving
-@mcp.tool()
+@mcp.tool(
+    title="Unarchive Entry",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unarchive_entry(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry."),
     environment_id: str = Field(..., description="The environment identifier where the entry is stored. Typically 'master' for the default environment."),
@@ -2654,7 +2906,12 @@ async def unarchive_entry(
     return _response_data
 
 # Tags: Uploads
-@mcp.tool()
+@mcp.tool(
+    title="Upload File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file(space_id: str = Field(..., description="The unique identifier of the space where the file will be uploaded.")) -> dict[str, Any] | ToolResult:
     """Upload a file to a Contentful space. The uploaded file can then be used as an asset within the space."""
 
@@ -2670,6 +2927,7 @@ async def upload_file(space_id: str = Field(..., description="The unique identif
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/uploads", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/uploads"
     _http_headers = {}
+    _http_headers["Content-Type"] = "text/plain"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_file")
@@ -2690,7 +2948,13 @@ async def upload_file(space_id: str = Field(..., description="The unique identif
     return _response_data
 
 # Tags: Uploads
-@mcp.tool()
+@mcp.tool(
+    title="Get Upload",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_upload(
     space_id: str = Field(..., description="The unique identifier of the space containing the upload."),
     upload_id: str = Field(..., description="The unique identifier of the upload to retrieve."),
@@ -2729,7 +2993,13 @@ async def get_upload(
     return _response_data
 
 # Tags: Uploads
-@mcp.tool()
+@mcp.tool(
+    title="Delete Upload",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_upload(
     space_id: str = Field(..., description="The unique identifier of the space containing the upload to delete."),
     upload_id: str = Field(..., description="The unique identifier of the upload to delete."),
@@ -2768,7 +3038,13 @@ async def delete_upload(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="List Assets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_assets(
     space_id: str = Field(..., description="The unique identifier of the space containing the assets you want to retrieve."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to fetch assets."),
@@ -2807,7 +3083,12 @@ async def list_assets(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Create Asset",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_asset(
     space_id: str = Field(..., description="The unique identifier of the Contentful space where the asset will be created."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset will be created."),
@@ -2846,7 +3127,13 @@ async def create_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="List Published Assets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_published_assets(
     space_id: str = Field(..., description="The unique identifier of the space containing the assets."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to retrieve published assets."),
@@ -2885,7 +3172,13 @@ async def list_published_assets(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Get Asset",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_asset(
     space_id: str = Field(..., description="The unique identifier of the space containing the asset."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset is located."),
@@ -2925,7 +3218,13 @@ async def get_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update Asset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_asset(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the asset."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset is located."),
@@ -2965,7 +3264,13 @@ async def create_or_update_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Asset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_asset(
     space_id: str = Field(..., description="The unique identifier of the space containing the asset to delete."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset is located."),
@@ -3005,7 +3310,12 @@ async def delete_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Process Asset File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def process_asset_file(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the asset."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset is located."),
@@ -3046,7 +3356,13 @@ async def process_asset_file(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Publish Asset",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def publish_asset(
     space_id: str = Field(..., description="The unique identifier of the space containing the asset to publish."),
     environment_id: str = Field(..., description="The unique identifier of the environment where the asset will be published."),
@@ -3086,7 +3402,13 @@ async def publish_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Unpublish Asset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unpublish_asset(
     space_id: str = Field(..., description="The unique identifier of the space containing the asset."),
     environment_id: str = Field(..., description="The unique identifier of the environment from which to unpublish the asset."),
@@ -3126,7 +3448,13 @@ async def unpublish_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Archive Asset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_asset(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the asset."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset is located."),
@@ -3166,7 +3494,13 @@ async def archive_asset(
     return _response_data
 
 # Tags: Assets
-@mcp.tool()
+@mcp.tool(
+    title="Unarchive Asset",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unarchive_asset(
     space_id: str = Field(..., description="The unique identifier of the space containing the asset."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset is located."),
@@ -3206,7 +3540,12 @@ async def unarchive_asset(
     return _response_data
 
 # Tags: Assets keys
-@mcp.tool()
+@mcp.tool(
+    title="Create Asset Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_asset_key(
     space_id: str = Field(..., description="The unique identifier of the space where the asset key will be created."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the asset key will be created."),
@@ -3245,7 +3584,13 @@ async def create_asset_key(
     return _response_data
 
 # Tags: Locale
-@mcp.tool()
+@mcp.tool(
+    title="List Locales",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_locales(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment and locales to retrieve."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to fetch locales."),
@@ -3284,7 +3629,12 @@ async def list_locales(
     return _response_data
 
 # Tags: Locale
-@mcp.tool()
+@mcp.tool(
+    title="Create Locale",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_locale(
     space_id: str = Field(..., description="The unique identifier of the Contentful space where the locale will be created (e.g., 'r0926rqjrebl')."),
     environment_id: str = Field(..., description="The environment identifier within the space where the locale will be added (e.g., 'master' for the default environment)."),
@@ -3323,7 +3673,13 @@ async def create_locale(
     return _response_data
 
 # Tags: Locale
-@mcp.tool()
+@mcp.tool(
+    title="Get Locale",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_locale(
     space_id: str = Field(..., description="The unique identifier of the space containing the locale."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space."),
@@ -3363,7 +3719,13 @@ async def get_locale(
     return _response_data
 
 # Tags: Locale
-@mcp.tool()
+@mcp.tool(
+    title="Update Locale",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_locale(
     space_id: str = Field(..., description="The unique identifier of the space containing the locale to update."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the locale resides."),
@@ -3403,7 +3765,13 @@ async def update_locale(
     return _response_data
 
 # Tags: Locale
-@mcp.tool()
+@mcp.tool(
+    title="Delete Locale",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_locale(
     space_id: str = Field(..., description="The unique identifier of the space containing the locale to delete."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the locale exists."),
@@ -3443,7 +3811,13 @@ async def delete_locale(
     return _response_data
 
 # Tags: Content tags
-@mcp.tool()
+@mcp.tool(
+    title="List Environment Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environment_tags(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment. This is required to scope the request to the correct workspace."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space. This specifies which environment's tags should be retrieved."),
@@ -3482,7 +3856,13 @@ async def list_environment_tags(
     return _response_data
 
 # Tags: Content tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag(
     space_id: str = Field(..., description="The unique identifier of the space containing the tag."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the tag is located."),
@@ -3522,7 +3902,12 @@ async def get_tag(
     return _response_data
 
 # Tags: Content tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment where the tag will be created."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the tag will be created."),
@@ -3562,7 +3947,13 @@ async def create_tag(
     return _response_data
 
 # Tags: Content tags
-@mcp.tool()
+@mcp.tool(
+    title="Update Tag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tag(
     space_id: str = Field(..., description="The unique identifier of the space containing the tag to be updated."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the tag is located."),
@@ -3602,7 +3993,13 @@ async def update_tag(
     return _response_data
 
 # Tags: Content tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment and tag to be deleted."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space that contains the tag to be deleted."),
@@ -3642,7 +4039,13 @@ async def delete_tag(
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks(space_id: str = Field(..., description="The unique identifier of the space containing the webhooks you want to retrieve (e.g., '5nvk6q4s3ttw').")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhook definitions configured for a specific space. Webhooks allow you to receive HTTP notifications when content changes occur in your space."""
 
@@ -3678,7 +4081,13 @@ async def list_webhooks(space_id: str = Field(..., description="The unique ident
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Calls",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_calls(
     space_id: str = Field(..., description="The unique identifier of the space containing the webhook. This is required to scope the webhook calls to the correct environment."),
     webhook_id: str = Field(..., description="The unique identifier of the webhook whose call history you want to retrieve. This specifies which webhook's execution log to fetch."),
@@ -3717,7 +4126,13 @@ async def list_webhook_calls(
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Call",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_call(
     space_id: str = Field(..., description="The unique identifier of the space containing the webhook."),
     webhook_id: str = Field(..., description="The unique identifier of the webhook for which to retrieve call details."),
@@ -3757,7 +4172,13 @@ async def get_webhook_call(
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Check Webhook Health",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_webhook_health(
     space_id: str = Field(..., description="The unique identifier of the space containing the webhook."),
     webhook_id: str = Field(..., description="The unique identifier of the webhook whose health status should be retrieved."),
@@ -3796,7 +4217,13 @@ async def check_webhook_health(
     return _response_data
 
 # Tags: Webhook
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Definition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_definition(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the webhook definition."),
     webhook_definition_id: str = Field(..., description="The unique identifier of the webhook definition to retrieve."),
@@ -3835,7 +4262,13 @@ async def get_webhook_definition(
     return _response_data
 
 # Tags: Roles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_role(
     space_id: str = Field(..., description="The unique identifier of the space containing the role to delete."),
     role_id: str = Field(..., description="The unique identifier of the role to delete."),
@@ -3874,7 +4307,13 @@ async def delete_role(
     return _response_data
 
 # Tags: Snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Entry Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entry_snapshots(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry. This is a required alphanumeric identifier that specifies which workspace to query."),
     entry_id: str = Field(..., description="The unique identifier of the entry for which to retrieve snapshots. This is a required alphanumeric identifier that specifies which entry's version history to fetch."),
@@ -3913,7 +4352,13 @@ async def list_entry_snapshots(
     return _response_data
 
 # Tags: Snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Content Type Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_content_type_snapshots(
     space_id: str = Field(..., description="The unique identifier of the space containing the content type."),
     content_type_id: str = Field(..., description="The unique identifier of the content type for which to retrieve snapshots."),
@@ -3952,7 +4397,13 @@ async def list_content_type_snapshots(
     return _response_data
 
 # Tags: Snapshots
-@mcp.tool()
+@mcp.tool(
+    title="Get Content Type Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_content_type_snapshot(
     space_id: str = Field(..., description="The unique identifier of the space containing the content type."),
     content_type_id: str = Field(..., description="The unique identifier of the content type for which to retrieve the snapshot."),
@@ -3992,7 +4443,13 @@ async def get_content_type_snapshot(
     return _response_data
 
 # Tags: Snapshots
-@mcp.tool()
+@mcp.tool(
+    title="Get Entry Snapshot",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_entry_snapshot(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry."),
     entry_id: str = Field(..., description="The unique identifier of the entry for which you want to retrieve the snapshot."),
@@ -4032,7 +4489,13 @@ async def get_entry_snapshot(
     return _response_data
 
 # Tags: Space memberships
-@mcp.tool()
+@mcp.tool(
+    title="List Space Memberships",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_memberships(space_id: str = Field(..., description="The unique identifier of the space. Use the space ID to target a specific workspace (e.g., '5nvk6q4s3ttw').")) -> dict[str, Any] | ToolResult:
     """Retrieve all space memberships for a given space. Returns a collection of all users and their roles within the specified space."""
 
@@ -4068,7 +4531,12 @@ async def list_space_memberships(space_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Space memberships
-@mcp.tool()
+@mcp.tool(
+    title="Create Space Membership",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_space_membership(space_id: str = Field(..., description="The unique identifier of the space where the membership will be created.")) -> dict[str, Any] | ToolResult:
     """Add a new member to a space with specified roles and permissions. This operation creates a space membership record that grants a user or team access to the space."""
 
@@ -4104,7 +4572,13 @@ async def create_space_membership(space_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Space memberships
-@mcp.tool()
+@mcp.tool(
+    title="Get Space Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_space_membership(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the membership."),
     space_membership_id: str = Field(..., description="The unique identifier of the space membership to retrieve."),
@@ -4143,7 +4617,13 @@ async def get_space_membership(
     return _response_data
 
 # Tags: Space memberships
-@mcp.tool()
+@mcp.tool(
+    title="Update Space Membership",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_space_membership(
     space_id: str = Field(..., description="The unique identifier of the space containing the membership to update."),
     space_membership_id: str = Field(..., description="The unique identifier of the space membership record to update."),
@@ -4182,7 +4662,13 @@ async def update_space_membership(
     return _response_data
 
 # Tags: Space memberships
-@mcp.tool()
+@mcp.tool(
+    title="Remove Space Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_space_member(
     space_id: str = Field(..., description="The unique identifier of the space from which the member will be removed."),
     space_membership_id: str = Field(..., description="The unique identifier of the space membership record to delete."),
@@ -4221,7 +4707,13 @@ async def remove_space_member(
     return _response_data
 
 # Tags: Space teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams(space_id: str = Field(..., description="The unique identifier of the space for which to retrieve teams.")) -> dict[str, Any] | ToolResult:
     """Retrieve all teams associated with a specific space. Teams are organizational units within a space that can be assigned permissions and manage content collaboratively."""
 
@@ -4257,7 +4749,13 @@ async def list_teams(space_id: str = Field(..., description="The unique identifi
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="Get Delivery API Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_delivery_api_key(
     space_id: str = Field(..., description="The unique identifier of the space containing the API key."),
     api_key_id: str = Field(..., description="The unique identifier of the Delivery API key to retrieve."),
@@ -4296,7 +4794,13 @@ async def get_delivery_api_key(
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="Update Delivery API Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_delivery_api_key(
     space_id: str = Field(..., description="The unique identifier of the space containing the API key to update."),
     api_key_id: str = Field(..., description="The unique identifier of the Delivery API key to update."),
@@ -4335,7 +4839,13 @@ async def update_delivery_api_key(
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete Delivery API Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_delivery_api_key(
     space_id: str = Field(..., description="The unique identifier of the space containing the API key to delete."),
     api_key_id: str = Field(..., description="The unique identifier of the Delivery API key to delete."),
@@ -4374,7 +4884,13 @@ async def delete_delivery_api_key(
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="List Delivery API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_delivery_api_keys(space_id: str = Field(..., description="The unique identifier of the space containing the API keys to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Delivery API keys configured for a specific space. These keys are used to access published content through the Contentful Delivery API."""
 
@@ -4410,7 +4926,12 @@ async def list_delivery_api_keys(space_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="Create Delivery API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_delivery_api_key(space_id: str = Field(..., description="The unique identifier of the Contentful space where the API key will be created.")) -> dict[str, Any] | ToolResult:
     """Create a new Delivery API key for a Contentful space to enable read-only access to published content via the Delivery API."""
 
@@ -4446,7 +4967,13 @@ async def create_delivery_api_key(space_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="List Preview API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_preview_api_keys(space_id: str = Field(..., description="The unique identifier of the space containing the Preview API keys to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Preview API keys for a specific space. Preview API keys are used to access published content in a read-only manner."""
 
@@ -4482,7 +5009,13 @@ async def list_preview_api_keys(space_id: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: API keys
-@mcp.tool()
+@mcp.tool(
+    title="Get Preview API Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_preview_api_key(
     space_id: str = Field(..., description="The unique identifier of the space containing the Preview API key."),
     preview_api_key_id: str = Field(..., description="The unique identifier of the Preview API key to retrieve."),
@@ -4521,7 +5054,13 @@ async def get_preview_api_key(
     return _response_data
 
 # Tags: Personal Access token
-@mcp.tool()
+@mcp.tool(
+    title="List Access Tokens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_access_tokens() -> dict[str, Any] | ToolResult:
     """Retrieve all personal access tokens for the authenticated user. This allows you to view and manage your API credentials used for programmatic access to Contentful."""
 
@@ -4548,7 +5087,13 @@ async def list_access_tokens() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Personal Access token
-@mcp.tool()
+@mcp.tool(
+    title="Get Access Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_access_token(token_id: str = Field(..., description="The unique identifier of the personal access token to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific personal access token by its ID. This allows you to view details about an individual access token associated with your account."""
 
@@ -4584,7 +5129,13 @@ async def get_access_token(token_id: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Personal Access token
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Access Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_access_token(token_id: str = Field(..., description="The unique identifier of the personal access token to revoke.")) -> dict[str, Any] | ToolResult:
     """Revoke a personal access token to immediately invalidate it and prevent further API access using that token."""
 
@@ -4620,7 +5171,13 @@ async def revoke_access_token(token_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile and details of the currently authenticated user. This operation requires valid authentication credentials."""
 
@@ -4647,7 +5204,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="List Entry Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entry_tasks(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the entry resides."),
@@ -4687,7 +5250,12 @@ async def list_entry_tasks(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Entry Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_entry_task(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the entry."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the entry resides."),
@@ -4727,7 +5295,13 @@ async def create_entry_task(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(
     space_id: str = Field(..., description="The unique identifier of the space containing the task."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space."),
@@ -4768,7 +5342,13 @@ async def get_task(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_task(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry and task to update."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the task exists."),
@@ -4809,7 +5389,13 @@ async def update_task(
     return _response_data
 
 # Tags: Tasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(
     space_id: str = Field(..., description="The unique identifier of the space containing the entry and task to be deleted."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the entry and task reside."),
@@ -4850,7 +5436,13 @@ async def delete_task(
     return _response_data
 
 # Tags: Schedule actions
-@mcp.tool()
+@mcp.tool(
+    title="List Scheduled Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_scheduled_actions(space_id: str = Field(..., description="The unique identifier of the space containing the scheduled actions you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all scheduled actions for a specific space. Scheduled actions allow you to automate content management tasks at predetermined times."""
 
@@ -4886,7 +5478,12 @@ async def list_scheduled_actions(space_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Schedule actions
-@mcp.tool()
+@mcp.tool(
+    title="Create Scheduled Action",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_scheduled_action(space_id: str = Field(..., description="The unique identifier of the space where the scheduled action will be created.")) -> dict[str, Any] | ToolResult:
     """Create a new scheduled action within a space. Scheduled actions allow you to automate content management tasks at specified times."""
 
@@ -4922,7 +5519,13 @@ async def create_scheduled_action(space_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: Schedule actions
-@mcp.tool()
+@mcp.tool(
+    title="Update Scheduled Action",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_scheduled_action(
     space_id: str = Field(..., description="The unique identifier of the space containing the scheduled action to update."),
     scheduled_action_id: str = Field(..., description="The unique identifier of the scheduled action to update."),
@@ -4961,7 +5564,13 @@ async def update_scheduled_action(
     return _response_data
 
 # Tags: Schedule actions
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Scheduled Action",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_scheduled_action(
     space_id: str = Field(..., description="The unique identifier of the space containing the scheduled action to cancel."),
     scheduled_action_id: str = Field(..., description="The unique identifier of the scheduled action to cancel."),
@@ -5000,7 +5609,13 @@ async def cancel_scheduled_action(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Releases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_releases(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment and releases."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space from which to retrieve releases."),
@@ -5039,7 +5654,12 @@ async def list_releases(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment_release(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment where the release will be created."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the release will be created."),
@@ -5078,7 +5698,12 @@ async def create_environment_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Validate Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_release(
     space_id: str = Field(..., description="The unique identifier of the space containing the release."),
     environment_id: str = Field(..., description="The unique identifier of the environment where the release will be validated."),
@@ -5118,7 +5743,13 @@ async def validate_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Actions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_actions(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the release."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the release exists."),
@@ -5158,7 +5789,13 @@ async def list_release_actions(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Get Release Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_action(
     space_id: str = Field(..., description="The unique identifier of the space containing the release and action."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the release action is defined."),
@@ -5199,7 +5836,12 @@ async def get_release_action(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Publish Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_release(
     space_id: str = Field(..., description="The unique identifier of the space containing the release to be published."),
     releases_id: str = Field(..., description="The unique identifier of the release to publish."),
@@ -5239,7 +5881,13 @@ async def publish_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Unpublish Release",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unpublish_release(
     space_id: str = Field(..., description="The unique identifier of the space containing the release."),
     releases_id: str = Field(..., description="The unique identifier of the release to unpublish."),
@@ -5279,7 +5927,13 @@ async def unpublish_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Get Release",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release(
     space_id: str = Field(..., description="The unique identifier of the space containing the release."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the release is located."),
@@ -5319,7 +5973,13 @@ async def get_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Update Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_release(
     space_id: str = Field(..., description="The unique identifier of the Contentful space containing the release to update."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the release exists."),
@@ -5359,7 +6019,13 @@ async def update_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release(
     space_id: str = Field(..., description="The unique identifier of the space containing the release to be deleted."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the release exists."),
@@ -5399,7 +6065,13 @@ async def delete_release(
     return _response_data
 
 # Tags: Bulk Actions
-@mcp.tool()
+@mcp.tool(
+    title="Get Bulk Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bulk_action(
     space_id: str = Field(..., description="The unique identifier of the space containing the bulk action."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the bulk action is located."),
@@ -5439,7 +6111,12 @@ async def get_bulk_action(
     return _response_data
 
 # Tags: Bulk Actions
-@mcp.tool()
+@mcp.tool(
+    title="Publish Scheduled Actions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def publish_scheduled_actions(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment where scheduled actions will be published."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the scheduled bulk actions will be published."),
@@ -5478,7 +6155,13 @@ async def publish_scheduled_actions(
     return _response_data
 
 # Tags: Bulk Actions
-@mcp.tool()
+@mcp.tool(
+    title="Unpublish Scheduled Actions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def unpublish_scheduled_actions(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment where scheduled actions will be unpublished."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where scheduled actions will be unpublished."),
@@ -5517,7 +6200,12 @@ async def unpublish_scheduled_actions(
     return _response_data
 
 # Tags: Bulk Actions
-@mcp.tool()
+@mcp.tool(
+    title="Validate Scheduled Bulk Action",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_scheduled_bulk_action(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment where the bulk action will be validated."),
     environment_id: str = Field(..., description="The unique identifier of the environment where the bulk action will be executed and validated."),
@@ -5556,7 +6244,13 @@ async def validate_scheduled_bulk_action(
     return _response_data
 
 # Tags: App definitions
-@mcp.tool()
+@mcp.tool(
+    title="List App Definitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_definitions(organization_id: str = Field(..., description="The unique identifier of the organization for which to retrieve app definitions.")) -> dict[str, Any] | ToolResult:
     """Retrieve all app definitions for a specific organization. App definitions describe the configuration and capabilities of apps available within the organization."""
 
@@ -5592,7 +6286,13 @@ async def list_app_definitions(organization_id: str = Field(..., description="Th
     return _response_data
 
 # Tags: App definitions
-@mcp.tool()
+@mcp.tool(
+    title="Delete App Definition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_app_definition(
     organization_id: str = Field(..., description="The unique identifier of the organization that contains the app definition to be deleted."),
     app_definition_id: str = Field(..., description="The unique identifier of the app definition to be deleted."),
@@ -5631,7 +6331,13 @@ async def delete_app_definition(
     return _response_data
 
 # Tags: App signing secret
-@mcp.tool()
+@mcp.tool(
+    title="Get App Signing Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_signing_secret(
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
     app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to retrieve the signing secret."),
@@ -5670,7 +6376,13 @@ async def get_app_signing_secret(
     return _response_data
 
 # Tags: App signing secret
-@mcp.tool()
+@mcp.tool(
+    title="Set App Signing Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_app_signing_secret(
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
     app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to set the signing secret."),
@@ -5709,7 +6421,13 @@ async def set_app_signing_secret(
     return _response_data
 
 # Tags: App signing secret
-@mcp.tool()
+@mcp.tool(
+    title="Revoke App Signing Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_app_signing_secret(
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
     app_definition_id: str = Field(..., description="The unique identifier of the app definition whose signing secret should be revoked."),
@@ -5748,7 +6466,13 @@ async def revoke_app_signing_secret(
     return _response_data
 
 # Tags: App keys
-@mcp.tool()
+@mcp.tool(
+    title="List App Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_keys(
     organization_id: str = Field(..., description="The unique identifier of the organization that contains the app definition."),
     app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to retrieve all associated API keys."),
@@ -5787,7 +6511,13 @@ async def list_app_keys(
     return _response_data
 
 # Tags: App keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete App Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_app_key(
     organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
     app_definition_id: str = Field(..., description="The unique identifier of the app definition containing the key to be deleted."),
@@ -5827,7 +6557,13 @@ async def delete_app_key(
     return _response_data
 
 # Tags: App Installations
-@mcp.tool()
+@mcp.tool(
+    title="List App Installations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_app_installations(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment and app installations."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space for which to retrieve app installations."),
@@ -5866,7 +6602,13 @@ async def list_app_installations(
     return _response_data
 
 # Tags: App Installations
-@mcp.tool()
+@mcp.tool(
+    title="Uninstall App",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def uninstall_app(
     space_id: str = Field(..., description="The unique identifier of the space containing the environment where the app is installed."),
     environment_id: str = Field(..., description="The unique identifier of the environment from which the app will be uninstalled."),
@@ -5906,7 +6648,12 @@ async def uninstall_app(
     return _response_data
 
 # Tags: App access token
-@mcp.tool()
+@mcp.tool(
+    title="Issue App Installation Access Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def issue_app_installation_access_token(
     space_id: str = Field(..., description="The unique identifier of the space containing the app installation."),
     environment_id: str = Field(..., description="The unique identifier of the environment within the space where the app is installed."),
@@ -5946,7 +6693,13 @@ async def issue_app_installation_access_token(
     return _response_data
 
 # Tags: Usage
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Usage Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_usage_metrics(
     organization_id: str = Field(..., description="The unique identifier of the organization for which to retrieve usage data."),
     order: str | None = Field(None, description="Field to sort results by, such as usage metrics. Determines the order of returned usage records."),
@@ -5991,7 +6744,13 @@ async def list_organization_usage_metrics(
     return _response_data
 
 # Tags: Usage
-@mcp.tool()
+@mcp.tool(
+    title="List Space Periodic Usages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_space_periodic_usages(
     organization_id: str = Field(..., description="The unique identifier of the organization for which to retrieve space usage data."),
     order: str | None = Field(None, description="Field to sort results by, such as usage metrics. Determines the order in which usage records are returned."),
