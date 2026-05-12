@@ -1,7 +1,7 @@
 """
 Launchdarkly MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:24:31 UTC
+Generated: 2026-05-12 11:44:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1981,7 +1981,7 @@ class CreateBigSegmentImportRequestPath(StrictModel):
     environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The unique identifier for the environment within the project.", json_schema_extra={'format': 'string'})
     segment_key: str = Field(default=..., validation_alias="segmentKey", serialization_alias="segmentKey", description="The unique identifier for the big segment to import data into.", json_schema_extra={'format': 'string'})
 class CreateBigSegmentImportRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="A CSV file containing the segment keys to import. Each row should contain one key entry.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. A CSV file containing the segment keys to import. Each row should contain one key entry.", json_schema_extra={'format': 'byte'})
     mode: str | None = Field(default=None, description="The import strategy: use `merge` to add new entries while preserving existing ones, or `replace` to overwrite all existing entries with the imported data.", json_schema_extra={'format': 'string'})
     wait_on_approvals: bool | None = Field(default=None, validation_alias="waitOnApprovals", serialization_alias="waitOnApprovals", description="If true, the import process will pause and wait for any required approvals before processing the data.")
 class CreateBigSegmentImportRequest(StrictModel):
@@ -2117,7 +2117,7 @@ class GetTeamMaintainersRequest(StrictModel):
 class PostTeamMembersRequestPath(StrictModel):
     team_key: str = Field(default=..., validation_alias="teamKey", serialization_alias="teamKey", description="The unique identifier for the team. Used to route the request to the correct team.", json_schema_extra={'format': 'string'})
 class PostTeamMembersRequestBody(StrictModel):
-    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="A CSV file containing email addresses in the first column (headers optional). LaunchDarkly ignores additional columns. File must not exceed 25MB and must contain at least one valid email address belonging to a LaunchDarkly organization member.", json_schema_extra={'format': 'binary'})
+    file_: str | None = Field(default=None, validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. A CSV file containing email addresses in the first column (headers optional). LaunchDarkly ignores additional columns. File must not exceed 25MB and must contain at least one valid email address belonging to a LaunchDarkly organization member.", json_schema_extra={'format': 'byte'})
 class PostTeamMembersRequest(StrictModel):
     """Add multiple team members to an existing team by uploading a CSV file containing email addresses. The operation validates all entries before adding any members—a single invalid entry prevents all additions."""
     path: PostTeamMembersRequestPath

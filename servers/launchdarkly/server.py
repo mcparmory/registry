@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 - Contact: LaunchDarkly Technical Support Team <support@launchdarkly.com> (https://support.launchdarkly.com)
 
-Generated: 2026-05-05 15:24:31 UTC
+Generated: 2026-05-12 11:44:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.launchdarkly.com")
 SERVER_NAME = "LaunchDarkly"
-SERVER_VERSION = "1.0.3"
+SERVER_VERSION = "1.0.4"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1011,6 +1042,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1035,6 +1068,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1242,7 +1277,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("LaunchDarkly", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Relay Proxy configurations
-@mcp.tool()
+@mcp.tool(
+    title="List Relay Proxy Configurations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_relay_proxy_configs() -> dict[str, Any] | ToolResult:
     """Retrieve all Relay Proxy configurations currently configured in your account. Use this to view existing proxy setups and their settings."""
 
@@ -1269,7 +1310,12 @@ async def list_relay_proxy_configs() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Relay Proxy configurations
-@mcp.tool()
+@mcp.tool(
+    title="Create Relay Proxy Configuration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_relay_proxy_config(
     name: str = Field(..., description="A human-readable name for this Relay Proxy configuration. Used to identify and manage the configuration."),
     policy: list[_models.Statement] = Field(..., description="An inline policy array that defines which environments and projects this Relay Proxy should include or exclude. Policy items are evaluated in order to determine scope. Refer to the inline policy documentation for syntax and structure."),
@@ -1304,13 +1350,20 @@ async def create_relay_proxy_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Relay Proxy configurations
-@mcp.tool()
+@mcp.tool(
+    title="Get Relay Proxy Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_relay_proxy_config(id_: str = Field(..., alias="id", description="The unique identifier of the relay auto config to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single Relay Proxy auto configuration by its unique identifier. Use this to fetch detailed settings for a specific relay proxy configuration."""
 
@@ -1346,7 +1399,13 @@ async def get_relay_proxy_config(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: Relay Proxy configurations
-@mcp.tool()
+@mcp.tool(
+    title="Update Relay Auto Config",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_relay_auto_config(
     id_: str = Field(..., alias="id", description="The unique identifier of the Relay Proxy configuration to update."),
     patch: list[_models.PatchOperation] = Field(..., description="An array of JSON patch operations (RFC 6902) or JSON merge patch operations (RFC 7386) describing the changes to apply to the configuration."),
@@ -1382,13 +1441,20 @@ async def update_relay_auto_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Relay Proxy configurations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Relay Auto Config",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_relay_auto_config(id_: str = Field(..., alias="id", description="The unique identifier of the relay auto config to delete. This is a string value that uniquely identifies the configuration within your account.")) -> dict[str, Any] | ToolResult:
     """Delete a Relay Proxy auto-configuration by its unique identifier. This operation permanently removes the specified relay auto config from your account."""
 
@@ -1424,7 +1490,13 @@ async def delete_relay_auto_config(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Relay Proxy configurations
-@mcp.tool()
+@mcp.tool(
+    title="Reset Relay Auto Config",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_relay_auto_config(
     id_: str = Field(..., alias="id", description="The unique identifier of the Relay Proxy configuration to reset."),
     expiry: str | None = Field(None, description="Optional Unix epoch time in milliseconds when the old configuration key should expire. If not provided, the old key expires immediately upon reset."),
@@ -1468,7 +1540,13 @@ async def reset_relay_auto_config(
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Applications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_applications() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all applications. Optionally expand the response to include additional details such as flags evaluated by each application."""
 
@@ -1495,7 +1573,13 @@ async def list_applications() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Application",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_application(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application. This is a string value that uniquely identifies the application within your LaunchDarkly workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieve a LaunchDarkly application by its unique application key. Optionally expand the response to include evaluated flags and other application details."""
 
@@ -1531,7 +1615,13 @@ async def get_application(application_key: str = Field(..., alias="applicationKe
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Application",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_application(
     application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include 'op' (the operation type), 'path' (the field to modify), and 'value' (the new value for replace operations). Supported paths include '/description' and '/kind'."),
@@ -1568,13 +1658,20 @@ async def update_application(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Application",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_application(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application to delete. This is a string value that uniquely identifies the application within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an application by its unique key. This action cannot be undone and will remove all associated data."""
 
@@ -1610,7 +1707,13 @@ async def delete_application(application_key: str = Field(..., alias="applicatio
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Application Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_application_versions(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application. This string key is used to look up and retrieve all versions belonging to that specific application.")) -> dict[str, Any] | ToolResult:
     """Retrieve all versions for a specific application identified by its application key. Returns a list of version records associated with the application in the account."""
 
@@ -1646,7 +1749,13 @@ async def list_application_versions(application_key: str = Field(..., alias="app
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Application Version",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_application_version(
     application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application being modified."),
     version_key: str = Field(..., alias="versionKey", description="The unique identifier for the specific application version to update."),
@@ -1684,13 +1793,20 @@ async def update_application_version(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Applications (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Application Version",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_application_version(
     application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application containing the version to delete."),
     version_key: str = Field(..., alias="versionKey", description="The unique identifier for the specific application version to delete."),
@@ -1729,7 +1845,13 @@ async def delete_application_version(
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="List Approval Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_approval_requests() -> dict[str, Any] | ToolResult:
     """Retrieve all approval requests with support for filtering by assignee, requestor, resource, status, and review status. Optionally expand the response to include related flag, project, and environment details."""
 
@@ -1756,7 +1878,12 @@ async def list_approval_requests() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Create Approval Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_approval_request(
     resource_id: str = Field(..., alias="resourceId", description="The resource identifier in the format proj/projKey:env/envKey:flag/flagKey (or equivalent for AI Configs and segments). Specifies which resource the approval request applies to."),
     description: str = Field(..., description="A brief summary of the requested changes. This helps reviewers understand the intent of the approval request."),
@@ -1793,13 +1920,20 @@ async def create_approval_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Get Approval Request",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific approval request by its ID. Optionally expand the response to include related resources such as environments, flags, projects, or resource details."""
 
@@ -1835,7 +1969,12 @@ async def get_approval_request(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Approvals (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Approval Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_approval_request(
     id_: str = Field(..., alias="id", description="The unique identifier of the approval request to update."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions to apply. Each instruction specifies an operation (addReviewers or updateDescription) with its required parameters. At least one instruction must be provided."),
@@ -1871,13 +2010,20 @@ async def update_approval_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Delete Approval Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an approval request by its ID. This action cannot be undone."""
 
@@ -1913,7 +2059,13 @@ async def delete_approval_request(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Apply Approval Request",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def apply_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to apply. This is a string value that identifies which approval request should be executed.")) -> dict[str, Any] | ToolResult:
     """Execute an approval request that has been approved. This operation finalizes the approval workflow for any approval request type."""
 
@@ -1949,7 +2101,12 @@ async def apply_approval_request(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Submit Approval Request Review",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_approval_request_review(
     id_: str = Field(..., alias="id", description="The unique identifier of the approval request being reviewed."),
     kind: Literal["approve", "comment", "decline"] | None = Field(None, description="The type of review action to perform: 'approve' to accept the changes, 'decline' to reject them, or 'comment' to provide feedback without making a final decision."),
@@ -1985,13 +2142,20 @@ async def submit_approval_request_review(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Audit log
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Log Entries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_log_entries(
     q: str | None = Field(None, description="Full or partial resource name to search for in audit logs. Supports text-based matching across resource identifiers."),
     spec: str | None = Field(None, description="Resource specifier to filter results by specific resources or resource collections. Use LaunchDarkly resource specifier syntax to target particular resource types or instances."),
@@ -2032,7 +2196,12 @@ async def list_audit_log_entries(
     return _response_data
 
 # Tags: Audit log
-@mcp.tool()
+@mcp.tool(
+    title="Search Audit Log Entries",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_audit_log_entries(
     q: str | None = Field(None, description="Full-text search query to filter audit log entries by resource name or partial matches. Searches across resource names and related metadata."),
     body: list[_models.StatementPost] | None = Field(None, description="Array of resource specifiers to restrict results to specific resources or resource collections. Use LaunchDarkly resource specifier syntax to target particular entities (e.g., projects, environments, flags). Order is not significant."),
@@ -2071,13 +2240,20 @@ async def search_audit_log_entries(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Audit log
-@mcp.tool()
+@mcp.tool(
+    title="Get Audit Log Entry",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_audit_log_entry(id_: str = Field(..., alias="id", description="The unique identifier of the audit log entry to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a detailed audit log entry with full change history. Returns comprehensive metadata including the previous and current versions of the modified entity, plus the JSON patch or semantic patch that was applied."""
 
@@ -2113,7 +2289,13 @@ async def get_audit_log_entry(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Other
-@mcp.tool()
+@mcp.tool(
+    title="Get Caller Identity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_caller_identity() -> dict[str, Any] | ToolResult:
     """Retrieve information about the identity used to authenticate the current API request, including details about the session cookie, API token, SDK keys, or other credentials."""
 
@@ -2140,7 +2322,13 @@ async def get_caller_identity() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="List Extinctions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_extinctions(
     repo_name: str | None = Field(None, alias="repoName", description="Filter results to extinctions in a specific repository by name."),
     branch_name: str | None = Field(None, alias="branchName", description="Filter results to extinctions in a specific branch. If not specified, only the default branch is queried."),
@@ -2187,7 +2375,13 @@ async def list_extinctions(
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories(
     with_branches: str | None = Field(None, alias="withBranches", description="Include branch metadata in the response. Set to any value to enable this option."),
     with_references_for_default_branch: str | None = Field(None, alias="withReferencesForDefaultBranch", description="Include branch metadata and code references for the default git branch in the response. Set to any value to enable this option."),
@@ -2229,7 +2423,12 @@ async def list_repositories(
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Create Repository",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_repository(
     name: str = Field(..., description="The name of the repository (e.g., 'LaunchDarkly-Docs'). Used as the unique identifier for this repository."),
     source_link: str | None = Field(None, alias="sourceLink", description="A URL where the repository can be accessed (e.g., a GitHub repository URL). Provides a direct link to the repository source."),
@@ -2267,13 +2466,20 @@ async def create_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository(repo: str = Field(..., description="The name of the repository to retrieve. This is a string identifier that uniquely identifies the repository within the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single repository by its name. Use this to fetch detailed information about a specific code repository tracked in the system."""
 
@@ -2309,7 +2515,13 @@ async def get_repository(repo: str = Field(..., description="The name of the rep
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Update Repository",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_repository(
     repo: str = Field(..., description="The name of the repository to update. This identifier is used to locate the specific repository in the system."),
     body: list[_models.PatchOperation] = Field(..., description="An array of patch operations describing the changes to apply. Each operation should specify an action (op), a JSON pointer path (path), and the new value (value) where applicable. Operations are processed in the order provided."),
@@ -2346,13 +2558,20 @@ async def update_repository(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Delete Repository",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_repository(repo: str = Field(..., description="The name of the repository to delete. Must be a valid string identifier.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a repository and all associated code references. This action cannot be undone."""
 
@@ -2388,7 +2607,13 @@ async def delete_repository(repo: str = Field(..., description="The name of the 
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Delete Branches",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_branches(
     repo: str = Field(..., description="The name of the repository from which branches will be deleted."),
     body: list[str] = Field(..., description="An array of branch names to delete. Each item should be a string representing a branch name. Order is not significant."),
@@ -2425,13 +2650,20 @@ async def delete_branches(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="List Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_branches(repo: str = Field(..., description="The name of the repository to list branches from. This is a required identifier that specifies which repository's branches to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all branches in the specified repository. Use this to discover available branches for code references and analysis."""
 
@@ -2467,7 +2699,13 @@ async def list_branches(repo: str = Field(..., description="The name of the repo
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Get Branch",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_branch(
     repo: str = Field(..., description="The name of the repository containing the branch."),
     branch: str = Field(..., description="The name of the branch to retrieve, URL-encoded to handle special characters in branch names."),
@@ -2510,7 +2748,13 @@ async def get_branch(
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Upsert Branch",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upsert_branch(
     repo: str = Field(..., description="The name of the repository where the branch exists or will be created."),
     branch: str = Field(..., description="The branch name as it appears in the URL, URL-encoded if it contains special characters."),
@@ -2552,13 +2796,20 @@ async def upsert_branch(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Create Extinction Event",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_extinction_event(
     repo: str = Field(..., description="The repository name where the extinction event will be created."),
     branch: str = Field(..., description="The branch name, URL-encoded, where the extinction event applies."),
@@ -2596,13 +2847,20 @@ async def create_extinction_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="List Code Reference Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_code_reference_statistics() -> dict[str, Any] | ToolResult:
     """Retrieve code reference statistics and repository links for all projects that have code references configured."""
 
@@ -2629,7 +2887,13 @@ async def list_code_reference_statistics() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Code references
-@mcp.tool()
+@mcp.tool(
+    title="Get Code References Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_code_references_statistics(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the statistics query to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve code reference statistics for flags in a project, showing the number of references to flag keys across repositories in the default branch. Optionally filter results to a single flag using the flagKey query parameter."""
 
@@ -2665,7 +2929,13 @@ async def get_code_references_statistics(project_key: str = Field(..., alias="pr
     return _response_data
 
 # Tags: Data Export destinations
-@mcp.tool()
+@mcp.tool(
+    title="List Destinations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_destinations() -> dict[str, Any] | ToolResult:
     """Retrieve all Data Export destinations configured across your projects and environments. This provides a comprehensive view of where your data is being exported."""
 
@@ -2692,7 +2962,12 @@ async def list_destinations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Data Export destinations
-@mcp.tool()
+@mcp.tool(
+    title="Generate Warehouse Destination Key Pair",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_warehouse_destination_key_pair(
     proj_key: str = Field(..., alias="projKey", description="The unique identifier for the project containing the destination configuration."),
     env_key: str = Field(..., alias="envKey", description="The unique identifier for the environment within the project where the warehouse destination is configured."),
@@ -2731,7 +3006,12 @@ async def generate_warehouse_destination_key_pair(
     return _response_data
 
 # Tags: Data Export destinations
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Export Destination",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_export_destination(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the LaunchDarkly project where the destination will be created."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that uniquely identifies the environment within the project where the destination will be created."),
@@ -2771,13 +3051,20 @@ async def create_data_export_destination(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Data Export destinations
-@mcp.tool()
+@mcp.tool(
+    title="Get Destination",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_destination(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the destination."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project contains the destination."),
@@ -2817,7 +3104,13 @@ async def get_destination(
     return _response_data
 
 # Tags: Data Export destinations
-@mcp.tool()
+@mcp.tool(
+    title="Update Destination",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_destination(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the destination."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the destination is configured."),
@@ -2856,13 +3149,20 @@ async def update_destination(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Data Export destinations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Destination",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_destination(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the destination to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the destination exists."),
@@ -2902,7 +3202,13 @@ async def delete_destination(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag Status Across Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_status_across_environments(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag. This is a required string key that identifies which project's flags to query."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the specific feature flag whose status you want to retrieve. This is a required string key that identifies the flag within the project."),
@@ -2945,7 +3251,13 @@ async def get_feature_flag_status_across_environments(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="List Feature Flag Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feature_flag_statuses(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flags."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
@@ -2984,7 +3296,13 @@ async def list_feature_flag_statuses(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag_status(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which to check the feature flag status."),
@@ -3024,7 +3342,13 @@ async def get_feature_flag_status(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="List Feature Flags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_feature_flags(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flags."),
     env: str | None = Field(None, description="Filter flag configurations to a specific environment (e.g., 'production', 'staging'). Required when using environment-specific filters like `evaluated` or `targetingModifiedDate` sorting."),
@@ -3067,7 +3391,12 @@ async def list_feature_flags(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Create Feature Flag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the project where the feature flag will be created."),
     name: str = Field(..., description="A human-readable name for the feature flag to display in the UI."),
@@ -3121,13 +3450,20 @@ async def create_feature_flag(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Feature Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag to retrieve."),
@@ -3170,7 +3506,13 @@ async def get_feature_flag(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Update Feature Flag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key used to identify the flag in your application code."),
@@ -3212,13 +3554,20 @@ async def update_feature_flag(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Feature Flag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique key that identifies the feature flag in your codebase. This is the identifier you reference when evaluating the flag in your application."),
@@ -3257,7 +3606,12 @@ async def delete_feature_flag(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Copy Feature Flag Between Environments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def copy_feature_flag_between_environments(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key that uniquely identifies the flag within the project."),
@@ -3299,13 +3653,20 @@ async def copy_feature_flag_between_environments(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="List Expiring Context Targets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_expiring_context_targets(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the feature flag is configured."),
@@ -3345,7 +3706,12 @@ async def list_expiring_context_targets(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Update Expiring Context Targets",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_expiring_context_targets(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag. A string identifier for the LaunchDarkly project."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the feature flag targeting applies. A string identifier for the specific environment."),
@@ -3383,13 +3749,20 @@ async def update_expiring_context_targets(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="List Expiring User Targets for Feature Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_expiring_user_targets_for_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that specifies which environment's feature flag targeting data to retrieve."),
@@ -3429,7 +3802,13 @@ async def list_expiring_user_targets_for_feature_flag(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Schedule User Target Removal on Flag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def schedule_user_target_removal_on_flag(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the feature flag is configured."),
@@ -3467,13 +3846,20 @@ async def schedule_user_target_removal_on_flag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Flag triggers
-@mcp.tool()
+@mcp.tool(
+    title="List Flag Triggers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flag_triggers(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the flag triggers are configured."),
@@ -3513,7 +3899,12 @@ async def list_flag_triggers(
     return _response_data
 
 # Tags: Flag triggers
-@mcp.tool()
+@mcp.tool(
+    title="Create Flag Trigger",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_flag_trigger(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier of the environment where the trigger will be active."),
@@ -3552,13 +3943,20 @@ async def create_flag_trigger(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Flag triggers
-@mcp.tool()
+@mcp.tool(
+    title="Get Trigger Workflow by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_trigger_workflow_by_id(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag and trigger."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that contains the trigger."),
@@ -3599,7 +3997,12 @@ async def get_trigger_workflow_by_id(
     return _response_data
 
 # Tags: Flag triggers
-@mcp.tool()
+@mcp.tool(
+    title="Update Flag Trigger",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_flag_trigger(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the trigger is configured."),
@@ -3638,13 +4041,20 @@ async def update_flag_trigger(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Flag triggers
-@mcp.tool()
+@mcp.tool(
+    title="Delete Trigger for Flag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_trigger_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the flag trigger is configured."),
@@ -3685,7 +4095,13 @@ async def delete_trigger_for_flag(
     return _response_data
 
 # Tags: Releases (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Release by Flag Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_by_flag_key(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flag."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag within the project."),
@@ -3724,7 +4140,12 @@ async def get_release_by_flag_key(
     return _response_data
 
 # Tags: Releases (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Release Phase Status by Flag Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_release_phase_status_by_flag_key(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the flag. A string identifier for the project."),
     flag_key: str = Field(..., alias="flagKey", description="The flag key identifying which flag's release to update. A string identifier for the flag."),
@@ -3762,13 +4183,20 @@ async def update_release_phase_status_by_flag_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Releases (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release for Flag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flag. Used to scope the operation to the correct project context."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag from which the release will be deleted. Must correspond to an existing flag within the specified project."),
@@ -3807,7 +4235,13 @@ async def delete_release_for_flag(
     return _response_data
 
 # Tags: Integration audit log subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Subscriptions by Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_subscriptions_by_integration(integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration whose audit log subscriptions you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all audit log subscriptions associated with a specific integration. Use this to view which audit events are being monitored for a given integration."""
 
@@ -3843,7 +4277,13 @@ async def list_audit_subscriptions_by_integration(integration_key: str = Field(.
     return _response_data
 
 # Tags: Integration audit log subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Get Audit Log Subscription",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_audit_log_subscription(
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration. This key determines which integration context the subscription belongs to."),
     id_: str = Field(..., alias="id", description="The unique identifier of the audit log subscription to retrieve."),
@@ -3882,7 +4322,12 @@ async def get_audit_log_subscription(
     return _response_data
 
 # Tags: Integration audit log subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Update Audit Log Subscription",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_audit_log_subscription(
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration containing the audit log subscription."),
     id_: str = Field(..., alias="id", description="The unique identifier of the audit log subscription to update."),
@@ -3920,13 +4365,20 @@ async def update_audit_log_subscription(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Integration audit log subscriptions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Audit Log Subscription",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_audit_log_subscription(
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration from which the subscription will be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the audit log subscription to delete."),
@@ -3965,7 +4417,13 @@ async def delete_audit_log_subscription(
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="List Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_members() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of account members with support for filtering by query, role, ID, email, team membership, and activity status. Optionally expand the response to include custom roles and role attributes."""
 
@@ -3992,7 +4450,12 @@ async def list_members() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="Invite Members",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invite_members(body: list[_models.NewMemberForm] = Field(..., description="Array of member objects to invite. Each object must include an email field and either a role field (base role name) or customRoles field (custom or preset role key). Some roles may require roleAttributes for scope specification. Maximum 50 members per request. The request fails entirely if any member data is invalid or if email addresses conflict with existing members in this account or others, or if duplicates exist within the request itself.")) -> dict[str, Any] | ToolResult:
     """Invite one or more new members to join an account via email. Each member receives an invitation and must have a valid email address with either a base role (reader, writer, admin, owner/admin, no_access) or a custom role key. Up to 50 members can be invited per request; the entire request fails if any member's data is invalid or conflicts with existing members."""
 
@@ -4025,13 +4488,20 @@ async def invite_members(body: list[_models.NewMemberForm] = Field(..., descript
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="Update Members in Bulk",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_members_bulk(instructions: list[_models.Instruction] = Field(..., description="Array of semantic patch instructions defining the bulk update operations. Each instruction object must include a `kind` field specifying the operation type (replaceMembersRoles, replaceAllMembersRoles, replaceMembersCustomRoles, replaceAllMembersCustomRoles, or replaceMembersRoleAttributes) along with required parameters for that operation type. Instructions are processed sequentially.")) -> dict[str, Any] | ToolResult:
     """Perform bulk updates to member roles and custom roles using semantic patch instructions. Supports targeted updates to specific members or filtered bulk updates across all members (Enterprise feature)."""
 
@@ -4063,13 +4533,20 @@ async def update_members_bulk(instructions: list[_models.Instruction] = Field(..
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="Get Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_member(id_: str = Field(..., alias="id", description="The member ID as a string. Use the reserved value `me` to retrieve the caller's own member information instead of specifying a numeric ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single account member by ID. Use the reserved value `me` to get the caller's own member information. Optionally expand the response to include custom role details and role attributes."""
 
@@ -4105,7 +4582,13 @@ async def get_member(id_: str = Field(..., alias="id", description="The member I
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="Update Member",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_member(
     id_: str = Field(..., alias="id", description="The unique identifier of the member to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch array describing the changes to apply. Each patch object must contain an operation (add, remove, replace, etc.), a path (e.g., '/role' or '/customRoles/0'), and a value. Use array index notation to modify role arrays: use '/0' to prepend, '/-' to append, or a specific index to modify an existing position."),
@@ -4142,13 +4625,20 @@ async def update_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="Delete Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_member(id_: str = Field(..., alias="id", description="The unique identifier of the member to delete")) -> dict[str, Any] | ToolResult:
     """Remove an account member by their ID. This operation will fail if SCIM provisioning is enabled for the account."""
 
@@ -4184,7 +4674,12 @@ async def delete_member(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Account members
-@mcp.tool()
+@mcp.tool(
+    title="Add Member to Teams",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_member_to_teams(
     id_: str = Field(..., alias="id", description="The unique identifier of the member to add to teams."),
     team_keys: list[str] = Field(..., alias="teamKeys", description="An array of team keys identifying which teams the member should be added to. Provide one or more team keys as strings in the array."),
@@ -4220,13 +4715,20 @@ async def add_member_to_teams(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="List Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metrics(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the metrics query to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all metrics for a specified project with support for filtering by various criteria (data sources, event types, tags, usage context) and optional expansion of related experiment counts."""
 
@@ -4262,7 +4764,12 @@ async def list_metrics(project_key: str = Field(..., alias="projectKey", descrip
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Create Metric",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project where the metric will be created."),
     key: str = Field(..., description="A unique identifier for the metric, used as a reference key in your codebase (e.g., 'metric-key-123abc')."),
@@ -4324,13 +4831,20 @@ async def create_metric(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the metric."),
     metric_key: str = Field(..., alias="metricKey", description="The unique identifier for the metric to retrieve."),
@@ -4373,7 +4887,13 @@ async def get_metric(
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Update Metric",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric."),
     metric_key: str = Field(..., alias="metricKey", description="The unique identifier for the metric to update."),
@@ -4411,13 +4931,20 @@ async def update_metric(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metrics
-@mcp.tool()
+@mcp.tool(
+    title="Delete Metric",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric to delete."),
     metric_key: str = Field(..., alias="metricKey", description="The unique identifier for the metric to delete."),
@@ -4456,7 +4983,13 @@ async def delete_metric(
     return _response_data
 
 # Tags: OAuth2 Clients
-@mcp.tool()
+@mcp.tool(
+    title="List OAuth Clients",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_oauth_clients() -> dict[str, Any] | ToolResult:
     """Retrieve all OAuth 2.0 clients registered with your account. Use this to view and manage your application integrations."""
 
@@ -4483,7 +5016,13 @@ async def list_oauth_clients() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: OAuth2 Clients
-@mcp.tool()
+@mcp.tool(
+    title="Get OAuth Client by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_oauth_client_by_id(client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a registered OAuth 2.0 client by its unique client ID. Use this to fetch detailed configuration and metadata for a specific OAuth client application."""
 
@@ -4519,7 +5058,13 @@ async def get_oauth_client_by_id(client_id: str = Field(..., alias="clientId", d
     return _response_data
 
 # Tags: OAuth2 Clients
-@mcp.tool()
+@mcp.tool(
+    title="Update OAuth Client",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_oauth_client(
     client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch array describing the changes to apply. Each operation must specify an operation type (op), a JSON pointer path, and a value. Supported paths are /name, /description, and /redirectUri."),
@@ -4556,13 +5101,20 @@ async def update_oauth_client(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: OAuth2 Clients
-@mcp.tool()
+@mcp.tool(
+    title="Delete OAuth Client",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_oauth_client(client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an OAuth 2.0 client application by its unique identifier. This action cannot be undone and will invalidate all tokens issued to this client."""
 
@@ -4598,7 +5150,13 @@ async def delete_oauth_client(client_id: str = Field(..., alias="clientId", desc
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of projects with support for filtering by name, tags, or keys, and sorting by name or creation date. Results are limited to 20 projects per page by default; use pagination links to navigate through additional pages."""
 
@@ -4625,7 +5183,12 @@ async def list_projects() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     name: str = Field(..., description="A human-friendly display name for the project (e.g., 'My Project')."),
     key: str = Field(..., description="A unique identifier for the project used in code references (e.g., 'project-key-123abc'). Must be unique within your account."),
@@ -4668,13 +5231,20 @@ async def create_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to specify which project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single project by its key. Optionally expand the response to include related resources such as environments."""
 
@@ -4710,7 +5280,13 @@ async def get_project(project_key: str = Field(..., alias="projectKey", descript
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must specify an operation type (add, remove, replace, etc.), a JSON Pointer path to the target field, and a value where applicable. For array fields, use numeric indices or `/-` to append to the end."),
@@ -4747,13 +5323,20 @@ async def update_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to delete. This is a string value that uniquely identifies the project within your account.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a project and all its associated environments and feature flags. This operation cannot be undone and will fail if the project is the last one in the account."""
 
@@ -4789,7 +5372,13 @@ async def delete_project(project_key: str = Field(..., alias="projectKey", descr
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="List Context Kinds by Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_context_kinds_by_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. This is a string-based key that distinguishes the project within your LaunchDarkly workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieve all context kinds configured for a specific project. Context kinds define the types of contextual information that can be associated with feature flags and experiments in the project."""
 
@@ -4825,7 +5414,13 @@ async def list_context_kinds_by_project(project_key: str = Field(..., alias="pro
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Update Context Kind",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_context_kind(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context kind."),
     key: str = Field(..., description="The unique identifier for the context kind to create or update."),
@@ -4863,13 +5458,20 @@ async def update_context_kind(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="List Environments by Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments_by_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the environment list to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of environments for a specified project, with support for filtering by name/key and tags, and sorting by creation date, criticality, or name."""
 
@@ -4905,7 +5507,12 @@ async def list_environments_by_project(project_key: str = Field(..., alias="proj
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project where the environment will be created."),
     name: str = Field(..., description="A human-readable name for the environment (e.g., 'Production', 'Staging', 'Development')."),
@@ -4952,13 +5559,20 @@ async def create_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment to retrieve."),
@@ -4997,7 +5611,13 @@ async def get_environment(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the environment to update."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project to update."),
@@ -5035,13 +5655,20 @@ async def update_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment to delete."),
@@ -5080,7 +5707,13 @@ async def delete_environment(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Reset Environment SDK Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_environment_sdk_key(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment whose SDK key should be reset."),
@@ -5125,7 +5758,13 @@ async def reset_environment_sdk_key(
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="List Context Attribute Names",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_context_attribute_names(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
@@ -5164,7 +5803,13 @@ async def list_context_attribute_names(
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Get Context Attribute Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_context_attribute_values(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context attribute."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the context attribute values are stored."),
@@ -5204,7 +5849,12 @@ async def get_context_attribute_values(
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Search Context Instances",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_context_instances(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the context instances to search."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project to search."),
@@ -5248,13 +5898,20 @@ async def search_context_instances(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Get Context Instance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_context_instance(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context instance."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
@@ -5298,7 +5955,13 @@ async def get_context_instance(
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Context Instance",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_context_instance(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context instance to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the context instance is located."),
@@ -5338,7 +6001,12 @@ async def delete_context_instance(
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Search Contexts",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_contexts(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the environment to search."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies the specific environment within the project where contexts will be searched."),
@@ -5381,13 +6049,20 @@ async def search_contexts(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Context settings
-@mcp.tool()
+@mcp.tool(
+    title="Update Flag Setting for Context",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_flag_setting_for_context(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the flag setting applies."),
@@ -5427,13 +6102,20 @@ async def update_flag_setting_for_context(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Contexts
-@mcp.tool()
+@mcp.tool(
+    title="Get Context",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_context(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
@@ -5478,7 +6160,13 @@ async def get_context(
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="List Experiments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_experiments(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the experiments."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies the specific environment within the project where experiments are located."),
@@ -5521,7 +6209,12 @@ async def list_experiments(
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="Create Experiment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_experiment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project where the experiment will be created."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the experiment will run."),
@@ -5582,13 +6275,20 @@ async def create_experiment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="Get Experiment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_experiment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the experiment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the experiment is running."),
@@ -5628,7 +6328,13 @@ async def get_experiment(
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="Update Experiment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experiment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the experiment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the experiment exists."),
@@ -5666,13 +6372,20 @@ async def update_experiment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Follow flags
-@mcp.tool()
+@mcp.tool(
+    title="List Flag Followers by Project Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flag_followers_by_project_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flags and environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where you want to retrieve flag followers."),
@@ -5711,7 +6424,13 @@ async def list_flag_followers_by_project_environment(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Reset Mobile Key for Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_mobile_key_for_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment whose mobile SDK key should be reset."),
@@ -5750,7 +6469,12 @@ async def reset_mobile_key_for_environment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Evaluate Context Instance Segment Memberships",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def evaluate_context_instance_segment_memberships(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project. This is a string identifier used to scope the operation within your workspace."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies the specific environment within the project. This determines which segment definitions and rules are evaluated."),
@@ -5788,13 +6512,20 @@ async def evaluate_context_instance_segment_memberships(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="Get Experimentation Settings",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_experimentation_settings(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose experimentation settings you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current experimentation settings configured for a specific project. This includes all active experimentation policies and configurations."""
 
@@ -5830,7 +6561,13 @@ async def get_experimentation_settings(project_key: str = Field(..., alias="proj
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="Update Experimentation Settings",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_experimentation_settings(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose experimentation settings should be updated."),
     randomization_units: list[_models.RandomizationUnitInput] = Field(..., alias="randomizationUnits", description="An array of randomization units that are permitted for experiments in this project. Each unit defines how experiment subjects are randomly assigned to variations."),
@@ -5866,13 +6603,20 @@ async def update_experimentation_settings(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Experiments
-@mcp.tool()
+@mcp.tool(
+    title="List Experiments in Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_experiments_project(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project from which to retrieve experiments."),
     lifecycle_state: str | None = Field(None, alias="lifecycleState", description="Filter experiments by lifecycle state using a comma-separated list. Valid values are `active`, `archived`, or both. Defaults to `active` experiments only if not specified."),
@@ -5914,7 +6658,13 @@ async def list_experiments_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Flag Defaults for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flag_defaults_for_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the flag defaults to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve the default flag settings configured for a specific project. These defaults apply to feature flags within the project unless overridden at a more granular level."""
 
@@ -5950,7 +6700,13 @@ async def get_flag_defaults_for_project(project_key: str = Field(..., alias="pro
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Flag Defaults for Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_flag_defaults_for_project(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project where flag defaults will be applied."),
     tags: list[str] = Field(..., description="A list of default tag labels to automatically assign to each new flag created in this project. Tags help organize and categorize flags."),
@@ -5997,13 +6753,20 @@ async def update_flag_defaults_for_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Flag Defaults for Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_flag_defaults_for_project_partial(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the project containing the flag defaults to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of patch operations following RFC 6902 (JSON Patch) or RFC 7386 (JSON Merge Patch) format, specifying the changes to apply to the flag defaults."),
@@ -6040,13 +6803,20 @@ async def update_flag_defaults_for_project_partial(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="List Approval Requests for Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_approval_requests_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag to retrieve approval requests for."),
@@ -6086,7 +6856,12 @@ async def list_approval_requests_for_flag(
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Create Approval Request for Feature Flag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_approval_request_for_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that requires approval for changes."),
@@ -6130,13 +6905,19 @@ async def create_approval_request_for_feature_flag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Create Flag Copy Approval Request",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_flag_copy_approval_request(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose configuration will be copied."),
@@ -6177,13 +6958,20 @@ async def create_flag_copy_approval_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Get Approval Request for Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_approval_request_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with this approval request."),
@@ -6224,7 +7012,13 @@ async def get_approval_request_for_flag(
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Delete Approval Request for Flag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_approval_request_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with the approval request."),
@@ -6265,7 +7059,12 @@ async def delete_approval_request_for_flag(
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Apply Approval Request for Flag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def apply_approval_request_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with the approval request."),
@@ -6306,7 +7105,12 @@ async def apply_approval_request_for_flag(
     return _response_data
 
 # Tags: Approvals
-@mcp.tool()
+@mcp.tool(
+    title="Review Approval Request for Flag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def review_approval_request_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag being reviewed."),
@@ -6345,13 +7149,20 @@ async def review_approval_request_for_flag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Follow flags
-@mcp.tool()
+@mcp.tool(
+    title="List Flag Followers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flag_followers(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose followers you want to retrieve."),
@@ -6391,7 +7202,13 @@ async def list_flag_followers(
     return _response_data
 
 # Tags: Follow flags
-@mcp.tool()
+@mcp.tool(
+    title="Add Flag Follower",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_flag_follower(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag to follow."),
@@ -6432,7 +7249,13 @@ async def add_flag_follower(
     return _response_data
 
 # Tags: Follow flags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Flag Follower",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_flag_follower(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag from which to remove the follower."),
@@ -6473,7 +7296,13 @@ async def remove_flag_follower(
     return _response_data
 
 # Tags: Scheduled changes
-@mcp.tool()
+@mcp.tool(
+    title="List Scheduled Changes for Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_scheduled_changes_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose scheduled changes you want to retrieve."),
@@ -6513,7 +7342,12 @@ async def list_scheduled_changes_for_flag(
     return _response_data
 
 # Tags: Scheduled changes
-@mcp.tool()
+@mcp.tool(
+    title="Create Scheduled Changes for Flag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_scheduled_changes_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key to schedule changes for."),
@@ -6558,13 +7392,20 @@ async def create_scheduled_changes_for_flag(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Scheduled changes
-@mcp.tool()
+@mcp.tool(
+    title="Get Scheduled Change for Feature Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_scheduled_change_for_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with the scheduled change."),
@@ -6605,7 +7446,12 @@ async def get_scheduled_change_for_feature_flag(
     return _response_data
 
 # Tags: Scheduled changes
-@mcp.tool()
+@mcp.tool(
+    title="Update Scheduled Flag Change",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_scheduled_flag_change(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key for which the scheduled change applies."),
@@ -6648,13 +7494,20 @@ async def update_scheduled_flag_change(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Scheduled changes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Scheduled Flag Changes",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_scheduled_flag_changes(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the feature flag. Used to scope the operation to a specific project."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key identifying which flag's scheduled changes should be deleted."),
@@ -6695,7 +7548,13 @@ async def delete_scheduled_flag_changes(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="List Workflows for Feature Flag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflows_for_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose workflows you want to retrieve."),
@@ -6739,7 +7598,13 @@ async def list_workflows_for_feature_flag(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Workflow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_workflow(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag and workflow."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that contains the workflow."),
@@ -6780,7 +7645,13 @@ async def get_custom_workflow(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that contains the workflow to delete."),
@@ -6821,7 +7692,12 @@ async def delete_workflow(
     return _response_data
 
 # Tags: Feature flags
-@mcp.tool()
+@mcp.tool(
+    title="Get Migration Safety Issues",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_migration_safety_issues(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag being evaluated for migration safety."),
@@ -6859,13 +7735,20 @@ async def get_migration_safety_issues(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Releases (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Add Flag to Release Pipeline",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_flag_to_release_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flag."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the flag to be added to the release pipeline."),
@@ -6903,13 +7786,19 @@ async def add_flag_to_release_pipeline(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Releases (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Release Phase Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_release_phase_status(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag release."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag whose release phase should be updated."),
@@ -6948,13 +7837,20 @@ async def update_release_phase_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Layers
-@mcp.tool()
+@mcp.tool(
+    title="List Layers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_layers(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. This string value is used to scope the layer collection to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all layers for a specified project. Returns a collection of layer resources associated with the given project."""
 
@@ -6990,7 +7886,12 @@ async def list_layers(project_key: str = Field(..., alias="projectKey", descript
     return _response_data
 
 # Tags: Layers
-@mcp.tool()
+@mcp.tool(
+    title="Create Layer",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_layer(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project where the layer will be created."),
     key: str = Field(..., description="A unique identifier for the layer, typically in kebab-case format (e.g., 'checkout-flow'). This key is used to reference the layer in API calls and must be distinct within the project."),
@@ -7028,13 +7929,19 @@ async def create_layer(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Layers
-@mcp.tool()
+@mcp.tool(
+    title="Update Layer",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_layer(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the layer."),
     layer_key: str = Field(..., alias="layerKey", description="The unique identifier for the layer to update."),
@@ -7072,13 +7979,20 @@ async def update_layer(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metrics (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Metric Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_metric_groups(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the metric groups to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all metric groups for a project. Supports filtering by experiment status, connections, kind, maintainers, and fuzzy search; results can be sorted by name, creation date, or connection count."""
 
@@ -7114,7 +8028,12 @@ async def list_metric_groups(project_key: str = Field(..., alias="projectKey", d
     return _response_data
 
 # Tags: Metrics (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create Metric Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project where the metric group will be created."),
     name: str = Field(..., description="A human-readable name for the metric group that appears in the UI and reports."),
@@ -7155,13 +8074,20 @@ async def create_metric_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metrics (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Metric Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric group."),
     metric_group_key: str = Field(..., alias="metricGroupKey", description="The unique identifier for the metric group to retrieve."),
@@ -7200,7 +8126,13 @@ async def get_metric_group(
     return _response_data
 
 # Tags: Metrics (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Metric Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric group."),
     metric_group_key: str = Field(..., alias="metricGroupKey", description="The unique identifier for the metric group to be updated."),
@@ -7238,13 +8170,20 @@ async def update_metric_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Metrics (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Metric Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric group to delete."),
     metric_group_key: str = Field(..., alias="metricGroupKey", description="The unique identifier for the metric group to delete."),
@@ -7283,7 +8222,13 @@ async def delete_metric_group(
     return _response_data
 
 # Tags: Release pipelines (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Release Pipelines",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_pipelines(project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's release pipelines to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all release pipelines for a project. Supports filtering by pipeline attributes (key, name, description) and environment."""
 
@@ -7319,7 +8264,12 @@ async def list_release_pipelines(project_key: str = Field(..., alias="projectKey
     return _response_data
 
 # Tags: Release pipelines (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create Release Pipeline",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_release_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the project where the release pipeline will be created."),
     key: str = Field(..., description="A unique identifier for this release pipeline within the project (e.g., 'standard-pipeline'). Used to reference the pipeline in API calls and configurations."),
@@ -7360,13 +8310,20 @@ async def create_release_pipeline(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Release pipelines (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Release Pipeline by Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_pipeline_by_key(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline to retrieve."),
@@ -7405,7 +8362,13 @@ async def get_release_pipeline_by_key(
     return _response_data
 
 # Tags: Release pipelines (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Release Pipeline",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_release_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline to be updated."),
@@ -7444,13 +8407,20 @@ async def update_release_pipeline(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Release pipelines (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release Pipeline",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline to delete."),
@@ -7489,7 +8459,13 @@ async def delete_release_pipeline(
     return _response_data
 
 # Tags: Release pipelines (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Release Progressions for Pipeline",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_progressions_for_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline whose release progressions you want to retrieve."),
@@ -7528,7 +8504,13 @@ async def list_release_progressions_for_pipeline(
     return _response_data
 
 # Tags: Custom roles
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_roles() -> dict[str, Any] | ToolResult:
     """Retrieve all custom roles available in your LaunchDarkly organization, including project-specific roles, organization-wide roles, and LaunchDarkly-provided preset roles. Base roles are excluded from this list."""
 
@@ -7555,7 +8537,13 @@ async def list_custom_roles() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Custom roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_role(custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier for the custom role, specified as either the custom role key or its ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single custom role by its unique key or ID. Use this to fetch detailed information about a specific custom role in your organization."""
 
@@ -7591,7 +8579,13 @@ async def get_custom_role(custom_role_key: str = Field(..., alias="customRoleKey
     return _response_data
 
 # Tags: Custom roles
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_role(
     custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier key for the custom role to update."),
     patch: list[_models.PatchOperation] = Field(..., description="An array of JSON patch operations (RFC 6902) or JSON merge patch (RFC 7386) representing the changes to apply. To modify the policy array, use path `/policy` followed by an array index (`/0` for beginning, `/-` for end), or specify other role properties to update."),
@@ -7627,13 +8621,20 @@ async def update_custom_role(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Custom roles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_role(custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier for the custom role to delete. This is a string value that uniquely identifies the role within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom role by its unique key. This action removes the role and any associated permissions from the system."""
 
@@ -7669,7 +8670,13 @@ async def delete_custom_role(custom_role_key: str = Field(..., alias="customRole
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Segments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_segments(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segments."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project from which to retrieve segments."),
@@ -7708,7 +8715,12 @@ async def list_segments(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Create Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project where the segment will be created."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment will be created."),
@@ -7749,13 +8761,20 @@ async def create_segment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
@@ -7795,7 +8814,13 @@ async def get_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Segment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_segment(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the segment to update."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment exists."),
@@ -7837,13 +8862,20 @@ async def update_segment(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment exists."),
@@ -7883,7 +8915,13 @@ async def delete_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Big Segment Context Targets",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_big_segment_context_targets(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies the specific environment within the project."),
@@ -7925,13 +8963,20 @@ async def update_big_segment_context_targets(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Segment Membership for Context",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segment_membership_for_context(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment to query for segment membership."),
@@ -7972,7 +9017,12 @@ async def get_segment_membership_for_context(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Create Big Segment Export",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_big_segment_export(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segment to export."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment exists."),
@@ -8012,7 +9062,13 @@ async def create_big_segment_export(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Big Segment Export",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_big_segment_export(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment is defined."),
@@ -8053,12 +9109,17 @@ async def get_big_segment_export(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Create Big Segment Import",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_big_segment_import(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the big segment to import data into."),
-    file_: str | None = Field(None, alias="file", description="A CSV file containing the segment keys to import. Each row should contain one key entry."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. A CSV file containing the segment keys to import. Each row should contain one key entry.", json_schema_extra={'format': 'byte'}),
     mode: str | None = Field(None, description="The import strategy: use `merge` to add new entries while preserving existing ones, or `replace` to overwrite all existing entries with the imported data."),
     wait_on_approvals: bool | None = Field(None, alias="waitOnApprovals", description="If true, the import process will pause and wait for any required approvals before processing the data."),
 ) -> dict[str, Any] | ToolResult:
@@ -8101,7 +9162,13 @@ async def create_big_segment_import(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get Big Segment Import",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_big_segment_import(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the segment being imported."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment contains the segment being imported."),
@@ -8142,7 +9209,13 @@ async def get_big_segment_import(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Big Segment User Targets",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_big_segment_user_targets(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment the segment belongs to."),
@@ -8184,13 +9257,20 @@ async def update_big_segment_user_targets(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Get User Segment Membership",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_segment_membership(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment membership is evaluated."),
@@ -8231,7 +9311,13 @@ async def get_user_segment_membership(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Expiring Targets for Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_expiring_targets_for_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the segment's expiring targets are managed."),
@@ -8271,7 +9357,12 @@ async def list_expiring_targets_for_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Segment Expiring Targets",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_segment_expiring_targets(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the segment. Used to identify which project's segment configuration to modify."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment targeting applies. Specifies which environment's segment expiration rules to update."),
@@ -8309,13 +9400,20 @@ async def update_segment_expiring_targets(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="List Expiring User Targets for Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_expiring_user_targets_for_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment is defined."),
@@ -8355,7 +9453,12 @@ async def list_expiring_user_targets_for_segment(
     return _response_data
 
 # Tags: Segments
-@mcp.tool()
+@mcp.tool(
+    title="Update Expiring User Targets for Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_expiring_user_targets_for_segment(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the segment. Used to identify which project's segment to update."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment targeting applies. Specifies which environment's user targets should be modified."),
@@ -8393,13 +9496,20 @@ async def update_expiring_user_targets_for_segment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of teams with optional filtering and field expansion. By default returns the first 20 teams; use pagination links and the limit parameter to navigate through results."""
 
@@ -8426,7 +9536,12 @@ async def list_teams() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(
     key: str = Field(..., description="Unique identifier for the team. Used to reference the team in API calls and must be URL-safe."),
     name: str = Field(..., description="Human-readable name for the team. This is displayed in the LaunchDarkly UI and should be descriptive."),
@@ -8465,13 +9580,20 @@ async def create_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team. Use this key to fetch the specific team's details.")) -> dict[str, Any] | ToolResult:
     """Retrieve a team by its unique key. Optionally expand the response to include members, roles, role attributes, projects, or maintainers."""
 
@@ -8507,7 +9629,13 @@ async def get_team(team_key: str = Field(..., alias="teamKey", description="The 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team to update. Use the team key value returned from team listing operations."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instruction objects that specify the updates to apply. Each instruction object must include a `kind` field indicating the operation type (e.g., addMembers, updateName, removeCustomRoles) and any required parameters for that operation. Multiple instructions are processed sequentially."),
@@ -8543,13 +9671,20 @@ async def update_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team to delete. This is a string value that uniquely identifies the team within your LaunchDarkly organization.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team by its key. This action cannot be undone and will remove the team from your LaunchDarkly account."""
 
@@ -8585,7 +9720,13 @@ async def delete_team(team_key: str = Field(..., alias="teamKey", description="T
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Maintainers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_maintainers(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team whose maintainers you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of maintainers assigned to a specific team. Maintainers have elevated permissions to manage team settings and members."""
 
@@ -8621,10 +9762,15 @@ async def list_team_maintainers(team_key: str = Field(..., alias="teamKey", desc
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Add Members to Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_members_to_team(
     team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team. Used to route the request to the correct team."),
-    file_: str | None = Field(None, alias="file", description="A CSV file containing email addresses in the first column (headers optional). LaunchDarkly ignores additional columns. File must not exceed 25MB and must contain at least one valid email address belonging to a LaunchDarkly organization member."),
+    file_: str | None = Field(None, alias="file", description="Base64-encoded file content for upload. A CSV file containing email addresses in the first column (headers optional). LaunchDarkly ignores additional columns. File must not exceed 25MB and must contain at least one valid email address belonging to a LaunchDarkly organization member.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Add multiple team members to an existing team by uploading a CSV file containing email addresses. The operation validates all entries before adding any members—a single invalid entry prevents all additions."""
 
@@ -8665,7 +9811,13 @@ async def add_members_to_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_roles(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team whose roles you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom roles assigned to a specific team. Custom roles define granular permissions for team members within LaunchDarkly."""
 
@@ -8701,7 +9853,13 @@ async def list_team_roles(team_key: str = Field(..., alias="teamKey", descriptio
     return _response_data
 
 # Tags: Workflow templates
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_templates(
     summary: bool | None = Field(None, description="Return lightweight template summaries instead of full template objects. When true, returns only essential metadata; when false or omitted, returns complete template details."),
     search: str | None = Field(None, description="Filter templates by searching for a substring within template names or descriptions. The search is case-sensitive and matches partial strings."),
@@ -8742,7 +9900,13 @@ async def list_workflow_templates(
     return _response_data
 
 # Tags: Access tokens
-@mcp.tool()
+@mcp.tool(
+    title="Get Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_token(id_: str = Field(..., alias="id", description="The unique identifier of the access token to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single access token by its unique identifier. Use this to fetch details about a specific token for inspection or validation purposes."""
 
@@ -8778,7 +9942,13 @@ async def get_token(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Access tokens
-@mcp.tool()
+@mcp.tool(
+    title="Update Token",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the access token to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include 'op' (the operation type), 'path' (the token property to modify), and 'value' (the new value for replace operations). Operations are applied in order."),
@@ -8815,13 +9985,20 @@ async def update_token(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Access tokens
-@mcp.tool()
+@mcp.tool(
+    title="Delete Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_token(id_: str = Field(..., alias="id", description="The unique identifier of the access token to delete. This is a string value that uniquely identifies the token in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an access token by its ID. This operation removes the token immediately, invalidating any authentication attempts using it."""
 
@@ -8857,7 +10034,13 @@ async def delete_token(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Access tokens
-@mcp.tool()
+@mcp.tool(
+    title="Reset Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the access token to reset."),
     expiry: str | None = Field(None, description="Optional Unix epoch time in milliseconds when the old token key should expire. If not provided, the old key expires immediately upon reset."),
@@ -8901,7 +10084,13 @@ async def reset_token(
     return _response_data
 
 # Tags: Account usage (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Events Usage by Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_events_usage_by_type(
     type_: str = Field(..., alias="type", description="The event category to retrieve usage data for. Must be either 'received' (events received by the system) or 'published' (events published by the system)."),
     from_: str | None = Field(None, alias="from", description="ISO 8601 timestamp marking the start of the requested data range. If not provided, defaults to 24 hours before the 'to' timestamp."),
@@ -8944,7 +10133,13 @@ async def get_events_usage_by_type(
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="List Webhooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhooks() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all configured webhooks for the account. Use this to view all active webhook endpoints and their configurations."""
 
@@ -8971,7 +10166,13 @@ async def list_webhooks() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook(id_: str = Field(..., alias="id", description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single webhook by its unique identifier. Use this to fetch detailed information about a specific webhook configuration."""
 
@@ -9007,7 +10208,13 @@ async def get_webhook(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include an 'op' field (e.g., 'replace'), a 'path' field indicating which property to modify, and a 'value' field with the new value."),
@@ -9044,13 +10251,20 @@ async def update_webhook(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Webhooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook(id_: str = Field(..., alias="id", description="The unique identifier of the webhook to delete. This is a string value that uniquely identifies the webhook in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a webhook by its ID. This action cannot be undone and will stop all event notifications from being sent to the webhook's configured endpoint."""
 
@@ -9086,7 +10300,13 @@ async def delete_webhook(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags(
     kind: list[str] | None = Field(None, description="Filter tags by resource type. Accepts multiple types including flag, project, environment, segment, metric, metric-data-source, aiconfig, and view. If not specified, returns tags of all types."),
     pre: str | None = Field(None, description="Return only tags that begin with the specified prefix string."),
@@ -9129,7 +10349,13 @@ async def list_tags(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Config Targeting",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_config_targeting(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config whose targeting configuration should be retrieved."),
@@ -9168,7 +10394,13 @@ async def get_ai_config_targeting(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update AI Config Targeting",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_ai_config_targeting(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config to update."),
@@ -9206,13 +10438,20 @@ async def update_ai_config_targeting(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List AI Configs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ai_configs(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project. Use the project key (e.g., 'default') to specify which project's AI Configs to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all AI Configs available in a specified project. Returns a list of AI configuration objects that define AI behavior and settings for the project."""
 
@@ -9248,7 +10487,12 @@ async def list_ai_configs(project_key: str = Field(..., alias="projectKey", desc
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create AI Config",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_ai_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project where the AI Config will be created."),
     key: str = Field(..., description="A unique identifier for the AI Config within the project, used for referencing and management."),
@@ -9300,13 +10544,20 @@ async def create_ai_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI configuration."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the specific AI configuration to retrieve."),
@@ -9345,7 +10596,13 @@ async def get_ai_config(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update AI Config",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_ai_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config to update."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config to update."),
@@ -9385,13 +10642,20 @@ async def update_ai_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete AI Config",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_ai_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI Config. Use 'default' for the default project or specify a custom project key."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier of the AI Config to delete."),
@@ -9430,7 +10694,12 @@ async def delete_ai_config(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create AI Config Variation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_ai_config_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier of the AI Config for which to create a variation."),
@@ -9473,13 +10742,20 @@ async def create_ai_config_variation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Config Variation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_config_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config. Use 'default' for the default project."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config within the project. Use 'default' for the default configuration."),
@@ -9519,7 +10795,13 @@ async def get_ai_config_variation(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update AI Config Variation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_ai_config_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config containing the variation to update."),
@@ -9563,13 +10845,20 @@ async def update_ai_config_variation(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete AI Config Variation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_ai_config_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config whose variation should be deleted."),
@@ -9609,7 +10898,13 @@ async def delete_ai_config_variation(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Config Quick Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_config_quick_stats(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Configs. This key determines which project's statistics will be retrieved."),
     env: str = Field(..., description="The environment key that filters which metrics are included in the results. Only statistics from this specific environment will be returned."),
@@ -9651,7 +10946,13 @@ async def get_ai_config_quick_stats(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Config Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_config_metrics(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config whose metrics should be retrieved."),
@@ -9696,7 +10997,13 @@ async def get_ai_config_metrics(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Config Metrics by Variation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_config_metrics_by_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config whose metrics you want to retrieve."),
@@ -9741,7 +11048,12 @@ async def get_ai_config_metrics_by_variation(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Add Restricted Models",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_restricted_models(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's restricted model list to update. Use the project key from your LaunchDarkly workspace (e.g., 'default')."),
     keys: list[str] = Field(..., description="An array of AI model keys to add to the restricted list. Each key must be a valid model key returned by the List AI model configs endpoint. Duplicate keys in the array will be deduplicated."),
@@ -9777,13 +11089,20 @@ async def add_restricted_models(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Remove Restricted Models",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_restricted_models(
     project_key: str = Field(..., alias="projectKey", description="The project identifier (e.g., 'default') that contains the restricted model list to modify."),
     keys: list[str] = Field(..., description="An array of model keys to remove from the restricted list. Each key identifies a specific model to unrestrict."),
@@ -9819,13 +11138,20 @@ async def remove_restricted_models(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List Model Configs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_model_configs(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project (e.g., 'default'). This determines which project's model configurations are returned."),
     restricted: bool | None = Field(None, description="When set to true, returns only model configurations that are restricted. Omit or set to false to return all configurations."),
@@ -9867,7 +11193,12 @@ async def list_model_configs(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create Model Config",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_model_config(
     project_key: str = Field(..., alias="projectKey", description="The project identifier where this model configuration will be created (e.g., 'default')."),
     name: str = Field(..., description="A human-readable display name for the model that will appear in the UI."),
@@ -9912,13 +11243,20 @@ async def create_model_config(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get Model Config",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_model_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the model configuration. Typically 'default' for standard projects."),
     model_config_key: str = Field(..., alias="modelConfigKey", description="The unique identifier for the AI model configuration to retrieve. Typically 'default' for the standard model configuration."),
@@ -9957,7 +11295,13 @@ async def get_model_config(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Model Config",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_model_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the model config. Use 'default' for the default project or specify a custom project key."),
     model_config_key: str = Field(..., alias="modelConfigKey", description="The unique identifier of the AI model configuration to delete."),
@@ -9996,7 +11340,13 @@ async def delete_model_config(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List AI Tools",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ai_tools(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tools to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all AI tools available in a specific project. Returns a complete list of configured AI tools that can be used within the project."""
 
@@ -10032,7 +11382,12 @@ async def list_ai_tools(project_key: str = Field(..., alias="projectKey", descri
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create AI Tool",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_ai_tool(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project where the AI tool will be created."),
     key: str = Field(..., description="The unique identifier for the AI tool within the project. Used to reference this tool in subsequent operations."),
@@ -10070,13 +11425,20 @@ async def create_ai_tool(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List AI Tool Versions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_ai_tool_versions(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tool."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier of the AI tool for which to retrieve versions."),
@@ -10115,7 +11477,13 @@ async def list_ai_tool_versions(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get AI Tool",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_ai_tool(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI tool."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier for the AI tool to retrieve."),
@@ -10154,7 +11522,12 @@ async def get_ai_tool(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update AI Tool",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_ai_tool(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI tool."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier for the AI tool to be updated."),
@@ -10192,13 +11565,20 @@ async def update_ai_tool(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete AI Tool",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_ai_tool(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tool to delete."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier of the AI tool to delete."),
@@ -10237,7 +11617,13 @@ async def delete_ai_tool(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List Prompt Snippets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_prompt_snippets(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippets to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all prompt snippets available in a specific project. Prompt snippets are reusable text templates used to configure AI behavior and responses."""
 
@@ -10273,7 +11659,12 @@ async def list_prompt_snippets(project_key: str = Field(..., alias="projectKey",
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create Prompt Snippet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_prompt_snippet(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project where the prompt snippet will be created."),
     key: str = Field(..., description="A unique key identifier for the prompt snippet within the project, used for referencing the snippet in configurations."),
@@ -10311,13 +11702,20 @@ async def create_prompt_snippet(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get Prompt Snippet",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_prompt_snippet(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippet."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier for the prompt snippet to retrieve."),
@@ -10356,7 +11754,12 @@ async def get_prompt_snippet(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update Prompt Snippet",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_prompt_snippet(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the prompt snippet."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier of the prompt snippet to update."),
@@ -10394,13 +11797,20 @@ async def update_prompt_snippet(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Prompt Snippet",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_prompt_snippet(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the prompt snippet to delete."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier of the prompt snippet to delete."),
@@ -10439,7 +11849,13 @@ async def delete_prompt_snippet(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List Prompt Snippet References",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_prompt_snippet_references(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippet."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier for the prompt snippet whose references you want to list."),
@@ -10478,7 +11894,13 @@ async def list_prompt_snippet_references(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List Agent Graphs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_agent_graphs(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graphs to list."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Must be set to 'beta'."),
@@ -10518,7 +11940,12 @@ async def list_agent_graphs(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create Agent Graph",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_agent_graph(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project where the agent graph will be created."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Currently only 'beta' is supported."),
@@ -10559,13 +11986,20 @@ async def create_agent_graph(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Graph",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_graph(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graph."),
     graph_key: str = Field(..., alias="graphKey", description="The unique identifier for the agent graph to retrieve."),
@@ -10606,7 +12040,13 @@ async def get_agent_graph(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update Agent Graph",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_agent_graph(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graph."),
     graph_key: str = Field(..., alias="graphKey", description="The unique identifier for the agent graph to update."),
@@ -10647,13 +12087,20 @@ async def update_agent_graph(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Agent Graph",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_agent_graph(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graph to delete."),
     graph_key: str = Field(..., alias="graphKey", description="The unique identifier for the agent graph to delete."),
@@ -10694,7 +12141,13 @@ async def delete_agent_graph(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="List Agent Optimizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_agent_optimizations(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the agent optimizations to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all agent optimizations configured for a specific project. Returns a list of optimization settings and configurations applied to agents within the project."""
 
@@ -10730,7 +12183,12 @@ async def list_agent_optimizations(project_key: str = Field(..., alias="projectK
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Create Agent Optimization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_agent_optimization(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project where the agent optimization will be created."),
     key: str = Field(..., description="A unique key to identify this agent optimization configuration within the project."),
@@ -10776,13 +12234,20 @@ async def create_agent_optimization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Get Agent Optimization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_agent_optimization(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent optimization."),
     optimization_key: str = Field(..., alias="optimizationKey", description="The unique identifier for the specific agent optimization to retrieve."),
@@ -10821,7 +12286,12 @@ async def get_agent_optimization(
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Update Agent Optimization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_agent_optimization(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the agent optimization."),
     optimization_key: str = Field(..., alias="optimizationKey", description="The unique identifier of the agent optimization to update."),
@@ -10866,13 +12336,20 @@ async def update_agent_optimization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: AI Configs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Agent Optimization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_agent_optimization(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the agent optimization to delete."),
     optimization_key: str = Field(..., alias="optimizationKey", description="The unique identifier of the agent optimization to delete."),
@@ -10911,7 +12388,13 @@ async def delete_agent_optimization(
     return _response_data
 
 # Tags: Announcements
-@mcp.tool()
+@mcp.tool(
+    title="List Announcements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_announcements(status: Literal["active", "inactive", "scheduled"] | None = Field(None, description="Filter announcements by their current status: active (published and visible), inactive (unpublished), or scheduled (queued for future publication).")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of announcements filtered by their publication status. Use this to fetch active, inactive, or scheduled announcements for display or management purposes."""
 
@@ -10949,7 +12432,12 @@ async def list_announcements(status: Literal["active", "inactive", "scheduled"] 
     return _response_data
 
 # Tags: Announcements
-@mcp.tool()
+@mcp.tool(
+    title="Create Announcement",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_announcement(
     is_dismissible: bool = Field(..., alias="isDismissible", description="Whether users can dismiss this announcement from their view. Set to true to allow users to close the announcement, or false to make it persistent."),
     title: str = Field(..., description="A concise headline for the announcement (e.g., 'System Maintenance Notice'). This is the primary text users see first."),
@@ -10991,13 +12479,19 @@ async def create_announcement(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Announcements
-@mcp.tool()
+@mcp.tool(
+    title="Update Announcement",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_announcement(
     announcement_id: str = Field(..., alias="announcementId", description="The unique identifier of the announcement to update, provided as a numeric string (e.g., '1234567890')."),
     body: list[_models.AnnouncementPatchOperation] = Field(..., description="An array of patch operations to apply to the announcement. Each operation specifies how to modify the announcement's properties."),
@@ -11034,13 +12528,20 @@ async def update_announcement(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Announcements
-@mcp.tool()
+@mcp.tool(
+    title="Delete Announcement",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_announcement(announcement_id: str = Field(..., alias="announcementId", description="The unique identifier of the announcement to delete, provided as a numeric string (e.g., '1234567890').")) -> dict[str, Any] | ToolResult:
     """Permanently delete an announcement by its ID. This action cannot be undone."""
 
@@ -11076,7 +12577,13 @@ async def delete_announcement(announcement_id: str = Field(..., alias="announcem
     return _response_data
 
 # Tags: Approvals (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Approval Request Settings for Project Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_approval_request_settings_for_project_environment(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the project containing the approval settings."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="API version identifier. Must be set to 'beta' for this endpoint."),
@@ -11127,13 +12634,20 @@ async def update_approval_request_settings_for_project_environment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Views",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_views(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Use 'default' for the default project or specify a custom project key."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="API version specification. Must be set to 'beta' to access this endpoint."),
@@ -11173,7 +12687,12 @@ async def list_views(
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_view(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the project where the view will be created (e.g., 'default')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Currently only 'beta' is supported."),
@@ -11214,13 +12733,20 @@ async def create_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_view(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the view (e.g., 'default')."),
     view_key: str = Field(..., alias="viewKey", description="The unique identifier for the view to retrieve (e.g., 'my-view')."),
@@ -11261,7 +12787,12 @@ async def get_view(
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_view(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the view. Use the project identifier (e.g., 'default')."),
     view_key: str = Field(..., alias="viewKey", description="The view key that identifies which view to update (e.g., 'my-view')."),
@@ -11303,13 +12834,20 @@ async def update_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete View",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_view(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the view. Use the project key (e.g., 'default') to specify which project to access."),
     view_key: str = Field(..., alias="viewKey", description="The unique identifier of the view to delete. Specify the view key (e.g., 'my-view') to target the exact view for deletion."),
@@ -11350,7 +12888,12 @@ async def delete_view(
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Link Resources to View",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_resources_to_view(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the view. Use the project identifier (e.g., 'default')."),
     view_key: str = Field(..., alias="viewKey", description="The view key where resources will be linked. Use the view identifier (e.g., 'my-view')."),
@@ -11391,13 +12934,20 @@ async def link_resources_to_view(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete View Resource Links",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_view_resource_links(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the view. Use the project identifier (e.g., 'default')."),
     view_key: str = Field(..., alias="viewKey", description="The view key from which to unlink resources. Use the view identifier (e.g., 'my-view')."),
@@ -11438,13 +12988,20 @@ async def delete_view_resource_links(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Linked Resources for View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_linked_resources_for_view(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the project containing the view. Use the project's unique identifier (e.g., 'default')."),
     view_key: str = Field(..., alias="viewKey", description="The view key that identifies the specific view within the project. Use the view's unique identifier (e.g., 'my-view')."),
@@ -11490,7 +13047,13 @@ async def list_linked_resources_for_view(
     return _response_data
 
 # Tags: Views (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Linked Views for Resource",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_linked_views_for_resource(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the resource. Typically 'default' for standard projects."),
     resource_type: Literal["flags", "segments"] = Field(..., alias="resourceType", description="The type of resource to retrieve linked views for. Must be either 'flags' or 'segments'."),
@@ -11536,7 +13099,13 @@ async def list_linked_views_for_resource(
     return _response_data
 
 # Tags: Release policies (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Release Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_policies(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project (e.g., 'default')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this endpoint; must be set to 'beta'."),
@@ -11580,7 +13149,12 @@ async def list_release_policies(
     return _response_data
 
 # Tags: Release policies (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Reorder Release Policies",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def reorder_release_policies(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose release policies should be reordered. Use the project key assigned during project creation (e.g., 'default')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this operation. Currently only the beta version is available."),
@@ -11619,13 +13193,20 @@ async def reorder_release_policies(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Release policies (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Release Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_policy(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project (e.g., 'default'). This scopes the release policy lookup to a specific project."),
     policy_key: str = Field(..., alias="policyKey", description="The unique identifier for the release policy within the project (e.g., 'production-release'). This specifies which policy to retrieve."),
@@ -11666,7 +13247,13 @@ async def get_release_policy(
     return _response_data
 
 # Tags: Release policies (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Release Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_release_policy(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release policy."),
     policy_key: str = Field(..., alias="policyKey", description="The unique human-readable identifier for the release policy to update."),
@@ -11717,13 +13304,20 @@ async def update_release_policy(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Release policies (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_policy(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release policy (e.g., 'default')."),
     policy_key: str = Field(..., alias="policyKey", description="The human-readable identifier for the release policy to delete (e.g., 'production-release')."),
@@ -11764,7 +13358,13 @@ async def delete_release_policy(
     return _response_data
 
 # Tags: Insights charts (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment Frequency Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment_frequency_chart(
     project_key: str | None = Field(None, alias="projectKey", description="The project key to filter deployment frequency data for a specific project."),
     environment_key: str | None = Field(None, alias="environmentKey", description="The environment key to filter deployment frequency data for a specific environment."),
@@ -11813,7 +13413,13 @@ async def get_deployment_frequency_chart(
     return _response_data
 
 # Tags: Insights charts (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Stale Flags Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_stale_flags_chart(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project to retrieve stale flags data for."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project to retrieve stale flags data for."),
@@ -11856,7 +13462,13 @@ async def get_stale_flags_chart(
     return _response_data
 
 # Tags: Insights charts (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Flag Status Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_flag_status_chart(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's flag data to retrieve."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that specifies which environment's flag statuses to chart."),
@@ -11898,7 +13510,13 @@ async def get_flag_status_chart(
     return _response_data
 
 # Tags: Insights charts (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Lead Time Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_lead_time_chart(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's lead time data to retrieve."),
     environment_key: str | None = Field(None, alias="environmentKey", description="Optional environment key to filter lead time data to a specific environment within the project."),
@@ -11949,7 +13567,13 @@ async def get_lead_time_chart(
     return _response_data
 
 # Tags: Insights charts (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Release Frequency Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_frequency_chart(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's release data to retrieve."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment's release data to retrieve."),
@@ -12000,7 +13624,12 @@ async def get_release_frequency_chart(
     return _response_data
 
 # Tags: Insights deployments (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create Deployment Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deployment_event(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which LaunchDarkly project this deployment belongs to."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key (e.g., production, staging) where the deployment occurred."),
@@ -12041,13 +13670,20 @@ async def create_deployment_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Insights deployments (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Deployments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_deployments(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project to query deployments for."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment to query deployments for."),
@@ -12096,7 +13732,13 @@ async def list_deployments(
     return _response_data
 
 # Tags: Insights deployments (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Deployment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deployment(deployment_id: str = Field(..., alias="deploymentID", description="The unique identifier of the deployment to retrieve. This ID is provided in the `id` field when listing deployments.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deployment by its ID. Optionally expand the response to include associated pull requests and flag references."""
 
@@ -12132,7 +13774,12 @@ async def get_deployment(deployment_id: str = Field(..., alias="deploymentID", d
     return _response_data
 
 # Tags: Insights deployments (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Deployment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_deployment(
     deployment_id: str = Field(..., alias="deploymentID", description="The unique identifier of the deployment to update. This ID is returned in the `id` field when listing deployments."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations (RFC 6902) describing the changes to apply. Each operation must include `op` (the operation type), `path` (the property to modify), and `value` (the new value for replace operations). Operations are applied in order."),
@@ -12169,13 +13816,20 @@ async def update_deployment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Insights flag events (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Flag Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_flag_events(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project to query for flag events."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project to query for flag events."),
@@ -12226,7 +13880,12 @@ async def list_flag_events(
     return _response_data
 
 # Tags: Insights scores (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Create Insight Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_insight_group(
     name: str = Field(..., description="A human-readable name for the insight group (e.g., 'Production - All Apps'). Used for display and identification in the UI."),
     key: str = Field(..., description="A unique identifier key for the insight group in kebab-case format (e.g., 'default-production-all-apps'). Used for API references and internal lookups."),
@@ -12264,13 +13923,20 @@ async def create_insight_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Insights scores (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Insight Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_insight_groups(query: str | None = Field(None, description="Filter the insight groups list by group name. Supports partial string matching to find groups by name.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of insight groups for which you are collecting engineering insights. Optionally filter by group name and expand the response to include scores, environment details, or metadata indicators."""
 
@@ -12308,7 +13974,13 @@ async def list_insight_groups(query: str | None = Field(None, description="Filte
     return _response_data
 
 # Tags: Insights scores (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Insight Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insight_group(insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific insight group by its key, with optional expansion to include scoring details and environment associations used in engineering insights metrics."""
 
@@ -12344,7 +14016,13 @@ async def get_insight_group(insight_group_key: str = Field(..., alias="insightGr
     return _response_data
 
 # Tags: Insights scores (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Update Insight Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_insight_group(
     insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch document (RFC 6902) describing the updates to apply. Each operation must include 'op' (the operation type), 'path' (the JSON pointer to the field), and 'value' (the new value for replace operations). Common operations include 'replace' to change field values."),
@@ -12381,13 +14059,20 @@ async def update_insight_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Insights scores (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Insight Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_insight_group(insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to delete. This is a string value that uniquely identifies the insight group within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an insight group by its unique key. This operation removes the insight group and all associated data."""
 
@@ -12423,7 +14108,13 @@ async def delete_insight_group(insight_group_key: str = Field(..., alias="insigh
     return _response_data
 
 # Tags: Insights scores (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Get Insights Scores",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insights_scores(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Required to scope the insights scores to a specific project."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project. Required to retrieve environment-specific insight metrics."),
@@ -12465,7 +14156,13 @@ async def get_insights_scores(
     return _response_data
 
 # Tags: Insights pull requests (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Pull Requests",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pull_requests(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's pull requests to retrieve."),
     environment_key: str | None = Field(None, alias="environmentKey", description="The environment key, required only when sorting results by lead time metrics."),
@@ -12511,7 +14208,13 @@ async def list_pull_requests(
     return _response_data
 
 # Tags: Insights repositories (beta)
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories Insights",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories_insights() -> dict[str, Any] | ToolResult:
     """Retrieve a list of repositories integrated with LaunchDarkly's engineering insights. Optionally expand the response to include associated project details for each repository."""
 
@@ -12538,7 +14241,13 @@ async def list_repositories_insights() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Insights repositories (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Associate Repositories with Projects",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def associate_repositories_with_projects(mappings: list[_models.InsightsRepositoryProject] = Field(..., description="Array of repository-to-project mappings. Each mapping object should specify which repository associates with which project. Order is preserved and processed sequentially.")) -> dict[str, Any] | ToolResult:
     """Create or update associations between repositories and projects. Use this operation to map one or more repositories to their corresponding projects for engineering insights tracking."""
 
@@ -12570,13 +14279,20 @@ async def associate_repositories_with_projects(mappings: list[_models.InsightsRe
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Insights repositories (beta)
-@mcp.tool()
+@mcp.tool(
+    title="Remove Repository Project Association",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_repository_project_association(
     repository_key: str = Field(..., alias="repositoryKey", description="The unique identifier for the repository from which the project association will be removed."),
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to be disassociated from the repository."),

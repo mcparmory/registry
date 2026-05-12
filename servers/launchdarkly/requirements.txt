@@ -1,6 +1,7 @@
 # LaunchDarkly - Dependencies
-# Generated: 2026-05-05 15:24:31 UTC
+# Generated: 2026-05-12 11:44:35 UTC
 fastmcp>=3.2.4
 httpx>=0.27.0,<1.0.0
+mcp
 pydantic>=2.0.0,<3.0.0
 python-dotenv>=1.0.0,<2.0.0
