@@ -5,7 +5,7 @@ Base URL: https://api.mailersend.com/v1
 | | |
 |---|---|
 | **Category** | Communication |
-| **Tools** | 89 |
+| **Tools** | 71 |
 | **Auth** | Bearer Token |
 
 ---
@@ -60,6 +60,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `BEARER_TOKEN` — Bearer token
 - `SERVER_PROTOCOL` — The protocol for the API request. (default: `https`)
 - `SERVER_HOST` — The host for the MailerSend API. (default: `api.mailersend.com`)
+
 Do not commit credentials to version control.
 
 ---

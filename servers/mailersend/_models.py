@@ -1,13 +1,13 @@
 """
 Mailersend MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:31:48 UTC
+Generated: 2026-05-12 11:50:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -338,7 +338,7 @@ class DeleteScheduledMessageRequest(StrictModel):
 # Operation: add_blocklist_recipients
 class AddBlocklistRecipientsRequestBody(StrictModel):
     domain_id: str = Field(default=..., description="The unique identifier for the domain to which blocklist recipients will be added.", examples=['{domain_id}'])
-    recipients: list[str] = Field(default=..., description="An array of email recipient addresses to add to the blocklist. Each item should be a valid email address string.")
+    recipients: list[Annotated[str, Field(json_schema_extra={'format': 'email'})]] = Field(default=..., description="An array of email recipient addresses to add to the blocklist. Each item should be a valid email address string.")
 class AddBlocklistRecipientsRequest(StrictModel):
     """Add one or more email recipients to the blocklist suppression list for a specific domain. Blocklisted recipients will not receive emails sent through this domain."""
     body: AddBlocklistRecipientsRequestBody
@@ -353,7 +353,7 @@ class DeleteBlocklistRecipientsRequest(StrictModel):
 # Operation: add_recipients_to_hard_bounces_suppression
 class AddHardBouncesRecipientsRequestBody(StrictModel):
     domain_id: str = Field(default=..., description="The unique identifier of the domain to which the hard bounce suppression list applies.", examples=['{domain_id}'])
-    recipients: list[str] = Field(default=..., description="An array of email recipient addresses to add to the hard bounces suppression list. Each item should be a valid email address string.")
+    recipients: list[Annotated[str, Field(json_schema_extra={'format': 'email'})]] = Field(default=..., description="An array of email recipient addresses to add to the hard bounces suppression list. Each item should be a valid email address string.")
 class AddHardBouncesRecipientsRequest(StrictModel):
     """Add one or more email recipients to the hard bounces suppression list for a specific domain. Hard-bounced addresses will be suppressed from future email sends to prevent delivery failures."""
     body: AddHardBouncesRecipientsRequestBody
@@ -368,7 +368,7 @@ class DeleteHardBouncesRecipientsRequest(StrictModel):
 # Operation: add_spam_complaints_recipients
 class AddSpamComplaintsRecipientsRequestBody(StrictModel):
     domain_id: str = Field(default=..., description="The unique identifier of the domain to which spam complaint suppressions will be applied.", examples=['{domain_id}'])
-    recipients: list[str] = Field(default=..., description="A list of email addresses to add to the spam complaints suppression list. Each item should be a valid email address string.")
+    recipients: list[Annotated[str, Field(json_schema_extra={'format': 'email'})]] = Field(default=..., description="A list of email addresses to add to the spam complaints suppression list. Each item should be a valid email address string.")
 class AddSpamComplaintsRecipientsRequest(StrictModel):
     """Add one or more email recipients to the spam complaints suppression list for a specific domain. Suppressed recipients will not receive emails sent through this domain."""
     body: AddSpamComplaintsRecipientsRequestBody
@@ -383,7 +383,7 @@ class DeleteSpamComplaintsRecipientsRequest(StrictModel):
 # Operation: add_unsubscribe_recipients
 class AddUnsubscribesRecipientsRequestBody(StrictModel):
     domain_id: str = Field(default=..., description="The unique identifier for the domain to which the unsubscribe recipients will be added.", examples=['{domain_id}'])
-    recipients: list[str] = Field(default=..., description="A list of email recipients to add to the unsubscribes suppression list. Each item should be a valid email address.")
+    recipients: list[Annotated[str, Field(json_schema_extra={'format': 'email'})]] = Field(default=..., description="A list of email recipients to add to the unsubscribes suppression list. Each item should be a valid email address.")
 class AddUnsubscribesRecipientsRequest(StrictModel):
     """Add one or more email recipients to the unsubscribes suppression list for a specific domain, preventing them from receiving future messages."""
     body: AddUnsubscribesRecipientsRequestBody
@@ -440,7 +440,7 @@ class VerifyAnEmailRequest(StrictModel):
 # Operation: create_email_verification_list
 class CreateAnEmailVerificationListRequestBody(StrictModel):
     name: str = Field(default=..., description="A descriptive name for the email verification list (e.g., 'List'). Used to identify and organize verification batches.", examples=['List'])
-    emails: list[str] = Field(default=..., description="An array of email addresses to include in the verification list. Each item should be a valid email address string.")
+    emails: list[Annotated[str, Field(json_schema_extra={'format': 'email'})]] = Field(default=..., description="An array of email addresses to include in the verification list. Each item should be a valid email address string.")
 class CreateAnEmailVerificationListRequest(StrictModel):
     """Create a new email verification list with a name and set of email addresses to verify. This list can be used to batch-process email validation across multiple addresses."""
     body: CreateAnEmailVerificationListRequestBody

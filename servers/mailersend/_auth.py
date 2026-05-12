@@ -1,7 +1,7 @@
 """
 Authentication module for MailerSend MCP server.
 
-Generated: 2026-05-05 15:31:48 UTC
+Generated: 2026-05-12 11:50:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
