@@ -1,11 +1,11 @@
-# Perplexity AI API MCP Server
+# Perplexity AI MCP Server
 <!-- mcp-name: com.mcparmory/perplexity -->
 
 Base URL: https://api.perplexity.ai
 | | |
 |---|---|
 | **Category** | AI & Machine Learning |
-| **Tools** | 7 |
+| **Tools** | 6 |
 | **Auth** | Bearer Token |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ---

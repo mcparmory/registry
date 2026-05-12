@@ -1,4 +1,4 @@
-# Perplexity AI API MCP Server
+# Perplexity AI MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-perplexity .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Perplexity AI API MCP Server" \
+LABEL org.opencontainers.image.title="Perplexity AI MCP Server" \
       org.opencontainers.image.vendor="MCP Armory" \
       org.opencontainers.image.source="https://github.com/mcparmory/registry" \
       io.modelcontextprotocol.server.name="com.mcparmory/perplexity"

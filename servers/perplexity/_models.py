@@ -1,7 +1,7 @@
 """
-Perplexity Ai Api MCP Server - Pydantic Models
+Perplexity Ai MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:53:17 UTC
+Generated: 2026-05-12 12:10:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

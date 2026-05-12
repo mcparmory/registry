@@ -1,7 +1,7 @@
 """
-Authentication module for Perplexity AI API MCP server.
+Authentication module for Perplexity AI MCP server.
 
-Generated: 2026-05-05 15:53:17 UTC
+Generated: 2026-05-12 12:10:35 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
