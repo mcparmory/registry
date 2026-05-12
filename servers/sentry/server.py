@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-API Reference MCP Server
+Sentry MCP Server
 
 API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: http://sentry.io/terms/
 
-Generated: 2026-05-05 16:19:13 UTC
+Generated: 2026-05-12 12:47:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -43,6 +44,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -55,8 +57,8 @@ OPERATION_URL_MAP: dict[str, str] = {
     "upload_release_file": os.getenv("SERVER_URL_UPLOAD_RELEASE_FILE", "https://{region}.sentry.io".format_map(collections.defaultdict(str, _SERVER_VARS))),
     "upload_release_file_project": os.getenv("SERVER_URL_UPLOAD_RELEASE_FILE_PROJECT", "https://{region}.sentry.io".format_map(collections.defaultdict(str, _SERVER_VARS))),
 }
-SERVER_NAME = "API Reference"
-SERVER_VERSION = "1.0.1"
+SERVER_NAME = "Sentry"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -547,6 +549,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -554,6 +578,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -643,6 +669,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -652,18 +679,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -674,24 +699,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1001,6 +1032,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1025,6 +1058,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1229,10 +1264,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("API Reference", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Sentry", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Organizations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organizations(
     owner: bool | None = Field(None, description="Set to `true` to filter results to only organizations where you have owner-level permissions."),
     query: str | None = Field(None, description="Filter organizations using query syntax supporting multiple fields: `id`, `slug`, `status` (active, pending_deletion, or deletion_in_progress), `email` or `member_id` for specific members, `platform` for projects using a given platform, and `query` for substring matching against name, slug, and member information. Supports boolean operators (AND, OR) and complex expressions."),
@@ -1273,7 +1314,13 @@ async def list_organizations(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization(
     organization_id_or_slug: str = Field(..., description="The unique identifier or slug of the organization. Use either the numeric ID or the URL-friendly slug name."),
     detailed: str | None = Field(None, description="Set to `\"0\"` to retrieve only basic organization details while excluding projects and teams from the response. Omit to include full details."),
@@ -1315,7 +1362,13 @@ async def get_organization(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     slug: str | None = Field(None, description="New organization slug for URLs; must be unique across the instance and not exceed 50 characters.", max_length=50),
@@ -1388,7 +1441,13 @@ async def update_organization(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Update Metric Alert Rule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_metric_alert_rule(
     organization_id_or_slug: str = Field(..., description="The ID or slug of the organization that owns the alert rule."),
     alert_rule_id: int = Field(..., description="The numeric ID of the alert rule to update."),
@@ -1444,7 +1503,13 @@ async def update_metric_alert_rule(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Integration Providers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_integration_providers(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     provider_key: str | None = Field(None, alias="providerKey", description="Optional filter to retrieve details for a single integration provider (e.g., 'slack'). When omitted, information for all available providers is returned."),
@@ -1486,7 +1551,13 @@ async def list_integration_providers(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Dashboards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_dashboards(
     organization_id_or_slug: str = Field(..., description="The unique identifier or slug of the organization. Use either the numeric ID or the organization's URL-friendly slug."),
     per_page: int | None = Field(None, description="Maximum number of dashboards to return in a single response. Defaults to 100 if not specified; cannot exceed 100."),
@@ -1528,7 +1599,12 @@ async def list_organization_dashboards(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Create Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dashboard(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     title: str = Field(..., description="A human-readable name for the dashboard. Limited to 255 characters.", max_length=255),
@@ -1577,7 +1653,13 @@ async def create_dashboard(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Dashboard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_dashboard(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     dashboard_id: int = Field(..., description="The numeric ID of the dashboard to retrieve."),
@@ -1616,7 +1698,13 @@ async def get_organization_dashboard(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Dashboard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_dashboard(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     dashboard_id: int = Field(..., description="The numeric ID of the dashboard to update."),
@@ -1665,7 +1753,13 @@ async def update_organization_dashboard(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Dashboard",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_dashboard(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     dashboard_id: int = Field(..., description="The numeric ID of the dashboard to delete."),
@@ -1704,7 +1798,13 @@ async def delete_organization_dashboard(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Monitors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_monitors(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. This determines which organization's monitors are returned."),
     query: str | None = Field(None, description="Optional search query to filter monitors by name, type (e.g., error, metric_issue, issue_stream), or assignee (email, username, team reference with # prefix, 'me', or 'none')."),
@@ -1746,7 +1846,13 @@ async def list_organization_monitors(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Monitors Enabled State",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_monitors_enabled_state(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the organization slug."),
     enabled: bool = Field(..., description="Set to true to enable the selected monitors or false to disable them."),
@@ -1792,7 +1898,13 @@ async def update_organization_monitors_enabled_state(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Monitors in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_monitors_bulk(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the organization slug."),
     query: str | None = Field(None, description="Optional search query to filter which monitors to delete. Supports filtering by name, type (error, metric_issue, issue_stream), or assignee (email, username, #team, me, none)."),
@@ -1834,7 +1946,13 @@ async def delete_monitors_bulk(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Get Monitor Detector",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monitor_detector(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     detector_id: int = Field(..., description="The numeric ID of the monitor to retrieve."),
@@ -1873,7 +1991,13 @@ async def get_monitor_detector(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Update Monitor Detector",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_monitor_detector(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     detector_id: int = Field(..., description="The numeric ID of the monitor to update."),
@@ -1924,7 +2048,13 @@ async def update_monitor_detector(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Monitor",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_monitor(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug of the organization that owns the monitor."),
     detector_id: int = Field(..., description="The numeric ID of the monitor to delete."),
@@ -1963,7 +2093,13 @@ async def delete_monitor(
     return _response_data
 
 # Tags: Discover
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Discover Saved Queries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_discover_saved_queries(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL-friendly slug."),
     per_page: int | None = Field(None, description="Maximum number of results to return per page, up to 100 (default is 100)."),
@@ -2006,7 +2142,12 @@ async def list_organization_discover_saved_queries(
     return _response_data
 
 # Tags: Discover
-@mcp.tool()
+@mcp.tool(
+    title="Create Saved Query",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_saved_query(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     name: str = Field(..., description="A descriptive name for the saved query, up to 255 characters.", max_length=255),
@@ -2057,7 +2198,13 @@ async def create_saved_query(
     return _response_data
 
 # Tags: Discover
-@mcp.tool()
+@mcp.tool(
+    title="Get Discover Saved Query",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_discover_saved_query(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     query_id: int = Field(..., description="The numeric ID of the saved Discover query to retrieve."),
@@ -2096,7 +2243,13 @@ async def get_discover_saved_query(
     return _response_data
 
 # Tags: Discover
-@mcp.tool()
+@mcp.tool(
+    title="Update Discover Saved Query",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_discover_saved_query(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     query_id: int = Field(..., description="The numeric ID of the saved Discover query to modify."),
@@ -2148,7 +2301,13 @@ async def update_discover_saved_query(
     return _response_data
 
 # Tags: Discover
-@mcp.tool()
+@mcp.tool(
+    title="Delete Discover Saved Query",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_discover_saved_query(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     query_id: int = Field(..., description="The numeric ID of the saved Discover query to delete."),
@@ -2187,7 +2346,13 @@ async def delete_discover_saved_query(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_environments(
     organization_id_or_slug: str = Field(..., description="The unique identifier or slug of the organization. You can use either the numeric ID or the organization's URL-friendly slug."),
     visibility: Literal["all", "hidden", "visible"] | None = Field(None, description="Filter environments by their visibility status. Choose 'visible' to show only active environments, 'hidden' to show only inactive ones, or 'all' to retrieve both. Defaults to 'visible' if not specified."),
@@ -2229,7 +2394,13 @@ async def list_organization_environments(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Event ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def resolve_event_id(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     event_id: str = Field(..., description="The event ID to resolve. This is the unique identifier for the event you want to look up."),
@@ -2268,7 +2439,13 @@ async def resolve_event_id(
     return _response_data
 
 # Tags: Explore
-@mcp.tool()
+@mcp.tool(
+    title="Search Events in Table Format",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_events_in_table_format(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL-friendly slug."),
     field: list[str] = Field(..., description="The columns to include in results. Select up to 20 fields, which can be built-in properties (e.g., transaction, environment), tags in tag[name, type] format, functions like count() or count_if(), or equations prefixed with equation|. See searchable properties documentation for available fields per dataset."),
@@ -2314,7 +2491,13 @@ async def search_events_in_table_format(
     return _response_data
 
 # Tags: Explore
-@mcp.tool()
+@mcp.tool(
+    title="Get Events Timeseries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_events_timeseries(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL slug."),
     dataset: Literal["logs", "profile_functions", "spans", "uptime_results"] = Field(..., description="The dataset to query. Different datasets provide different available fields: logs, profile_functions, spans, or uptime_results."),
@@ -2362,7 +2545,12 @@ async def get_events_timeseries(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Link External User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_external_user(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     user_id: int = Field(..., description="The numeric ID of the Sentry user to link to the external provider."),
@@ -2408,7 +2596,13 @@ async def link_external_user(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Update External User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_user(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     external_user_id: int = Field(..., description="The unique identifier of the external user object to update, returned when the external user was initially created."),
@@ -2455,7 +2649,13 @@ async def update_external_user(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete External User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_external_user(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     external_user_id: int = Field(..., description="The unique identifier of the external user object to delete. This ID is provided when the external user is initially created."),
@@ -2494,7 +2694,13 @@ async def delete_external_user(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Data Forwarders for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_data_forwarders_for_organization(organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization.")) -> dict[str, Any] | ToolResult:
     """Retrieves all data forwarders configured for a specific organization. Data forwarders enable automatic forwarding of events and data to external destinations."""
 
@@ -2530,7 +2736,12 @@ async def list_data_forwarders_for_organization(organization_id_or_slug: str = F
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Create Data Forwarder for Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_data_forwarder_for_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the organization slug."),
     organization_id: int = Field(..., description="The numeric ID of the organization that will own this data forwarder."),
@@ -2577,7 +2788,13 @@ async def create_data_forwarder_for_organization(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Update Data Forwarder",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_data_forwarder(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the organization slug."),
     data_forwarder_id: int = Field(..., description="The numeric ID of the data forwarder to update."),
@@ -2625,7 +2842,13 @@ async def update_data_forwarder(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Data Forwarder for Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_data_forwarder_for_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     data_forwarder_id: int = Field(..., description="The numeric ID of the data forwarder to delete."),
@@ -2664,7 +2887,13 @@ async def delete_data_forwarder_for_organization(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Integrations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_integrations(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     provider_key: str | None = Field(None, alias="providerKey", description="Filter results to a specific integration provider (e.g., slack, github, jira). Omit to return all providers."),
@@ -2708,7 +2937,13 @@ async def list_organization_integrations(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_integration(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     integration_id: str = Field(..., description="The unique identifier of the integration installed on the organization."),
@@ -2747,7 +2982,13 @@ async def get_organization_integration(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_integration(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     integration_id: str = Field(..., description="The unique identifier of the integration that is installed on the organization."),
@@ -2786,7 +3027,13 @@ async def delete_organization_integration(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_issues(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     environment: list[str] | None = Field(None, description="Filter issues by one or more environment names. Provide as a list of environment identifiers."),
@@ -2833,7 +3080,13 @@ async def list_organization_issues(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Bulk Update Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def bulk_update_issues(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug."),
     inbox: bool = Field(..., description="Mark the issue as reviewed by the requesting user when set to true."),
@@ -2892,7 +3145,13 @@ async def bulk_update_issues(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_issues(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug."),
     environment: list[str] | None = Field(None, description="Filter issues by one or more environment names. Only issues matching all specified environments will be affected."),
@@ -2936,7 +3195,13 @@ async def delete_organization_issues(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_members(organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or a URL-friendly slug.")) -> dict[str, Any] | ToolResult:
     """Retrieve all members of an organization, including pending invitations that have been approved by owners or managers but not yet accepted by invitees."""
 
@@ -2972,7 +3237,12 @@ async def list_organization_members(organization_id_or_slug: str = Field(..., de
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Add Member to Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_member_to_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     email: str = Field(..., description="Email address of the member to invite. Must be a valid email format with a maximum length of 75 characters.", max_length=75),
@@ -3018,7 +3288,13 @@ async def add_member_to_organization(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_member(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     member_id: str = Field(..., description="The unique identifier of the organization member to retrieve."),
@@ -3057,7 +3333,13 @@ async def get_organization_member(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Member Roles",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_member_roles(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug."),
     member_id: str = Field(..., description="The numeric ID of the member whose roles should be updated."),
@@ -3101,7 +3383,13 @@ async def update_organization_member_roles(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_member(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     member_id: str = Field(..., description="The unique identifier of the organization member to remove."),
@@ -3140,7 +3428,12 @@ async def delete_organization_member(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Add Member to Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_member_to_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug. Used to scope the operation to a specific organization."),
     member_id: str = Field(..., description="The numeric ID of the organization member to add to the team."),
@@ -3180,7 +3473,13 @@ async def add_member_to_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Member Team Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_member_team_role(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     member_id: str = Field(..., description="The numeric ID of the organization member whose team role should be updated."),
@@ -3224,7 +3523,13 @@ async def update_organization_member_team_role(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Remove Member from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_member_from_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     member_id: str = Field(..., description="The numeric ID of the organization member to remove from the team."),
@@ -3264,7 +3569,13 @@ async def remove_member_from_team(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="List Monitors for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_monitors_for_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     environment: list[str] | None = Field(None, description="Filter results to include only monitors from specified environments. Accepts multiple environment names; monitors matching any of the provided environments will be included."),
@@ -3307,7 +3618,12 @@ async def list_monitors_for_organization(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Create Monitor",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_monitor(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     project: str = Field(..., description="The project slug that this monitor will be associated with."),
@@ -3355,7 +3671,13 @@ async def create_monitor(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Get Monitor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monitor(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     monitor_id_or_slug: str = Field(..., description="The monitor identifier, which can be either the numeric ID or the URL-friendly slug of the monitor."),
@@ -3398,7 +3720,13 @@ async def get_monitor(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Update Monitor",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_monitor(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the organization slug."),
     monitor_id_or_slug: str = Field(..., description="The monitor identifier, either the numeric ID or the monitor slug."),
@@ -3447,7 +3775,13 @@ async def update_monitor(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Delete Monitor or Monitor Environments",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_monitor_or_monitor_environments(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     monitor_id_or_slug: str = Field(..., description="The monitor identifier, either the numeric ID or the URL slug of the monitor."),
@@ -3490,7 +3824,13 @@ async def delete_monitor_or_monitor_environments(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="List Check-ins for Monitor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_checkins_for_monitor(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     monitor_id_or_slug: str = Field(..., description="The monitor identifier, which can be either the numeric ID or the URL-friendly slug of the monitor within the organization."),
@@ -3529,7 +3869,13 @@ async def list_checkins_for_monitor(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="List Spike Protection Notifications",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_spike_protection_notifications(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug."),
     trigger_type: str | None = Field(None, alias="triggerType", description="Filter notifications by trigger type. Currently, only `spike-protection` is supported."),
@@ -3571,7 +3917,13 @@ async def list_spike_protection_notifications(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Get Spike Protection Notification Action",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_spike_protection_notification_action(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. Use whichever format you have available."),
     action_id: int = Field(..., description="The numeric identifier of the notification action to retrieve."),
@@ -3610,7 +3962,13 @@ async def get_spike_protection_notification_action(
     return _response_data
 
 # Tags: Mobile Builds
-@mcp.tool()
+@mcp.tool(
+    title="Get Artifact Install Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_artifact_install_details(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     artifact_id: str = Field(..., description="The unique identifier of the build artifact for which to retrieve installation details."),
@@ -3649,7 +4007,13 @@ async def get_artifact_install_details(
     return _response_data
 
 # Tags: Mobile Builds
-@mcp.tool()
+@mcp.tool(
+    title="Get Artifact Size Analysis",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_artifact_size_analysis(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     artifact_id: str = Field(..., description="The unique identifier of the build artifact to analyze."),
@@ -3692,7 +4056,13 @@ async def get_artifact_size_analysis(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories for Owner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories_for_owner(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL slug. This determines which organization's repositories to query."),
     owner: str = Field(..., description="The owner identifier whose repositories should be retrieved."),
@@ -3736,7 +4106,13 @@ async def list_repositories_for_owner(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository Sync Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository_sync_status(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     owner: str = Field(..., description="The repository owner identifier, typically a username or organization name that owns the repositories being queried."),
@@ -3775,7 +4151,12 @@ async def get_repository_sync_status(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="Sync Repositories for Owner",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def sync_repositories_for_owner(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. This determines which organization's GitHub integration will be used for the sync operation."),
     owner: str = Field(..., description="The GitHub username or organization name that owns the repositories to be synchronized. Only repositories owned by this entity will be synced."),
@@ -3814,7 +4195,13 @@ async def sync_repositories_for_owner(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Tokens for Owner",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_tokens_for_owner(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL slug. This determines which organization's tokens to retrieve."),
     owner: str = Field(..., description="The repository owner whose tokens should be listed. Filters results to tokens belonging to this specific owner."),
@@ -3857,7 +4244,13 @@ async def list_repository_tokens_for_owner(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     owner: str = Field(..., description="The owner identifier of the repository, typically a user or team name within the organization."),
@@ -3897,7 +4290,13 @@ async def get_repository(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Branches",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_branches(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     owner: str = Field(..., description="The repository owner's username or identifier."),
@@ -3942,7 +4341,13 @@ async def list_repository_branches(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="List Test Results for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_test_results_for_repository(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     owner: str = Field(..., description="The repository owner or account name."),
@@ -3989,7 +4394,13 @@ async def list_test_results_for_repository(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="Get Test Results Aggregates for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_test_results_aggregates_for_repository(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. This determines which organization's data is accessed."),
     owner: str = Field(..., description="The owner or account name that owns the repository. Used to scope the repository lookup within the organization."),
@@ -4033,7 +4444,13 @@ async def get_test_results_aggregates_for_repository(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="List Test Suites for Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_test_suites_for_repository(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     owner: str = Field(..., description="The owner or account name that owns the repository."),
@@ -4077,7 +4494,13 @@ async def list_test_suites_for_repository(
     return _response_data
 
 # Tags: Prevent
-@mcp.tool()
+@mcp.tool(
+    title="Regenerate Repository Upload Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def regenerate_repository_upload_token(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     owner: str = Field(..., description="The owner identifier of the repository, typically a user or organization name."),
@@ -4117,7 +4540,13 @@ async def regenerate_repository_upload_token(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Client Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_client_keys(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its unique ID or human-readable slug."),
     team: str | None = Field(None, description="Optional filter to retrieve keys only for projects belonging to a specific team, identified by team slug or ID.", min_length=1),
@@ -4160,7 +4589,13 @@ async def list_organization_client_keys(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_projects(organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all projects associated with a specific organization. Returns a list of projects bound to the organization identified by ID or slug."""
 
@@ -4196,7 +4631,12 @@ async def list_organization_projects(organization_id_or_slug: str = Field(..., d
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Create Metric Monitor for Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_metric_monitor_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL slug."),
@@ -4247,7 +4687,13 @@ async def create_metric_monitor_for_project(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Trusted Relays",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_trusted_relays(organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all trusted relays configured for an organization. Relays are used to forward events and requests securely within the organization's infrastructure."""
 
@@ -4283,7 +4729,13 @@ async def list_organization_trusted_relays(organization_id_or_slug: str = Field(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Threshold Statuses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_threshold_statuses(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     start: str = Field(..., description="The start of the time range as a UTC datetime in ISO 8601 format or Unix epoch seconds (inclusive)."),
@@ -4328,7 +4780,13 @@ async def list_release_threshold_statuses(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Release",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_release(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     version: str = Field(..., description="The version identifier that uniquely identifies the release within the organization."),
@@ -4377,7 +4835,13 @@ async def get_organization_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Release",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_release(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     version: str = Field(..., description="The semantic version string that uniquely identifies the release within the organization."),
@@ -4422,7 +4886,13 @@ async def update_organization_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Delete Organization Release",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_organization_release(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     version: str = Field(..., description="The version string that uniquely identifies the release within the organization."),
@@ -4461,7 +4931,13 @@ async def delete_organization_release(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Deploys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_deploys(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     version: str = Field(..., description="The version string that uniquely identifies the release for which to retrieve deployments."),
@@ -4500,7 +4976,12 @@ async def list_release_deploys(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Create Deploy for Release",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_deploy_for_release(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     version: str = Field(..., description="The release version identifier to deploy."),
@@ -4548,7 +5029,13 @@ async def create_deploy_for_release(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="Get Replay Count for Issues or Transactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_replay_count_for_issues_or_transactions(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     environment: list[str] | None = Field(None, description="Optional list of environment names to narrow results to specific deployment environments."),
@@ -4591,7 +5078,13 @@ async def get_replay_count_for_issues_or_transactions(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Replay Selectors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_replay_selectors(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     environment: list[str] | None = Field(None, description="Filter selectors by one or more environments. Specify as an array of environment names."),
@@ -4635,7 +5128,13 @@ async def list_organization_replay_selectors(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Replays",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_replays(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     field: list[Literal["activity", "browser", "count_dead_clicks", "count_errors", "count_rage_clicks", "count_segments", "count_urls", "device", "dist", "duration", "environment", "error_ids", "finished_at", "id", "is_archived", "os", "platform", "project_id", "releases", "sdk", "started_at", "tags", "trace_ids", "urls", "user", "clicks", "info_ids", "warning_ids", "count_warnings", "count_infos", "has_viewed"]] | None = Field(None, description="Comma-separated list of specific fields to include in the response. Only valid field names are accepted; invalid fields will cause an error."),
@@ -4680,7 +5179,13 @@ async def list_organization_replays(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="Get Replay Instance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_replay_instance(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. Required to scope the replay to the correct organization."),
     replay_id: str = Field(..., description="The unique identifier of the replay to retrieve, formatted as a UUID. This must be a valid UUID string."),
@@ -4726,7 +5231,13 @@ async def get_replay_instance(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Repository Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repository_commits(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     repo_id: str = Field(..., description="The unique identifier of the repository within the organization."),
@@ -4765,7 +5276,13 @@ async def list_repository_commits(
     return _response_data
 
 # Tags: SCIM
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Teams (SCIM)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_teams_scim(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug."),
     start_index: int | None = Field(None, alias="startIndex", description="The starting position for pagination using 1-based indexing. Defaults to 1 if not specified.", ge=1),
@@ -4809,7 +5326,12 @@ async def list_organization_teams_scim(
     return _response_data
 
 # Tags: SCIM
-@mcp.tool()
+@mcp.tool(
+    title="Create Team in Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team_in_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     display_name: str = Field(..., alias="displayName", description="The display name for the team as shown in the UI. This will be normalized to a URL-friendly slug format (lowercase, spaces converted to dashes)."),
@@ -4845,13 +5367,20 @@ async def create_team_in_organization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: SCIM
-@mcp.tool()
+@mcp.tool(
+    title="List Organization SCIM Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_scim_members(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug."),
     start_index: int | None = Field(None, alias="startIndex", description="The starting position for pagination using 1-based indexing (defaults to 1 if not specified).", ge=1),
@@ -4895,7 +5424,12 @@ async def list_organization_scim_members(
     return _response_data
 
 # Tags: SCIM
-@mcp.tool()
+@mcp.tool(
+    title="Create Organization Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_organization_member(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     user_name: str = Field(..., alias="userName", description="The email address for the new member, used as the SAML identifier. Must be a valid email format."),
@@ -4932,13 +5466,20 @@ async def create_organization_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="List Sentry Apps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sentry_apps(organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. Use the slug for human-readable requests or the ID for programmatic access.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom integrations (Sentry Apps) created by an organization. This returns the organization's internal integrations that extend Sentry's functionality."""
 
@@ -4974,7 +5515,13 @@ async def list_sentry_apps(organization_id_or_slug: str = Field(..., description
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Health Session Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_health_session_statistics(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     field: list[str] = Field(..., description="One or more metrics to retrieve, such as session counts, unique user counts, crash rates, or session duration percentiles. Multiple fields can be requested in a single query."),
@@ -5022,7 +5569,13 @@ async def list_release_health_session_statistics(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Short ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def resolve_short_id(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. This determines which organization's namespace to search within."),
     issue_id: str = Field(..., description="The short ID of the issue to resolve. This is a condensed identifier that maps to a specific issue within the organization."),
@@ -5061,7 +5614,13 @@ async def resolve_short_id(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Events Count by Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_events_count_by_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     field: Literal["sum(quantity)", "sum(times_seen)"] = Field(..., description="The aggregation metric to retrieve: `sum(quantity)` returns event counts (or total bytes for attachments), while `sum(times_seen)` returns the number of times events were observed (or unique session counts for sessions, total attachments for attachments).", min_length=1),
@@ -5107,7 +5666,13 @@ async def get_organization_events_count_by_project(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Counts for Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_counts_for_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     group_by: list[Literal["outcome", "category", "reason", "project"]] = Field(..., alias="groupBy", description="One or more dimensions to group results by (e.g., project, outcome, category). Multiple groupBy parameters can be passed to create multi-dimensional breakdowns. Note: grouping by project may omit rows if the project/interval combination is very large; for large project counts, filter and query individually. Project grouping does not support timeseries intervals and returns aggregated sums instead."),
@@ -5158,7 +5723,13 @@ async def get_event_counts_for_organization(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_teams(
     organization_id_or_slug: str = Field(..., description="The unique identifier or slug of the organization. Use either the numeric ID or the organization's URL-friendly slug."),
     detailed: str | None = Field(None, description="Set to \"0\" to return team information without including associated project details, reducing response size."),
@@ -5200,7 +5771,12 @@ async def list_organization_teams(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL-friendly slug."),
     slug: str | None = Field(None, description="A URL-friendly identifier for the team (lowercase alphanumeric characters, hyphens, and underscores; cannot be purely numeric). Maximum 50 characters. If omitted, it will be automatically generated from the team name.", max_length=50),
@@ -5242,7 +5818,13 @@ async def create_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List User Teams in Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_teams_in_organization(organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all teams within an organization that the authenticated user has access to. This endpoint requires user authentication tokens and is useful for discovering team membership and permissions."""
 
@@ -5278,7 +5860,13 @@ async def list_user_teams_in_organization(organization_id_or_slug: str = Field(.
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="List Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alerts(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     query: str | None = Field(None, description="Optional search query to filter alerts by name, status, or other alert properties."),
@@ -5320,7 +5908,12 @@ async def list_alerts(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert for Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert_for_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     name: str = Field(..., description="A descriptive name for the alert, up to 256 characters in length.", max_length=256),
@@ -5369,7 +5962,13 @@ async def create_alert_for_organization(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Alerts in Bulk",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_alerts_bulk(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     enabled: bool = Field(..., description="Set to true to enable the selected alerts, or false to disable them."),
@@ -5415,7 +6014,13 @@ async def update_organization_alerts_bulk(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alerts in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alerts_bulk(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     query: str | None = Field(None, description="An optional search query to filter which alerts should be deleted. If omitted, the operation applies to all alerts in the organization."),
@@ -5457,7 +6062,13 @@ async def delete_alerts_bulk(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. This determines which organization's alert you're accessing."),
     workflow_id: int = Field(..., description="The numeric ID of the alert (workflow) to retrieve."),
@@ -5496,7 +6107,13 @@ async def get_alert(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     workflow_id: int = Field(..., description="The numeric ID of the alert to update."),
@@ -5546,7 +6163,13 @@ async def update_alert(
     return _response_data
 
 # Tags: Monitors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     workflow_id: int = Field(..., description="The numeric ID of the alert to delete."),
@@ -5585,7 +6208,13 @@ async def delete_alert(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -5624,7 +6253,13 @@ async def get_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either its numeric ID or URL-friendly slug."),
@@ -5674,7 +6309,13 @@ async def update_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL slug of the project to be deleted."),
@@ -5713,7 +6354,13 @@ async def delete_project(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="List Project Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_environments(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its unique ID or URL-friendly slug. Required to scope the project within the correct organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either its unique ID or URL-friendly slug. Required to specify which project's environments to list."),
@@ -5756,7 +6403,13 @@ async def list_project_environments(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_environment(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project."),
@@ -5796,7 +6449,13 @@ async def get_project_environment(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Environment Visibility",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_environment_visibility(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -5840,7 +6499,13 @@ async def update_project_environment_visibility(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Project Error Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_error_events(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -5884,7 +6549,13 @@ async def list_project_error_events(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Source Map Debug for Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_source_map_debug_for_event(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -5929,7 +6600,13 @@ async def get_source_map_debug_for_event(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Filters",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_filters(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -5968,7 +6645,13 @@ async def list_project_filters(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Inbound Data Filter",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_inbound_data_filter(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL-friendly slug."),
@@ -6012,7 +6695,13 @@ async def update_inbound_data_filter(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Client Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_client_keys(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -6055,7 +6744,12 @@ async def list_project_client_keys(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project Client Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_client_key(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL-friendly slug."),
@@ -6099,7 +6793,13 @@ async def create_project_client_key(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Client Key",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_client_key(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -6139,7 +6839,13 @@ async def get_client_key(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Client Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_client_key(
     organization_id_or_slug: str = Field(..., description="The ID or slug of the organization that owns the project containing this client key."),
     project_id_or_slug: str = Field(..., description="The ID or slug of the project that contains this client key."),
@@ -6191,7 +6897,13 @@ async def update_client_key(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Client Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_client_key(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -6231,7 +6943,13 @@ async def delete_client_key(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_members(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -6270,7 +6988,13 @@ async def list_project_members(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Get Monitor",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_monitor_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -6310,7 +7034,13 @@ async def get_monitor_project(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Update Monitor",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_monitor_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL-friendly slug."),
@@ -6360,7 +7090,13 @@ async def update_monitor_project(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="Delete Monitor for Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_monitor_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -6404,7 +7140,13 @@ async def delete_monitor_for_project(
     return _response_data
 
 # Tags: Crons
-@mcp.tool()
+@mcp.tool(
+    title="List Check-ins for Monitor in Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_checkins_for_monitor_in_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. This scopes the request to a specific organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug. This scopes the request to a specific project within the organization."),
@@ -6444,7 +7186,13 @@ async def list_checkins_for_monitor_in_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Ownership Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_ownership_configuration(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL slug of the project within the organization."),
@@ -6483,7 +7231,13 @@ async def get_project_ownership_configuration(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Ownership Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_ownership_configuration(
     organization_id_or_slug: str = Field(..., description="The ID or slug of the organization that owns the project."),
     project_id_or_slug: str = Field(..., description="The ID or slug of the project whose ownership configuration will be updated."),
@@ -6529,7 +7283,13 @@ async def update_project_ownership_configuration(
     return _response_data
 
 # Tags: Mobile Builds
-@mcp.tool()
+@mcp.tool(
+    title="Get Latest Installable Build",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_latest_installable_build(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL-friendly slug."),
@@ -6577,7 +7337,13 @@ async def get_latest_installable_build(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="Delete Replay",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_replay(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -6617,7 +7383,13 @@ async def delete_replay(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="List Clicked Nodes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_clicked_nodes(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its unique ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either its unique ID or URL-friendly slug."),
@@ -6663,7 +7435,13 @@ async def list_clicked_nodes(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="List Replay Recording Segments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_replay_recording_segments(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL-friendly slug."),
@@ -6707,7 +7485,13 @@ async def list_replay_recording_segments(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="Get Recording Segment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_recording_segment(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. This determines which organization's resources are accessed."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL-friendly slug. This determines which project within the organization contains the replay."),
@@ -6748,7 +7532,13 @@ async def get_recording_segment(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="List Users Who Viewed Replay",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users_who_viewed_replay(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug. Used to scope the resource within your organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL-friendly slug. Used to scope the replay within a specific project."),
@@ -6788,7 +7578,13 @@ async def list_users_who_viewed_replay(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="List Replay Deletion Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_replay_deletion_jobs(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. This scopes the request to a specific organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug. This scopes the request to a specific project within the organization."),
@@ -6827,7 +7623,13 @@ async def list_replay_deletion_jobs(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="Create Replay Deletion Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_replay_deletion_job(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug of the project."),
@@ -6873,7 +7675,13 @@ async def create_replay_deletion_job(
     return _response_data
 
 # Tags: Replays
-@mcp.tool()
+@mcp.tool(
+    title="Get Replay Deletion Job",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_replay_deletion_job(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. This scopes the request to a specific organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug. This scopes the request to a specific project within the organization."),
@@ -6913,7 +7721,13 @@ async def get_replay_deletion_job(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Alert Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_alert_rule(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug of the project."),
@@ -6953,7 +7767,13 @@ async def get_issue_alert_rule(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Update Issue Alert Rule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_issue_alert_rule(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL slug."),
@@ -7005,7 +7825,13 @@ async def update_issue_alert_rule(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue Alert Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue_alert_rule(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization that owns the project."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug of the project containing the alert rule."),
@@ -7045,7 +7871,13 @@ async def delete_issue_alert_rule(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Symbol Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_symbol_sources(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -7084,7 +7916,12 @@ async def list_project_symbol_sources(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Symbol Source to Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_symbol_source_to_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL-friendly slug."),
@@ -7145,7 +7982,13 @@ async def add_symbol_source_to_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Symbol Source",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_symbol_source(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL-friendly slug."),
@@ -7211,7 +8054,13 @@ async def update_project_symbol_source(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Symbol Source",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_symbol_source(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -7254,7 +8103,13 @@ async def delete_symbol_source(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project."),
@@ -7293,7 +8148,12 @@ async def list_teams_for_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Add Team to Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_team_to_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -7333,7 +8193,13 @@ async def add_team_to_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team from Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team_from_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug."),
@@ -7373,7 +8239,13 @@ async def delete_team_from_project(
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_integration(sentry_app_id_or_slug: str = Field(..., description="The unique identifier or URL-friendly slug of the custom integration. You can use either the numeric ID or the slug string to identify which custom integration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details about a custom integration (Sentry App) by its unique identifier or slug. Use this to fetch configuration, permissions, and metadata for a specific custom integration."""
 
@@ -7409,7 +8281,13 @@ async def get_custom_integration(sentry_app_id_or_slug: str = Field(..., descrip
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_integration(sentry_app_id_or_slug: str = Field(..., description="The unique identifier or slug of the custom integration to delete. You can use either the numeric ID or the URL-friendly slug name.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom integration (Sentry app) from your organization. This action cannot be undone."""
 
@@ -7445,7 +8323,13 @@ async def delete_custom_integration(sentry_app_id_or_slug: str = Field(..., desc
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. This scopes the team lookup to a specific organization."),
     team_id_or_slug: str = Field(..., description="The team identifier, either the numeric ID or the URL-friendly slug. Combined with the organization identifier to uniquely identify the team."),
@@ -7489,7 +8373,13 @@ async def get_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     team_id_or_slug: str = Field(..., description="The team identifier, either the numeric ID or the URL-friendly slug."),
@@ -7532,7 +8422,13 @@ async def update_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     team_id_or_slug: str = Field(..., description="The team identifier, which can be either the numeric ID or the URL slug of the team to be deleted."),
@@ -7571,7 +8467,12 @@ async def delete_team(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Link External Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def link_external_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     team_id_or_slug: str = Field(..., description="The team identifier, either the numeric ID or the URL slug of the team within the organization."),
@@ -7617,7 +8518,13 @@ async def link_external_team(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Update External Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_external_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     team_id_or_slug: str = Field(..., description="The team identifier, either the numeric ID or the URL slug of the team within the organization."),
@@ -7664,7 +8571,13 @@ async def update_external_team(
     return _response_data
 
 # Tags: Integrations
-@mcp.tool()
+@mcp.tool(
+    title="Delete External Team Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_external_team_link(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization containing the team."),
     team_id_or_slug: str = Field(..., description="The team identifier, either the numeric ID or the URL slug of the Sentry team to disconnect from the external provider."),
@@ -7704,7 +8617,13 @@ async def delete_external_team_link(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_members(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     team_id_or_slug: str = Field(..., description="The team identifier, which can be either the numeric ID or the URL slug of the team within the organization."),
@@ -7743,7 +8662,13 @@ async def list_team_members(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Team Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_projects(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     team_id_or_slug: str = Field(..., description="The team identifier, which can be either the numeric ID or the URL-friendly slug of the team within the organization."),
@@ -7782,7 +8707,12 @@ async def list_team_projects(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project for Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_for_team(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug."),
     team_id_or_slug: str = Field(..., description="The team identifier, either its numeric ID or URL slug."),
@@ -7828,7 +8758,13 @@ async def create_project_for_team(
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_repositories(organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the organization's slug (short name). Use the slug for human-readable requests or the ID for programmatic lookups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all version control repositories belonging to a specified organization. Returns a paginated list of repositories accessible to the authenticated user."""
 
@@ -7864,7 +8800,13 @@ async def list_organization_repositories(organization_id_or_slug: str = Field(..
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Debug Information Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_debug_information_files(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -7903,11 +8845,16 @@ async def list_debug_information_files(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Upload dSYM File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_dsym_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug. Used to scope the project within your organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug. Specifies which project receives the debug information file."),
-    file_: str = Field(..., alias="file", description="The dSYM file to upload as binary data. Must be a zip archive containing Apple .dSYM folders with debug images."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The dSYM file to upload as binary data. Must be a zip archive containing Apple .dSYM folders with debug images.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload a debug information file (dSYM) for a specific release. The file must be a zip archive containing Apple .dSYM folders with debug images; uploading creates separate files for each contained image. Use region-specific domains (e.g., us.sentry.io or de.sentry.io) for this request."""
 
@@ -7948,7 +8895,13 @@ async def upload_dsym_file(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Debug Information File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_debug_information_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug of the organization that owns the project."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug of the project containing the debug information file to delete."),
@@ -7991,7 +8944,13 @@ async def delete_debug_information_file(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_users(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or a URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or a URL-friendly slug."),
@@ -8034,7 +8993,13 @@ async def list_project_users(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Tag Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_values(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug."),
@@ -8074,7 +9039,13 @@ async def list_tag_values(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Counts for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_counts_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug."),
@@ -8120,7 +9091,13 @@ async def get_event_counts_for_project(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project User Feedback",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_user_feedback(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug."),
@@ -8159,7 +9136,12 @@ async def list_project_user_feedback(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Submit User Feedback",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_user_feedback(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug."),
@@ -8205,7 +9187,13 @@ async def submit_user_feedback(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Project Service Hooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_service_hooks(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -8244,7 +9232,13 @@ async def list_project_service_hooks(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Hook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_hook(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -8284,7 +9278,13 @@ async def get_service_hook(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Service Hook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service_hook(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -8329,7 +9329,13 @@ async def update_service_hook(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Remove Service Hook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_service_hook(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -8369,7 +9375,13 @@ async def remove_service_hook(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -8409,7 +9421,13 @@ async def get_event(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Project Issues",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_issues(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL slug."),
@@ -8453,7 +9471,13 @@ async def list_project_issues(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Update Issues in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_issues_bulk(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or URL slug."),
@@ -8511,7 +9535,13 @@ async def update_issues_bulk(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issues",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issues(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either its numeric ID or URL slug. Used to scope the project and issues being deleted."),
     project_id_or_slug: str = Field(..., description="The project identifier, either its numeric ID or URL slug. Combined with the organization to locate the issues for deletion."),
@@ -8550,7 +9580,13 @@ async def delete_issues(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Tag Values for Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tag_values_for_issue(
     issue_id: int = Field(..., description="The numeric identifier of the issue to query for tag values."),
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
@@ -8594,7 +9630,13 @@ async def list_tag_values_for_issue(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Hashes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_hashes(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     issue_id: str = Field(..., description="The numeric or string identifier of the issue whose hashes should be retrieved."),
@@ -8637,7 +9679,13 @@ async def list_issue_hashes(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization that owns the issue."),
     issue_id: str = Field(..., description="The unique identifier of the issue to retrieve."),
@@ -8676,7 +9724,13 @@ async def get_issue(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Update Issue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_issue(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     issue_id: str = Field(..., description="The unique identifier of the issue to update."),
@@ -8724,7 +9778,13 @@ async def update_issue(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Delete Issue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_issue(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     issue_id: str = Field(..., description="The unique identifier of the issue to be deleted."),
@@ -8763,7 +9823,13 @@ async def delete_issue(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Releases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_releases(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     query: str | None = Field(None, description="Optional filter to match releases by version prefix using a 'starts with' comparison."),
@@ -8805,7 +9871,12 @@ async def list_organization_releases(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Create Release for Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_release_for_organization(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either a numeric ID or URL-friendly slug."),
     version: str = Field(..., description="A unique version identifier for this release, such as a semantic version number, commit hash, or other build identifier."),
@@ -8851,7 +9922,13 @@ async def create_release_for_organization(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_files(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug name of the organization."),
     version: str = Field(..., description="The version string that uniquely identifies the release. This should match the exact version identifier used when the release was created."),
@@ -8890,11 +9967,16 @@ async def list_release_files(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Upload Release File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_release_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     version: str = Field(..., description="The release version identifier to associate this file with."),
-    file_: str = Field(..., alias="file", description="The file content to upload, provided as binary multipart form data."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file content to upload, provided as binary multipart form data.", json_schema_extra={'format': 'byte'}),
     name: str | None = Field(None, description="The absolute path or URI where this file will be referenced (e.g., a full web URI for JavaScript files). If omitted, the original filename is used."),
     dist: str | None = Field(None, description="The distribution name to associate with this file, useful for organizing files across different build variants or platforms."),
     header: str | None = Field(None, description="HTTP headers to attach to the file, specified as key:value pairs. This parameter can be supplied multiple times to add multiple headers (e.g., to define content type or caching directives)."),
@@ -8938,7 +10020,13 @@ async def upload_release_file(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Files for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_files_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -8978,12 +10066,17 @@ async def list_release_files_for_project(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Upload Release File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_release_file_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug."),
     version: str = Field(..., description="The release version identifier to associate this file with."),
-    file_: str = Field(..., alias="file", description="The file content to upload as binary data via multipart form encoding."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The file content to upload as binary data via multipart form encoding.", json_schema_extra={'format': 'byte'}),
     name: str | None = Field(None, description="Optional absolute path or URI where this file will be referenced (e.g., full web URI for JavaScript files)."),
     dist: str | None = Field(None, description="Optional distribution name to associate with this file artifact."),
     header: str | None = Field(None, description="Optional HTTP headers to attach to the file, specified as key:value pairs. This parameter can be supplied multiple times for multiple headers (e.g., to define content type)."),
@@ -9027,7 +10120,13 @@ async def upload_release_file_project(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Get Release File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug name."),
     version: str = Field(..., description="The release version identifier, typically a semantic version string or tag name."),
@@ -9071,7 +10170,13 @@ async def get_release_file(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Update Organization Release File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_organization_release_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     version: str = Field(..., description="The version string that identifies the release."),
@@ -9116,7 +10221,13 @@ async def update_organization_release_file(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL slug of the organization."),
     version: str = Field(..., description="The version string that uniquely identifies the release within the organization."),
@@ -9156,7 +10267,13 @@ async def delete_release_file(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Get Release File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_release_file_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL slug of the project within the organization."),
@@ -9201,7 +10318,13 @@ async def get_release_file_project(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Update Release File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_release_file(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either as a numeric ID or URL-friendly slug."),
@@ -9247,7 +10370,13 @@ async def update_release_file(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="Delete Release File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_release_file_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug."),
     project_id_or_slug: str = Field(..., description="The project identifier, either the numeric ID or the URL-friendly slug."),
@@ -9288,7 +10417,13 @@ async def delete_release_file_for_project(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_commits(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     version: str = Field(..., description="The version string that uniquely identifies the release within the organization."),
@@ -9327,7 +10462,13 @@ async def list_release_commits(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Release Commits for Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_release_commits_for_project(
     organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the URL-friendly slug of the organization."),
     project_id_or_slug: str = Field(..., description="The project identifier, which can be either the numeric ID or the URL-friendly slug of the project within the organization."),
@@ -9367,7 +10508,13 @@ async def list_release_commits_for_project(
     return _response_data
 
 # Tags: Releases
-@mcp.tool()
+@mcp.tool(
+    title="List Files Changed in Release Commits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_files_changed_in_release_commits(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or the organization's URL slug. Use the slug for human-readable requests or the ID for programmatic lookups."),
     version: str = Field(..., description="The release version identifier. This should match the version tag or semantic version string used to identify the release in your system."),
@@ -9406,7 +10553,13 @@ async def list_files_changed_in_release_commits(
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Sentry App Installations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_sentry_app_installations(organization_id_or_slug: str = Field(..., description="The organization identifier, which can be either the numeric ID or the organization's URL slug (short name). Use the slug for human-readable references or the ID for programmatic lookups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all integration platform (Sentry App) installations configured for a specific organization. This returns the list of third-party integrations that have been installed and are active within the organization."""
 
@@ -9442,7 +10595,13 @@ async def list_organization_sentry_app_installations(organization_id_or_slug: st
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="Create or Update External Issue",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def create_or_update_external_issue(
     uuid_: str = Field(..., alias="uuid", description="The unique identifier of the integration platform installation that will handle the external issue creation or update."),
     issue_id: int = Field(..., alias="issueId", description="The numeric ID of the Sentry issue to link with the external issue."),
@@ -9487,7 +10646,13 @@ async def create_or_update_external_issue(
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="Delete External Issue",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_external_issue(
     uuid_: str = Field(..., alias="uuid", description="The unique identifier of the Sentry app installation (integration platform integration) that owns the external issue."),
     external_issue_id: str = Field(..., description="The unique identifier of the external issue to delete from the integration platform."),
@@ -9526,7 +10691,12 @@ async def delete_external_issue(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Enable Spike Protection for Projects",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_spike_protection_for_projects(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug. This determines which organization's projects will have Spike Protection enabled."),
     projects: list[str] = Field(..., description="Array of project slugs to enable Spike Protection for. Use the special value `$all` to enable Spike Protection across all projects in the organization, or provide specific project slugs as an array of strings."),
@@ -9568,7 +10738,13 @@ async def enable_spike_protection_for_projects(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Disable Spike Protection for Projects",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_spike_protection_for_projects(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization containing the projects."),
     projects: list[str] = Field(..., description="Array of project slugs to disable Spike Protection for. Use the special value `$all` to disable Spike Protection for all projects in the organization at once."),
@@ -9610,7 +10786,13 @@ async def disable_spike_protection_for_projects(
     return _response_data
 
 # Tags: Seer
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Autofix State",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_autofix_state(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug. Required to scope the issue within the correct organization."),
     issue_id: int = Field(..., description="The numeric identifier of the issue. Required to retrieve the specific autofix state for that issue."),
@@ -9649,7 +10831,12 @@ async def get_issue_autofix_state(
     return _response_data
 
 # Tags: Seer
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Issue Autofix",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_issue_autofix(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug of the organization."),
     issue_id: int = Field(..., description="The numeric ID of the issue to analyze and fix."),
@@ -9695,7 +10882,13 @@ async def trigger_issue_autofix(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="List Issue Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_issue_events(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug."),
     issue_id: int = Field(..., description="The numeric ID of the issue to retrieve events for."),
@@ -9741,7 +10934,13 @@ async def list_issue_events(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Issue Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_issue_event(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL-friendly slug (e.g., 'my-org'). This determines which organization's resources are accessed."),
     issue_id: int = Field(..., description="The numeric ID of the issue containing the event you want to retrieve."),
@@ -9785,7 +10984,13 @@ async def get_issue_event(
     return _response_data
 
 # Tags: Integration
-@mcp.tool()
+@mcp.tool(
+    title="List External Issues for Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_external_issues_for_issue(
     organization_id_or_slug: str = Field(..., description="The organization identifier, either the numeric ID or the URL slug. Use the slug for human-readable references or the ID for programmatic lookups."),
     issue_id: int = Field(..., description="The numeric ID of the Sentry issue. Must be a positive integer representing a valid issue within the organization."),
@@ -9824,7 +11029,13 @@ async def list_external_issues_for_issue(
     return _response_data
 
 # Tags: Events
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag Values for Issue",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag_values_for_issue(
     issue_id: int = Field(..., description="The numeric identifier of the issue to query for tag values."),
     organization_id_or_slug: str = Field(..., description="The organization identifier, either as a numeric ID or URL-friendly slug."),
@@ -9951,7 +11162,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python api_reference_server.py", file=sys.stderr)
+        print("  python sentry_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -10053,7 +11264,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="API Reference MCP Server")
+    parser = argparse.ArgumentParser(description="Sentry MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -10154,7 +11365,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting API Reference MCP Server")
+    logger.info("Starting Sentry MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

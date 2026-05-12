@@ -1,4 +1,4 @@
-# API Reference MCP Server
+# Sentry MCP Server
 <!-- mcp-name: com.mcparmory/sentry -->
 
 Base URL: https://us.sentry.io
@@ -60,6 +60,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BEARER_TOKEN` — Bearer token
 - `SERVER_REGION` — The data-storage-location for an organization (default: `us`)
+
 Do not commit credentials to version control.
 
 ---

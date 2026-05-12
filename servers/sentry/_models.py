@@ -1,7 +1,7 @@
 """
-Api Reference MCP Server - Pydantic Models
+Sentry MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:19:13 UTC
+Generated: 2026-05-12 12:47:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -2064,7 +2064,7 @@ class UploadANewFileRequestPath(StrictModel):
     organization_id_or_slug: str = Field(default=..., description="The organization identifier, either the numeric ID or the URL slug. Used to scope the project within your organization.")
     project_id_or_slug: str = Field(default=..., description="The project identifier, either the numeric ID or the URL slug. Specifies which project receives the debug information file.")
 class UploadANewFileRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The dSYM file to upload as binary data. Must be a zip archive containing Apple .dSYM folders with debug images.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The dSYM file to upload as binary data. Must be a zip archive containing Apple .dSYM folders with debug images.", json_schema_extra={'format': 'byte'})
 class UploadANewFileRequest(StrictModel):
     """Upload a debug information file (dSYM) for a specific release. The file must be a zip archive containing Apple .dSYM folders with debug images; uploading creates separate files for each contained image. Use region-specific domains (e.g., us.sentry.io or de.sentry.io) for this request."""
     path: UploadANewFileRequestPath
@@ -2323,7 +2323,7 @@ class UploadANewOrganizationReleaseFileRequestPath(StrictModel):
     organization_id_or_slug: str = Field(default=..., description="The organization identifier, either the numeric ID or the URL slug.")
     version: str = Field(default=..., description="The release version identifier to associate this file with.")
 class UploadANewOrganizationReleaseFileRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The file content to upload, provided as binary multipart form data.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file content to upload, provided as binary multipart form data.", json_schema_extra={'format': 'byte'})
     name: str | None = Field(default=None, description="The absolute path or URI where this file will be referenced (e.g., a full web URI for JavaScript files). If omitted, the original filename is used.")
     dist: str | None = Field(default=None, description="The distribution name to associate with this file, useful for organizing files across different build variants or platforms.")
     header: str | None = Field(default=None, description="HTTP headers to attach to the file, specified as key:value pairs. This parameter can be supplied multiple times to add multiple headers (e.g., to define content type or caching directives).")
@@ -2347,7 +2347,7 @@ class UploadANewProjectReleaseFileRequestPath(StrictModel):
     project_id_or_slug: str = Field(default=..., description="The project identifier, either the numeric ID or the URL slug.")
     version: str = Field(default=..., description="The release version identifier to associate this file with.")
 class UploadANewProjectReleaseFileRequestBody(StrictModel):
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The file content to upload as binary data via multipart form encoding.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The file content to upload as binary data via multipart form encoding.", json_schema_extra={'format': 'byte'})
     name: str | None = Field(default=None, description="Optional absolute path or URI where this file will be referenced (e.g., full web URI for JavaScript files).")
     dist: str | None = Field(default=None, description="Optional distribution name to associate with this file artifact.")
     header: str | None = Field(default=None, description="Optional HTTP headers to attach to the file, specified as key:value pairs. This parameter can be supplied multiple times for multiple headers (e.g., to define content type).")

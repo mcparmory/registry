@@ -1,7 +1,7 @@
 """
-Authentication module for API Reference MCP server.
+Authentication module for Sentry MCP server.
 
-Generated: 2026-05-05 16:19:13 UTC
+Generated: 2026-05-12 12:47:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
