@@ -1,7 +1,7 @@
 """
-Pdf.co Api MCP Server - Pydantic Models
+Pdf.co MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:49:30 UTC
+Generated: 2026-05-12 12:06:07 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -560,7 +560,7 @@ class PostV1JobCheckRequestBody(StrictModel):
     jobid: str = Field(default=..., description="The unique identifier of the asynchronous job whose status you want to check. This ID is returned when you initially create a background job.")
     force: bool | None = Field(default=None, description="When enabled, forces a fresh status check from the server rather than returning a cached result, ensuring you get the most current job state.")
 class PostV1JobCheckRequest(StrictModel):
-    """Retrieves the current status of an asynchronous background job that was previously initiated through the PDF.co API. Use this operation to poll and monitor the progress of long-running tasks."""
+    """Retrieves the current status of an asynchronous background job that was previously initiated through the PDF.co. Use this operation to poll and monitor the progress of long-running tasks."""
     body: PostV1JobCheckRequestBody
 
 # Operation: classify_document

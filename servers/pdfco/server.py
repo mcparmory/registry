@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PDF.co API MCP Server
-Generated: 2026-05-05 15:49:30 UTC
+PDF.co MCP Server
+Generated: 2026-05-12 12:06:07 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.pdf.co/v1")
-SERVER_NAME = "PDF.co API"
-SERVER_VERSION = "1.0.1"
+SERVER_NAME = "PDF.co"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1210,10 +1245,15 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("PDF.co API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("PDF.co", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="Extract Invoice Data",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_invoice_data(
     url: str = Field(..., description="URL of the invoice document to process. Accepts PDF and image formats. Defaults to a sample invoice if not provided."),
     customfield: str | None = Field(None, description="JSON string specifying custom field names to extract beyond standard invoice fields. Use camelCase for field names (e.g., storeNumber, deliveryDate) with multiple fields comma-separated."),
@@ -1249,13 +1289,19 @@ async def extract_invoice_data(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="Extract Data From PDF Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_data_from_pdf_document(
     url: str = Field(..., description="URL of the PDF document to parse. Can be a remote URL or a local file path accessible to the service."),
     template: str | None = Field(None, description="JSON template defining extraction rules, including field patterns (regex-based), table structures with multi-page support, and data type specifications. Defaults to a multi-page table extraction template if not provided."),
@@ -1294,13 +1340,20 @@ async def extract_data_from_pdf_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="List Document Parser Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_document_parser_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available Document Parser data extraction templates accessible to the current user. Use this to discover template options before configuring document parsing operations."""
 
@@ -1327,7 +1380,13 @@ async def list_document_parser_templates() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Parser Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_parser_template(id_: str = Field(..., alias="id", description="The unique identifier of the document parser template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific document parser template using its unique identifier."""
 
@@ -1363,7 +1422,12 @@ async def get_document_parser_template(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="Extract PDF Attachments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_pdf_attachments(url: str = Field(..., description="The URL of the PDF file to extract attachments from. Defaults to a sample PDF file if not provided.")) -> dict[str, Any] | ToolResult:
     """Extracts all attachments embedded in a PDF file from the provided URL. Returns the extracted attachment data for processing or download."""
 
@@ -1395,13 +1459,19 @@ async def extract_pdf_attachments(url: str = Field(..., description="The URL of 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Editing
-@mcp.tool()
+@mcp.tool(
+    title="Add Content to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_content_to_pdf(
     url: str = Field(..., description="URL of the source PDF file to edit. Defaults to a sample PDF if not provided."),
     annotations_string: str = Field(..., alias="annotationsString", description="One or more text annotations to add to the PDF. Each annotation is semicolon-delimited with parameters: x-coordinate, y-coordinate, page numbers, text content, font size, font name, font color, optional link URL, transparency setting, width, height, and text alignment."),
@@ -1439,13 +1509,19 @@ async def add_content_to_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Editing
-@mcp.tool()
+@mcp.tool(
+    title="Replace Text in PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def replace_text_in_pdf(
     url: str = Field(..., description="URL of the PDF file to process. Defaults to a sample agreement template if not specified."),
     searchstrings: list[str] | None = Field(None, description="Array of text strings or patterns to search for in the PDF. Order corresponds to replacestrings array for paired replacements."),
@@ -1486,13 +1562,19 @@ async def replace_text_in_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Editing
-@mcp.tool()
+@mcp.tool(
+    title="Replace Text with Image in PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def replace_text_with_image_in_pdf(
     url: str = Field(..., description="URL of the PDF file to modify. Accepts publicly accessible URLs or data URIs."),
     replaceimage: str | None = Field(None, description="Base64-encoded image data (with data URI prefix) to use as the replacement. Supports PNG, JPEG, and other common image formats."),
@@ -1533,13 +1615,20 @@ async def replace_text_with_image_in_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Editing
-@mcp.tool()
+@mcp.tool(
+    title="Delete Text from PDF",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_text_from_pdf(
     url: str = Field(..., description="URL of the PDF document to process. Defaults to a sample agreement template if not provided."),
     searchstrings: list[str] | None = Field(None, description="Array of text strings to search for and delete from the PDF. Each string is treated as a literal match unless regex mode is enabled. Defaults to common placeholder tokens like [CLIENT-NAME], [CLIENT-COMPANY], etc."),
@@ -1579,13 +1668,19 @@ async def delete_text_from_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_csv(
     url: str = Field(..., description="URL of the PDF file to convert. Can be a direct file URL or a cloud storage link. Defaults to a sample PDF if not provided."),
     lang: str | None = Field(None, description="Language code for OCR processing of scanned images. Uses standard language codes (e.g., 'eng' for English). Defaults to English."),
@@ -1625,13 +1720,19 @@ async def convert_pdf_to_csv(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to JSON",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_json(
     url: str = Field(..., description="URL of the PDF file to convert. Accepts publicly accessible URLs pointing to PDF documents or scanned images."),
     lang: str | None = Field(None, description="Language code for OCR processing when extracting text from scanned PDFs, PNGs, and JPGs. Use ISO 639-3 three-letter language codes (e.g., 'eng' for English). Combine multiple languages with a plus sign (e.g., 'eng+deu') to process text in multiple languages simultaneously.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1671,13 +1772,19 @@ async def convert_pdf_to_json(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to JSON with AI",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_json_with_ai(
     url: str = Field(..., description="URL of the PDF, PNG, or JPG file to convert. Accepts publicly accessible URLs or file paths from supported cloud storage."),
     lang: str | None = Field(None, description="OCR language code for extracting text from scanned PDFs and images. Use 3-letter ISO 639-2 language codes (e.g., 'eng' for English). Combine multiple languages with '+' to process bilingual documents (e.g., 'eng+deu' for English and German).", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1717,13 +1824,19 @@ async def convert_pdf_to_json_with_ai(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_text(
     url: str = Field(..., description="URL of the PDF or image file to convert. Accepts PDF, PNG, and JPG formats. Defaults to a sample PDF if not provided."),
     lang: str | None = Field(None, description="Language code for OCR processing when extracting text from scanned PDFs, images, or JPG documents. Use three-letter ISO 639-2 language codes (e.g., 'eng' for English). Combine multiple languages with a plus sign to process text in two languages simultaneously (e.g., 'eng+deu'). Defaults to English.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1763,13 +1876,19 @@ async def convert_pdf_to_text(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Text Fast",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_text_fast(
     url: str = Field(..., description="URL of the PDF file to convert. Accepts publicly accessible PDF URLs."),
     pages: str | None = Field(None, description="Comma-separated page indices or ranges to extract (0-based indexing). Supports individual pages (e.g., 0, 5), ranges (e.g., 3-7, 10-), and reverse indexing from the end (e.g., !0 for last page, !5-!2 for range from end). Whitespace around separators is allowed. Omit to process all pages.", pattern="^\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*(?:,\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*)*$"),
@@ -1805,13 +1924,19 @@ async def convert_pdf_to_text_fast(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to XLS",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_xls(
     url: str = Field(..., description="URL of the PDF file to convert. Defaults to a sample PDF if not provided."),
     lang: str | None = Field(None, description="Language(s) for OCR processing when extracting text from scanned PDFs, images, or JPG documents. Use ISO 639-3 three-letter language codes, optionally combining two languages with a plus sign (e.g., eng+deu for English and German). Defaults to English.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1851,13 +1976,19 @@ async def convert_pdf_to_xls(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to XLSX",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_xlsx(
     url: str = Field(..., description="URL of the PDF file to convert. Defaults to a sample PDF if not provided."),
     lang: str | None = Field(None, description="Language code for OCR processing of scanned PDFs, images, and JPG documents. Use ISO 639-3 three-letter codes (e.g., 'eng' for English). Combine multiple languages with '+' for simultaneous processing (e.g., 'eng+deu'). Defaults to English.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1897,13 +2028,19 @@ async def convert_pdf_to_xlsx(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to XML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_xml(
     url: str = Field(..., description="URL of the PDF file to convert. Accepts publicly accessible PDF URLs; defaults to a sample PDF if not provided."),
     lang: str | None = Field(None, description="OCR language code for text extraction from scanned PDFs, images, and documents. Use ISO 639-3 three-letter language codes (e.g., 'eng' for English). Combine multiple languages with '+' for simultaneous processing (e.g., 'eng+deu'). Defaults to English.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1943,13 +2080,19 @@ async def convert_pdf_to_xml(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_html(
     url: str = Field(..., description="URL of the PDF file to convert. Accepts publicly accessible URLs pointing to PDF documents or scanned images (PNG, JPG)."),
     lang: str | None = Field(None, description="Language code for OCR processing when converting scanned PDFs or image files. Use three-letter ISO 639-2 language codes (e.g., 'eng' for English). Combine multiple languages with '+' to enable simultaneous multi-language OCR (e.g., 'eng+deu' for English and German). Defaults to English.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -1987,13 +2130,19 @@ async def convert_pdf_to_html(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to JPG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_jpg(
     url: str = Field(..., description="URL of the PDF file to convert. Can be a remote URL or a local file path. Defaults to a sample encrypted PDF for testing."),
     rect: str | None = Field(None, description="Optional rectangular region to extract from each page, specified as four space-separated values: x-coordinate, y-coordinate, width, and height (e.g., '10 20 300 400'). If omitted, the entire page is converted."),
@@ -2030,13 +2179,19 @@ async def convert_pdf_to_jpg(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to PNG",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_png(
     url: str = Field(..., description="URL of the PDF file to convert. Defaults to a sample PDF if not provided."),
     rect: str | None = Field(None, description="Optional rectangular region to extract from the PDF, specified as four space-separated values: x-coordinate, y-coordinate, width, and height (e.g., '10 20 300 400')."),
@@ -2073,13 +2228,19 @@ async def convert_pdf_to_png(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to WebP",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_webp(
     url: str = Field(..., description="URL of the PDF file to convert. Accepts publicly accessible PDF URLs or file paths. Defaults to a sample PDF if not specified."),
     rect: str | None = Field(None, description="Optional rectangular region to extract from the PDF, specified as four space-separated values: x-coordinate, y-coordinate, width, and height. Use this to crop a specific area of interest from the page."),
@@ -2116,13 +2277,19 @@ async def convert_pdf_to_webp(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to TIFF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_tiff(
     url: str = Field(..., description="URL of the PDF file to convert. Defaults to a sample PDF if not provided."),
     rect: str | None = Field(None, description="Rectangular region to extract from the PDF, specified as four space-separated coordinates: x y width height. Use the PDF Edit Add Helper tool to measure and obtain precise coordinates for your target region."),
@@ -2160,13 +2327,19 @@ async def convert_pdf_to_tiff(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF From Doc",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_from_doc(
     url: str = Field(..., description="URL of the source document file to convert. Must point to a valid DOC, DOCX, RTF, TXT, or XPS file accessible via HTTP(S)."),
     name: str | None = Field(None, description="Optional filename for the output PDF file. Defaults to 'result.pdf' if not specified."),
@@ -2201,13 +2374,19 @@ async def convert_pdf_from_doc(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF from CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_from_csv(
     url: str = Field(..., description="URL of the CSV, XLS, or XLSX file to convert. Must be a publicly accessible HTTP(S) URL pointing to the spreadsheet file."),
     name: str | None = Field(None, description="Output filename for the generated PDF document. Defaults to 'result.pdf' if not specified."),
@@ -2242,13 +2421,19 @@ async def convert_pdf_from_csv(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF from Image",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_from_image(
     url: str = Field(..., description="One or more image URLs to convert into PDF, separated by commas. Supported formats are JPG, PNG, and TIFF. Images are processed in the order provided."),
     name: str | None = Field(None, description="Optional custom file name for the generated PDF output file."),
@@ -2283,13 +2468,19 @@ async def convert_pdf_from_image(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF From URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_from_url(
     url: str = Field(..., description="The URL of the webpage to convert to PDF. Defaults to the Wikipedia contact page if not specified."),
     margins: str | None = Field(None, description="Space around the page edges in the PDF output. Specified as a measurement value (e.g., millimeters). Defaults to 5mm."),
@@ -2332,13 +2523,19 @@ async def convert_pdf_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF from HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_from_html(
     html: str = Field(..., description="The HTML code to convert to PDF. Can include inline styles, scripts, and other HTML elements."),
     templateid: int = Field(..., description="Template identifier that determines the PDF layout and styling template to apply. Defaults to template 1."),
@@ -2382,13 +2579,20 @@ async def convert_pdf_from_html(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="List HTML Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates_html() -> dict[str, Any] | ToolResult:
     """Retrieve all HTML templates available for the current user. Returns a collection of template resources that can be used for rendering or customization."""
 
@@ -2415,7 +2619,13 @@ async def list_templates_html() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Get HTML Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_html_template(id_: str = Field(..., alias="id", description="The unique identifier of the HTML template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific HTML template by its unique identifier. Use this operation to fetch the full template content for rendering or editing purposes."""
 
@@ -2451,7 +2661,12 @@ async def get_html_template(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: PDF Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Email to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_email_to_pdf(
     url: str = Field(..., description="URL pointing to the email file (.msg or .eml) to convert. Defaults to a sample email file if not specified."),
     margins: str | None = Field(None, description="Custom page margins as space-separated values (top right bottom left). Supports px, mm, cm, or in units. A single value applies to all sides. Overrides default CSS margins."),
@@ -2491,13 +2706,19 @@ async def convert_email_to_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Excel Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to CSV",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_csv(
     url: str = Field(..., description="URL of the Excel file to convert. Must be a publicly accessible URL pointing to a valid xls or xlsx file."),
     worksheetindex: str | None = Field(None, description="Zero-based index of the worksheet to convert (first worksheet is index 1). If not specified, the first worksheet is used by default.", pattern="^\\d+$"),
@@ -2533,13 +2754,19 @@ async def convert_spreadsheet_to_csv(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Excel Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to JSON",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_json(
     url: str = Field(..., description="URL of the spreadsheet file to convert. Must be a publicly accessible URL pointing to an xls, xlsx, or csv file."),
     worksheetindex: str | None = Field(None, description="Zero-based index of the worksheet to extract (e.g., 1 for the first sheet, 2 for the second). Only applicable to Excel files with multiple sheets. Omit to use the default sheet.", pattern="^\\d+$"),
@@ -2575,13 +2802,19 @@ async def convert_spreadsheet_to_json(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Excel Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to HTML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_html(
     url: str = Field(..., description="URL of the spreadsheet file to convert. Must be a publicly accessible URL pointing to an xls, xlsx, or csv file."),
     worksheetindex: str | None = Field(None, description="Zero-based index of the worksheet to convert when the file contains multiple sheets. Defaults to the first worksheet if not specified.", pattern="^\\d+$"),
@@ -2617,13 +2850,19 @@ async def convert_spreadsheet_to_html(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Excel Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_text(
     url: str = Field(..., description="URL of the spreadsheet file to convert. Must be a publicly accessible URL pointing to an xls, xlsx, or csv file."),
     worksheetindex: str | None = Field(None, description="Zero-based index of the worksheet to convert (first worksheet is index 1). If not specified, the first worksheet is used by default.", pattern="^\\d+$"),
@@ -2659,13 +2898,19 @@ async def convert_spreadsheet_to_text(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Excel Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to XML",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_xml(
     url: str = Field(..., description="URL of the spreadsheet file to convert. Must be a publicly accessible URL pointing to an xls, xlsx, or csv file."),
     worksheetindex: str | None = Field(None, description="Zero-based index of the worksheet to convert from multi-sheet workbooks. Use 1 for the first worksheet, 2 for the second, and so on. Only applicable to Excel files with multiple sheets.", pattern="^\\d+$"),
@@ -2701,13 +2946,19 @@ async def convert_spreadsheet_to_xml(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Excel Conversion
-@mcp.tool()
+@mcp.tool(
+    title="Convert Spreadsheet to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_spreadsheet_to_pdf(
     url: str = Field(..., description="URL of the spreadsheet file to convert. Accepts XLS, XLSX, or CSV formats."),
     worksheetindex: str | None = Field(None, description="Zero-based index of the worksheet to convert when the file contains multiple sheets. Defaults to the first worksheet if not specified.", pattern="^\\d+$"),
@@ -2744,13 +2995,19 @@ async def convert_spreadsheet_to_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Merging & Splitting
-@mcp.tool()
+@mcp.tool(
+    title="Merge PDFs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_pdfs(
     url: str = Field(..., description="One or more URLs pointing to PDF files to merge, separated by commas. URLs must be accessible and point to valid PDF documents. Defaults to sample encrypted PDFs if not specified."),
     name: str | None = Field(None, description="The filename for the resulting merged PDF document. Defaults to 'result.pdf' if not specified."),
@@ -2785,13 +3042,19 @@ async def merge_pdfs(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Merging & Splitting
-@mcp.tool()
+@mcp.tool(
+    title="Merge Documents to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def merge_documents_to_pdf(
     url: str = Field(..., description="Comma-separated URLs of source files to merge. Supports PDF, DOC, DOCX, XLS, XLSX, RTF, TXT, PNG, JPG, and ZIP files containing documents or images. Multiple files are merged in the order specified."),
     name: str | None = Field(None, description="Optional custom filename for the generated PDF output file."),
@@ -2826,13 +3089,19 @@ async def merge_documents_to_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Merging & Splitting
-@mcp.tool()
+@mcp.tool(
+    title="Split PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def split_pdf(
     url: str = Field(..., description="URL of the PDF file to split. Accepts any publicly accessible PDF URL; defaults to a sample PDF if not provided."),
     pages: str | None = Field(None, description="Pages to extract from the PDF using 1-based indexing. Specify individual pages (e.g., 1,3,5), ranges (e.g., 1-5), or combinations (e.g., 1-3,5,7-9). Use !1 to reference the last page and !6-!2 for ranges from the end. Omit the end number in a range (e.g., 3-) to include all pages from that point onward.", pattern="^\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*(?:,\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*)*$"),
@@ -2868,13 +3137,19 @@ async def split_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: PDF Merging & Splitting
-@mcp.tool()
+@mcp.tool(
+    title="Split PDF by Text Search",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def split_pdf_by_text_search(
     url: str = Field(..., description="URL of the PDF file to split. Must be a publicly accessible URL pointing to a valid PDF document."),
     searchstring: str = Field(..., description="Text pattern or barcode format to search for within the PDF. Supports barcode syntax like [[barcode:qrcode,datamatrix /pattern/]] for barcode detection, or plain text strings for text search."),
@@ -2914,13 +3189,19 @@ async def split_pdf_by_text_search(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Get PDF Form Fields",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_pdf_form_fields(url: str = Field(..., description="The URL of the PDF file to analyze. Must be a publicly accessible URL pointing to a valid PDF document containing form fields.")) -> dict[str, Any] | ToolResult:
     """Extract and retrieve metadata about all fillable form fields within a PDF document. Returns field names, types, and properties for programmatic form processing."""
 
@@ -2952,13 +3233,19 @@ async def get_pdf_form_fields(url: str = Field(..., description="The URL of the 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Find & Search
-@mcp.tool()
+@mcp.tool(
+    title="Search PDF Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_pdf_text(
     url: str = Field(..., description="URL of the PDF file to search. Defaults to a sample PDF if not specified."),
     searchstring: str = Field(..., description="Text or pattern to find in the PDF. When regex search is enabled, this accepts regular expression syntax (e.g., date patterns like \\d+/\\d+/\\d+)."),
@@ -2998,13 +3285,19 @@ async def search_pdf_text(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Find & Search
-@mcp.tool()
+@mcp.tool(
+    title="Search Tables in PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_tables_in_pdf(
     url: str = Field(..., description="URL of the PDF file to analyze. Defaults to a sample PDF if not provided."),
     pages: str | None = Field(None, description="Comma-separated page indices or ranges to scan (0-based indexing). Supports individual pages (e.g., 0, 5), ranges (e.g., 3-7, 10-), and reverse indexing from the end (e.g., !0 for last page, !5-!2 for range from fifth-to-last to third-to-last). Whitespace is allowed. If omitted, all pages are processed.", pattern="^\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*(?:,\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*)*$"),
@@ -3040,13 +3333,19 @@ async def search_tables_in_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Find & Search
-@mcp.tool()
+@mcp.tool(
+    title="Make PDF Searchable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def make_pdf_searchable(
     url: str = Field(..., description="URL of the PDF or image file to process. Accepts remote URLs pointing to scanned documents or image files that need OCR conversion."),
     lang: str | None = Field(None, description="Language code for OCR processing (e.g., 'eng' for English). Defaults to English if not specified. Use standard ISO 639-3 language codes."),
@@ -3084,13 +3383,19 @@ async def make_pdf_searchable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Find & Search
-@mcp.tool()
+@mcp.tool(
+    title="Convert PDF to Unsearchable",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def convert_pdf_to_unsearchable(
     url: str = Field(..., description="URL of the PDF file to convert. Can be a direct file URL or a cloud storage path (e.g., S3 URI)."),
     pages: str | None = Field(None, description="Comma-separated page indices or ranges to process (0-based indexing). Supports individual pages (e.g., 0, 5), ranges (e.g., 3-7, 10-), and reverse indexing from the end (e.g., !0 for last page, !5-!2 for range from fifth-to-last to third-to-last). Whitespace is allowed. If omitted, all pages are processed.", pattern="^\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*(?:,\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*)*$"),
@@ -3126,13 +3431,19 @@ async def convert_pdf_to_unsearchable(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Compress PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def compress_pdf(
     url: str = Field(..., description="URL of the PDF file to compress. Defaults to a sample PDF if not provided."),
     name: str | None = Field(None, description="Optional file name for the compressed output PDF. If not specified, a default name will be generated."),
@@ -3168,13 +3479,19 @@ async def compress_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Get PDF Info",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def get_pdf_info(url: str = Field(..., description="The URL of the PDF document to analyze. Must be a valid, publicly accessible PDF file URL.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata, properties, and security permissions for a PDF document from a specified URL."""
 
@@ -3206,18 +3523,25 @@ async def get_pdf_info(url: str = Field(..., description="The URL of the PDF doc
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Get Job Status",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_job_status(
     jobid: str = Field(..., description="The unique identifier of the asynchronous job whose status you want to check. This ID is returned when you initially create a background job."),
     force: bool | None = Field(None, description="When enabled, forces a fresh status check from the server rather than returning a cached result, ensuring you get the most current job state."),
 ) -> dict[str, Any] | ToolResult:
-    """Retrieves the current status of an asynchronous background job that was previously initiated through the PDF.co API. Use this operation to poll and monitor the progress of long-running tasks."""
+    """Retrieves the current status of an asynchronous background job that was previously initiated through the PDF.co. Use this operation to poll and monitor the progress of long-running tasks."""
 
     # Construct request model with validation
     try:
@@ -3247,13 +3571,20 @@ async def get_job_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Credit Balance",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_credit_balance() -> dict[str, Any] | ToolResult:
     """Retrieve the current credit balance and related account balance information for the authenticated user's account."""
 
@@ -3280,7 +3611,12 @@ async def get_account_credit_balance() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Classify Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def classify_document(
     url: str = Field(..., description="URL of the document to classify. Accepts PDF, JPG, or PNG files. Defaults to a sample invoice if not provided."),
     casesensitive: bool | None = Field(None, description="Controls whether the classification search is case-sensitive. Set to false to ignore case differences during analysis; defaults to true for case-sensitive matching."),
@@ -3315,13 +3651,19 @@ async def classify_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Send Email with Attachment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_email_with_attachment(
     url: str = Field(..., description="URL of the file to attach to the email. Defaults to a sample PDF from AWS S3."),
     from_: str = Field(..., alias="from", description="Sender email address in the format 'Name <email@domain.com>' or just 'email@domain.com'."),
@@ -3365,13 +3707,19 @@ async def send_email_with_attachment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Extract Email Components",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_email_components(url: str = Field(..., description="URL pointing to the email file (.eml format) to be decoded. Defaults to a sample email file if not provided.")) -> dict[str, Any] | ToolResult:
     """Decode an email message file to extract and parse its components including headers, body, attachments, and metadata."""
 
@@ -3403,13 +3751,19 @@ async def extract_email_components(url: str = Field(..., description="URL pointi
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Extract Email Attachments",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_email_attachments(url: str = Field(..., description="The URL pointing to the EML email file to process. Must be a valid, accessible HTTP(S) URL. Defaults to a sample EML file if not provided.")) -> dict[str, Any] | ToolResult:
     """Extract all attachments from an email message. Provide the URL to an EML file to retrieve and process its attachments."""
 
@@ -3441,13 +3795,20 @@ async def extract_email_attachments(url: str = Field(..., description="The URL p
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Delete Temporary File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_temporary_file(url: str = Field(..., description="The S3 URL of the temporary file to delete. This should be a full URL path to the file in the temporary storage bucket.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a temporary file from cloud storage. This operation removes files that were previously uploaded by you or generated by the API."""
 
@@ -3479,13 +3840,20 @@ async def delete_temporary_file(url: str = Field(..., description="The S3 URL of
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Upload File from URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def upload_file_from_url(
     url: str = Field(..., description="The source URL of the file to download and upload. Must be a valid, accessible HTTP or HTTPS URL."),
     name: str | None = Field(None, description="Optional custom name for the uploaded file. If not provided, the original filename from the source URL will be used."),
@@ -3526,7 +3894,12 @@ async def upload_file_from_url(
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Upload File From URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_file_from_url_direct(
     url: str = Field(..., description="The remote URL pointing to the file to download and upload. Must be a valid URI format."),
     name: str | None = Field(None, description="Optional custom name for the uploaded file. If not provided, the original filename from the source URL will be used."),
@@ -3561,13 +3934,19 @@ async def upload_file_from_url_direct(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Create File from Base64",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_file_from_base64(
     file_: str = Field(..., alias="file", description="Base64-encoded file content to upload. Must be a valid base64 string representing the file bytes."),
     name: str | None = Field(None, description="Optional name for the generated file. If not provided, a default name will be assigned."),
@@ -3602,13 +3981,20 @@ async def create_file_from_base64(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Get File Upload Presigned URL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_upload_presigned_url(
     name: str | None = Field(None, description="The name to assign to the uploaded file. Must be provided as a string."),
     contenttype: str | None = Field(None, description="The MIME type of the file being uploaded (e.g., application/pdf, image/png, text/plain)."),
@@ -3649,7 +4035,12 @@ async def get_file_upload_presigned_url(
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Add Password to PDF",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_password_to_pdf(
     url: str = Field(..., description="URL of the PDF file to secure. Defaults to a sample PDF if not provided."),
     ownerpassword: str | None = Field(None, description="Password required to modify document permissions and security settings. Defaults to '12345' if not specified."),
@@ -3694,13 +4085,20 @@ async def add_password_to_pdf(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Document, File & System
-@mcp.tool()
+@mcp.tool(
+    title="Remove PDF Password",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_pdf_password(
     url: str = Field(..., description="The URL of the PDF file to remove password protection from. Can be a direct file URL or a cloud storage link."),
     name: str | None = Field(None, description="The desired filename for the unprotected PDF output. Defaults to 'unprotected' if not specified."),
@@ -3735,13 +4133,20 @@ async def remove_pdf_password(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Delete PDF Pages",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pdf_pages(
     url: str = Field(..., description="URL of the PDF file to process. Can be a direct file URL or a path to a PDF stored in cloud storage."),
     pages: str | None = Field(None, description="Comma-separated list of page numbers or ranges to delete, using 1-based indexing. Supports ranges (e.g., 3-5), individual pages (e.g., 2), and negative indices where !1 is the last page (e.g., !1 deletes the last page, !6-!2 deletes from the 6th-to-last to 2nd-to-last page). Whitespace around values is ignored.", pattern="^\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*(?:,\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*)*$"),
@@ -3777,13 +4182,19 @@ async def delete_pdf_pages(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Rotate PDF Pages",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def rotate_pdf_pages(
     url: str = Field(..., description="The URL of the PDF file to rotate. Can be a remote URL or a local file path."),
     pages: str | None = Field(None, description="Zero-based page indices or ranges to rotate, specified as comma-separated values. Supports individual pages (e.g., 0, 2, 5), ranges (e.g., 3-7, 10-), and reverse indexing from the end of the document (e.g., !0 for last page, !5-!2 for a range from the end). Whitespace around values is allowed. Omit to rotate all pages.", pattern="^\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*(?:,\\s*(?:!?\\d+\\s*-\\s*!?\\d+|!?\\d+\\s*-\\s*|!?\\d+)\\s*)*$"),
@@ -3820,13 +4231,19 @@ async def rotate_pdf_pages(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Pages
-@mcp.tool()
+@mcp.tool(
+    title="Auto Rotate PDF Pages",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def auto_rotate_pdf_pages(
     url: str = Field(..., description="URL of the PDF file to auto-rotate. Accepts a publicly accessible PDF document URL."),
     lang: str | None = Field(None, description="Language(s) for text recognition during rotation analysis. Use a 3-letter language code (e.g., 'eng' for English). Combine multiple languages with a plus sign (e.g., 'eng+deu') for simultaneous multi-language support. Defaults to English.", pattern="^[a-z]{3}(\\+[a-z]{3})*$"),
@@ -3862,13 +4279,19 @@ async def auto_rotate_pdf_pages(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Barcodes
-@mcp.tool()
+@mcp.tool(
+    title="Generate Barcode",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_barcode(
     value: str | None = Field(None, description="The data or text to encode in the barcode. Defaults to 'abcdef123456' if not provided."),
     type_: Literal["AustralianPostCode", "Aztec", "Codabar", "CodablockF", "Code128", "Code16K", "Code39", "Code39Extended", "Code39Mod43", "Code39Mod43Extended", "Code93", "DataMatrix", "DPMDataMatrix", "EAN13", "EAN2", "EAN5", "EAN8", "GS1DataBarExpanded", "GS1DataBarExpandedStacked", "GS1DataBarLimited", "GS1DataBarOmnidirectional", "GS1DataBarStacked", "GTIN12", "GTIN13", "GTIN14", "GTIN8", "IntelligentMail", "Interleaved2of5", "ITF14", "MaxiCode", "MICR", "MicroPDF", "MSI", "PatchCode", "PDF417", "Pharmacode", "PostNet", "PZN", "QRCode", "RoyalMail", "RoyalMailKIX", "Trioptic", "UPCA", "UPCE", "UPU"] | None = Field(None, alias="type", description="The barcode format type to generate. Defaults to QR Code if not specified. Supports formats such as QR Code, Data Matrix, Code 39, Code 128, and PDF417."),
@@ -3905,13 +4328,19 @@ async def generate_barcode(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Barcodes
-@mcp.tool()
+@mcp.tool(
+    title="Read Barcodes from URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def read_barcodes_from_url(
     url: str = Field(..., description="URL of the image or PDF document to scan for barcodes. Must be publicly accessible."),
     types: str = Field(..., description="Comma-separated list of barcode types to detect. Choose from 40+ supported formats including QRCode, Code128, EAN13, DataMatrix, PDF417, GS1, and others. Only specified types will be decoded."),
@@ -3947,6 +4376,7 @@ async def read_barcodes_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
@@ -4036,7 +4466,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python pdf_co_api_server.py", file=sys.stderr)
+        print("  python pdf_co_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -4138,7 +4568,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="PDF.co API MCP Server")
+    parser = argparse.ArgumentParser(description="PDF.co MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -4239,7 +4669,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting PDF.co API MCP Server")
+    logger.info("Starting PDF.co MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

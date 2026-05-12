@@ -1,6 +1,7 @@
-# PDF.co API - Dependencies
-# Generated: 2026-05-05 15:49:30 UTC
+# PDF.co - Dependencies
+# Generated: 2026-05-12 12:06:07 UTC
 fastmcp>=3.2.4
 httpx>=0.27.0,<1.0.0
+mcp
 pydantic>=2.0.0,<3.0.0
 python-dotenv>=1.0.0,<2.0.0
