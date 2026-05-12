@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Runpod API MCP Server
+Runpod MCP Server
 
 API Info:
 - Contact: help <help@runpod.io> (https://contact.runpod.io/hc/requests/new)
 
-Generated: 2026-05-05 16:14:05 UTC
+Generated: 2026-05-12 12:32:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://rest.runpod.io/v1")
-SERVER_NAME = "Runpod API"
-SERVER_VERSION = "1.0.0"
+SERVER_NAME = "Runpod"
+SERVER_VERSION = "1.0.1"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -986,6 +1017,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1010,6 +1043,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1214,10 +1249,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Runpod API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Runpod", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="List Pods",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pods(
     compute_type: Literal["GPU", "CPU"] | None = Field(None, alias="computeType", description="Filter results to only GPU-based or CPU-based Pods."),
     cpu_flavor_id: list[str] | None = Field(None, alias="cpuFlavorId", description="Filter to CPU Pods matching any of the specified CPU flavor identifiers (e.g., cpu3c, cpu5g)."),
@@ -1271,7 +1312,12 @@ async def list_pods(
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Create Pod",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pod(
     cloud_type: Literal["SECURE", "COMMUNITY"] | None = Field(None, alias="cloudType", description="Cloud environment for the Pod. SECURE provides dedicated infrastructure with guaranteed availability; COMMUNITY offers lower-cost shared resources. Defaults to SECURE."),
     compute_type: Literal["GPU", "CPU"] | None = Field(None, alias="computeType", description="Compute type for the Pod. GPU Pods include graphics processors and ignore CPU-related settings; CPU Pods are GPU-less and ignore GPU-related settings. Defaults to GPU."),
@@ -1328,13 +1374,20 @@ async def create_pod(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Get Pod",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pod(
     pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to retrieve."),
     include_machine: bool | None = Field(None, alias="includeMachine", description="When enabled, includes details about the machine the Pod is running on. Defaults to false."),
@@ -1380,7 +1433,13 @@ async def get_pod(
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Update Pod",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pod(
     pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to update."),
     docker_entrypoint: list[str] | None = Field(None, alias="dockerEntrypoint", description="Override the Docker image's ENTRYPOINT instruction. Provide as an array of command segments (e.g., ['python', '-m', 'server']). An empty array uses the image's default ENTRYPOINT."),
@@ -1423,13 +1482,20 @@ async def update_pod(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Delete Pod",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_pod(pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Pod by its ID. This operation removes the Pod and cannot be undone."""
 
@@ -1465,7 +1531,13 @@ async def delete_pod(pod_id: str = Field(..., alias="podId", description="The un
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Update Pod",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pod_request(
     pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to update."),
     docker_entrypoint: list[str] | None = Field(None, alias="dockerEntrypoint", description="Override the Docker image's ENTRYPOINT instruction. Provide as an array of command arguments, or use an empty array to use the image's default ENTRYPOINT."),
@@ -1508,13 +1580,19 @@ async def update_pod_request(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Start Pod",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_pod(pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to start or resume.")) -> dict[str, Any] | ToolResult:
     """Start or resume a Pod that is currently stopped or paused. This operation transitions the Pod to a running state."""
 
@@ -1550,7 +1628,13 @@ async def start_pod(pod_id: str = Field(..., alias="podId", description="The uni
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Stop Pod",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def stop_pod(pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to stop.")) -> dict[str, Any] | ToolResult:
     """Stop a running Pod, halting its execution and resources. This operation gracefully terminates the Pod identified by the provided ID."""
 
@@ -1586,7 +1670,13 @@ async def stop_pod(pod_id: str = Field(..., alias="podId", description="The uniq
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Reset Pod",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def reset_pod(pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to reset.")) -> dict[str, Any] | ToolResult:
     """Reset a Pod to its initial state, clearing any runtime state or configuration changes. This operation restarts the Pod and restores it to a clean state."""
 
@@ -1622,7 +1712,12 @@ async def reset_pod(pod_id: str = Field(..., alias="podId", description="The uni
     return _response_data
 
 # Tags: pods
-@mcp.tool()
+@mcp.tool(
+    title="Restart Pod",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restart_pod(pod_id: str = Field(..., alias="podId", description="The unique identifier of the Pod to restart.")) -> dict[str, Any] | ToolResult:
     """Restart a running Pod, causing it to stop and start again. This operation is useful for refreshing a Pod's state or recovering from transient issues."""
 
@@ -1658,7 +1753,13 @@ async def restart_pod(pod_id: str = Field(..., alias="podId", description="The u
     return _response_data
 
 # Tags: endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Endpoints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_endpoints(
     include_template: bool | None = Field(None, alias="includeTemplate", description="When enabled, includes template information for each endpoint. Defaults to false."),
     include_workers: bool | None = Field(None, alias="includeWorkers", description="When enabled, includes details about workers currently running on each endpoint. Defaults to false."),
@@ -1699,7 +1800,12 @@ async def list_endpoints(
     return _response_data
 
 # Tags: endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Create Serverless Endpoint",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_serverless_endpoint(
     template_id: str = Field(..., alias="templateId", description="Unique identifier of the template defining the container image and runtime configuration for workers."),
     compute_type: Literal["GPU", "CPU"] | None = Field(None, alias="computeType", description="Compute resource type for workers: GPU for GPU-accelerated inference, or CPU for CPU-only workloads. GPU-related properties are ignored for CPU endpoints and vice versa. Defaults to GPU."),
@@ -1745,13 +1851,20 @@ async def create_serverless_endpoint(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Endpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_endpoint(
     endpoint_id: str = Field(..., alias="endpointId", description="The unique identifier of the endpoint to retrieve."),
     include_template: bool | None = Field(None, alias="includeTemplate", description="When enabled, includes detailed information about the template that was used to create this endpoint. Defaults to false."),
@@ -1794,7 +1907,13 @@ async def get_endpoint(
     return _response_data
 
 # Tags: endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Endpoint",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_endpoint(
     endpoint_id: str = Field(..., alias="endpointId", description="The unique identifier of the endpoint to update."),
     cpu_flavor_ids: list[Literal["cpu3c", "cpu3g", "cpu5c", "cpu5g"]] | None = Field(None, alias="cpuFlavorIds", description="For CPU endpoints, an ordered list of RunPod CPU flavor IDs to attach to workers. The list order determines rental priority."),
@@ -1841,13 +1960,20 @@ async def update_endpoint(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Delete Endpoint",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_endpoint(endpoint_id: str = Field(..., alias="endpointId", description="The unique identifier of the endpoint to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an endpoint by its ID. This action cannot be undone and will remove the endpoint from the system."""
 
@@ -1883,7 +2009,13 @@ async def delete_endpoint(endpoint_id: str = Field(..., alias="endpointId", desc
     return _response_data
 
 # Tags: endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Endpoint",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_endpoint_async(
     endpoint_id: str = Field(..., alias="endpointId", description="The unique identifier of the endpoint to update."),
     cpu_flavor_ids: list[Literal["cpu3c", "cpu3g", "cpu5c", "cpu5g"]] | None = Field(None, alias="cpuFlavorIds", description="For CPU endpoints, an ordered list of RunPod CPU flavor IDs available for worker allocation. Earlier flavors in the list are prioritized for rental."),
@@ -1930,13 +2062,20 @@ async def update_endpoint_async(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(
     include_endpoint_bound_templates: bool | None = Field(None, alias="includeEndpointBoundTemplates", description="Include templates that are bound to Serverless endpoints in the response. Disabled by default."),
     include_public_templates: bool | None = Field(None, alias="includePublicTemplates", description="Include community-made public templates in the response. Disabled by default."),
@@ -1978,7 +2117,12 @@ async def list_templates(
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     image_name: str = Field(..., alias="imageName", description="The Docker image to use for this template, specified as a registry path (e.g., 'nvidia/cuda:12.0' or 'myregistry.com/myimage:latest'). Required."),
     name: str = Field(..., description="A human-readable name for this template. Used for identification in the RunPod UI and API. Required."),
@@ -2021,13 +2165,20 @@ async def create_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template(
     template_id: str = Field(..., alias="templateId", description="The unique identifier of the template to retrieve."),
     include_endpoint_bound_templates: bool | None = Field(None, alias="includeEndpointBoundTemplates", description="Whether to include templates that are bound to Serverless endpoints in the response. Defaults to false."),
@@ -2071,7 +2222,13 @@ async def get_template(
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     template_id: str = Field(..., alias="templateId", description="The unique identifier of the template to update."),
     docker_entrypoint: list[str] | None = Field(None, alias="dockerEntrypoint", description="Override the Docker image's ENTRYPOINT instruction. Provide as an array of command segments (e.g., ['python', '-m', 'server']). Leave empty to use the ENTRYPOINT defined in the Dockerfile."),
@@ -2114,13 +2271,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(template_id: str = Field(..., alias="templateId", description="The unique identifier of the template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a template by its ID. This action cannot be undone."""
 
@@ -2156,7 +2320,13 @@ async def delete_template(template_id: str = Field(..., alias="templateId", desc
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template Alternate",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template_alternate(
     template_id: str = Field(..., alias="templateId", description="The unique identifier of the template to update."),
     docker_entrypoint: list[str] | None = Field(None, alias="dockerEntrypoint", description="Docker ENTRYPOINT override for Pods using this template. Provide as an array of command segments; pass an empty array to use the ENTRYPOINT defined in the Dockerfile."),
@@ -2199,13 +2369,20 @@ async def update_template_alternate(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: network volumes
-@mcp.tool()
+@mcp.tool(
+    title="List Network Volumes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_network_volumes() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all network volumes available in the system. Use this operation to discover and enumerate network storage resources."""
 
@@ -2232,7 +2409,12 @@ async def list_network_volumes() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: network volumes
-@mcp.tool()
+@mcp.tool(
+    title="Create Network Volume",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_network_volume(
     data_center_id: str = Field(..., alias="dataCenterId", description="The Runpod data center where the network volume will be created (e.g., EU-RO-1)."),
     name: str = Field(..., description="A user-defined name for the network volume. Names do not need to be unique and can be any descriptive label."),
@@ -2268,13 +2450,20 @@ async def create_network_volume(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: network volumes
-@mcp.tool()
+@mcp.tool(
+    title="Get Network Volume",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_network_volume(network_volume_id: str = Field(..., alias="networkVolumeId", description="The unique identifier of the network volume to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific network volume by its unique identifier. Returns detailed information about the requested network volume."""
 
@@ -2310,7 +2499,13 @@ async def get_network_volume(network_volume_id: str = Field(..., alias="networkV
     return _response_data
 
 # Tags: network volumes
-@mcp.tool()
+@mcp.tool(
+    title="Update Network Volume",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_network_volume(
     network_volume_id: str = Field(..., alias="networkVolumeId", description="The unique identifier of the network volume to be updated."),
     name: str | None = Field(None, description="A user-defined name for the network volume. Names do not need to be unique and can be changed at any time."),
@@ -2347,13 +2542,20 @@ async def update_network_volume(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: network volumes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Network Volume",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_network_volume(network_volume_id: str = Field(..., alias="networkVolumeId", description="The unique identifier of the network volume to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a network volume by its ID. This operation removes the network volume and its associated resources from the system."""
 
@@ -2389,7 +2591,13 @@ async def delete_network_volume(network_volume_id: str = Field(..., alias="netwo
     return _response_data
 
 # Tags: network volumes
-@mcp.tool()
+@mcp.tool(
+    title="Update Network Volume",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_network_volume_action(
     network_volume_id: str = Field(..., alias="networkVolumeId", description="The unique identifier of the network volume to update."),
     name: str | None = Field(None, description="A user-defined name for the network volume. Names do not need to be unique across volumes."),
@@ -2426,13 +2634,20 @@ async def update_network_volume_action(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: container registry auths
-@mcp.tool()
+@mcp.tool(
+    title="List Container Registry Auths",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_container_registry_auths() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all container registry authentication configurations. Use this to view available registry credentials and their settings."""
 
@@ -2459,7 +2674,12 @@ async def list_container_registry_auths() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: container registry auths
-@mcp.tool()
+@mcp.tool(
+    title="Create Container Registry Auth",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_container_registry_auth(
     name: str = Field(..., description="A unique identifier for this container registry credential. Choose a descriptive name that helps you identify which registry or account this credential is for."),
     password: str = Field(..., description="The password or authentication token for accessing the container registry. This is stored securely and used when authenticating registry operations."),
@@ -2495,13 +2715,20 @@ async def create_container_registry_auth(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: container registry auths
-@mcp.tool()
+@mcp.tool(
+    title="Get Container Registry Auth",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_container_registry_auth(container_registry_auth_id: str = Field(..., alias="containerRegistryAuthId", description="The unique identifier of the container registry authentication configuration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific container registry authentication configuration by its unique identifier. Returns the complete details of the requested registry auth."""
 
@@ -2537,7 +2764,13 @@ async def get_container_registry_auth(container_registry_auth_id: str = Field(..
     return _response_data
 
 # Tags: container registry auths
-@mcp.tool()
+@mcp.tool(
+    title="Delete Container Registry Auth",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_container_registry_auth(container_registry_auth_id: str = Field(..., alias="containerRegistryAuthId", description="The unique identifier of the container registry authentication configuration to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a container registry authentication configuration. This removes the stored credentials and access settings for the specified registry."""
 
@@ -2573,7 +2806,13 @@ async def delete_container_registry_auth(container_registry_auth_id: str = Field
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="List Pod Billing History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pod_billing_history(
     bucket_size: Literal["hour", "day", "week", "month", "year"] | None = Field(None, alias="bucketSize", description="Time granularity for aggregating billing records. Choose from hourly, daily, weekly, monthly, or yearly buckets. Defaults to daily aggregation."),
     end_time: str | None = Field(None, alias="endTime", description="End of the billing period to retrieve, specified as an ISO 8601 datetime (e.g., 2023-01-31T23:59:59Z). If omitted, defaults to the current time."),
@@ -2618,7 +2857,13 @@ async def list_pod_billing_history(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="List Endpoint Billing History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_endpoint_billing_history(
     bucket_size: Literal["hour", "day", "week", "month", "year"] | None = Field(None, alias="bucketSize", description="Time bucket size for aggregating billing records. Choose from hourly, daily, weekly, monthly, or yearly aggregation. Defaults to daily."),
     data_center_id: list[Literal["EU-RO-1", "CA-MTL-1", "EU-SE-1", "US-IL-1", "EUR-IS-1", "EU-CZ-1", "US-TX-3", "EUR-IS-2", "US-KS-2", "US-GA-2", "US-WA-1", "US-TX-1", "CA-MTL-3", "EU-NL-1", "US-TX-4", "US-CA-2", "US-NC-1", "OC-AU-1", "US-DE-1", "EUR-IS-3", "CA-MTL-2", "AP-JP-1", "EUR-NO-1", "EU-FR-1", "US-KS-3", "US-GA-1"]] | None = Field(None, alias="dataCenterId", description="Filter results to endpoints in specific Runpod data centers. Provide an array of data center IDs (e.g., EU-RO-1, US-TX-3). Defaults to all available data centers."),
@@ -2666,7 +2911,13 @@ async def list_endpoint_billing_history(
     return _response_data
 
 # Tags: billing
-@mcp.tool()
+@mcp.tool(
+    title="List Network Volume Billing",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_network_volume_billing(
     bucket_size: Literal["hour", "day", "week", "month", "year"] | None = Field(None, alias="bucketSize", description="The time granularity for aggregating billing data. Defaults to daily buckets if not specified. Valid options are hour, day, week, month, or year."),
     end_time: str | None = Field(None, alias="endTime", description="The end of the billing period to retrieve, specified as an ISO 8601 datetime string (e.g., 2023-01-31T23:59:59Z). If omitted, defaults to the current time."),
@@ -2791,7 +3042,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python runpod_api_server.py", file=sys.stderr)
+        print("  python runpod_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -2893,7 +3144,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Runpod API MCP Server")
+    parser = argparse.ArgumentParser(description="Runpod MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2994,7 +3245,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Runpod API MCP Server")
+    logger.info("Starting Runpod MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

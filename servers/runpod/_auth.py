@@ -1,7 +1,7 @@
 """
-Authentication module for Runpod API MCP server.
+Authentication module for Runpod MCP server.
 
-Generated: 2026-05-05 16:14:05 UTC
+Generated: 2026-05-12 12:32:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

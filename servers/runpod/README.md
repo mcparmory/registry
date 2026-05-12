@@ -1,11 +1,11 @@
-# Runpod API MCP Server
+# Runpod MCP Server
 <!-- mcp-name: com.mcparmory/runpod -->
 
 Base URL: https://rest.runpod.io/v1
 | | |
 |---|---|
 | **Category** | Infrastructure |
-| **Tools** | 35 |
+| **Tools** | 33 |
 | **Auth** | Bearer Token |
 
 ## API Info
@@ -55,6 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ---
