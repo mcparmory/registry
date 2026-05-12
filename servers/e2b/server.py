@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 E2B MCP Server
-Generated: 2026-05-05 14:51:46 UTC
+Generated: 2026-05-12 11:19:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.e2b.app")
 SERVER_NAME = "E2B"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1043,6 +1074,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1067,6 +1100,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1274,7 +1309,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("E2B", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: auth
-@mcp.tool()
+@mcp.tool(
+    title="List Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all teams in the system. Use this operation to discover available teams for management or assignment purposes."""
 
@@ -1301,7 +1342,13 @@ async def list_teams() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: auth
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_metrics(
     team_id: str = Field(..., alias="teamID", description="The unique identifier of the team for which to retrieve metrics."),
     start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the metrics interval. If omitted, defaults to the beginning of the current period."),
@@ -1347,7 +1394,13 @@ async def get_team_metrics(
     return _response_data
 
 # Tags: auth
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Metrics Maximum",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_metrics_maximum(
     team_id: str = Field(..., alias="teamID", description="The unique identifier of the team for which to retrieve metrics."),
     metric: Literal["concurrent_sandboxes", "sandbox_start_rate"] = Field(..., description="The specific metric to retrieve the maximum value for during the interval."),
@@ -1394,7 +1447,12 @@ async def get_team_metrics_maximum(
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Create Sandbox",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_sandbox(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to use for creating the sandbox."),
     enabled: bool = Field(..., description="Enable automatic resumption of the sandbox when it enters a paused state."),
@@ -1438,13 +1496,20 @@ async def create_sandbox(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="List Sandboxes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sandboxes(
     metadata: str | None = Field(None, description="Filter sandboxes by metadata key-value pairs. Use URL encoding for both keys and values (e.g., user=abc&app=prod)."),
     state: list[Literal["running", "paused"]] | None = Field(None, description="Filter sandboxes by one or more states. Provide as an array of state values."),
@@ -1491,7 +1556,13 @@ async def list_sandboxes(
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="List Sandbox Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sandbox_metrics(sandbox_ids: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="One or more sandbox IDs to retrieve metrics for. Provide as a comma-separated list of sandbox identifiers.", max_length=100)) -> dict[str, Any] | ToolResult:
     """Retrieve performance and usage metrics for specified sandboxes. Supports querying multiple sandboxes in a single request."""
 
@@ -1532,7 +1603,13 @@ async def list_sandbox_metrics(sandbox_ids: Annotated[list[str], AfterValidator(
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="List Sandbox Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sandbox_logs(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve logs."),
     cursor: str | None = Field(None, description="Starting timestamp in milliseconds from which logs should be returned. Use this to paginate through results or retrieve logs after a specific point in time."),
@@ -1579,7 +1656,13 @@ async def list_sandbox_logs(
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Get Sandbox",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific sandbox by its unique identifier. Use this operation to fetch detailed information about a sandbox environment."""
 
@@ -1615,7 +1698,13 @@ async def get_sandbox(sandbox_id: str = Field(..., alias="sandboxID", descriptio
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Terminate Sandbox",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def terminate_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to terminate.")) -> dict[str, Any] | ToolResult:
     """Terminate and remove a sandbox environment by its ID. This operation permanently deletes the sandbox and all associated resources."""
 
@@ -1651,7 +1740,13 @@ async def terminate_sandbox(sandbox_id: str = Field(..., alias="sandboxID", desc
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Get Sandbox Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sandbox_metrics(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve metrics."),
     start: str | None = Field(None, description="Unix timestamp in seconds marking the beginning of the metrics collection interval. If omitted, metrics are retrieved from the earliest available data."),
@@ -1697,7 +1792,12 @@ async def get_sandbox_metrics(
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Pause Sandbox",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def pause_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to pause.")) -> dict[str, Any] | ToolResult:
     """Pause an active sandbox to temporarily suspend its execution and resource consumption. The sandbox can be resumed later without losing its state."""
 
@@ -1733,7 +1833,12 @@ async def pause_sandbox(sandbox_id: str = Field(..., alias="sandboxID", descript
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Connect Sandbox",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def connect_sandbox(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to connect to."),
     timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative value."),
@@ -1771,13 +1876,20 @@ async def connect_sandbox(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Set Sandbox Timeout",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_sandbox_timeout(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to configure."),
     timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative integer."),
@@ -1815,13 +1927,19 @@ async def set_sandbox_timeout(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Refresh Sandbox",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def refresh_sandbox(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to refresh."),
     duration: int | None = Field(None, description="The duration in seconds to extend the sandbox's time to live. If not specified, a default duration will be applied.", ge=0, le=3600),
@@ -1857,13 +1975,19 @@ async def refresh_sandbox(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sandboxes
-@mcp.tool()
+@mcp.tool(
+    title="Create Sandbox Snapshot",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_sandbox_snapshot(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox from which to create the snapshot."),
     name: str | None = Field(None, description="Optional name for the snapshot. If a snapshot with this name already exists, a new build will be assigned to the existing snapshot instead of creating a new one."),
@@ -1899,13 +2023,20 @@ async def create_sandbox_snapshot(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: snapshots
-@mcp.tool()
+@mcp.tool(
+    title="List Snapshots",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_snapshots(
     sandbox_id: str | None = Field(None, alias="sandboxID", description="Filter results to snapshots created from a specific sandbox ID."),
     limit: str | None = Field(None, description="Number of snapshots to return per page. Useful for paginating through large result sets."),
@@ -1948,7 +2079,12 @@ async def list_snapshots(
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     name: str | None = Field(None, description="Name of the template. Optionally include a version tag using colon separator (e.g., 'my-template:v1'). If a tag is provided in the name, it will be added to the tags array automatically."),
     tags: list[str] | None = Field(None, description="Tags to assign to the template for organization and categorization. Tags help identify and group related templates."),
@@ -1988,13 +2124,20 @@ async def create_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template File Upload Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template_files_upload_link(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve the files upload link."),
     hash_: str = Field(..., alias="hash", description="The cryptographic hash that identifies the specific version or snapshot of the template files to retrieve."),
@@ -2033,7 +2176,13 @@ async def get_template_files_upload_link(
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(team_id: str | None = Field(None, alias="teamID", description="Filter templates to a specific team. If omitted, returns templates accessible to all teams or the default scope.")) -> dict[str, Any] | ToolResult:
     """Retrieve all templates available in the system, optionally filtered by a specific team. Use this to discover and display template options for users."""
 
@@ -2071,7 +2220,13 @@ async def list_templates(team_id: str | None = Field(None, alias="teamID", descr
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="List Template Builds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_template_builds(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve builds."),
     limit: str | None = Field(None, description="The maximum number of builds to return in a single page of results. Defaults to 100 if not specified."),
@@ -2115,7 +2270,13 @@ async def list_template_builds(
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a template by its ID. This action cannot be undone."""
 
@@ -2151,7 +2312,12 @@ async def delete_template(template_id: str = Field(..., alias="templateID", desc
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Start Template Build",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def start_template_build(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to build."),
     build_id: str = Field(..., alias="buildID", description="The unique identifier for this specific build execution."),
@@ -2193,13 +2359,20 @@ async def start_template_build(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to update."),
     public: bool | None = Field(None, description="Controls template visibility. When true, the template is accessible to anyone; when false, it is restricted to team members only."),
@@ -2235,13 +2408,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Get Template Build Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template_build_status(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template containing the build."),
     build_id: str = Field(..., alias="buildID", description="The unique identifier of the build whose status should be retrieved."),
@@ -2289,7 +2469,13 @@ async def get_template_build_status(
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="List Template Build Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_template_build_logs(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template containing the build."),
     build_id: str = Field(..., alias="buildID", description="The unique identifier of the build whose logs should be retrieved."),
@@ -2339,7 +2525,12 @@ async def list_template_build_logs(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Assign Template Tags",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def assign_template_tags(
     target: str = Field(..., description="The target template specified in 'name:tag' format, where name is the template identifier and tag is the specific build version."),
     tags: list[str] = Field(..., description="Array of tags to assign to the template. Tags are applied in the order provided and can be used for categorization and filtering."),
@@ -2374,13 +2565,20 @@ async def assign_template_tags(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Template Tags",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_template_tags(
     name: str = Field(..., description="The name of the template from which tags will be removed."),
     tags: list[str] = Field(..., description="An array of tag names to remove from the template. Order is not significant."),
@@ -2415,13 +2613,20 @@ async def remove_template_tags(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="List Template Tags",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_template_tags(template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve tags.")) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific template. Tags are used to categorize and organize templates for easier discovery and management."""
 
@@ -2457,7 +2662,13 @@ async def list_template_tags(template_id: str = Field(..., alias="templateID", d
     return _response_data
 
 # Tags: templates
-@mcp.tool()
+@mcp.tool(
+    title="Check Template Alias",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def check_template_alias(alias: str = Field(..., description="The unique identifier or name of the template to check for existence.")) -> dict[str, Any] | ToolResult:
     """Verify whether a template with the specified alias exists in the system."""
 
@@ -2493,7 +2704,13 @@ async def check_template_alias(alias: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: admin
-@mcp.tool()
+@mcp.tool(
+    title="List Nodes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_nodes() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all available nodes in the system. Use this operation to discover and monitor all nodes."""
 
@@ -2520,7 +2737,13 @@ async def list_nodes() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: admin
-@mcp.tool()
+@mcp.tool(
+    title="Get Node",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_node(
     node_id: str = Field(..., alias="nodeID", description="The unique identifier of the node to retrieve."),
     cluster_id: str | None = Field(None, alias="clusterID", description="The cluster to which the node belongs. Use this to scope the node lookup to a specific cluster."),
@@ -2562,7 +2785,12 @@ async def get_node(
     return _response_data
 
 # Tags: admin
-@mcp.tool()
+@mcp.tool(
+    title="Update Node Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_node_status(
     node_id: str = Field(..., alias="nodeID", description="The unique identifier of the node to update."),
     status: Literal["ready", "draining", "connecting", "unhealthy"] = Field(..., description="The desired operational status for the node. Determines how the node handles workloads and cluster participation."),
@@ -2599,13 +2827,20 @@ async def update_node_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: admin
-@mcp.tool()
+@mcp.tool(
+    title="Terminate Team Sandboxes",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def terminate_team_sandboxes(team_id: str = Field(..., alias="teamID", description="The unique identifier of the team whose sandboxes should be terminated.")) -> dict[str, Any] | ToolResult:
     """Terminates all active sandboxes for a specified team. This operation will immediately stop and remove all sandbox instances associated with the team."""
 
@@ -2641,7 +2876,12 @@ async def terminate_team_sandboxes(team_id: str = Field(..., alias="teamID", des
     return _response_data
 
 # Tags: access-tokens
-@mcp.tool()
+@mcp.tool(
+    title="Create Access Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_access_token(name: str = Field(..., description="A descriptive name for the access token to help identify its purpose or associated application.")) -> dict[str, Any] | ToolResult:
     """Create a new access token for API authentication. The token can be used to authorize requests to protected endpoints."""
 
@@ -2673,13 +2913,20 @@ async def create_access_token(name: str = Field(..., description="A descriptive 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: access-tokens
-@mcp.tool()
+@mcp.tool(
+    title="Revoke Access Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_access_token(access_token_id: str = Field(..., alias="accessTokenID", description="The unique identifier of the access token to revoke and delete.")) -> dict[str, Any] | ToolResult:
     """Revoke and delete an access token, immediately invalidating it for future API requests."""
 
@@ -2715,7 +2962,13 @@ async def revoke_access_token(access_token_id: str = Field(..., alias="accessTok
     return _response_data
 
 # Tags: api-keys
-@mcp.tool()
+@mcp.tool(
+    title="List API Keys",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_api_keys() -> dict[str, Any] | ToolResult:
     """Retrieve all API keys associated with your team. Use this to view and manage authentication credentials for API access."""
 
@@ -2742,7 +2995,12 @@ async def list_api_keys() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: api-keys
-@mcp.tool()
+@mcp.tool(
+    title="Create API Key",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_api_key(name: str = Field(..., description="A descriptive name for the API key to help identify its purpose or associated application.")) -> dict[str, Any] | ToolResult:
     """Create a new API key for your team to authenticate API requests. The key can be used to access team resources and data."""
 
@@ -2774,13 +3032,20 @@ async def create_api_key(name: str = Field(..., description="A descriptive name 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: api-keys
-@mcp.tool()
+@mcp.tool(
+    title="Update API Key",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_api_key(
     api_key_id: str = Field(..., alias="apiKeyID", description="The unique identifier of the API key to update."),
     name: str = Field(..., description="The new name for the API key. Use a descriptive name to identify the key's purpose or associated application."),
@@ -2816,13 +3081,20 @@ async def update_api_key(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: api-keys
-@mcp.tool()
+@mcp.tool(
+    title="Delete API Key",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_api_key(api_key_id: str = Field(..., alias="apiKeyID", description="The unique identifier of the API key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team API key. This action cannot be undone and will invalidate any requests using this key."""
 
@@ -2858,7 +3130,13 @@ async def delete_api_key(api_key_id: str = Field(..., alias="apiKeyID", descript
     return _response_data
 
 # Tags: volumes
-@mcp.tool()
+@mcp.tool(
+    title="List Volumes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_volumes() -> dict[str, Any] | ToolResult:
     """Retrieve all volumes available to the team. This operation returns a complete list of storage volumes with their metadata and configuration details."""
 
@@ -2885,7 +3163,12 @@ async def list_volumes() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: volumes
-@mcp.tool()
+@mcp.tool(
+    title="Create Volume",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_volume(name: str = Field(..., description="The name identifier for the volume. Must contain only letters, numbers, hyphens, and underscores.", pattern="^[a-zA-Z0-9_-]+$")) -> dict[str, Any] | ToolResult:
     """Create a new team volume for storing and organizing data. The volume name must be unique within the team and follow alphanumeric naming conventions."""
 
@@ -2917,13 +3200,20 @@ async def create_volume(name: str = Field(..., description="The name identifier 
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: volumes
-@mcp.tool()
+@mcp.tool(
+    title="Get Volume",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_volume(volume_id: str = Field(..., alias="volumeID", description="The unique identifier of the volume to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific team volume by its unique identifier."""
 
@@ -2959,7 +3249,13 @@ async def get_volume(volume_id: str = Field(..., alias="volumeID", description="
     return _response_data
 
 # Tags: volumes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Volume",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_volume(volume_id: str = Field(..., alias="volumeID", description="The unique identifier of the volume to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team volume by its ID. This action cannot be undone."""
 

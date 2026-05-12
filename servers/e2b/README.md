@@ -5,7 +5,7 @@ Base URL: https://api.e2b.app
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 43 |
+| **Tools** | 39 |
 | **Auth** | API Key |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (X-API-Key)
+
 Do not commit credentials to version control.
 
 ---
