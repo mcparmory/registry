@@ -1,7 +1,7 @@
 """
 Authentication module for Customer.io Journeys Track MCP server.
 
-Generated: 2026-05-05 14:47:42 UTC
+Generated: 2026-05-12 11:10:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

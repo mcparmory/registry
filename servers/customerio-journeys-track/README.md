@@ -5,7 +5,7 @@ Base URL: https://track.customer.io
 | | |
 |---|---|
 | **Category** | Marketing |
-| **Tools** | 17 |
+| **Tools** | 16 |
 | **Auth** | HTTP Basic |
 
 ---
@@ -56,6 +56,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
+
 Do not commit credentials to version control.
 
 ---

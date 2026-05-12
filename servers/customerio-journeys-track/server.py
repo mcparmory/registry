@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Customer.io Journeys Track MCP Server
-Generated: 2026-05-05 14:47:42 UTC
+Generated: 2026-05-12 11:10:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://track.customer.io")
 SERVER_NAME = "Customer.io Journeys Track"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1006,6 +1037,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1030,6 +1063,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1237,7 +1272,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Customer.io Journeys Track", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: trackRegion
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Region",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_region() -> dict[str, Any] | ToolResult:
     """Retrieve your account's region and environment details. This endpoint returns the appropriate regional URL and environment ID for your Track API credentials, which you should use for all subsequent API requests."""
 
@@ -1264,7 +1305,13 @@ async def get_account_region() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Upsert Customer",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def upsert_customer(
     identifier: str = Field(..., description="The unique identifier for the customer in the path. Can be a customer ID, email address, or `cio_id` (prefixed with `cio_`). For workspaces using email as an identifier, this is case-insensitive."),
     id_: str | None = Field(None, alias="id", description="A customer's unique ID. Can be set when identifying by email; can be updated when identifying by `cio_id`."),
@@ -1309,13 +1356,20 @@ async def upsert_customer(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Delete Customer",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_customer(identifier: str = Field(..., description="The unique identifier for the customer to delete. This can be a customer ID, email address, or cio_id (prefixed with 'cio_') depending on your workspace configuration.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a customer and all associated information from Customer.io. Note that customers recreated through other integration methods (such as the Javascript snippet) after deletion may need to be deleted again."""
 
@@ -1351,7 +1405,13 @@ async def delete_customer(identifier: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Register Device",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def register_device(
     identifier: str = Field(..., description="The unique identifier for the customer. Can be an `id`, `email` address, or `cio_id` (prefixed with `cio_`) depending on workspace configuration."),
     device: _models.DeviceObject = Field(..., description="An object containing device properties such as platform type, device token, and attributes. Properties are automatically collected by SDKs unless `autoTrackDeviceAttributes` is disabled. Device properties can be referenced in segments and Liquid templates."),
@@ -1387,13 +1447,20 @@ async def register_device(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Remove Device",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_device(
     identifier: str = Field(..., description="The unique identifier for the customer. This can be an `id`, `email` address, or `cio_id` (prefixed with `cio_`) depending on your workspace configuration."),
     device_id: str = Field(..., description="The unique identifier of the device to remove from the customer profile."),
@@ -1432,7 +1499,13 @@ async def remove_device(
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Suppress Customer",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def suppress_customer(identifier: str = Field(..., description="The unique identifier for the customer to suppress. This can be an email address, customer ID, or CIO ID (prefixed with `cio_`) depending on your workspace configuration. When using CIO ID, the value must be prefixed with `cio_`.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a customer profile and suppress their identifier(s) to prevent re-addition to the workspace. All future API calls referencing the suppressed identifier are ignored. This action cannot be undone and should be used primarily for GDPR/CCPA compliance requests."""
 
@@ -1468,7 +1541,12 @@ async def suppress_customer(identifier: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Unsuppress Customer",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unsuppress_customer(identifier: str = Field(..., description="The unique identifier for the customer, which can be their ID, email address, or cio_id (prefixed with 'cio_'). The identifier type depends on your workspace configuration.")) -> dict[str, Any] | ToolResult:
     """Reactivate a suppressed customer profile to make their identifier available for new profile creation. Unsuppressing does not restore the previous profile history; it only makes the identifier usable again."""
 
@@ -1504,7 +1582,13 @@ async def unsuppress_customer(identifier: str = Field(..., description="The uniq
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Mark Delivery Unsubscribed",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_delivery_unsubscribed(
     delivery_id: str = Field(..., description="The unique identifier of the email delivery associated with the unsubscribe request."),
     unsubscribe: bool | None = Field(None, description="Set to true to mark the person as unsubscribed and attribute the unsubscribe action to this delivery."),
@@ -1540,13 +1624,19 @@ async def mark_delivery_unsubscribed(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Events
-@mcp.tool()
+@mcp.tool(
+    title="Track Customer Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def track_customer_event(
     identifier: str = Field(..., description="The unique identifier for the customer. Can be their user ID, email address, or CIO ID depending on workspace configuration."),
     name: str = Field(..., description="The name of the event used to reference it in campaigns and segments. Leading and trailing spaces are automatically trimmed."),
@@ -1589,13 +1679,19 @@ async def track_customer_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Events
-@mcp.tool()
+@mcp.tool(
+    title="Log Anonymous Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def log_anonymous_event(
     name: str = Field(..., description="The name of the event used to reference it in campaigns and segments. Avoid leading or trailing spaces as they cannot be referenced in campaign logic."),
     anonymous_id: str | None = Field(None, description="A unique identifier for the anonymous person, such as a cookie or device ID. When this identifier is later set as an attribute on a person, all events with matching anonymous_id are associated with that person."),
@@ -1636,13 +1732,19 @@ async def log_anonymous_event(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Forms
-@mcp.tool()
+@mcp.tool(
+    title="Submit Form",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def submit_form(
     form_id: str = Field(..., description="The unique identifier for the form. Use a value that is meaningful to your system and traceable to your backend. If Customer.io does not recognize this identifier, a new form connection will be created automatically."),
     data: _models.SubmitFormBodyDataV0 | _models.SubmitFormBodyDataV1 = Field(..., description="An object containing form field data and respondent identifiers. Must include at least one identifier field (id, email, or a field mapped to these identifiers) to identify or create the form respondent. All additional keys represent form fields submitted by the respondent; field values must be formatted as strings. Reserved keys (form_id, form_name, form_type, form_url, form_url_param) are ignored if included."),
@@ -1678,13 +1780,20 @@ async def submit_form(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Customers
-@mcp.tool()
+@mcp.tool(
+    title="Merge Customers",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def merge_customers(
     primary: _models.MergeBodyPrimaryV0 | _models.MergeBodyPrimaryV1 | _models.MergeBodyPrimaryV2 = Field(..., description="The customer profile that will remain after the merge. Identified by `id`, `email`, or `cio_id`. This profile receives merged data from the secondary profile. Must already exist in Customer.io at the time of the merge request."),
     secondary: _models.MergeBodySecondaryV0 | _models.MergeBodySecondaryV1 | _models.MergeBodySecondaryV2 = Field(..., description="The customer profile that will be deleted after the merge. Identified by `id`, `email`, or `cio_id`. This profile's attributes, event history, segments, and campaign journeys are merged into the primary profile before deletion."),
@@ -1719,13 +1828,19 @@ async def merge_customers(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Events
-@mcp.tool()
+@mcp.tool(
+    title="Report Metric",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def report_metric(
     delivery_id: str = Field(..., description="The CIO-Delivery-ID header value from the notification you want to associate this metric with. This ID links the reported event back to the original message delivery."),
     metric: Literal["bounced", "clicked", "converted", "deferred", "delivered", "dropped", "opened", "spammed"] = Field(..., description="The type of email metric being reported. Choose the value that best describes the event that occurred."),
@@ -1766,13 +1881,19 @@ async def report_metric(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Segments
-@mcp.tool()
+@mcp.tool(
+    title="Add Customers to Segment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_customers_to_segment(
     segment_id: str = Field(..., description="The unique identifier of the manual segment. Find this ID in the segment's dashboard page under Usage, or retrieve it using the segments API."),
     ids: list[str] = Field(..., description="Array of customer identifiers to add to the segment. All values must match the id_type parameter. Unmatched entries are ignored. Accepts 1 to 1000 identifiers per request.", min_length=1, max_length=1000),
@@ -1814,13 +1935,20 @@ async def add_customers_to_segment(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Track Segments
-@mcp.tool()
+@mcp.tool(
+    title="Remove Customers from Segment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_customers_from_segment(
     segment_id: str = Field(..., description="The unique identifier of the segment from which to remove customers. You can find this ID in the Segments dashboard under Usage, or retrieve it via the Segments API."),
     ids: list[str] = Field(..., description="Array of customer identifiers to remove from the segment. Must contain between 1 and 1000 identifiers, all matching the type specified in id_type.", min_length=1, max_length=1000),
@@ -1862,13 +1990,19 @@ async def remove_customers_from_segment(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: track_v2
-@mcp.tool()
+@mcp.tool(
+    title="Manage Entity",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def manage_entity(
     type_: Literal["delivery", "object", "person"] = Field(..., alias="type", description="The entity type being modified: a person, object, or delivery record."),
     action: Literal["add_device", "add_relationships", "delete", "delete_device", "delete_relationships", "event", "identify", "identify_anonymous", "merge", "page", "screen", "suppress", "unsuppress"] = Field(..., description="The operation to perform on the specified entity type, such as identifying a profile, tracking an event, managing devices, or merging records."),
@@ -1912,13 +2046,19 @@ async def manage_entity(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: track_v2
-@mcp.tool()
+@mcp.tool(
+    title="Batch Entities",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def batch_entities(batch: list[Annotated[_models.IdentifyPerson | _models.PersonDelete | _models.PersonEvent | _models.PersonScreen | _models.PersonPage | _models.PersonAddRelationships | _models.PersonDeleteRelationships | _models.PersonAddDevice | _models.PersonDeleteDevice | _models.PersonMerge | _models.PersonSuppress | _models.PersonUnsuppress, Field(discriminator="action")] | Annotated[_models.ObjectIdentify | _models.ObjectIdentifyAnonymous | _models.ObjectDelete | _models.ObjectAddRelationships | _models.ObjectDeleteRelationships, Field(discriminator="action")] | _models.DeliveryOperations] | None = Field(None, description="Array of entity payloads representing individual operations. Each object modifies a single person or object. The batch request must not exceed 500kb total, and each individual entity operation must not exceed 32kb.")) -> dict[str, Any] | ToolResult:
     """Submit multiple entity operations in a single request to create or modify people and objects. Combine different entity types (people, objects, deliveries) in one batch for efficient bulk processing."""
 
@@ -1950,6 +2090,7 @@ async def batch_entities(batch: list[Annotated[_models.IdentifyPerson | _models.
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
