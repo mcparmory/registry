@@ -5,7 +5,7 @@ Base URL: https://api.globalping.io
 | | |
 |---|---|
 | **Category** | Infrastructure |
-| **Tools** | 3 |
+| **Tools** | 2 |
 | **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
@@ -70,6 +70,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ### OAuth2
