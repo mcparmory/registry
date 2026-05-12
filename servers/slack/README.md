@@ -5,7 +5,7 @@ Base URL: https://slack.com/api
 | | |
 |---|---|
 | **Category** | Communication |
-| **Tools** | 72 |
+| **Tools** | 67 |
 | **Auth** | OAuth2 |
 
 ## API Info
@@ -73,6 +73,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_USER_SCOPES` — OAuth2 scopes for `user_scope` (comma-separated)
 - `OAUTH2_TLS_CERT_FILE` — OAuth2 localhost TLS certificate path
 - `OAUTH2_TLS_KEY_FILE` — OAuth2 localhost TLS private key path
+
 Do not commit credentials to version control.
 
 ### OAuth2

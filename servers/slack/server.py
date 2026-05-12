@@ -5,7 +5,7 @@ Slack MCP Server
 API Info:
 - Contact: Slack developer relations (https://api.slack.com/support)
 
-Generated: 2026-05-08 19:05:30 UTC
+Generated: 2026-05-12 12:55:32 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -42,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://slack.com/api")
 SERVER_NAME = "Slack"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.0.1"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -1251,7 +1252,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Slack", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: auth
-@mcp.tool()
+@mcp.tool(
+    title="Verify Authentication",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def verify_authentication() -> dict[str, Any] | ToolResult:
     """Verifies that the provided authentication token is valid and returns information about the authenticated user or application."""
 
@@ -1278,7 +1285,13 @@ async def verify_authentication() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: bots
-@mcp.tool()
+@mcp.tool(
+    title="Get Bot Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bot_info(bot: str | None = Field(None, description="The bot user identifier to retrieve information for. If not provided, returns information about the authenticated bot making the request.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific bot user. Requires authentication with users:read scope."""
 
@@ -1316,7 +1329,13 @@ async def get_bot_info(bot: str | None = Field(None, description="The bot user i
     return _response_data
 
 # Tags: calls
-@mcp.tool()
+@mcp.tool(
+    title="Update Call",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_call(
     id_: str = Field(..., alias="id", description="The unique identifier of the Call to update, as returned by the calls.add method."),
     join_url: str | None = Field(None, description="The URL that clients use to join the Call. This is the primary join link for the call."),
@@ -1359,7 +1378,13 @@ async def update_call(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Delete Message",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_message(
     ts: float | None = Field(None, description="The timestamp of the message to delete. This uniquely identifies the message within its channel."),
     as_user: bool | None = Field(None, description="When true, deletes the message as the authenticated user using the `chat:write:user` scope (applies to bot users as well). When false or omitted, deletes the message using the `chat:write:bot` scope."),
@@ -1402,7 +1427,13 @@ async def delete_message(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Delete Scheduled Message",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_scheduled_message(
     channel: str = Field(..., description="The channel ID where the scheduled message is queued to be posted."),
     scheduled_message_id: str = Field(..., description="The unique identifier of the scheduled message to delete, as returned from the chat.scheduleMessage operation."),
@@ -1445,7 +1476,13 @@ async def delete_scheduled_message(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Get Message Permalink",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message_permalink(
     channel: str = Field(..., description="The unique identifier of the channel or conversation containing the target message."),
     message_ts: str = Field(..., description="The timestamp value (`ts`) of the message, which uniquely identifies it within the channel."),
@@ -1486,7 +1523,12 @@ async def get_message_permalink(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Send Me Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_me_message(
     text: str | None = Field(None, description="The text content of the me message to send to the channel."),
     channel: str | None = Field(None, description="Channel to send message to. Can be a public channel, private group or IM channel. Can be an encoded ID, or a name."),
@@ -1528,7 +1570,12 @@ async def send_me_message(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Send Ephemeral Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_ephemeral_message(
     channel: str = Field(..., description="Target channel, private group, or direct message channel. Accepts encoded channel ID or channel name."),
     user: str = Field(..., description="User ID of the recipient. The user must be a member of the specified channel to receive the ephemeral message."),
@@ -1575,7 +1622,12 @@ async def send_ephemeral_message(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Send Message to Channel",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_message_to_channel(
     channel: str = Field(..., description="Target destination for the message: a channel name, private group name, or encoded channel/user ID."),
     as_user: str | None = Field(None, description="When true, posts the message as the authenticated user instead of as a bot. Defaults to false."),
@@ -1625,7 +1677,12 @@ async def send_message_to_channel(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Schedule Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def schedule_message(
     text: str | None = Field(None, description="The message content to send. Required unless using blocks or other content structures. See formatting documentation for supported syntax options."),
     post_at: str | None = Field(None, description="Unix EPOCH timestamp indicating when the message should be sent. Must be a future time."),
@@ -1674,7 +1731,13 @@ async def schedule_message(
     return _response_data
 
 # Tags: chat.scheduledMessages, chat
-@mcp.tool()
+@mcp.tool(
+    title="List Scheduled Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_scheduled_messages(
     latest: float | None = Field(None, description="A UNIX timestamp marking the most recent message to include in the results. Messages scheduled at or before this time will be returned."),
     oldest: float | None = Field(None, description="A UNIX timestamp marking the oldest message to include in the results. Messages scheduled at or after this time will be returned."),
@@ -1716,7 +1779,13 @@ async def list_scheduled_messages(
     return _response_data
 
 # Tags: chat
-@mcp.tool()
+@mcp.tool(
+    title="Update Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_message(
     channel: str = Field(..., description="The channel ID containing the message to be updated."),
     ts: str = Field(..., description="The timestamp (ts) of the message to be updated, used to uniquely identify the message within the channel."),
@@ -1761,7 +1830,13 @@ async def update_message(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Archive Conversation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def archive_conversation(channel: str | None = Field(None, description="ID of conversation to archive")) -> dict[str, Any] | ToolResult:
     """Archives a conversation, removing it from the active conversation list while preserving its history for future reference."""
 
@@ -1800,7 +1875,13 @@ async def archive_conversation(channel: str | None = Field(None, description="ID
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Close Conversation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def close_conversation(channel: str | None = Field(None, description="Conversation to close.")) -> dict[str, Any] | ToolResult:
     """Closes an active direct message conversation, either between two users or among multiple participants. This action archives the conversation and prevents further messages in that thread."""
 
@@ -1839,7 +1920,12 @@ async def close_conversation(channel: str | None = Field(None, description="Conv
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Create Conversation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_conversation(
     is_private: bool | None = Field(None, description="Set to true to create a private channel with restricted access, or false (default) to create a public channel visible to all users."),
     name: str | None = Field(None, description="Name of the public or private channel to create"),
@@ -1881,7 +1967,13 @@ async def create_conversation(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation_history(
     latest: float | None = Field(None, description="Unix timestamp marking the end of the time range; only messages up to this point are included in results."),
     oldest: float | None = Field(None, description="Unix timestamp marking the start of the time range; only messages from this point forward are included in results."),
@@ -1925,7 +2017,13 @@ async def get_conversation_history(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation_info(
     include_locale: bool | None = Field(None, description="Include the locale language and region information for the conversation in the response."),
     include_num_members: bool | None = Field(None, description="Include the total number of members in the conversation in the response."),
@@ -1967,7 +2065,12 @@ async def get_conversation_info(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Add Users to Conversation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_users_to_conversation(
     users: str | None = Field(None, description="A comma-separated list of user IDs to invite to the conversation. Up to 1000 users can be added in a single request."),
     channel: str | None = Field(None, description="The ID of the public or private channel to invite user(s) to."),
@@ -2009,7 +2112,12 @@ async def add_users_to_conversation(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Join Conversation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def join_conversation(channel: str | None = Field(None, description="ID of conversation to join")) -> dict[str, Any] | ToolResult:
     """Joins the authenticated user to an existing conversation, enabling participation in the conversation's messages and interactions."""
 
@@ -2048,7 +2156,13 @@ async def join_conversation(channel: str | None = Field(None, description="ID of
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Remove User From Conversation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_user_from_conversation(
     user: str | None = Field(None, description="The unique identifier of the user to be removed from the conversation."),
     channel: str | None = Field(None, description="ID of conversation to remove user from."),
@@ -2090,7 +2204,13 @@ async def remove_user_from_conversation(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Leave Conversation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def leave_conversation(channel: str | None = Field(None, description="Conversation to leave")) -> dict[str, Any] | ToolResult:
     """Removes the authenticated user from a conversation, ending their participation and access to that conversation."""
 
@@ -2129,7 +2249,13 @@ async def leave_conversation(channel: str | None = Field(None, description="Conv
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="List Conversations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversations(
     exclude_archived: bool | None = Field(None, description="When set to true, archived channels are excluded from the results. Useful for focusing on active conversations only."),
     types: str | None = Field(None, description="Filters conversations by type using a comma-separated list. Supported types are public_channel, private_channel, mpim (multi-person direct messages), and im (direct messages). Omit to include all types."),
@@ -2171,7 +2297,13 @@ async def list_conversations(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Mark Conversation Read",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def mark_conversation_read(
     ts: float = Field(..., description="The message timestamp to mark as read. If provided, sets your read cursor to this message; if omitted, marks the entire conversation as read up to the current time."),
     channel: str | None = Field(None, description="Channel or conversation to set the read cursor for."),
@@ -2213,7 +2345,13 @@ async def mark_conversation_read(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="List Conversation Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_conversation_members(
     limit: int | None = Field(None, description="Maximum number of members to return in a single request. The API may return fewer members than requested if the end of the list is reached."),
     channel: str | None = Field(None, description="ID of the conversation to retrieve members for"),
@@ -2254,7 +2392,12 @@ async def list_conversation_members(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Open Direct Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def open_direct_message(
     users: str | None = Field(None, description="Comma-separated list of user identifiers to include in the direct message. Provide a single user for a 1:1 DM, or multiple users for a group DM. The order of users is preserved in the returned conversation. Either this parameter or a channel must be supplied."),
     return_im: bool | None = Field(None, description="When true, returns the complete direct message channel definition in the response, including all channel metadata and settings."),
@@ -2296,7 +2439,12 @@ async def open_direct_message(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Rename Conversation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_conversation(
     channel: str | None = Field(None, description="ID of conversation to rename"),
     name: str | None = Field(None, description="New name for conversation."),
@@ -2338,7 +2486,13 @@ async def update_conversation(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Get Conversation Thread",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_conversation_thread(
     ts: float | None = Field(None, description="The timestamp of the parent message whose thread you want to retrieve. This message must exist and can have zero or more replies; if there are no replies, only the parent message itself is returned."),
     latest: float | None = Field(None, description="The end of the time range for filtering messages, specified as a Unix timestamp. Only messages up to this time will be included in results."),
@@ -2383,7 +2537,13 @@ async def get_conversation_thread(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Update Conversation Purpose",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_conversation_purpose(
     purpose: str | None = Field(None, description="The new purpose or topic description for the conversation. Provide a clear, concise statement that describes the conversation's intent or focus."),
     channel: str | None = Field(None, description="Conversation to set the purpose of"),
@@ -2425,7 +2585,13 @@ async def update_conversation_purpose(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Update Conversation Topic",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_conversation_topic(
     topic: str | None = Field(None, description="The new topic string for the conversation. Plain text only; formatting and linkification are not supported."),
     channel: str | None = Field(None, description="Conversation to set the topic of"),
@@ -2467,7 +2633,12 @@ async def update_conversation_topic(
     return _response_data
 
 # Tags: conversations
-@mcp.tool()
+@mcp.tool(
+    title="Unarchive Conversation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def unarchive_conversation(channel: str | None = Field(None, description="ID of conversation to unarchive")) -> dict[str, Any] | ToolResult:
     """Restores an archived conversation to active status, reversing the archival action and making it accessible again."""
 
@@ -2506,7 +2677,13 @@ async def unarchive_conversation(channel: str | None = Field(None, description="
     return _response_data
 
 # Tags: dnd
-@mcp.tool()
+@mcp.tool(
+    title="Disable Do Not Disturb",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_dnd() -> dict[str, Any] | ToolResult:
     """Immediately deactivates the current user's Do Not Disturb mode, restoring normal notification delivery."""
 
@@ -2533,7 +2710,12 @@ async def disable_dnd() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: dnd
-@mcp.tool()
+@mcp.tool(
+    title="End DND Snooze",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def end_dnd_snooze() -> dict[str, Any] | ToolResult:
     """Immediately ends the current user's do-not-disturb snooze mode, restoring normal notification delivery."""
 
@@ -2560,7 +2742,13 @@ async def end_dnd_snooze() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: dnd
-@mcp.tool()
+@mcp.tool(
+    title="Get Do Not Disturb Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dnd_status(user: str | None = Field(None, description="The user ID or username to fetch the Do Not Disturb status for. If not provided, returns the status for the authenticated user making the request.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current Do Not Disturb status for a user, indicating whether they have notifications muted or disabled."""
 
@@ -2598,7 +2786,12 @@ async def get_dnd_status(user: str | None = Field(None, description="The user ID
     return _response_data
 
 # Tags: dnd
-@mcp.tool()
+@mcp.tool(
+    title="Enable Do Not Disturb",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_do_not_disturb(num_minutes: str = Field(..., description="Duration in minutes from the current time until Do Not Disturb mode should automatically turn off. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Activates Do Not Disturb mode for the current user with a specified duration. If Do Not Disturb is already active, this updates the snooze duration."""
 
@@ -2637,7 +2830,13 @@ async def enable_do_not_disturb(num_minutes: str = Field(..., description="Durat
     return _response_data
 
 # Tags: dnd
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Do Not Disturb Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_dnd_status(users: str = Field(..., description="Comma-separated list of user identifiers to retrieve Do Not Disturb status for. Supports up to 50 users per request.")) -> dict[str, Any] | ToolResult:
     """Retrieves the Do Not Disturb status for specified users on a team, allowing you to check up to 50 users at once."""
 
@@ -2675,7 +2874,13 @@ async def get_team_dnd_status(users: str = Field(..., description="Comma-separat
     return _response_data
 
 # Tags: emoji
-@mcp.tool()
+@mcp.tool(
+    title="List Emoji",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_emoji() -> dict[str, Any] | ToolResult:
     """Retrieves all custom emoji configured for the workspace. This includes emoji names, URLs, and metadata for all custom emoji available to team members."""
 
@@ -2702,7 +2907,13 @@ async def list_emoji() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: files.comments, files
-@mcp.tool()
+@mcp.tool(
+    title="Delete File Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file_comment(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the comment to delete."),
     file_: str | None = Field(None, alias="file", description="File to delete a comment from."),
@@ -2744,7 +2955,13 @@ async def delete_file_comment(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(file_: str | None = Field(None, alias="file", description="ID of file to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a file from the system. This action cannot be undone."""
 
@@ -2783,7 +3000,13 @@ async def delete_file(file_: str | None = Field(None, alias="file", description=
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Get File Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file_info(
     limit: int | None = Field(None, description="The maximum number of file records to return in the response. The API may return fewer items than requested if the end of the list is reached."),
     file_: str | None = Field(None, alias="file", description="Specify a file by providing its ID."),
@@ -2824,7 +3047,13 @@ async def get_file_info(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="List Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_files(
     user: str | None = Field(None, description="Filter results to files created by a specific user. Provide the user identifier."),
     ts_from: float | None = Field(None, description="Filter results to files created on or after this timestamp (inclusive). Use Unix timestamp format."),
@@ -2868,7 +3097,13 @@ async def list_files(
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Revoke File Public URL",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def revoke_file_public_url(file_: str | None = Field(None, alias="file", description="File to revoke")) -> dict[str, Any] | ToolResult:
     """Revokes public and external sharing access for a file, preventing further access via public URLs."""
 
@@ -2907,7 +3142,12 @@ async def revoke_file_public_url(file_: str | None = Field(None, alias="file", d
     return _response_data
 
 # Tags: files
-@mcp.tool()
+@mcp.tool(
+    title="Enable File Public Sharing",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_file_public_sharing(file_: str | None = Field(None, alias="file", description="File to share")) -> dict[str, Any] | ToolResult:
     """Enables public sharing for a file by generating a shareable public URL that allows external users to access the file without authentication."""
 
@@ -2946,7 +3186,12 @@ async def enable_file_public_sharing(file_: str | None = Field(None, alias="file
     return _response_data
 
 # Tags: pins
-@mcp.tool()
+@mcp.tool(
+    title="Add Pin to Channel",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_pin_to_channel(
     channel: str = Field(..., description="The channel where the item will be pinned. Specify the channel ID or name."),
     timestamp: str | None = Field(None, description="The timestamp of the message to pin. Use the message's timestamp identifier to specify which message should be pinned."),
@@ -2988,7 +3233,13 @@ async def add_pin_to_channel(
     return _response_data
 
 # Tags: pins
-@mcp.tool()
+@mcp.tool(
+    title="List Channel Pins",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_channel_pins(channel: str = Field(..., description="The channel ID or name to retrieve pinned items from.")) -> dict[str, Any] | ToolResult:
     """Retrieves all items pinned to a specified channel. Pinned items are messages or files that have been marked for easy reference within the channel."""
 
@@ -3026,7 +3277,13 @@ async def list_channel_pins(channel: str = Field(..., description="The channel I
     return _response_data
 
 # Tags: pins
-@mcp.tool()
+@mcp.tool(
+    title="Remove Pin from Channel",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_pin_from_channel(
     channel: str = Field(..., description="The channel ID or name where the pinned item is located."),
     timestamp: str | None = Field(None, description="The timestamp of the specific message to un-pin. If omitted, the most recently pinned message in the channel will be removed."),
@@ -3068,7 +3325,12 @@ async def remove_pin_from_channel(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Add Reaction to Message",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_reaction_to_message(
     channel: str = Field(..., description="The channel ID where the message to react to is located."),
     name: str = Field(..., description="The emoji name to add as a reaction (e.g., 'thumbsup', 'heart'). Use the emoji name without colons or special characters."),
@@ -3111,7 +3373,13 @@ async def add_reaction_to_message(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Get Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_reactions(
     file_comment: str | None = Field(None, description="The file comment to retrieve reactions for. Specify either this parameter, timestamp, or neither to get reactions for the item context."),
     full: bool | None = Field(None, description="When true, returns the complete list of all reactions. When false or omitted, may return a truncated list."),
@@ -3155,7 +3423,13 @@ async def get_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="List User Reactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_reactions(
     user: str | None = Field(None, description="The user whose reactions to retrieve. If not specified, defaults to the authenticated user."),
     full: bool | None = Field(None, description="When enabled, returns the complete list of all reactions without pagination limits."),
@@ -3197,7 +3471,13 @@ async def list_user_reactions(
     return _response_data
 
 # Tags: reactions
-@mcp.tool()
+@mcp.tool(
+    title="Remove Reaction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_reaction(
     name: str = Field(..., description="The emoji name of the reaction to remove (e.g., 'thumbsup', 'heart'). Must match the exact reaction name."),
     file_comment: str | None = Field(None, description="The file comment ID from which to remove the reaction. Use this when removing a reaction from a file comment instead of a message."),
@@ -3242,7 +3522,12 @@ async def remove_reaction(
     return _response_data
 
 # Tags: reminders
-@mcp.tool()
+@mcp.tool(
+    title="Create Reminder",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_reminder(
     text: str = Field(..., description="The reminder message content that will be displayed to the recipient."),
     time_: str = Field(..., alias="time", description="When the reminder should trigger: a Unix timestamp (up to five years in the future), seconds from now (for reminders within 24 hours), or natural language phrasing like 'in 15 minutes' or 'every Thursday'."),
@@ -3285,7 +3570,13 @@ async def create_reminder(
     return _response_data
 
 # Tags: search
-@mcp.tool()
+@mcp.tool(
+    title="Search Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_messages(
     query: str = Field(..., description="Search query string to match against message content. Supports the platform's standard search syntax."),
     highlight: bool | None = Field(None, description="Enable query highlight markers in results to visually distinguish matched terms within message content."),
@@ -3328,7 +3619,12 @@ async def search_messages(
     return _response_data
 
 # Tags: stars
-@mcp.tool()
+@mcp.tool(
+    title="Add Star",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_star(
     file_comment: str | None = Field(None, description="The file comment identifier to star. Specify either this or timestamp, but not both."),
     timestamp: str | None = Field(None, description="The timestamp of the message to star. Specify either this or file_comment, but not both."),
@@ -3371,7 +3667,13 @@ async def add_star(
     return _response_data
 
 # Tags: stars
-@mcp.tool()
+@mcp.tool(
+    title="List Stars",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stars(limit: int | None = Field(None, description="Maximum number of items to return per request. The API may return fewer items than requested if the end of the list is reached.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of stars for the authenticated user, with optional pagination control."""
 
@@ -3409,7 +3711,13 @@ async def list_stars(limit: int | None = Field(None, description="Maximum number
     return _response_data
 
 # Tags: stars
-@mcp.tool()
+@mcp.tool(
+    title="Remove Star",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_star(
     file_comment: str | None = Field(None, description="The file comment to remove the star from. Either this or timestamp must be provided."),
     timestamp: str | None = Field(None, description="The timestamp of the message to remove the star from. Either this or file_comment must be provided."),
@@ -3452,7 +3760,13 @@ async def remove_star(
     return _response_data
 
 # Tags: team
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_info(team: str | None = Field(None, description="Optional team identifier to retrieve information for a specific team. If omitted, returns the current team. Only returns teams accessible to the authenticated token through external shared channels.")) -> dict[str, Any] | ToolResult:
     """Retrieves information about a team. If no team is specified, returns information about the authenticated user's current team. The authenticated token must have the `team:read` scope."""
 
@@ -3490,7 +3804,13 @@ async def get_team_info(team: str | None = Field(None, description="Optional tea
     return _response_data
 
 # Tags: team.profile, team
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_profile(visibility: str | None = Field(None, description="Optional filter to retrieve only team profiles matching a specific visibility level.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed profile information for a team, with optional filtering by visibility settings."""
 
@@ -3528,7 +3848,12 @@ async def get_team_profile(visibility: str | None = Field(None, description="Opt
     return _response_data
 
 # Tags: usergroups
-@mcp.tool()
+@mcp.tool(
+    title="Create User Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_usergroup(
     name: str = Field(..., description="A unique name for the User Group. Must not duplicate any existing User Group names."),
     channels: str | None = Field(None, description="Comma-separated list of encoded channel IDs to set as defaults for this User Group."),
@@ -3573,7 +3898,13 @@ async def create_usergroup(
     return _response_data
 
 # Tags: usergroups
-@mcp.tool()
+@mcp.tool(
+    title="Disable Usergroup",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def disable_usergroup(
     usergroup: str = Field(..., description="The encoded ID of the User Group to disable. This identifier uniquely identifies the target group."),
     include_count: bool | None = Field(None, description="When enabled, the response will include a count of users currently in the User Group."),
@@ -3615,7 +3946,12 @@ async def disable_usergroup(
     return _response_data
 
 # Tags: usergroups
-@mcp.tool()
+@mcp.tool(
+    title="Enable Usergroup",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def enable_usergroup(
     usergroup: str = Field(..., description="The encoded ID of the User Group to enable. This identifier uniquely identifies the target User Group."),
     include_count: bool | None = Field(None, description="When true, the response includes the total number of users currently in the User Group."),
@@ -3657,7 +3993,13 @@ async def enable_usergroup(
     return _response_data
 
 # Tags: usergroups
-@mcp.tool()
+@mcp.tool(
+    title="List User Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_usergroups(
     include_users: bool | None = Field(None, description="Include the complete list of users belonging to each User Group in the response."),
     include_count: bool | None = Field(None, description="Include the total count of users in each User Group without listing individual members."),
@@ -3699,7 +4041,13 @@ async def list_usergroups(
     return _response_data
 
 # Tags: usergroups
-@mcp.tool()
+@mcp.tool(
+    title="Update Usergroup",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_usergroup(
     usergroup: str = Field(..., description="The encoded ID of the User Group to update. This identifier is required to target the correct group."),
     handle: str | None = Field(None, description="A unique mention handle for the User Group. Must be distinct across all channels, users, and other User Groups in the workspace."),
@@ -3744,7 +4092,13 @@ async def update_usergroup(
     return _response_data
 
 # Tags: usergroups.users, usergroups
-@mcp.tool()
+@mcp.tool(
+    title="List Usergroup Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_usergroup_members(
     usergroup: str = Field(..., description="The encoded ID of the User Group whose members you want to list."),
     include_disabled: bool | None = Field(None, description="When enabled, includes results from User Groups that are currently disabled. By default, only active User Groups are included."),
@@ -3785,7 +4139,13 @@ async def list_usergroup_members(
     return _response_data
 
 # Tags: usergroups.users, usergroups
-@mcp.tool()
+@mcp.tool(
+    title="Update Usergroup Users",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_usergroup_users(
     usergroup: str = Field(..., description="The encoded ID of the User Group to update. This identifies which group's membership will be replaced."),
     users: str = Field(..., description="A comma-separated list of encoded user IDs that defines the complete new membership for the User Group. All previous members not in this list will be removed."),
@@ -3828,7 +4188,13 @@ async def update_usergroup_users(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List User Conversations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_conversations(
     user: str | None = Field(None, description="Filter conversations to only those where a specific user is a member. Non-public channels are only included if the calling user shares membership in them."),
     types: str | None = Field(None, description="Filter by conversation type using a comma-separated list. Supported types are: public_channel, private_channel, mpim (multi-person direct message), and im (direct message)."),
@@ -3871,7 +4237,13 @@ async def list_user_conversations(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Photo",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_photo() -> dict[str, Any] | ToolResult:
     """Remove the user's profile photo. Requires authentication with users.profile:write scope."""
 
@@ -3898,7 +4270,13 @@ async def delete_user_photo() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Presence",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_presence(user: str | None = Field(None, description="The user whose presence information should be retrieved. If omitted, defaults to the authenticated user making the request.")) -> dict[str, Any] | ToolResult:
     """Retrieves the presence status of a user. If no user is specified, returns the presence information for the authenticated user."""
 
@@ -3936,7 +4314,13 @@ async def get_user_presence(user: str | None = Field(None, description="The user
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_info(
     include_locale: bool | None = Field(None, description="Set to `true` to include the user's locale in the response; defaults to `false` if omitted."),
     user: str | None = Field(None, description="The user identifier to retrieve information for. If omitted, returns information for the authenticated user."),
@@ -3977,7 +4361,13 @@ async def get_user_info(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     limit: int | None = Field(None, description="Maximum number of users to return per request. Omitting this parameter attempts to return the entire user list, which may fail if the workspace is large; include a limit to ensure reliable pagination."),
     include_locale: bool | None = Field(None, description="Include the locale setting for each user in the response. Defaults to false; set to true only if locale information is needed, as it may increase response size."),
@@ -4018,7 +4408,13 @@ async def list_users(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Get User by Email",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_by_email(email: str = Field(..., description="The email address of the user to look up. Must be a valid email address associated with a user in the workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieve a user account by their email address. Returns the user object if found in the workspace."""
 
@@ -4056,7 +4452,13 @@ async def get_user_by_email(email: str = Field(..., description="The email addre
     return _response_data
 
 # Tags: users.profile, users
-@mcp.tool()
+@mcp.tool(
+    title="Get User Profile",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user_profile(
     include_labels: bool | None = Field(None, description="When enabled, includes human-readable labels for each identifier in custom profile fields, making the response more interpretable."),
     user: str | None = Field(None, description="The user identifier to retrieve profile information for. If omitted, returns the profile of the authenticated user making the request."),
@@ -4097,7 +4499,13 @@ async def get_user_profile(
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Update User Presence",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_presence(presence: str = Field(..., description="Presence status to set for the user. Must be either 'auto' for active presence or 'away' for away status.")) -> dict[str, Any] | ToolResult:
     """Manually set a user's presence status to either active (auto) or away. Requires authentication with users:write scope."""
 
@@ -4136,7 +4544,13 @@ async def update_user_presence(presence: str = Field(..., description="Presence 
     return _response_data
 
 # Tags: users
-@mcp.tool()
+@mcp.tool(
+    title="Set User Photo",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def users_set_photo(
     crop_w: str | None = Field(None, description="Width/height of crop box (always square)"),
     crop_x: str | None = Field(None, description="X coordinate of top-left corner of crop box"),
