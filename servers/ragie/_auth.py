@@ -1,7 +1,7 @@
 """
 Authentication module for Ragie MCP server.
 
-Generated: 2026-05-05 16:03:55 UTC
+Generated: 2026-05-12 12:20:20 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

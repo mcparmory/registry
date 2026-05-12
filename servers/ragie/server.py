@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Ragie MCP Server
-Generated: 2026-05-05 16:03:55 UTC
+Generated: 2026-05-12 12:20:20 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.ragie.ai")
 SERVER_NAME = "Ragie"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1213,7 +1248,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Ragie", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="List Documents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_documents(
     page_size: int | None = Field(None, description="Number of documents to return per page. Must be between 1 and 100 items. Defaults to 10 if not specified.", ge=1, le=100),
     filter_: str | None = Field(None, alias="filter", description="Metadata filter expression to narrow results. Supports operators like $eq (equal), $ne (not equal), $gt/$gte (greater than), $lt/$lte (less than), $in/$nin (array membership), and logical AND/OR combinations. See documentation for syntax and examples."),
@@ -1254,9 +1295,14 @@ async def list_documents(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Create Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_document(
-    file_: str = Field(..., alias="file", description="The binary file to upload and index. Supported formats include plain text (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .docx, .xlsx, .pptx, .csv, .epub, and others). PDF files exceeding 2000 pages are not supported in hi_res mode."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file to upload and index. Supported formats include plain text (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .docx, .xlsx, .pptx, .csv, .epub, and others). PDF files exceeding 2000 pages are not supported in hi_res mode.", json_schema_extra={'format': 'byte'}),
     mode: _models.CreateDocumentBodyMode | None = Field(None, description="Processing mode configuration for document ingestion. Accepts either an object with detailed mode settings or a scalar shorthand value."),
     metadata: dict[str, str | float | bool | list[str]] | None = Field(None, description="Custom metadata key-value pairs to attach to the document. Keys must be strings; values can be strings, numbers (integers or floats), booleans, or lists of strings. Up to 1000 total values are allowed across all metadata (each array item counts separately). Reserved keys like document_id, document_type, document_source, document_name, document_uploaded_at, start_time, end_time, and chunk_content_type are for internal use only."),
     external_id: str | None = Field(None, description="Optional external identifier for the document, such as an ID from an external system or the source URL where the file originates."),
@@ -1301,7 +1347,12 @@ async def create_document(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Create Document from Text",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_document_from_text(
     data: str | dict[str, Any] = Field(..., description="The document content as raw text or JSON. Must contain at least 1 character.", min_length=1),
     name: str | None = Field(None, description="Optional human-readable name for the document. If not provided, defaults to the current timestamp."),
@@ -1339,13 +1390,19 @@ async def create_document_from_text(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Ingest Document from URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def ingest_document_from_url(
     url: str = Field(..., description="URL of the file to ingest. Must be publicly accessible via HTTP or HTTPS, between 1 and 2083 characters in length, and a valid URI format.", min_length=1, max_length=2083),
     name: str | None = Field(None, description="Optional human-readable name for the document. If not provided, a default name will be assigned."),
@@ -1384,13 +1441,20 @@ async def ingest_document_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document(document_id: str = Field(..., description="The unique identifier of the document to retrieve, formatted as a UUID (universally unique identifier).")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific document by its unique identifier. Returns the full document details including metadata and content."""
 
@@ -1426,7 +1490,13 @@ async def get_document(document_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_document(
     document_id: str = Field(..., description="The unique identifier of the document to delete, formatted as a UUID."),
     async_: bool | None = Field(None, alias="async", description="When true, the deletion is performed asynchronously and returns immediately without waiting for completion. Defaults to false for synchronous deletion."),
@@ -1468,10 +1538,16 @@ async def delete_document(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document_file(
     document_id: str = Field(..., description="The unique identifier of the document to update, formatted as a UUID."),
-    file_: str = Field(..., alias="file", description="The binary file to upload and process. Supported formats include text files (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .doc, .docx, .xlsx, .xls, .csv, .ppt, .pptx, .epub, .odt, .tsv). PDF files must not exceed 2000 pages."),
+    file_: str = Field(..., alias="file", description="Base64-encoded file content for upload. The binary file to upload and process. Supported formats include text files (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .doc, .docx, .xlsx, .xls, .csv, .ppt, .pptx, .epub, .odt, .tsv). PDF files must not exceed 2000 pages.", json_schema_extra={'format': 'byte'}),
     mode: _models.UpdateDocumentFileBodyMode | None = Field(None, description="Optional processing mode configuration that controls how the file is extracted and indexed. Accepts either an object with detailed settings or a scalar shorthand value."),
 ) -> dict[str, Any] | ToolResult:
     """Replace the file content of an existing document. The uploaded file will be extracted, processed, and indexed for retrieval. Supports text formats (plain text, markdown, email, HTML, XML, JSON, RST, RTF), images (PNG, WebP, JPEG, TIFF, BMP, HEIC), and documents (PDF, Word, Excel, PowerPoint, CSV, EPUB, ODT)."""
@@ -1513,7 +1589,13 @@ async def update_document_file(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document Raw",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document_raw(
     document_id: str = Field(..., description="The unique identifier of the document to update, formatted as a UUID."),
     data: str | dict[str, Any] = Field(..., description="The new document content as text or JSON. Must contain at least one character.", min_length=1),
@@ -1549,13 +1631,20 @@ async def update_document_raw(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document from URL",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document_from_url(
     document_id: str = Field(..., description="The unique identifier of the document to update, formatted as a UUID."),
     url: str = Field(..., description="Public HTTP or HTTPS URL of the file to ingest. Must be publicly accessible and between 1 and 2083 characters in length.", min_length=1, max_length=2083),
@@ -1592,13 +1681,20 @@ async def update_document_from_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document Metadata",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document_metadata(
     document_id: str = Field(..., description="The UUID identifier of the document to update."),
     metadata: dict[str, Any] = Field(..., description="A partial metadata object with string keys and values that are strings, numbers, booleans, or lists of strings. Set a key to null to delete it. Up to 1000 total values are allowed across all metadata (each array item counts separately). Numbers are converted to 64-bit floating point."),
@@ -1635,13 +1731,20 @@ async def update_document_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="List Document Chunks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_document_chunks(
     document_id: str = Field(..., description="The unique identifier (UUID) of the document to retrieve chunks from."),
     start_index: int | None = Field(None, description="The inclusive starting index for filtering chunks by range. If specified alone, returns only the chunk at this index. If both start_index and end_index are omitted, all chunks are returned without index filtering."),
@@ -1685,7 +1788,13 @@ async def list_document_chunks(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Chunk",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_chunk(
     document_id: str = Field(..., description="The unique identifier of the document containing the chunk, formatted as a UUID."),
     chunk_id: str = Field(..., description="The unique identifier of the specific chunk to retrieve, formatted as a UUID."),
@@ -1724,7 +1833,13 @@ async def get_document_chunk(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Chunk Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_chunk_content(
     document_id: str = Field(..., description="The unique identifier (UUID) of the document containing the chunk."),
     chunk_id: str = Field(..., description="The unique identifier (UUID) of the specific chunk within the document."),
@@ -1768,7 +1883,13 @@ async def get_document_chunk_content(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Content",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_content(
     document_id: str = Field(..., description="The unique identifier of the document to retrieve, formatted as a UUID."),
     media_type: str | None = Field(None, description="The desired format for the returned content, specified as a MIME type (e.g., application/json, text/plain, audio/mpeg, video/mp4). If the document doesn't support the requested type, an error will be returned."),
@@ -1811,7 +1932,13 @@ async def get_document_content(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_source(document_id: str = Field(..., description="The unique identifier of the document, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the original source file of a document. The source varies by origin: uploaded files are returned as-is, URL-sourced documents return the fetched content, and connection-synced documents return the format specific to that connection type (e.g., file from Google Drive, JSON from Salesforce)."""
 
@@ -1847,7 +1974,12 @@ async def get_document_source(document_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: retrievals
-@mcp.tool()
+@mcp.tool(
+    title="Search Document Chunks",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_document_chunks(
     query: str = Field(..., description="The search query used to find semantically relevant document chunks. Can be a natural language question or statement."),
     top_k: int | None = Field(None, description="Maximum number of chunks to return in the results. Defaults to 8 chunks."),
@@ -1886,13 +2018,20 @@ async def search_document_chunks(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Summary",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_summary(document_id: str = Field(..., description="The unique identifier of the document, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve an LLM-generated summary of a document. The summary is automatically created when the document is first uploaded or updated. Note: This feature is in beta and may change; data files (xls, xlsx, csv, json) and documents exceeding 1M tokens are not supported."""
 
@@ -1928,7 +2067,13 @@ async def get_document_summary(document_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="List Instructions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_instructions() -> dict[str, Any] | ToolResult:
     """Retrieve all instructions available in the system. Use this operation to discover and review the complete set of instructions."""
 
@@ -1955,7 +2100,12 @@ async def list_instructions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="Create Instruction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_instruction(
     name: str = Field(..., description="A unique name for the instruction that identifies its purpose (e.g., 'Find all pizzas'). Must not duplicate existing instruction names."),
     prompt: str = Field(..., description="A natural language instruction describing what data to extract from documents. This prompt is applied to document content and results are stored as entities matching the entity_schema."),
@@ -1995,13 +2145,20 @@ async def create_instruction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="Update Instruction",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_instruction(
     instruction_id: str = Field(..., description="The unique identifier (UUID) of the instruction to update."),
     name: str | None = Field(None, description="A unique name for the instruction. Must not conflict with existing instruction names."),
@@ -2043,13 +2200,20 @@ async def update_instruction(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="Delete Instruction",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_instruction(instruction_id: str = Field(..., description="The unique identifier of the instruction to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an instruction and all entities it generated. This operation cannot be undone."""
 
@@ -2085,7 +2249,13 @@ async def delete_instruction(instruction_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="List Entities by Instruction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entities_by_instruction(
     instruction_id: str = Field(..., description="The unique identifier (UUID) of the instruction whose extracted entities you want to retrieve."),
     page_size: int | None = Field(None, description="The number of entities to return per page, between 1 and 100 items. Defaults to 10 if not specified.", ge=1, le=100),
@@ -2127,11 +2297,17 @@ async def list_entities_by_instruction(
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="List Instruction Entity Extraction Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_instruction_entity_extraction_logs(
     instruction_id: str = Field(..., description="The UUID of the instruction for which to retrieve entity extraction logs."),
     page_size: int | None = Field(None, description="Number of results to return per page. Must be between 1 and 100 items. Defaults to 10 if not specified.", ge=1, le=100),
-    document_ids: list[str] | None = Field(None, description="Optional list of document IDs to filter extraction logs. Only logs matching these document IDs will be included in results."),
+    document_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="Optional list of document IDs to filter extraction logs. Only logs matching these document IDs will be included in results."),
     status: Literal["extracted", "not_found", "error"] | None = Field(None, description="Optional filter by extraction outcome status. Valid values are `extracted` (successful extraction), `not_found` (entity not found), or `error` (extraction failed)."),
     created_after: str | None = Field(None, description="Optional ISO 8601 timestamp to include only logs created on or after this date and time."),
     created_before: str | None = Field(None, description="Optional ISO 8601 timestamp to include only logs created before this date and time."),
@@ -2173,7 +2349,13 @@ async def list_instruction_entity_extraction_logs(
     return _response_data
 
 # Tags: entities
-@mcp.tool()
+@mcp.tool(
+    title="List Entities by Document",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entities_by_document(
     document_id: str = Field(..., description="The unique identifier (UUID) of the document from which to retrieve extracted entities."),
     page_size: int | None = Field(None, description="Number of entities to return per page, between 1 and 100 items. Defaults to 10 if not specified.", ge=1, le=100),
@@ -2215,7 +2397,12 @@ async def list_entities_by_document(
     return _response_data
 
 # Tags: connections, beta, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Create Connection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_connection(
     connection: Annotated[_models.PublicBackblazeConnection | _models.PublicGcsConnection | _models.PublicFreshdeskConnection | _models.PublicIntercomConnection | _models.PublicS3CompatibleConnection | _models.PublicWebcrawlerConnection | _models.PublicZendeskConnection, Field(discriminator="provider")] = Field(..., description="Connection configuration object specifying the data source type and authentication details."),
     static: Literal["hi_res", "fast", "agentic_ocr"] | None = Field(None, description="Processing mode for document extraction: 'hi_res' for high-resolution processing, 'fast' for quick processing, or 'agentic_ocr' for advanced OCR-based extraction."),
@@ -2257,13 +2444,20 @@ async def create_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="List Connections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_connections(
     page_size: int | None = Field(None, description="Number of connections to return per page. Must be between 1 and 100 items; defaults to 10 if not specified.", ge=1, le=100),
     filter_: str | None = Field(None, alias="filter", description="Filter connections by metadata using comparison operators ($eq, $ne, $gt, $gte, $lt, $lte, $in, $nin) combined with AND/OR logic. Returns only connections matching the filter criteria. Refer to the Metadata & Filters guide for syntax and examples."),
@@ -2304,7 +2498,12 @@ async def list_connections(
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Create OAuth Redirect URL",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_oauth_redirect_url(
     redirect_uri: str = Field(..., description="The URI where the user will be redirected after completing OAuth authentication. This must be a valid, accessible endpoint in your application."),
     source_type: Literal["backblaze", "confluence", "dropbox", "freshdesk", "onedrive", "google_drive", "gmail", "intercom", "notion", "salesforce", "sharepoint", "jira", "slack", "s3", "gcs", "hubspot", "webcrawler", "zendesk"] | None = Field(None, description="The connector type to initialize (e.g., google_drive, notion, hubspot). Defaults to google_drive if not specified. Choose from supported connectors like cloud storage (S3, GCS, Dropbox), productivity tools (Notion, Slack), CRM systems (Salesforce, HubSpot), and others."),
@@ -2346,13 +2545,20 @@ async def create_oauth_redirect_url(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="List Connection Source Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_connection_source_types() -> dict[str, Any] | ToolResult:
     """Retrieve all available connection source types (such as Google Drive, Notion, etc.) along with their metadata to understand what integrations can be configured."""
 
@@ -2379,7 +2585,13 @@ async def list_connection_source_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Update Connection Enabled Status",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_connection_enabled_status(
     connection_id: str = Field(..., description="The unique identifier (UUID format) of the connection to modify."),
     enabled: bool = Field(..., description="Boolean flag to enable (true) or disable (false) the connection."),
@@ -2416,13 +2628,20 @@ async def update_connection_enabled_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Get Connection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_connection(connection_id: str = Field(..., description="The unique identifier (UUID) of the connection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific connection by its unique identifier. Returns the full connection details including configuration and metadata."""
 
@@ -2458,7 +2677,13 @@ async def get_connection(connection_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Update Connection",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_connection(
     connection_id: str = Field(..., description="The unique identifier (UUID) of the connection to update."),
     partition_strategy: Literal["hi_res", "fast", "agentic_ocr"] | _models.MediaModeParam = Field(..., description="The strategy for partitioning data during sync operations."),
@@ -2496,13 +2721,20 @@ async def update_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Get Connection Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_connection_stats(connection_id: str = Field(..., description="The unique identifier (UUID) of the connection to retrieve statistics for.")) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated statistics for a specific connection, including total documents, active documents, and total active pages."""
 
@@ -2538,7 +2770,13 @@ async def get_connection_stats(connection_id: str = Field(..., description="The 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Update Connection Page Limit",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_connection_page_limit(
     connection_id: str = Field(..., description="The unique identifier of the connection to configure limits for."),
     page_limit: int | None = Field(None, description="The maximum number of pages this connection will synchronize before being disabled. Must be at least 1 if specified. Set to null to remove any existing limit.", ge=1),
@@ -2574,13 +2812,20 @@ async def update_connection_page_limit(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Delete Connection",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_connection(
     connection_id: str = Field(..., description="The unique identifier (UUID) of the connection to delete."),
     keep_files: bool = Field(..., description="Whether to retain files associated with this connection. If true, files are preserved but disassociated; if false, all files are deleted with the connection."),
@@ -2616,13 +2861,19 @@ async def delete_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connections
-@mcp.tool()
+@mcp.tool(
+    title="Trigger Connection Sync",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def trigger_connection_sync(connection_id: str = Field(..., description="The unique identifier of the connection to sync, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Immediately schedules a connector to begin syncing data. This operation queues the sync to run as soon as possible."""
 
@@ -2658,7 +2909,13 @@ async def trigger_connection_sync(connection_id: str = Field(..., description="T
     return _response_data
 
 # Tags: webhook_endpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Endpoints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_endpoints(page_size: int | None = Field(None, description="Number of webhook endpoints to return per page. Must be between 1 and 100 items. Defaults to 10 if not specified.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve all webhook endpoints sorted by creation date in descending order. Results are paginated with a maximum of 100 items per page, and a cursor is provided when additional endpoints are available."""
 
@@ -2696,7 +2953,13 @@ async def list_webhook_endpoints(page_size: int | None = Field(None, description
     return _response_data
 
 # Tags: webhook_endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Endpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_endpoint(endpoint_id: str = Field(..., description="The unique identifier (UUID) of the webhook endpoint to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook endpoint by its unique identifier. Use this to fetch configuration and status details for a registered webhook."""
 
@@ -2732,7 +2995,12 @@ async def get_webhook_endpoint(endpoint_id: str = Field(..., description="The un
     return _response_data
 
 # Tags: webhook_endpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhook Endpoint",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_webhook_endpoint(
     endpoint_id: str = Field(..., description="The unique identifier of the webhook endpoint to update, formatted as a UUID."),
     name: str | None = Field(None, description="A new display name for the webhook endpoint."),
@@ -2771,13 +3039,20 @@ async def update_webhook_endpoint(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: partitions
-@mcp.tool()
+@mcp.tool(
+    title="List Partitions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_partitions(page_size: int | None = Field(None, description="Number of partitions to return per page. Must be between 1 and 100 items; defaults to 10 if not specified.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve all partitions sorted alphabetically in ascending order. Results are paginated with a maximum of 100 items per page; use the cursor parameter to fetch subsequent pages when available."""
 
@@ -2815,7 +3090,12 @@ async def list_partitions(page_size: int | None = Field(None, description="Numbe
     return _response_data
 
 # Tags: partitions
-@mcp.tool()
+@mcp.tool(
+    title="Create Partition",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_partition(
     name: str = Field(..., description="Unique identifier for the partition. Must be lowercase alphanumeric and may only contain underscores and hyphens."),
     description: str | None = Field(None, description="Human-readable description of the partition's purpose. Automatic description generation can be enabled in the web dashboard."),
@@ -2857,13 +3137,20 @@ async def create_partition(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: partitions
-@mcp.tool()
+@mcp.tool(
+    title="Get Partition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_partition(partition_id: str = Field(..., description="The unique identifier of the partition to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific partition, including its usage metrics (document and page counts) and configured limits."""
 
@@ -2899,7 +3186,13 @@ async def get_partition(partition_id: str = Field(..., description="The unique i
     return _response_data
 
 # Tags: partitions
-@mcp.tool()
+@mcp.tool(
+    title="Update Partition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_partition(
     partition_id: str = Field(..., description="The unique identifier of the partition to update."),
     context_aware: bool | None = Field(None, description="Enable context-aware descriptions that provide additional semantic context for the partition to improve LLM understanding and filter generation."),
@@ -2937,13 +3230,20 @@ async def update_partition(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: partitions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Partition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_partition(
     partition_id: str = Field(..., description="The unique identifier of the partition to delete."),
     async_: bool | None = Field(None, alias="async", description="When set to true, the partition deletion is performed asynchronously, allowing the request to return immediately while the deletion completes in the background. Defaults to false for synchronous deletion."),
@@ -2985,7 +3285,13 @@ async def delete_partition(
     return _response_data
 
 # Tags: partitions
-@mcp.tool()
+@mcp.tool(
+    title="Update Partition Limits",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_partition_limits(
     partition_id: str = Field(..., description="The unique identifier of the partition to configure limits for."),
     pages_hosted_limit_max: int | None = Field(None, description="Maximum number of pages allowed for hosted documents in the partition. Must be at least 1 page.", ge=1),
@@ -3026,13 +3332,20 @@ async def update_partition_limits(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: authenticators, beta, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="List Authenticators",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_authenticators(page_size: int | None = Field(None, description="Number of authenticators to return per page. Must be between 1 and 100 items; defaults to 10 if not specified.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all authenticators sorted by creation date in descending order. Use the cursor parameter to navigate through pages when more results are available."""
 
@@ -3070,7 +3383,12 @@ async def list_authenticators(page_size: int | None = Field(None, description="N
     return _response_data
 
 # Tags: authenticators, beta, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Create Authenticator",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_authenticator(
     provider: Literal["atlassian", "dropbox", "hubspot", "microsoft", "salesforce", "slack"] = Field(..., description="The provider service to authenticate with. Must be one of: Atlassian, Dropbox, HubSpot, Microsoft, Salesforce, or Slack."),
     name: str = Field(..., description="A unique identifier for this authenticator configuration. This name is used to reference and distinguish the authenticator from others. Names must be globally unique within your account."),
@@ -3109,13 +3427,19 @@ async def create_authenticator(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: authenticators, beta, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Create Authenticator Connection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_authenticator_connection(
     authenticator_id: str = Field(..., description="The unique identifier (UUID) of the authenticator to create a connection for."),
     connection: Annotated[_models.AuthenticatorConfluenceConnection | _models.AuthenticatorDropboxConnection | _models.AuthenticatorGoogleDriveConnection | _models.AuthenticatorGmailConnection | _models.AuthenticatorHubspotConnection | _models.AuthenticatorJiraConnection | _models.AuthenticatorNotionConnection | _models.AuthenticatorOnedriveConnection | _models.AuthenticatorSalesforceConnection | _models.AuthenticatorSharepointConnection | _models.AuthenticatorSlackConnection, Field(discriminator="provider")] = Field(..., description="Connection credentials object. Structure and required fields depend on the authenticator provider type."),
@@ -3159,13 +3483,20 @@ async def create_authenticator_connection(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: authenticators, beta, enterprise
-@mcp.tool()
+@mcp.tool(
+    title="Delete Authenticator",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_authenticator(authenticator_id: str = Field(..., description="The unique identifier (UUID) of the authenticator to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an authenticator connection method. All connections created by this authenticator must be deleted before this operation can succeed."""
 
@@ -3201,7 +3532,12 @@ async def delete_authenticator(authenticator_id: str = Field(..., description="T
     return _response_data
 
 # Tags: responses
-@mcp.tool()
+@mcp.tool(
+    title="Create Response",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_response(
     input_: str = Field(..., alias="input", description="The query or question to generate a response for. This text is processed by the LLM agent to produce relevant answers."),
     effort: Literal["low", "medium", "high"] = Field(..., description="The computational effort level for generating the response. Choose low for quick responses, medium for balanced quality and speed, or high for more thorough analysis."),
@@ -3241,13 +3577,20 @@ async def create_response(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: responses
-@mcp.tool()
+@mcp.tool(
+    title="Get Response",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_response(response_id: str = Field(..., description="The unique identifier (UUID) of the response to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a response by its unique identifier. Returns the response data along with its current status: `in_progress` for ongoing processing, `completed` for finished responses, or `failed` for responses that encountered an error."""
 
@@ -3283,7 +3626,13 @@ async def get_response(response_id: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: elements
-@mcp.tool()
+@mcp.tool(
+    title="List Document Elements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_document_elements(
     document_id: str = Field(..., description="The unique identifier (UUID) of the document containing the elements to retrieve."),
     page_size: int | None = Field(None, description="Number of elements to return per page. Must be between 1 and 100 items (defaults to 10 if not specified).", ge=1, le=100),
@@ -3328,7 +3677,13 @@ async def list_document_elements(
     return _response_data
 
 # Tags: elements
-@mcp.tool()
+@mcp.tool(
+    title="Get Element",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_element(element_id: str = Field(..., description="The unique identifier (UUID) of the element to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific element from a document by its unique identifier. Use this to fetch detailed information about an individual element."""
 

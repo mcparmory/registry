@@ -1,7 +1,7 @@
 """
 Ragie MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:03:55 UTC
+Generated: 2026-05-12 12:20:20 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -103,7 +103,7 @@ class ListDocumentsRequest(StrictModel):
 class CreateDocumentRequestBody(StrictModel):
     mode: CreateDocumentBodyMode | None = Field(default=None, description="Processing mode configuration for document ingestion. Accepts either an object with detailed mode settings or a scalar shorthand value.")
     metadata: dict[str, str | float | bool | list[str]] | None = Field(default=None, description="Custom metadata key-value pairs to attach to the document. Keys must be strings; values can be strings, numbers (integers or floats), booleans, or lists of strings. Up to 1000 total values are allowed across all metadata (each array item counts separately). Reserved keys like document_id, document_type, document_source, document_name, document_uploaded_at, start_time, end_time, and chunk_content_type are for internal use only.")
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file to upload and index. Supported formats include plain text (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .docx, .xlsx, .pptx, .csv, .epub, and others). PDF files exceeding 2000 pages are not supported in hi_res mode.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file to upload and index. Supported formats include plain text (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .docx, .xlsx, .pptx, .csv, .epub, and others). PDF files exceeding 2000 pages are not supported in hi_res mode.", json_schema_extra={'format': 'byte'})
     external_id: str | None = Field(default=None, description="Optional external identifier for the document, such as an ID from an external system or the source URL where the file originates.")
     name: str | None = Field(default=None, description="Optional display name for the document. If provided, this name will be used; otherwise, the uploaded file's name will be used as the document name.")
     workflow: Literal["parse", "index"] | None = Field(default=None, description="Processing workflow to apply to the document. Choose 'parse' for document parsing or 'index' for indexing operations.")
@@ -156,7 +156,7 @@ class UpdateDocumentFileRequestPath(StrictModel):
     document_id: str = Field(default=..., description="The unique identifier of the document to update, formatted as a UUID.", json_schema_extra={'format': 'uuid'}, examples=['00000000-0000-0000-0000-000000000000'])
 class UpdateDocumentFileRequestBody(StrictModel):
     mode: UpdateDocumentFileBodyMode | None = Field(default=None, description="Optional processing mode configuration that controls how the file is extracted and indexed. Accepts either an object with detailed settings or a scalar shorthand value.")
-    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The binary file to upload and process. Supported formats include text files (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .doc, .docx, .xlsx, .xls, .csv, .ppt, .pptx, .epub, .odt, .tsv). PDF files must not exceed 2000 pages.", json_schema_extra={'format': 'binary'})
+    file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="Base64-encoded file content for upload. The binary file to upload and process. Supported formats include text files (.txt, .md, .json, .html, .xml, .eml, .msg, .rst, .rtf), images (.png, .jpg, .jpeg, .webp, .tiff, .bmp, .heic), and documents (.pdf, .doc, .docx, .xlsx, .xls, .csv, .ppt, .pptx, .epub, .odt, .tsv). PDF files must not exceed 2000 pages.", json_schema_extra={'format': 'byte'})
 class UpdateDocumentFileRequest(StrictModel):
     """Replace the file content of an existing document. The uploaded file will be extracted, processed, and indexed for retrieval. Supports text formats (plain text, markdown, email, HTML, XML, JSON, RST, RTF), images (PNG, WebP, JPEG, TIFF, BMP, HEIC), and documents (PDF, Word, Excel, PowerPoint, CSV, EPUB, ODT)."""
     path: UpdateDocumentFileRequestPath
@@ -314,7 +314,7 @@ class ListInstructionEntityExtractionLogsRequestPath(StrictModel):
     instruction_id: str = Field(default=..., description="The UUID of the instruction for which to retrieve entity extraction logs.", json_schema_extra={'format': 'uuid'}, examples=['00000000-0000-0000-0000-000000000000'])
 class ListInstructionEntityExtractionLogsRequestQuery(StrictModel):
     page_size: int | None = Field(default=None, description="Number of results to return per page. Must be between 1 and 100 items. Defaults to 10 if not specified.", ge=1, le=100)
-    document_ids: list[str] | None = Field(default=None, description="Optional list of document IDs to filter extraction logs. Only logs matching these document IDs will be included in results.")
+    document_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="Optional list of document IDs to filter extraction logs. Only logs matching these document IDs will be included in results.")
     status: Literal["extracted", "not_found", "error"] | None = Field(default=None, description="Optional filter by extraction outcome status. Valid values are `extracted` (successful extraction), `not_found` (entity not found), or `error` (extraction failed).")
     created_after: str | None = Field(default=None, description="Optional ISO 8601 timestamp to include only logs created on or after this date and time.", json_schema_extra={'format': 'date-time'})
     created_before: str | None = Field(default=None, description="Optional ISO 8601 timestamp to include only logs created before this date and time.", json_schema_extra={'format': 'date-time'})
