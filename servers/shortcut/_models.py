@@ -1,7 +1,7 @@
 """
 Shortcut MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:23:17 UTC
+Generated: 2026-05-12 12:53:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -310,12 +310,12 @@ class ListEpicsRequest(StrictModel):
 # Operation: create_epic
 class CreateEpicRequestBody(StrictModel):
     description: str | None = Field(default=None, description="A detailed explanation of the Epic's purpose and scope. Limited to 100,000 characters.", max_length=100000)
-    objective_ids: list[int] | None = Field(default=None, description="An array of Objective IDs to associate with this Epic. Objectives provide strategic alignment for the Epic.")
+    objective_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="An array of Objective IDs to associate with this Epic. Objectives provide strategic alignment for the Epic.")
     name: str = Field(default=..., description="The Epic's title or name. Required field, must be between 1 and 256 characters.", min_length=1, max_length=256)
     planned_start_date: str | None = Field(default=None, description="The date when work on this Epic is planned to begin. Specify as an ISO 8601 formatted date-time string.", json_schema_extra={'format': 'date-time'})
     requested_by_id: str | None = Field(default=None, description="The UUID of the team member who requested this Epic. Used to track Epic ownership and accountability.", json_schema_extra={'format': 'uuid'})
     epic_state_id: int | None = Field(default=None, description="The numeric ID of the Epic State that defines the Epic's workflow status (e.g., Backlog, In Progress, Done).", json_schema_extra={'format': 'int64'})
-    group_ids: list[str] | None = Field(default=None, description="An array of Group UUIDs to associate with this Epic. Groups help organize and categorize Epics within your workspace.")
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="An array of Group UUIDs to associate with this Epic. Groups help organize and categorize Epics within your workspace.")
     converted_from_story_id: int | None = Field(default=None, description="The numeric ID of a Story that was converted into this Epic. Use this when promoting an existing Story to Epic status.", json_schema_extra={'format': 'int64'})
     external_id: str | None = Field(default=None, description="An external identifier for this Epic, useful when importing from other tools or systems. Limited to 128 characters and should be unique within your workspace.", max_length=128)
     deadline: str | None = Field(default=None, description="The date by which this Epic must be completed. Specify as an ISO 8601 formatted date-time string.", json_schema_extra={'format': 'date-time'})
@@ -345,12 +345,12 @@ class UpdateEpicRequestPath(StrictModel):
 class UpdateEpicRequestBody(StrictModel):
     description: str | None = Field(default=None, description="The Epic's description text. Can be up to 100,000 characters long.", max_length=100000)
     archived: bool | None = Field(default=None, description="Whether the Epic is archived. Set to true to archive or false to unarchive.")
-    objective_ids: list[int] | None = Field(default=None, description="An array of Objective IDs to associate with this Epic. Order is not significant.")
+    objective_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="An array of Objective IDs to associate with this Epic. Order is not significant.")
     name: str | None = Field(default=None, description="The Epic's display name. Must be between 1 and 256 characters long.", min_length=1, max_length=256)
     planned_start_date: str | None = Field(default=None, description="The Epic's planned start date in ISO 8601 date-time format.", json_schema_extra={'format': 'date-time'})
     requested_by_id: str | None = Field(default=None, description="The UUID of the team member who requested this Epic.", json_schema_extra={'format': 'uuid'})
     epic_state_id: int | None = Field(default=None, description="The 64-bit integer ID of the Epic State (e.g., Backlog, In Progress, Done) to assign to this Epic.", json_schema_extra={'format': 'int64'})
-    group_ids: list[str] | None = Field(default=None, description="An array of Group UUIDs to associate with this Epic. Order is not significant.")
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="An array of Group UUIDs to associate with this Epic. Order is not significant.")
     external_id: str | None = Field(default=None, description="An external identifier for this Epic, useful when importing from other tools. Maximum 128 characters.", max_length=128)
     deadline: str | None = Field(default=None, description="The Epic's deadline in ISO 8601 date-time format.", json_schema_extra={'format': 'date-time'})
 class UpdateEpicRequest(StrictModel):
@@ -483,10 +483,10 @@ class GetExternalLinkStoriesRequest(StrictModel):
 # Operation: upload_files
 class UploadFilesRequestBody(StrictModel):
     story_id: int | None = Field(default=None, description="The ID of the story to associate these uploaded files with. If omitted, files are uploaded without story association.", json_schema_extra={'format': 'int64'})
-    file0: str = Field(default=..., description="The primary file to upload. This parameter is required; at least one file must be provided in the request.", json_schema_extra={'format': 'binary'})
-    file1: str | None = Field(default=None, description="An optional additional file to upload alongside file0.", json_schema_extra={'format': 'binary'})
-    file2: str | None = Field(default=None, description="An optional additional file to upload alongside file0 and file1.", json_schema_extra={'format': 'binary'})
-    file3: str | None = Field(default=None, description="An optional additional file to upload alongside file0, file1, and file2.", json_schema_extra={'format': 'binary'})
+    file0: str = Field(default=..., description="Base64-encoded file content for upload. The primary file to upload. This parameter is required; at least one file must be provided in the request.", json_schema_extra={'format': 'byte'})
+    file1: str | None = Field(default=None, description="Base64-encoded file content for upload. An optional additional file to upload alongside file0.", json_schema_extra={'format': 'byte'})
+    file2: str | None = Field(default=None, description="Base64-encoded file content for upload. An optional additional file to upload alongside file0 and file1.", json_schema_extra={'format': 'byte'})
+    file3: str | None = Field(default=None, description="Base64-encoded file content for upload. An optional additional file to upload alongside file0, file1, and file2.", json_schema_extra={'format': 'byte'})
 class UploadFilesRequest(StrictModel):
     """Upload one or more files to the system, optionally associating them with a specific story. Files are submitted using multipart/form-data encoding with each file assigned to a separate form field."""
     body: UploadFilesRequestBody
@@ -528,7 +528,7 @@ class ListGroupsRequest(StrictModel):
 class CreateGroupRequestBody(StrictModel):
     description: str | None = Field(default=None, description="A detailed description of the group's purpose and scope, up to 4096 characters.", max_length=4096)
     member_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(default=None, description="Array of member IDs to add to the group upon creation. Members can be added or modified after creation.")
-    workflow_ids: list[int] | None = Field(default=None, description="Array of workflow IDs to associate with the group. Workflows define the processes and automations available to group members.")
+    workflow_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="Array of workflow IDs to associate with the group. Workflows define the processes and automations available to group members.")
     name: str = Field(default=..., description="The display name of the group, between 1 and 63 characters. This is the human-readable identifier shown in the UI.", min_length=1, max_length=63)
     mention_name: str = Field(default=..., description="The mention handle for the group, between 1 and 63 characters. Used for @-mentions and programmatic references (e.g., @engineering-team).", min_length=1, max_length=63)
     display_icon_id: str | None = Field(default=None, description="A UUID-formatted icon ID to use as the group's avatar. If not provided, a default icon will be assigned.", json_schema_extra={'format': 'uuid'})
@@ -554,7 +554,7 @@ class UpdateGroupRequestBody(StrictModel):
     name: str | None = Field(default=None, description="The display name of the group, 1-63 characters long.", min_length=1, max_length=63)
     default_workflow_id: int | None = Field(default=None, description="The numeric ID of the workflow to set as the default for stories created in this group.", json_schema_extra={'format': 'int64'})
     member_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(default=None, description="An array of member IDs to add to the group. Each ID should be a valid member identifier.")
-    workflow_ids: list[int] | None = Field(default=None, description="An array of workflow IDs to associate with the group, enabling these workflows for story creation.")
+    workflow_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, description="An array of workflow IDs to associate with the group, enabling these workflows for story creation.")
 class UpdateGroupRequest(StrictModel):
     """Update an existing group's properties including name, description, icon, workflow settings, and membership. Allows archiving groups and modifying their configuration."""
     path: UpdateGroupRequestPath
@@ -598,7 +598,7 @@ class DeleteGenericIntegrationRequest(StrictModel):
 
 # Operation: create_iteration
 class CreateIterationRequestBody(StrictModel):
-    group_ids: list[str] | None = Field(default=None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports only one group association at a time.")
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports only one group association at a time.")
     description: str | None = Field(default=None, description="A detailed description of the iteration's purpose or scope. Limited to 100,000 characters.", max_length=100000)
     name: str = Field(default=..., description="The name of the iteration. Must be between 1 and 256 characters.", min_length=1, max_length=256)
     start_date: str = Field(default=..., description="The start date of the iteration in ISO 8601 format (e.g., 2019-07-01). Required and must be a valid date string.", min_length=1)
@@ -618,7 +618,7 @@ class GetIterationRequest(StrictModel):
 class UpdateIterationRequestPath(StrictModel):
     iteration_public_id: int = Field(default=..., validation_alias="iteration-public-id", serialization_alias="iteration-public-id", description="The unique identifier of the iteration to update. Must be a valid 64-bit integer.", json_schema_extra={'format': 'int64'})
 class UpdateIterationRequestBody(StrictModel):
-    group_ids: list[str] | None = Field(default=None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports one group association at a time.")
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(default=None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports one group association at a time.")
     description: str | None = Field(default=None, description="A detailed description of the iteration. Maximum length is 100,000 characters.", max_length=100000)
     name: str | None = Field(default=None, description="The display name of the iteration. Must be between 1 and 256 characters.", min_length=1, max_length=256)
     start_date: str | None = Field(default=None, description="The start date of the iteration in ISO 8601 format (e.g., YYYY-MM-DD). Must be a non-empty string.", min_length=1)
@@ -1383,14 +1383,14 @@ class CreateStoryLinkParams(StrictModel):
 
 class CreateSubTaskParams(StrictModel):
     name: str = Field(..., description="The name of the SubTask.", min_length=1, max_length=512)
-    owner_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of UUIDs of the owners of this story.")
+    owner_ids: Annotated[list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of UUIDs of the owners of this story.")
     workflow_state_id: int | None = Field(None, description="The ID of the workflow state the story will be in.", json_schema_extra={'format': 'int64'})
 
 class CreateTaskParams(StrictModel):
     """Request parameters for creating a Task on a Story."""
     description: str = Field(..., description="The Task description.", min_length=1, max_length=2048)
     complete: bool | None = Field(None, description="True/false boolean indicating whether the Task is completed. Defaults to false.")
-    owner_ids: list[str] | None = Field(None, description="An array of UUIDs for any members you want to add as Owners on this new Task.")
+    owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="An array of UUIDs for any members you want to add as Owners on this new Task.")
     external_id: str | None = Field(None, description="This field can be set to another unique ID. In the case that the Task has been imported from another tool, the ID in the other tool can be indicated here.", max_length=128)
     created_at: str | None = Field(None, description="Defaults to the time/date the Task is created but can be set to reflect another creation time/date.", json_schema_extra={'format': 'date-time'})
     updated_at: str | None = Field(None, description="Defaults to the time/date the Task is created in Shortcut but can be set to reflect another time/date.", json_schema_extra={'format': 'date-time'})
@@ -1481,8 +1481,8 @@ class Group(StrictModel):
     id_: str = Field(..., validation_alias="id", serialization_alias="id", description="The id of the Group.", json_schema_extra={'format': 'uuid'})
     display_icon: Icon
     default_workflow_id: int | None = Field(None, description="The ID of the default workflow for stories created in this group.", json_schema_extra={'format': 'int64'})
-    member_ids: list[str] = Field(..., description="The Member IDs contain within the Group.")
-    workflow_ids: list[int] = Field(..., description="The Workflow IDs contained within the Group.")
+    member_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The Member IDs contain within the Group.")
+    workflow_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="The Workflow IDs contained within the Group.")
     created_at: str = Field(..., description="The instant when this group was created.", json_schema_extra={'format': 'date-time'})
 
 class Identity(StrictModel):
@@ -1581,17 +1581,17 @@ class Iteration(StrictModel):
     description: str = Field(..., description="The description of the iteration.")
     entity_type: str = Field(..., description="A string description of this resource")
     labels: list[Label] = Field(..., description="An array of labels attached to the iteration.")
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
-    member_mention_ids: list[str] = Field(..., description="An array of Member IDs that have been mentioned in the Story description.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Member IDs that have been mentioned in the Story description.")
     associated_groups: list[IterationAssociatedGroup] = Field(..., description="An array containing Group IDs and Group-owned story counts for the Iteration's associated groups.")
     name: str = Field(..., description="The name of the iteration.")
     global_id: str
-    label_ids: list[int] = Field(..., description="An array of label ids attached to the iteration.")
+    label_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="An array of label ids attached to the iteration.")
     updated_at: str = Field(..., description="The instant when this iteration was last updated.", json_schema_extra={'format': 'date-time'})
-    group_mention_ids: list[str] = Field(..., description="An array of Group IDs that have been mentioned in the Story description.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Group IDs that have been mentioned in the Story description.")
     end_date: str = Field(..., description="The date this iteration ends.", json_schema_extra={'format': 'date-time'})
-    follower_ids: list[str] = Field(..., description="An array of UUIDs for any Members listed as Followers.")
-    group_ids: list[str] = Field(..., description="An array of UUIDs for any Groups you want to add as Followers. Currently, only one Group association is presented in our web UI.")
+    follower_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs for any Members listed as Followers.")
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs for any Groups you want to add as Followers. Currently, only one Group association is presented in our web UI.")
     start_date: str = Field(..., description="The date this iteration begins.", json_schema_extra={'format': 'date-time'})
     status: str = Field(..., description="The status of the iteration. Values are either \"unstarted\", \"started\", or \"done\".")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The ID of the iteration.", json_schema_extra={'format': 'int64'})
@@ -1610,7 +1610,7 @@ class CreateStoryParams(StrictModel):
     story_type: Literal["feature", "chore", "bug"] | None = Field(None, description="The type of story (feature, bug, chore).")
     custom_fields: list[CustomFieldValueParams] | None = Field(None, description="A map specifying a CustomField ID and CustomFieldEnumValue ID that represents an assertion of some value for a CustomField.")
     move_to: Literal["last", "first"] | None = Field(None, description="One of \"first\" or \"last\". This can be used to move the given story to the first or last position in the workflow state.")
-    file_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of IDs of files attached to the story.")
+    file_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of IDs of files attached to the story.")
     source_task_id: int | None = Field(None, description="Given this story was converted from a task in another story, this is the original task ID that was converted to this story.", json_schema_extra={'format': 'int64'})
     completed_at_override: str | None = Field(None, description="A manual override for the time/date the Story was completed.", json_schema_extra={'format': 'date-time'})
     name: str = Field(..., description="The name of the story.", min_length=1, max_length=512)
@@ -1626,13 +1626,13 @@ class CreateStoryParams(StrictModel):
     group_id: str | None = Field(None, description="The id of the group to associate with this story.", json_schema_extra={'format': 'uuid'})
     workflow_state_id: int | None = Field(None, description="The ID of the workflow state the story will be in.", json_schema_extra={'format': 'int64'})
     updated_at: str | None = Field(None, description="The time/date the Story was updated.", json_schema_extra={'format': 'date-time'})
-    follower_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of UUIDs of the followers of this story.")
-    owner_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of UUIDs of the owners of this story.")
+    follower_ids: Annotated[list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of UUIDs of the followers of this story.")
+    owner_ids: Annotated[list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of UUIDs of the owners of this story.")
     external_id: str | None = Field(None, description="This field can be set to another unique ID. In the case that the Story has been imported from another tool, the ID in the other tool can be indicated here.", max_length=1024)
     parent_story_id: int | None = Field(None, description="The ID of the parent story to associate with this story (making the created story a sub-task).\nField only applicable when Sub-task feature is enabled.", json_schema_extra={'format': 'int64'})
     estimate: int | None = Field(None, description="The numeric point estimate of the story. Can also be null, which means unestimated.", json_schema_extra={'format': 'int64'})
     project_id: int | None = Field(None, description="The ID of the project the story belongs to.", json_schema_extra={'format': 'int64'})
-    linked_file_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of IDs of linked files attached to the story.")
+    linked_file_ids: Annotated[list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of IDs of linked files attached to the story.")
     deadline: str | None = Field(None, description="The due date of the story.", json_schema_extra={'format': 'date-time'})
     created_at: str | None = Field(None, description="The time/date the Story was created.", json_schema_extra={'format': 'date-time'})
 
@@ -1640,9 +1640,9 @@ class LinkedFile(StrictModel):
     """Linked files are stored on a third-party website and linked to one or more Stories. Shortcut currently supports linking files from Google Drive, Dropbox, Box, and by URL."""
     description: str | None = Field(..., description="The description of the file.")
     entity_type: str = Field(..., description="A string description of this resource.")
-    story_ids: list[int] = Field(..., description="The IDs of the stories this file is attached to.")
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
-    member_mention_ids: list[str] = Field(..., description="The members that are mentioned in the description of the file.")
+    story_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="The IDs of the stories this file is attached to.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The members that are mentioned in the description of the file.")
     name: str = Field(..., description="The name of the linked file.")
     thumbnail_url: str | None = Field(..., description="The URL of the file thumbnail, if the integration provided it.")
     type_: str = Field(..., validation_alias="type", serialization_alias="type", description="The integration type (e.g. google, dropbox, box).")
@@ -1650,7 +1650,7 @@ class LinkedFile(StrictModel):
     uploader_id: str = Field(..., description="The UUID of the member that uploaded the file.", json_schema_extra={'format': 'uuid'})
     content_type: str | None = Field(..., description="The content type of the image (e.g. txt/plain).")
     updated_at: str = Field(..., description="The time/date the LinkedFile was updated.", json_schema_extra={'format': 'date-time'})
-    group_mention_ids: list[str] = Field(..., description="The groups that are mentioned in the description of the file.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The groups that are mentioned in the description of the file.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique identifier for the file.", json_schema_extra={'format': 'int64'})
     url: str = Field(..., description="The URL of the file.")
     created_at: str = Field(..., description="The time/date the LinkedFile was created.", json_schema_extra={'format': 'date-time'})
@@ -1679,7 +1679,7 @@ class Milestone(StrictModel):
     updated_at: str = Field(..., description="The time/date the Milestone was updated.", json_schema_extra={'format': 'date-time'})
     categories: list[Category] = Field(..., description="An array of Categories attached to the Milestone.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Milestone.", json_schema_extra={'format': 'int64'})
-    key_result_ids: list[str] = Field(..., description="The IDs of the Key Results associated with the Objective.")
+    key_result_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The IDs of the Key Results associated with the Objective.")
     position: int = Field(..., description="A number representing the position of the Milestone in relation to every other Milestone within the Workspace.", json_schema_extra={'format': 'int64'})
     stats: MilestoneStats
     created_at: str = Field(..., description="The time/date the Milestone was created.", json_schema_extra={'format': 'date-time'})
@@ -1708,7 +1708,7 @@ class Objective(StrictModel):
     updated_at: str = Field(..., description="The time/date the Objective was updated.", json_schema_extra={'format': 'date-time'})
     categories: list[Category] = Field(..., description="An array of Categories attached to the Objective.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Objective.", json_schema_extra={'format': 'int64'})
-    key_result_ids: list[str] = Field(..., description="The IDs of the Key Results associated with the Objective.")
+    key_result_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The IDs of the Key Results associated with the Objective.")
     position: int = Field(..., description="A number representing the position of the Objective in relation to every other Objective within the Workspace.", json_schema_extra={'format': 'int64'})
     stats: ObjectiveStats
     created_at: str = Field(..., description="The time/date the Objective was created.", json_schema_extra={'format': 'date-time'})
@@ -1728,7 +1728,7 @@ class PullRequest(StrictModel):
     merged: bool = Field(..., description="True/False boolean indicating whether the VCS pull request has been merged.")
     num_added: int = Field(..., description="Number of lines added in the pull request, according to VCS.", json_schema_extra={'format': 'int64'})
     branch_id: int = Field(..., description="The ID of the branch for the particular pull request.", json_schema_extra={'format': 'int64'})
-    overlapping_stories: list[int] | None = Field(None, description="An array of Story ids that have Pull Requests that change at least one of the same lines this Pull Request changes.")
+    overlapping_stories: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="An array of Story ids that have Pull Requests that change at least one of the same lines this Pull Request changes.")
     number: int = Field(..., description="The pull request's unique number ID in VCS.", json_schema_extra={'format': 'int64'})
     branch_name: str = Field(..., description="The name of the branch for the particular pull request.")
     target_branch_name: str = Field(..., description="The name of the target branch for the particular pull request.")
@@ -1756,7 +1756,7 @@ class Branch(StrictModel):
     persistent: bool = Field(..., description="This field is deprecated, and will always be false.")
     updated_at: str | None = Field(..., description="The time/date the Branch was updated.", json_schema_extra={'format': 'date-time'})
     pull_requests: list[PullRequest] = Field(..., description="An array of PullRequests attached to the Branch (there is usually only one).")
-    merged_branch_ids: list[int] = Field(..., description="The IDs of the Branches the Branch has been merged into.")
+    merged_branch_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="The IDs of the Branches the Branch has been merged into.")
     id_: int | None = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Branch.", json_schema_extra={'format': 'int64'})
     url: str = Field(..., description="The URL of the Branch.")
     repository_id: int = Field(..., description="The ID of the Repository that contains the Branch.", json_schema_extra={'format': 'int64'})
@@ -1777,7 +1777,7 @@ class StoryCustomField(StrictModel):
 class StoryReaction(StrictModel):
     """Emoji reaction on a comment."""
     emoji: str = Field(..., description="Emoji text of the reaction.")
-    permission_ids: list[str] = Field(..., description="Permissions who have reacted with this.")
+    permission_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="Permissions who have reacted with this.")
 
 class StoryComment(StrictModel):
     """A Comment is any note added within the Comment field of a Story."""
@@ -1785,13 +1785,13 @@ class StoryComment(StrictModel):
     entity_type: str = Field(..., description="A string description of this resource.")
     deleted: bool = Field(..., description="True/false boolean indicating whether the Comment has been deleted.")
     story_id: int = Field(..., description="The ID of the Story on which the Comment appears.", json_schema_extra={'format': 'int64'})
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
     author_id: str | None = Field(..., description="The unique ID of the Member who is the Comment's author.", json_schema_extra={'format': 'uuid'})
-    member_mention_ids: list[str] = Field(..., description="The unique IDs of the Member who are mentioned in the Comment.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The unique IDs of the Member who are mentioned in the Comment.")
     blocker: bool | None = Field(None, description="Marks the comment as a blocker that can be surfaced to permissions or teams mentioned in the comment. Can only be used on a top-level comment.")
     linked_to_slack: bool = Field(..., description="Whether the Comment is currently the root of a thread that is linked to Slack.")
     updated_at: str | None = Field(..., description="The time/date when the Comment was updated.", json_schema_extra={'format': 'date-time'})
-    group_mention_ids: list[str] = Field(..., description="The unique IDs of the Group who are mentioned in the Comment.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The unique IDs of the Group who are mentioned in the Comment.")
     external_id: str | None = Field(..., description="This field can be set to another unique ID. In the case that the Comment has been imported from another tool, the ID in the other tool can be indicated here.")
     parent_id: int | None = Field(None, description="The ID of the parent Comment this Comment is threaded under.", json_schema_extra={'format': 'int64'})
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Comment.", json_schema_extra={'format': 'int64'})
@@ -1815,13 +1815,13 @@ class Task(StrictModel):
     description: str = Field(..., description="Full text of the Task.")
     entity_type: str = Field(..., description="A string description of this resource.")
     story_id: int = Field(..., description="The unique identifier of the parent Story.", json_schema_extra={'format': 'int64'})
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
-    member_mention_ids: list[str] = Field(..., description="An array of UUIDs of Members mentioned in this Task.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs of Members mentioned in this Task.")
     completed_at: str | None = Field(..., description="The time/date the Task was completed.", json_schema_extra={'format': 'date-time'})
     global_id: str
     updated_at: str | None = Field(..., description="The time/date the Task was updated.", json_schema_extra={'format': 'date-time'})
-    group_mention_ids: list[str] = Field(..., description="An array of UUIDs of Groups mentioned in this Task.")
-    owner_ids: list[str] = Field(..., description="An array of UUIDs of the Owners of this Task.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs of Groups mentioned in this Task.")
+    owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs of the Owners of this Task.")
     external_id: str | None = Field(..., description="This field can be set to another unique ID. In the case that the Task has been imported from another tool, the ID in the other tool can be indicated here.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Task.", json_schema_extra={'format': 'int64'})
     position: int = Field(..., description="The number corresponding to the Task's position within a list of Tasks on a Story.", json_schema_extra={'format': 'int64'})
@@ -1850,9 +1850,9 @@ class UploadedFile(StrictModel):
     """An UploadedFile is any document uploaded to your Shortcut Workspace. Files attached from a third-party service are different: see the Linked Files endpoint."""
     description: str | None = Field(..., description="The description of the file.")
     entity_type: str = Field(..., description="A string description of this resource.")
-    story_ids: list[int] = Field(..., description="The unique IDs of the Stories associated with this file.")
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
-    member_mention_ids: list[str] = Field(..., description="The unique IDs of the Members who are mentioned in the file description.")
+    story_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="The unique IDs of the Stories associated with this file.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The unique IDs of the Members who are mentioned in the file description.")
     name: str = Field(..., description="The optional User-specified name of the file.")
     thumbnail_url: str | None = Field(..., description="The url where the thumbnail of the file can be found in Shortcut.")
     size: int = Field(..., description="The size of the file.", json_schema_extra={'format': 'int64'})
@@ -1860,7 +1860,7 @@ class UploadedFile(StrictModel):
     content_type: str = Field(..., description="Free form string corresponding to a text or image file.")
     updated_at: str | None = Field(..., description="The time/date that the file was updated.", json_schema_extra={'format': 'date-time'})
     filename: str = Field(..., description="The name assigned to the file in Shortcut upon upload.")
-    group_mention_ids: list[str] = Field(..., description="The unique IDs of the Groups who are mentioned in the file description.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="The unique IDs of the Groups who are mentioned in the file description.")
     external_id: str | None = Field(..., description="This field can be set to another unique ID. In the case that the File has been imported from another tool, the ID in the other tool can be indicated here.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID for the file.", json_schema_extra={'format': 'int64'})
     url: str | None = Field(..., description="The URL for the file.")
@@ -1875,9 +1875,9 @@ class Story(StrictModel):
     story_links: list[TypedStoryLink] = Field(..., description="An array of story links attached to the Story.")
     entity_type: str = Field(..., description="A string description of this resource.")
     labels: list[LabelSlim] = Field(..., description="An array of labels attached to the story.")
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
     synced_item: SyncedItem | None = None
-    member_mention_ids: list[str] = Field(..., description="An array of Member IDs that have been mentioned in the Story description.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Member IDs that have been mentioned in the Story description.")
     story_type: str = Field(..., description="The type of story (feature, bug, chore).")
     custom_fields: list[StoryCustomField] | None = Field(None, description="An array of CustomField value assertions for the story.")
     linked_files: list[LinkedFile] = Field(..., description="An array of linked files attached to the story.")
@@ -1894,21 +1894,21 @@ class Story(StrictModel):
     epic_id: int | None = Field(..., description="The ID of the epic the story belongs to.", json_schema_extra={'format': 'int64'})
     story_template_id: str | None = Field(..., description="The ID of the story template used to create this story, or null if not created using a template.", json_schema_extra={'format': 'uuid'})
     external_links: list[str] = Field(..., description="An array of external links (strings) associated with a Story")
-    previous_iteration_ids: list[int] = Field(..., description="The IDs of the iteration the story belongs to.")
+    previous_iteration_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="The IDs of the iteration the story belongs to.")
     requested_by_id: str = Field(..., description="The ID of the Member that requested the story.", json_schema_extra={'format': 'uuid'})
     iteration_id: int | None = Field(..., description="The ID of the iteration the story belongs to.", json_schema_extra={'format': 'int64'})
-    sub_task_story_ids: list[int] | None = Field(None, description="The Story IDs of Sub-tasks attached to the Story\nField only applicable when Sub-task feature is enabled.")
+    sub_task_story_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="The Story IDs of Sub-tasks attached to the Story\nField only applicable when Sub-task feature is enabled.")
     tasks: list[Task] = Field(..., description="An array of tasks connected to the story.")
     formatted_vcs_branch_name: str | None = Field(None, description="The formatted branch name for this story.")
-    label_ids: list[int] = Field(..., description="An array of label ids attached to the story.")
+    label_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="An array of label ids attached to the story.")
     started_at_override: str | None = Field(..., description="A manual override for the time/date the Story was started.", json_schema_extra={'format': 'date-time'})
     group_id: str | None = Field(..., description="The ID of the group associated with the story.", json_schema_extra={'format': 'uuid'})
     workflow_state_id: int = Field(..., description="The ID of the workflow state the story is currently in.", json_schema_extra={'format': 'int64'})
     updated_at: str | None = Field(..., description="The time/date the Story was updated.", json_schema_extra={'format': 'date-time'})
     pull_requests: list[PullRequest] = Field(..., description="An array of Pull/Merge Requests attached to the story.")
-    group_mention_ids: list[str] = Field(..., description="An array of Group IDs that have been mentioned in the Story description.")
-    follower_ids: list[str] = Field(..., description="An array of UUIDs for any Members listed as Followers.")
-    owner_ids: list[str] = Field(..., description="An array of UUIDs of the owners of this story.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Group IDs that have been mentioned in the Story description.")
+    follower_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs for any Members listed as Followers.")
+    owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs of the owners of this story.")
     external_id: str | None = Field(..., description="This field can be set to another unique ID. In the case that the Story has been imported from another tool, the ID in the other tool can be indicated here.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Story.", json_schema_extra={'format': 'int64'})
     lead_time: int | None = Field(None, description="The lead time (in seconds) of this story when complete.", json_schema_extra={'format': 'int64'})
@@ -1945,7 +1945,7 @@ class Workflow(StrictModel):
     """Workflow is the array of defined Workflow States. Workflow can be queried using the API but must be updated in the Shortcut UI."""
     description: str = Field(..., description="A description of the workflow.")
     entity_type: str = Field(..., description="A string description of this resource.")
-    project_ids: list[float] = Field(..., description="An array of IDs of projects within the Workflow.")
+    project_ids: list[Annotated[float, Field(json_schema_extra={'format': 'double'})]] = Field(..., description="An array of IDs of projects within the Workflow.")
     states: list[WorkflowState] = Field(..., description="A map of the states in this Workflow.")
     name: str = Field(..., description="The name of the workflow.")
     updated_at: str = Field(..., description="The date the Workflow was updated.", json_schema_extra={'format': 'date-time'})
@@ -1963,16 +1963,16 @@ class Epic(StrictModel):
     started: bool = Field(..., description="A true/false boolean indicating if the Epic has been started.")
     entity_type: str = Field(..., description="A string description of this resource.")
     labels: list[LabelSlim] = Field(..., description="An array of Labels attached to the Epic.")
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
-    member_mention_ids: list[str] = Field(..., description="An array of Member IDs that have been mentioned in the Epic description.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Member IDs that have been mentioned in the Epic description.")
     associated_groups: list[EpicAssociatedGroup] = Field(..., description="An array containing Group IDs and Group-owned story counts for the Epic's associated groups.")
-    project_ids: list[int] = Field(..., description="The IDs of Projects related to this Epic.")
+    project_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="The IDs of Projects related to this Epic.")
     stories_without_projects: int = Field(..., description="The number of stories in this epic which are not associated with a project.", json_schema_extra={'format': 'int64'})
     completed_at_override: str | None = Field(..., description="A manual override for the time/date the Epic was completed.", json_schema_extra={'format': 'date-time'})
     productboard_plugin_id: str | None = Field(..., description="The ID of the associated productboard integration.", json_schema_extra={'format': 'uuid'})
     started_at: str | None = Field(..., description="The time/date the Epic was started.", json_schema_extra={'format': 'date-time'})
     completed_at: str | None = Field(..., description="The time/date the Epic was completed.", json_schema_extra={'format': 'date-time'})
-    objective_ids: list[int] = Field(..., description="An array of IDs for Objectives to which this epic is related.")
+    objective_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="An array of IDs for Objectives to which this epic is related.")
     name: str = Field(..., description="The name of the Epic.")
     global_id: str
     completed: bool = Field(..., description="A true/false boolean indicating if the Epic has been completed.")
@@ -1983,15 +1983,15 @@ class Epic(StrictModel):
     milestone_id: int | None = Field(..., description="`Deprecated` The ID of the Objective this Epic is related to. Use `objective_ids`.", json_schema_extra={'format': 'int64'})
     requested_by_id: str = Field(..., description="The ID of the Member that requested the epic.", json_schema_extra={'format': 'uuid'})
     epic_state_id: int = Field(..., description="The ID of the Epic State.", json_schema_extra={'format': 'int64'})
-    label_ids: list[int] = Field(..., description="An array of Label ids attached to the Epic.")
+    label_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] = Field(..., description="An array of Label ids attached to the Epic.")
     started_at_override: str | None = Field(..., description="A manual override for the time/date the Epic was started.", json_schema_extra={'format': 'date-time'})
     group_id: str | None = Field(..., description="`Deprecated` The ID of the group to associate with the epic. Use `group_ids`.", json_schema_extra={'format': 'uuid'})
     updated_at: str | None = Field(..., description="The time/date the Epic was updated.", json_schema_extra={'format': 'date-time'})
-    group_mention_ids: list[str] = Field(..., description="An array of Group IDs that have been mentioned in the Epic description.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Group IDs that have been mentioned in the Epic description.")
     productboard_id: str | None = Field(..., description="The ID of the associated productboard feature.", json_schema_extra={'format': 'uuid'})
-    follower_ids: list[str] = Field(..., description="An array of UUIDs for any Members you want to add as Followers on this Epic.")
-    group_ids: list[str] = Field(..., description="An array of UUIDS for Groups to which this Epic is related.")
-    owner_ids: list[str] = Field(..., description="An array of UUIDs for any members you want to add as Owners on this new Epic.")
+    follower_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs for any Members you want to add as Followers on this Epic.")
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDS for Groups to which this Epic is related.")
+    owner_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of UUIDs for any members you want to add as Owners on this new Epic.")
     external_id: str | None = Field(..., description="This field can be set to another unique ID. In the case that the Epic has been imported from another tool, the ID in the other tool can be indicated here.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Epic.", json_schema_extra={'format': 'int64'})
     health: Health | None = None
@@ -2018,12 +2018,12 @@ class ThreadedComment(StrictModel):
     app_url: str = Field(..., description="The Shortcut application url for the Comment.")
     entity_type: str = Field(..., description="A string description of this resource.")
     deleted: bool = Field(..., description="True/false boolean indicating whether the Comment is deleted.")
-    mention_ids: list[str] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
+    mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="`Deprecated:` use `member_mention_ids`.")
     author_id: str = Field(..., description="The unique ID of the Member that authored the Comment.", json_schema_extra={'format': 'uuid'})
-    member_mention_ids: list[str] = Field(..., description="An array of Member IDs that have been mentioned in this Comment.")
+    member_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Member IDs that have been mentioned in this Comment.")
     comments: list[ThreadedComment] = Field(..., description="A nested array of threaded comments.")
     updated_at: str = Field(..., description="The time/date the Comment was updated.", json_schema_extra={'format': 'date-time'})
-    group_mention_ids: list[str] = Field(..., description="An array of Group IDs that have been mentioned in this Comment.")
+    group_mention_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] = Field(..., description="An array of Group IDs that have been mentioned in this Comment.")
     external_id: str | None = Field(..., description="This field can be set to another unique ID. In the case that the Comment has been imported from another tool, the ID in the other tool can be indicated here.")
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="The unique ID of the Comment.", json_schema_extra={'format': 'int64'})
     created_at: str = Field(..., description="The time/date the Comment was created.", json_schema_extra={'format': 'date-time'})

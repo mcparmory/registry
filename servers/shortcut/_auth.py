@@ -1,7 +1,7 @@
 """
 Authentication module for Shortcut MCP server.
 
-Generated: 2026-05-05 16:23:17 UTC
+Generated: 2026-05-12 12:53:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

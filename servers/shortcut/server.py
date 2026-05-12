@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Shortcut MCP Server
-Generated: 2026-05-05 16:23:17 UTC
+Generated: 2026-05-12 12:53:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.app.shortcut.com")
 SERVER_NAME = "Shortcut"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1014,6 +1045,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1038,6 +1071,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1245,7 +1280,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Shortcut", middleware=[_JsonCoercionMiddleware()])
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_categories() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all available categories with their attributes. Use this to discover category options for filtering, organizing, or referencing in other operations."""
 
@@ -1272,7 +1313,12 @@ async def list_categories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Category",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_category(
     name: str = Field(..., description="The display name for the new Category. Must be between 1 and 128 characters.", min_length=1, max_length=128),
     external_id: str | None = Field(None, description="An optional external identifier for this Category, useful when importing from another tool. Must be between 1 and 128 characters if provided.", min_length=1, max_length=128),
@@ -1308,13 +1354,20 @@ async def create_category(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_category(category_public_id: str = Field(..., alias="category-public-id", description="The unique identifier for the category as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific category using its unique identifier. Returns the category's properties and metadata."""
 
@@ -1352,7 +1405,13 @@ async def get_category(category_public_id: str = Field(..., alias="category-publ
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_category(
     category_public_id: str = Field(..., alias="category-public-id", description="The unique identifier of the Category to update. Must be a valid 64-bit integer."),
     name: str | None = Field(None, description="The new name for the Category. Must be at least 1 character long and unique across all Categories.", min_length=1),
@@ -1391,13 +1450,20 @@ async def update_category(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Category",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_category(category_public_id: str = Field(..., alias="category-public-id", description="The unique identifier of the category to delete, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a category by its unique identifier. This operation removes the category and cannot be undone."""
 
@@ -1435,7 +1501,13 @@ async def delete_category(category_public_id: str = Field(..., alias="category-p
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Milestones for Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_milestones_for_category(category_public_id: str = Field(..., alias="category-public-id", description="The unique identifier of the category. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all milestones associated with a specific category. Returns a complete list of milestones within the given category."""
 
@@ -1473,7 +1545,13 @@ async def list_milestones_for_category(category_public_id: str = Field(..., alia
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Objectives for Category",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_objectives_for_category(category_public_id: str = Field(..., alias="category-public-id", description="The unique identifier of the Category. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves all Objectives associated with a specific Category. Use this to view the complete list of objectives within a category."""
 
@@ -1511,7 +1589,13 @@ async def list_objectives_for_category(category_public_id: str = Field(..., alia
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_fields() -> dict[str, Any] | ToolResult:
     """Retrieve all custom fields available in the system. This returns the complete list of custom field definitions that can be used across resources."""
 
@@ -1538,7 +1622,13 @@ async def list_custom_fields() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_field(custom_field_public_id: str = Field(..., alias="custom-field-public-id", description="The unique identifier of the custom field to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific custom field by its unique identifier. Returns the complete configuration and metadata for the custom field."""
 
@@ -1574,7 +1664,13 @@ async def get_custom_field(custom_field_public_id: str = Field(..., alias="custo
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_field(
     custom_field_public_id: str = Field(..., alias="custom-field-public-id", description="The unique identifier of the custom field to update, formatted as a UUID."),
     enabled: bool | None = Field(None, description="Whether this field is enabled for use in the workspace. Only enabled fields can be applied to stories."),
@@ -1614,13 +1710,20 @@ async def update_custom_field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_field(custom_field_public_id: str = Field(..., alias="custom-field-public-id", description="The unique UUID identifier of the custom field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom field by its unique identifier. This operation removes the custom field and all associated data."""
 
@@ -1656,7 +1759,13 @@ async def delete_custom_field(custom_field_public_id: str = Field(..., alias="cu
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Documents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_documents() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all documents that the current user has read access to. Returns documents accessible based on the user's permissions."""
 
@@ -1683,7 +1792,12 @@ async def list_documents() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_document(
     title: str = Field(..., description="The document title. Must be between 1 and 256 characters long.", min_length=1, max_length=256),
     content: str = Field(..., description="The document content. Can be formatted as markdown or HTML depending on the content_format parameter."),
@@ -1718,13 +1832,20 @@ async def create_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Document",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_doc(doc_public_id: str = Field(..., alias="doc-public-id", description="The unique identifier of the Doc to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a Doc by its public ID, including its full content. Optionally request HTML-formatted content using the content_format query parameter."""
 
@@ -1760,7 +1881,13 @@ async def get_doc(doc_public_id: str = Field(..., alias="doc-public-id", descrip
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Document",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document(
     doc_public_id: str = Field(..., alias="doc-public-id", description="The unique public identifier for the document being updated, formatted as a UUID."),
     title: str | None = Field(None, description="The new title for the document. Must be between 1 and 256 characters long.", min_length=1, max_length=256),
@@ -1797,13 +1924,20 @@ async def update_document(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Document",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_doc(doc_public_id: str = Field(..., alias="doc-public-id", description="The unique public identifier of the Doc to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a Doc and all its associated data. Requires admin access to the document. Connected clients will be notified of the deletion via SSE events."""
 
@@ -1839,7 +1973,13 @@ async def delete_doc(doc_public_id: str = Field(..., alias="doc-public-id", desc
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Document Epics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_document_epics(doc_public_id: str = Field(..., alias="doc-public-id", description="The unique public identifier of the Document, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Epics associated with a specific Document. Returns a collection of Epics linked to the Document identified by its public ID."""
 
@@ -1875,7 +2015,13 @@ async def list_document_epics(doc_public_id: str = Field(..., alias="doc-public-
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Link Document to Epic",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def link_document_to_epic(
     doc_public_id: str = Field(..., alias="doc-public-id", description="The unique identifier of the Document to link, provided as a UUID."),
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic to link the document to, provided as a 64-bit integer."),
@@ -1916,7 +2062,13 @@ async def link_document_to_epic(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Remove Document from Epic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_document_from_epic(
     doc_public_id: str = Field(..., alias="doc-public-id", description="The unique identifier of the Document to unlink, formatted as a UUID."),
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic to unlink, formatted as a 64-bit integer."),
@@ -1957,7 +2109,13 @@ async def remove_document_from_epic(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Entity Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_entity_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all entity templates available in the Workspace. Entity templates define the structure and configuration for entities within your workspace."""
 
@@ -1984,7 +2142,13 @@ async def list_entity_templates() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Entity Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_entity_template(entity_template_public_id: str = Field(..., alias="entity-template-public-id", description="The unique identifier of the entity template, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific entity template using its unique identifier. This operation returns the complete configuration and metadata for the requested entity template."""
 
@@ -2020,7 +2184,13 @@ async def get_entity_template(entity_template_public_id: str = Field(..., alias=
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epics(includes_description: bool | None = Field(None, description="Set to true to include the full description text for each Epic in the response; omit or set to false to return only basic Epic metadata.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all Epics with their core attributes. Optionally include full descriptions for each Epic."""
 
@@ -2058,15 +2228,20 @@ async def list_epics(includes_description: bool | None = Field(None, description
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Epic",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_epic(
     name: str = Field(..., description="The Epic's title or name. Required field, must be between 1 and 256 characters.", min_length=1, max_length=256),
     description: str | None = Field(None, description="A detailed explanation of the Epic's purpose and scope. Limited to 100,000 characters.", max_length=100000),
-    objective_ids: list[int] | None = Field(None, description="An array of Objective IDs to associate with this Epic. Objectives provide strategic alignment for the Epic."),
+    objective_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="An array of Objective IDs to associate with this Epic. Objectives provide strategic alignment for the Epic."),
     planned_start_date: str | None = Field(None, description="The date when work on this Epic is planned to begin. Specify as an ISO 8601 formatted date-time string."),
     requested_by_id: str | None = Field(None, description="The UUID of the team member who requested this Epic. Used to track Epic ownership and accountability."),
     epic_state_id: str | None = Field(None, description="The numeric ID of the Epic State that defines the Epic's workflow status (e.g., Backlog, In Progress, Done)."),
-    group_ids: list[str] | None = Field(None, description="An array of Group UUIDs to associate with this Epic. Groups help organize and categorize Epics within your workspace."),
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="An array of Group UUIDs to associate with this Epic. Groups help organize and categorize Epics within your workspace."),
     converted_from_story_id: str | None = Field(None, description="The numeric ID of a Story that was converted into this Epic. Use this when promoting an existing Story to Epic status."),
     external_id: str | None = Field(None, description="An external identifier for this Epic, useful when importing from other tools or systems. Limited to 128 characters and should be unique within your workspace.", max_length=128),
     deadline: str | None = Field(None, description="The date by which this Epic must be completed. Specify as an ISO 8601 formatted date-time string."),
@@ -2104,13 +2279,20 @@ async def create_epic(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epics Paginated",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epics_paginated(
     includes_description: bool | None = Field(None, description="Include the full description text for each Epic in the response. When false or omitted, descriptions are excluded from the results."),
     page: str | None = Field(None, description="The page number to retrieve, starting from 1. Defaults to the first page if not specified."),
@@ -2155,7 +2337,13 @@ async def list_epics_paginated(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Epic",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_epic(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic to retrieve. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific Epic by its unique identifier. Returns the Epic's properties and metadata."""
 
@@ -2193,17 +2381,23 @@ async def get_epic(epic_public_id: str = Field(..., alias="epic-public-id", desc
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Epic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_epic(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic to update. This is a 64-bit integer value found in the Shortcut UI."),
     description: str | None = Field(None, description="The Epic's description text. Can be up to 100,000 characters long.", max_length=100000),
     archived: bool | None = Field(None, description="Whether the Epic is archived. Set to true to archive or false to unarchive."),
-    objective_ids: list[int] | None = Field(None, description="An array of Objective IDs to associate with this Epic. Order is not significant."),
+    objective_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="An array of Objective IDs to associate with this Epic. Order is not significant."),
     name: str | None = Field(None, description="The Epic's display name. Must be between 1 and 256 characters long.", min_length=1, max_length=256),
     planned_start_date: str | None = Field(None, description="The Epic's planned start date in ISO 8601 date-time format."),
     requested_by_id: str | None = Field(None, description="The UUID of the team member who requested this Epic."),
     epic_state_id: str | None = Field(None, description="The 64-bit integer ID of the Epic State (e.g., Backlog, In Progress, Done) to assign to this Epic."),
-    group_ids: list[str] | None = Field(None, description="An array of Group UUIDs to associate with this Epic. Order is not significant."),
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="An array of Group UUIDs to associate with this Epic. Order is not significant."),
     external_id: str | None = Field(None, description="An external identifier for this Epic, useful when importing from other tools. Maximum 128 characters.", max_length=128),
     deadline: str | None = Field(None, description="The Epic's deadline in ISO 8601 date-time format."),
 ) -> dict[str, Any] | ToolResult:
@@ -2241,13 +2435,20 @@ async def update_epic(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Epic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_epic(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an Epic by its unique identifier. This operation removes the Epic and cannot be undone."""
 
@@ -2285,7 +2486,13 @@ async def delete_epic(epic_public_id: str = Field(..., alias="epic-public-id", d
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epic Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epic_comments(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all comments associated with a specific Epic. Returns a list of comment objects ordered by creation date."""
 
@@ -2323,7 +2530,12 @@ async def list_epic_comments(epic_public_id: str = Field(..., alias="epic-public
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Epic Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_epic_comment(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic where the comment will be posted."),
     text: str = Field(..., description="The comment text content. Must be between 1 and 100,000 characters.", min_length=1, max_length=100000),
@@ -2363,13 +2575,20 @@ async def create_epic_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Epic Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_epic_comment(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic that contains the comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the specific comment to retrieve. Must be a positive integer."),
@@ -2411,7 +2630,12 @@ async def get_epic_comment(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Reply to Epic Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_reply_to_epic_comment(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic containing the parent comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the parent Epic Comment to which you are replying. Must be a positive integer."),
@@ -2453,13 +2677,20 @@ async def create_reply_to_epic_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Epic Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_epic_comment(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic containing the comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the Comment to update. Must be a positive integer."),
@@ -2499,13 +2730,20 @@ async def update_epic_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Epic Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_epic_comment(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the epic containing the comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the comment to delete. Must be a positive integer."),
@@ -2547,7 +2785,13 @@ async def delete_epic_comment(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epic Documents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epic_documents(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all documents associated with a specific Epic. Returns a collection of documents linked to the Epic for reference and collaboration."""
 
@@ -2585,7 +2829,13 @@ async def list_epic_documents(epic_public_id: str = Field(..., alias="epic-publi
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Epic Health",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_epic_health(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current health status of a specified Epic. This provides insights into the Epic's overall condition and progress."""
 
@@ -2623,7 +2873,12 @@ async def get_epic_health(epic_public_id: str = Field(..., alias="epic-public-id
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Epic Health",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_epic_health(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic for which you're creating a health status. Must be a valid 64-bit integer."),
     status: Literal["At Risk", "On Track", "Off Track", "No Health"] = Field(..., description="The health status level for the Epic. Must be one of: 'At Risk', 'On Track', 'Off Track', or 'No Health'."),
@@ -2662,13 +2917,20 @@ async def create_epic_health(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epic Health History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epic_health_history(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic whose health history you want to retrieve. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete health status history for a specified Epic, ordered from most recent to oldest. Use this to track how an Epic's health has evolved over time."""
 
@@ -2706,7 +2968,13 @@ async def list_epic_health_history(epic_public_id: str = Field(..., alias="epic-
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epic Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epic_stories(
     epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the epic. Must be a valid 64-bit integer."),
     includes_description: bool | None = Field(None, description="Set to true to include story descriptions in the response; false or omit to exclude them."),
@@ -2750,7 +3018,13 @@ async def list_epic_stories(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Remove Productboard from Epic",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_productboard_from_epic(epic_public_id: str = Field(..., alias="epic-public-id", description="The unique identifier of the Epic to unlink from Productboard. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Unlink a Productboard epic from an Epic, removing the association between the two resources."""
 
@@ -2788,7 +3062,13 @@ async def remove_productboard_from_epic(epic_public_id: str = Field(..., alias="
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Stories by External Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stories_by_external_link(external_link: str = Field(..., description="A valid HTTP or HTTPS URL (must start with http:// or https://) that is associated with one or more stories. Maximum length is 2048 characters.", max_length=2048, pattern="^https?://.+$")) -> dict[str, Any] | ToolResult:
     """Retrieve all stories associated with a given external link. Use this to find stories that reference or are linked to a specific URL."""
 
@@ -2826,7 +3106,13 @@ async def list_stories_by_external_link(external_link: str = Field(..., descript
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_files() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all uploaded files in the workspace. Returns metadata for each file available in the current workspace."""
 
@@ -2853,13 +3139,18 @@ async def list_files() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Upload Files",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def upload_files(
-    file0: str = Field(..., description="The primary file to upload. This parameter is required; at least one file must be provided in the request."),
+    file0: str = Field(..., description="Base64-encoded file content for upload. The primary file to upload. This parameter is required; at least one file must be provided in the request.", json_schema_extra={'format': 'byte'}),
     story_id: str | None = Field(None, description="The ID of the story to associate these uploaded files with. If omitted, files are uploaded without story association."),
-    file1: str | None = Field(None, description="An optional additional file to upload alongside file0."),
-    file2: str | None = Field(None, description="An optional additional file to upload alongside file0 and file1."),
-    file3: str | None = Field(None, description="An optional additional file to upload alongside file0, file1, and file2."),
+    file1: str | None = Field(None, description="Base64-encoded file content for upload. An optional additional file to upload alongside file0.", json_schema_extra={'format': 'byte'}),
+    file2: str | None = Field(None, description="Base64-encoded file content for upload. An optional additional file to upload alongside file0 and file1.", json_schema_extra={'format': 'byte'}),
+    file3: str | None = Field(None, description="Base64-encoded file content for upload. An optional additional file to upload alongside file0, file1, and file2.", json_schema_extra={'format': 'byte'}),
 ) -> dict[str, Any] | ToolResult:
     """Upload one or more files to the system, optionally associating them with a specific story. Files are submitted using multipart/form-data encoding with each file assigned to a separate form field."""
 
@@ -2901,7 +3192,13 @@ async def upload_files(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_file(file_public_id: str = Field(..., alias="file-public-id", description="The unique identifier for the file, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific uploaded file using its unique public identifier."""
 
@@ -2939,7 +3236,13 @@ async def get_file(file_public_id: str = Field(..., alias="file-public-id", desc
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_file(
     file_public_id: str = Field(..., alias="file-public-id", description="The unique identifier of the file in Shortcut (64-bit integer)."),
     description: str | None = Field(None, description="A descriptive text for the file, up to 4096 characters.", max_length=4096),
@@ -2979,13 +3282,20 @@ async def update_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_file(file_public_id: str = Field(..., alias="file-public-id", description="The unique identifier of the file to delete, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a previously uploaded file by its unique identifier. This action cannot be undone."""
 
@@ -3023,7 +3333,13 @@ async def delete_file(file_public_id: str = Field(..., alias="file-public-id", d
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(archived: bool | None = Field(None, description="Filter groups by their archived state. Set to true to return only archived groups, false to return only active groups, or omit to return all groups regardless of status.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of groups (teams) in Shortcut. Groups represent collections of users that can be associated with stories, epics, and iterations. Optionally filter by archived status."""
 
@@ -3061,13 +3377,18 @@ async def list_groups(archived: bool | None = Field(None, description="Filter gr
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group(
     name: str = Field(..., description="The display name of the group, between 1 and 63 characters. This is the human-readable identifier shown in the UI.", min_length=1, max_length=63),
     mention_name: str = Field(..., description="The mention handle for the group, between 1 and 63 characters. Used for @-mentions and programmatic references (e.g., @engineering-team).", min_length=1, max_length=63),
     description: str | None = Field(None, description="A detailed description of the group's purpose and scope, up to 4096 characters.", max_length=4096),
     member_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of member IDs to add to the group upon creation. Members can be added or modified after creation."),
-    workflow_ids: list[int] | None = Field(None, description="Array of workflow IDs to associate with the group. Workflows define the processes and automations available to group members."),
+    workflow_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="Array of workflow IDs to associate with the group. Workflows define the processes and automations available to group members."),
     display_icon_id: str | None = Field(None, description="A UUID-formatted icon ID to use as the group's avatar. If not provided, a default icon will be assigned."),
 ) -> dict[str, Any] | ToolResult:
     """Create a new group with members and workflows. Groups can be used to organize and manage collections of members and their associated workflows."""
@@ -3100,13 +3421,20 @@ async def create_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(group_public_id: str = Field(..., alias="group-public-id", description="The unique identifier of the group, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific group using its unique public identifier. Returns the group's metadata and configuration."""
 
@@ -3142,7 +3470,13 @@ async def get_group(group_public_id: str = Field(..., alias="group-public-id", d
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group(
     group_public_id: str = Field(..., alias="group-public-id", description="The unique identifier of the group to update, formatted as a UUID."),
     description: str | None = Field(None, description="A text description of the group, up to 4096 characters.", max_length=4096),
@@ -3152,7 +3486,7 @@ async def update_group(
     name: str | None = Field(None, description="The display name of the group, 1-63 characters long.", min_length=1, max_length=63),
     default_workflow_id: str | None = Field(None, description="The numeric ID of the workflow to set as the default for stories created in this group."),
     member_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="An array of member IDs to add to the group. Each ID should be a valid member identifier."),
-    workflow_ids: list[int] | None = Field(None, description="An array of workflow IDs to associate with the group, enabling these workflows for story creation."),
+    workflow_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="An array of workflow IDs to associate with the group, enabling these workflows for story creation."),
 ) -> dict[str, Any] | ToolResult:
     """Update an existing group's properties including name, description, icon, workflow settings, and membership. Allows archiving groups and modifying their configuration."""
 
@@ -3187,13 +3521,20 @@ async def update_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Group Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_stories(
     group_public_id: str = Field(..., alias="group-public-id", description="The unique identifier of the Group, formatted as a UUID."),
     limit: str | None = Field(None, description="Maximum number of results to return per request. Defaults to 1,000 and cannot exceed 1,000."),
@@ -3239,7 +3580,13 @@ async def list_group_stories(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Health",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_health(
     health_public_id: str = Field(..., alias="health-public-id", description="The unique identifier of the Health record to update, formatted as a UUID."),
     status: Literal["At Risk", "On Track", "Off Track", "No Health"] | None = Field(None, description="The health status level for the Epic. Must be one of: At Risk, On Track, Off Track, or No Health."),
@@ -3276,13 +3623,20 @@ async def update_health(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Integration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_integration(integration_public_id: str = Field(..., alias="integration-public-id", description="The unique public identifier of the webhook integration to retrieve. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook integration by its public identifier. Use this to fetch configuration and details for a webhook integration."""
 
@@ -3320,7 +3674,13 @@ async def get_webhook_integration(integration_public_id: str = Field(..., alias=
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook Integration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook_integration(integration_public_id: str = Field(..., alias="integration-public-id", description="The unique public identifier of the webhook integration to delete, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a webhook integration by its public identifier. This action cannot be undone and will remove all associated webhook configurations."""
 
@@ -3358,7 +3718,13 @@ async def delete_webhook_integration(integration_public_id: str = Field(..., ali
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Iterations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_iterations() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all iterations. Iterations represent time-boxed periods used for organizing and tracking work in agile project management."""
 
@@ -3385,12 +3751,17 @@ async def list_iterations() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Iteration",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_iteration(
     name: str = Field(..., description="The name of the iteration. Must be between 1 and 256 characters.", min_length=1, max_length=256),
     start_date: str = Field(..., description="The start date of the iteration in ISO 8601 format (e.g., 2019-07-01). Required and must be a valid date string.", min_length=1),
     end_date: str = Field(..., description="The end date of the iteration in ISO 8601 format (e.g., 2019-07-01). Required and must be a valid date string.", min_length=1),
-    group_ids: list[str] | None = Field(None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports only one group association at a time."),
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports only one group association at a time."),
     description: str | None = Field(None, description="A detailed description of the iteration's purpose or scope. Limited to 100,000 characters.", max_length=100000),
 ) -> dict[str, Any] | ToolResult:
     """Create a new iteration (sprint or planning cycle) with a specified name, date range, and optional description. Optionally add groups as followers to the iteration."""
@@ -3423,13 +3794,20 @@ async def create_iteration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Iteration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_iteration(iteration_public_id: str = Field(..., alias="iteration-public-id", description="The unique identifier for the iteration as a 64-bit integer. This ID is used to look up and retrieve the specific iteration's details.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific iteration by its public ID. Use this to fetch iteration metadata, status, and associated data."""
 
@@ -3467,10 +3845,16 @@ async def get_iteration(iteration_public_id: str = Field(..., alias="iteration-p
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Iteration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_iteration(
     iteration_public_id: str = Field(..., alias="iteration-public-id", description="The unique identifier of the iteration to update. Must be a valid 64-bit integer."),
-    group_ids: list[str] | None = Field(None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports one group association at a time."),
+    group_ids: list[Annotated[str, Field(json_schema_extra={'format': 'uuid'})]] | None = Field(None, description="An array of group UUIDs to add as followers to this iteration. Currently, the web UI supports one group association at a time."),
     description: str | None = Field(None, description="A detailed description of the iteration. Maximum length is 100,000 characters.", max_length=100000),
     name: str | None = Field(None, description="The display name of the iteration. Must be between 1 and 256 characters.", min_length=1, max_length=256),
     start_date: str | None = Field(None, description="The start date of the iteration in ISO 8601 format (e.g., YYYY-MM-DD). Must be a non-empty string.", min_length=1),
@@ -3509,13 +3893,20 @@ async def update_iteration(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Iteration",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_iteration(iteration_public_id: str = Field(..., alias="iteration-public-id", description="The unique public identifier of the iteration to delete, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an iteration by its public ID. This action cannot be undone and will remove the iteration and all associated data."""
 
@@ -3553,7 +3944,13 @@ async def delete_iteration(iteration_public_id: str = Field(..., alias="iteratio
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Iteration Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_iteration_stories(
     iteration_public_id: str = Field(..., alias="iteration-public-id", description="The unique identifier of the iteration. Must be a positive integer."),
     includes_description: bool | None = Field(None, description="Set to true to include story descriptions in the response; false or omit to exclude them."),
@@ -3597,7 +3994,13 @@ async def list_iteration_stories(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Key Result",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_key_result(key_result_public_id: str = Field(..., alias="key-result-public-id", description="The unique identifier of the Key Result to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific Key Result by its unique identifier. Returns the Key Result's properties and current state."""
 
@@ -3633,7 +4036,13 @@ async def get_key_result(key_result_public_id: str = Field(..., alias="key-resul
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Key Result",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_key_result(
     key_result_public_id: str = Field(..., alias="key-result-public-id", description="The unique identifier of the Key Result to update, formatted as a UUID."),
     name: str | None = Field(None, description="The updated name for the Key Result. Maximum length is 1024 characters.", max_length=1024),
@@ -3672,13 +4081,20 @@ async def update_key_result(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Labels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_labels(slim: bool | None = Field(None, description="When true, returns a lightweight version of each label with minimal attributes; when false or omitted, returns complete label details.")) -> dict[str, Any] | ToolResult:
     """Retrieve all labels available in the system with their complete attributes. Optionally request slim versions containing only essential label information."""
 
@@ -3716,7 +4132,12 @@ async def list_labels(slim: bool | None = Field(None, description="When true, re
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Label",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_label(
     name: str = Field(..., description="The display name for the label. Must be between 1 and 128 characters.", min_length=1, max_length=128),
     description: str | None = Field(None, description="Optional descriptive text explaining the label's purpose or usage. Limited to 1024 characters.", max_length=1024),
@@ -3752,13 +4173,20 @@ async def create_label(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Label",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_label(label_public_id: str = Field(..., alias="label-public-id", description="The unique identifier of the label to retrieve, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific label by its unique identifier. Returns the label's properties and metadata."""
 
@@ -3796,7 +4224,13 @@ async def get_label(label_public_id: str = Field(..., alias="label-public-id", d
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_label(
     label_public_id: str = Field(..., alias="label-public-id", description="The unique identifier of the label to update. Must be a valid 64-bit integer."),
     name: str | None = Field(None, description="The new name for the label. Must be between 1 and 128 characters long.", min_length=1, max_length=128),
@@ -3836,13 +4270,20 @@ async def update_label(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Label",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_label(label_public_id: str = Field(..., alias="label-public-id", description="The unique identifier of the label to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a label by its unique identifier. This operation removes the label and cannot be undone."""
 
@@ -3880,7 +4321,13 @@ async def delete_label(label_public_id: str = Field(..., alias="label-public-id"
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epics for Label",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epics_for_label(label_public_id: str = Field(..., alias="label-public-id", description="The unique identifier of the Label. Must be a positive integer value.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Epics associated with a specific Label. Use this to view Epic-level work items grouped by a particular label."""
 
@@ -3918,7 +4365,13 @@ async def list_epics_for_label(label_public_id: str = Field(..., alias="label-pu
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Stories by Label",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stories_by_label(
     label_public_id: str = Field(..., alias="label-public-id", description="The unique identifier of the label. Must be a valid 64-bit integer."),
     includes_description: bool | None = Field(None, description="Set to true to include story descriptions in the response; false or omit to exclude them."),
@@ -3962,7 +4415,13 @@ async def list_stories_by_label(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Linked Files",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_linked_files() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all linked files with their attributes. Use this to view all file associations in the system."""
 
@@ -3989,7 +4448,12 @@ async def list_linked_files() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Linked File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_linked_file(
     name: str = Field(..., description="The display name for the linked file. Must be between 1 and 256 characters.", min_length=1, max_length=256),
     type_: Literal["google", "url", "dropbox", "box", "onedrive"] = Field(..., alias="type", description="The source service or integration type for the file. Must be one of: google (Google Drive), url (direct link), dropbox (Dropbox), box (Box), or onedrive (OneDrive)."),
@@ -4030,13 +4494,20 @@ async def create_linked_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Linked File",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_linked_file(linked_file_public_id: str = Field(..., alias="linked-file-public-id", description="The unique public identifier of the linked file to retrieve. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific linked file using its unique public identifier."""
 
@@ -4074,7 +4545,13 @@ async def get_linked_file(linked_file_public_id: str = Field(..., alias="linked-
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Linked File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_linked_file(
     linked_file_public_id: str = Field(..., alias="linked-file-public-id", description="The unique identifier of the linked file to update. Must be a valid 64-bit integer."),
     description: str | None = Field(None, description="A brief description of the file's purpose or content. Limited to 512 characters.", max_length=512),
@@ -4117,13 +4594,20 @@ async def update_linked_file(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Linked File",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_linked_file(linked_file_public_id: str = Field(..., alias="linked-file-public-id", description="The unique identifier of the linked file to delete. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a previously attached linked file by its unique identifier. This operation removes the file association and cannot be undone."""
 
@@ -4161,7 +4645,13 @@ async def delete_linked_file(linked_file_public_id: str = Field(..., alias="link
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Current Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_member() -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about the authenticated member, including profile data and account settings."""
 
@@ -4188,7 +4678,13 @@ async def get_current_member() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Workspace Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workspace_members(
     org_public_id: str | None = Field(None, alias="org-public-id", description="Filter results to members belonging to a specific Organization by providing its unique identifier (UUID format)."),
     disabled: bool | None = Field(None, description="Filter members by their account status: true returns only disabled members, false returns only enabled members. Omit to include all members regardless of status."),
@@ -4229,7 +4725,13 @@ async def list_workspace_members(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_member(
     member_public_id: str = Field(..., alias="member-public-id", description="The unique identifier of the member to retrieve, formatted as a UUID."),
     org_public_id: str | None = Field(None, alias="org-public-id", description="Optional organization identifier (UUID format) to scope the member lookup to a specific organization."),
@@ -4271,7 +4773,13 @@ async def get_member(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Milestones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_milestones() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all milestones with their attributes. Note: This endpoint is deprecated; use list_objectives for new implementations."""
 
@@ -4298,7 +4806,12 @@ async def list_milestones() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Milestone",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_milestone(
     name: str = Field(..., description="The name of the Milestone. Must be between 1 and 256 characters.", min_length=1, max_length=256),
     description: str | None = Field(None, description="Optional description of the Milestone. Can be up to 100,000 characters.", max_length=100000),
@@ -4334,13 +4847,20 @@ async def create_milestone(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Milestone",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_milestone(milestone_public_id: str = Field(..., alias="milestone-public-id", description="The unique identifier of the milestone to retrieve, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific milestone by its public ID. Note: This operation is deprecated; use get_objective instead for new implementations."""
 
@@ -4378,7 +4898,13 @@ async def get_milestone(milestone_public_id: str = Field(..., alias="milestone-p
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Milestone",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_milestone(
     milestone_public_id: str = Field(..., alias="milestone-public-id", description="The unique identifier of the milestone to update. Must be a valid 64-bit integer."),
     description: str | None = Field(None, description="The milestone's description text. Can be up to 100,000 characters long.", max_length=100000),
@@ -4419,13 +4945,20 @@ async def update_milestone(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Milestone",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_milestone(milestone_public_id: str = Field(..., alias="milestone-public-id", description="The unique identifier of the milestone to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Delete a milestone by its public ID. Note: This operation is deprecated; use delete_objective instead for new implementations."""
 
@@ -4463,7 +4996,13 @@ async def delete_milestone(milestone_public_id: str = Field(..., alias="mileston
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epics for Milestone",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epics_for_milestone(milestone_public_id: str = Field(..., alias="milestone-public-id", description="The unique identifier of the milestone. Must be a positive integer value.")) -> dict[str, Any] | ToolResult:
     """Retrieve all epics associated with a specific milestone. This operation is deprecated; use list_objective_epics instead for new implementations."""
 
@@ -4501,7 +5040,13 @@ async def list_epics_for_milestone(milestone_public_id: str = Field(..., alias="
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Objectives",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_objectives() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all objectives with their associated attributes and metadata."""
 
@@ -4528,7 +5073,12 @@ async def list_objectives() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Objective",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_objective(
     name: str = Field(..., description="The name of the Objective. Must be between 1 and 256 characters.", min_length=1, max_length=256),
     description: str | None = Field(None, description="A detailed description of the Objective. Can be up to 100,000 characters to provide comprehensive context and guidance.", max_length=100000),
@@ -4564,13 +5114,20 @@ async def create_objective(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Objective",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_objective(objective_public_id: str = Field(..., alias="objective-public-id", description="The unique public identifier for the Objective. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific Objective by its public ID. Use this to fetch the full details of an Objective you want to inspect or reference."""
 
@@ -4608,7 +5165,13 @@ async def get_objective(objective_public_id: str = Field(..., alias="objective-p
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Objective",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_objective(
     objective_public_id: str = Field(..., alias="objective-public-id", description="The unique identifier of the Objective to update. Must be a valid 64-bit integer."),
     description: str | None = Field(None, description="The Objective's description text. Can be up to 100,000 characters long.", max_length=100000),
@@ -4649,13 +5212,20 @@ async def update_objective(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Objective",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_objective(objective_public_id: str = Field(..., alias="objective-public-id", description="The unique public identifier of the Objective to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an Objective by its public ID. This action cannot be undone."""
 
@@ -4693,7 +5263,13 @@ async def delete_objective(objective_public_id: str = Field(..., alias="objectiv
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Epics for Objective",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_epics_for_objective(objective_public_id: str = Field(..., alias="objective-public-id", description="The unique identifier of the objective. Must be a positive integer value.")) -> dict[str, Any] | ToolResult:
     """Retrieve all epics associated with a specific objective. Epics are returned as a collection within the objective."""
 
@@ -4731,7 +5307,13 @@ async def list_epics_for_objective(objective_public_id: str = Field(..., alias="
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Projects",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all projects with their complete attributes and metadata. Use this to discover available projects or build project directories."""
 
@@ -4758,7 +5340,12 @@ async def list_projects() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Project",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project(
     name: str = Field(..., description="The display name for the project. Must be between 1 and 128 characters long.", min_length=1, max_length=128),
     team_id: str = Field(..., description="The numeric ID of the team that will own this project."),
@@ -4801,13 +5388,20 @@ async def create_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Project",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project(project_public_id: str = Field(..., alias="project-public-id", description="The unique public identifier for the project. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project using its unique public identifier. Returns comprehensive project metadata and configuration."""
 
@@ -4845,7 +5439,13 @@ async def get_project(project_public_id: str = Field(..., alias="project-public-
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     project_public_id: str = Field(..., alias="project-public-id", description="The unique identifier of the project to update. Must be a valid 64-bit integer."),
     description: str | None = Field(None, description="The project's description text. Can be up to 100,000 characters long.", max_length=100000),
@@ -4891,13 +5491,20 @@ async def update_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project(project_public_id: str = Field(..., alias="project-public-id", description="The unique identifier of the project to delete, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a project. Projects can only be deleted if all associated stories have been moved or deleted; attempting to delete a project with remaining stories will result in a 422 error."""
 
@@ -4935,7 +5542,13 @@ async def delete_project(project_public_id: str = Field(..., alias="project-publ
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_stories(
     project_public_id: str = Field(..., alias="project-public-id", description="The unique identifier of the project. Must be a valid 64-bit integer."),
     includes_description: bool | None = Field(None, description="Set to true to include story descriptions in the response; omit or set to false to exclude them."),
@@ -4979,7 +5592,13 @@ async def list_stories(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Repositories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_repositories() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all repositories with their attributes. Use this operation to discover available repositories and their metadata."""
 
@@ -5006,7 +5625,13 @@ async def list_repositories() -> dict[str, Any] | ToolResult:
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Repository",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_repository(repo_public_id: str = Field(..., alias="repo-public-id", description="The unique public identifier of the repository as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific repository using its unique public identifier."""
 
@@ -5044,7 +5669,13 @@ async def get_repository(repo_public_id: str = Field(..., alias="repo-public-id"
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Epics and Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_epics_and_stories(
     query: str = Field(..., description="Search query using supported search operators (see help documentation). Must be at least 1 character long.", min_length=1),
     page_size: str | None = Field(None, description="Number of results per page, between 1 and 250 inclusive. Defaults to a standard page size if not specified."),
@@ -5089,7 +5720,13 @@ async def search_epics_and_stories(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Documents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_documents(
     title: str = Field(..., description="Search text to match against document titles using fuzzy matching. Must be at least 1 character long.", min_length=1),
     archived: bool | None = Field(None, description="Filter by archive status: true returns archived documents, false returns non-archived documents."),
@@ -5135,7 +5772,13 @@ async def search_documents(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Epics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_epics(
     query: str = Field(..., description="Search query using supported operators (see search operators documentation). Must be at least 1 character long.", min_length=1),
     page_size: str | None = Field(None, description="Number of results per page, between 1 and 250 inclusive. Defaults to a standard page size if not specified."),
@@ -5180,7 +5823,13 @@ async def search_epics(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Iterations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_iterations(
     query: str = Field(..., description="Search query using supported search operators. Must be at least 1 character long. See search operators documentation for syntax and available filters.", min_length=1),
     page_size: str | None = Field(None, description="Number of results to return per page, between 1 and 250 results. Defaults to a standard page size if not specified."),
@@ -5225,7 +5874,13 @@ async def search_iterations(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Milestones",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_milestones(
     query: str = Field(..., description="Search query using supported search operators. Must be at least 1 character long.", min_length=1),
     page_size: str | None = Field(None, description="Number of results per page, between 1 and 250 inclusive. Defaults to a standard page size if not specified."),
@@ -5270,7 +5925,13 @@ async def search_milestones(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Objectives",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_objectives(
     query: str = Field(..., description="Search query using supported search operators. Must be at least 1 character long. See search operators documentation for syntax details.", min_length=1),
     page_size: str | None = Field(None, description="Number of results to return per page, between 1 and 250 results."),
@@ -5315,7 +5976,13 @@ async def search_objectives(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_stories(
     query: str = Field(..., description="Search query using supported operators (see search operators documentation). Must be at least 1 character long.", min_length=1),
     page_size: str | None = Field(None, description="Number of results per page, between 1 and 250 inclusive. Defaults to a standard page size if not specified."),
@@ -5360,7 +6027,12 @@ async def search_stories(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Story",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_story(
     name: str = Field(..., description="The story's title. Must be between 1 and 512 characters.", min_length=1, max_length=512),
     description: str | None = Field(None, description="The story's description text. Supports up to 100,000 characters.", max_length=100000),
@@ -5414,13 +6086,19 @@ async def create_story(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Stories",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_stories(stories: list[_models.CreateStoryParams] = Field(..., description="An array of story objects to create. Each story object uses the same schema as individual story creation. Order is preserved in processing.")) -> dict[str, Any] | ToolResult:
     """Create multiple stories in a single batch request. Each story is created with the same configuration options available in individual story creation."""
 
@@ -5452,13 +6130,20 @@ async def create_stories(stories: list[_models.CreateStoryParams] = Field(..., d
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Multiple Stories",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_multiple_stories(
     story_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="The unique identifiers of the stories to update. Required to specify which stories are affected by this bulk operation."),
     archived: bool | None = Field(None, description="Archive or unarchive the selected stories."),
@@ -5511,13 +6196,20 @@ async def update_multiple_stories(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Stories in Bulk",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_stories_bulk(story_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of story IDs to delete. Provide the IDs as an array of strings or numbers representing the stories you want to remove. All stories must be archived before deletion.")) -> dict[str, Any] | ToolResult:
     """Permanently delete multiple archived stories in a single operation. This bulk deletion operation allows you to remove several stories at once by providing their IDs."""
 
@@ -5549,13 +6241,19 @@ async def delete_stories_bulk(story_ids: Annotated[list[int], AfterValidator(_ch
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Story from Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_story_from_template(
     story_template_id: str = Field(..., description="The UUID of the story template to use as the basis for this story. Required."),
     description: str | None = Field(None, description="The story's description text. Limited to 100,000 characters.", max_length=100000),
@@ -5623,13 +6321,19 @@ async def create_story_from_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Stories Advanced",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_stories_advanced(
     archived: bool | None = Field(None, description="Filter to include or exclude archived Stories."),
     story_type: Literal["feature", "chore", "bug"] | None = Field(None, description="Filter Stories by type: feature, chore, or bug."),
@@ -5689,13 +6393,20 @@ async def search_stories_advanced(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Story",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_story(story_public_id: str = Field(..., alias="story-public-id", description="The unique public identifier for the story. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific story by its public ID. Returns the story's metadata and content."""
 
@@ -5733,7 +6444,13 @@ async def get_story(story_public_id: str = Field(..., alias="story-public-id", d
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Story",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_story(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story to update. This is a 64-bit integer that uniquely identifies the story within the system."),
     description: str | None = Field(None, description="A detailed description of the story, up to 100,000 characters in length.", max_length=100000),
@@ -5788,13 +6505,20 @@ async def update_story(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Story",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_story(story_public_id: str = Field(..., alias="story-public-id", description="The unique public identifier of the story to delete. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a story by its public ID. This action cannot be undone."""
 
@@ -5832,7 +6556,13 @@ async def delete_story(story_public_id: str = Field(..., alias="story-public-id"
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Story Comments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_story_comments(story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story. Must be a positive integer value.")) -> dict[str, Any] | ToolResult:
     """Retrieves all comments associated with a specific story. Use this to fetch the complete list of comments for a given story."""
 
@@ -5870,7 +6600,12 @@ async def list_story_comments(story_public_id: str = Field(..., alias="story-pub
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Story Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_story_comment(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story where the comment will be posted. Must be a valid 64-bit integer."),
     text: str = Field(..., description="The comment text content. Supports up to 100,000 characters.", max_length=100000),
@@ -5912,13 +6647,20 @@ async def create_story_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Story Comment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_story_comment(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story containing the comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the comment to retrieve. Must be a positive integer."),
@@ -5960,7 +6702,13 @@ async def get_story_comment(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Story Comment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_story_comment(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story containing the comment to update."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the comment to update."),
@@ -6000,13 +6748,20 @@ async def update_story_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Story Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_story_comment(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story containing the comment to delete. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the comment to delete. Must be a positive integer."),
@@ -6048,7 +6803,12 @@ async def delete_story_comment(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Add Reaction to Story Comment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_reaction_to_story_comment(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story containing the comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the comment to react to. Must be a positive integer."),
@@ -6088,13 +6848,20 @@ async def add_reaction_to_story_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Remove Reaction From Story Comment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_reaction_from_story_comment(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story containing the comment. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the comment from which to remove the reaction. Must be a positive integer."),
@@ -6134,13 +6901,20 @@ async def remove_reaction_from_story_comment(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Remove Comment Slack Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_comment_slack_link(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the Story containing the comment to unlink. Must be a positive integer."),
     comment_public_id: str = Field(..., alias="comment-public-id", description="The unique identifier of the Comment to unlink from Slack. Must be a positive integer."),
@@ -6182,7 +6956,13 @@ async def remove_comment_slack_link(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Story History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_story_history(story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the story. Must be a valid 64-bit integer representing the story's public ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete history of changes for a specific story, including all revisions and modifications over time."""
 
@@ -6220,7 +7000,13 @@ async def get_story_history(story_public_id: str = Field(..., alias="story-publi
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Story Sub-Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_story_sub_tasks(story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the parent story. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all sub-task stories associated with a parent story. Returns a complete list of child tasks for the specified story."""
 
@@ -6258,7 +7044,12 @@ async def list_story_sub_tasks(story_public_id: str = Field(..., alias="story-pu
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Task in Story",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_task_in_story(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the Story where the task will be created. Must be a valid 64-bit integer."),
     description: str = Field(..., description="A text description of the task. Must be between 1 and 2048 characters.", min_length=1, max_length=2048),
@@ -6298,13 +7089,20 @@ async def create_task_in_story(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_task(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the Story that contains the Task. Must be a positive integer."),
     task_public_id: str = Field(..., alias="task-public-id", description="The unique identifier of the Task to retrieve. Must be a positive integer."),
@@ -6346,7 +7144,12 @@ async def get_task(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_task(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the parent story containing the task. Must be a positive integer."),
     task_public_id: str = Field(..., alias="task-public-id", description="The unique identifier of the task to update. Must be a positive integer."),
@@ -6387,13 +7190,20 @@ async def update_task(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_task(
     story_public_id: str = Field(..., alias="story-public-id", description="The unique identifier of the Story containing the Task to delete. Must be a positive integer."),
     task_public_id: str = Field(..., alias="task-public-id", description="The unique identifier of the Task to delete. Must be a positive integer."),
@@ -6435,7 +7245,12 @@ async def delete_task(
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Create Story Link",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_story_link(
     verb: Literal["blocks", "duplicates", "relates to"] = Field(..., description="The relationship type expressed as an active voice verb. Must be one of: 'blocks' (subject prevents object from progressing), 'duplicates' (subject and object represent identical work), or 'relates to' (subject has a general association with object)."),
     subject_id: str = Field(..., description="The numeric ID of the story performing the action (the subject of the relationship)."),
@@ -6474,13 +7289,20 @@ async def create_story_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Story Link",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_story_link(story_link_public_id: str = Field(..., alias="story-link-public-id", description="The unique identifier of the story link to retrieve. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific story link and the stories it connects, along with their relationship details. Use this to understand how stories are related to each other."""
 
@@ -6518,7 +7340,13 @@ async def get_story_link(story_link_public_id: str = Field(..., alias="story-lin
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Update Story Link",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_story_link(
     story_link_public_id: str = Field(..., alias="story-link-public-id", description="The unique identifier of the story link to update. Must be a positive integer."),
     verb: Literal["blocks", "duplicates", "relates to"] | None = Field(None, description="The type of relationship between the stories. Choose from: blocks (one story blocks another), duplicates (stories are duplicates), or relates to (general relationship)."),
@@ -6560,13 +7388,20 @@ async def update_story_link(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Story Link",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_story_link(story_link_public_id: str = Field(..., alias="story-link-public-id", description="The unique identifier of the Story Link to delete. This is a 64-bit integer that uniquely identifies the relationship between stories.")) -> dict[str, Any] | ToolResult:
     """Removes the relationship between two stories by deleting the specified Story Link. This operation severs the connection without affecting the individual stories themselves."""
 
@@ -6604,7 +7439,13 @@ async def delete_story_link(story_link_public_id: str = Field(..., alias="story-
     return _response_data
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow(workflow_public_id: str = Field(..., alias="workflow-public-id", description="The unique identifier of the workflow to retrieve, provided as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific workflow by its public ID. Returns the workflow's configuration, status, and metadata."""
 

@@ -5,7 +5,7 @@ Base URL: https://api.app.shortcut.com
 | | |
 |---|---|
 | **Category** | Productivity |
-| **Tools** | 131 |
+| **Tools** | 119 |
 | **Auth** | API Key |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (Shortcut-Token)
+
 Do not commit credentials to version control.
 
 ---
