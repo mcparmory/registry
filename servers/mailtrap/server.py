@@ -6,7 +6,7 @@ API Info:
 - API License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) (https://creativecommons.org/licenses/by-sa/4.0/)
 - Contact: Mailtrap Support <support@mailtrap.io> (https://docs.mailtrap.io)
 
-Generated: 2026-05-05 15:33:37 UTC
+Generated: 2026-05-12 11:52:23 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -42,11 +43,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://send.api.mailtrap.io")
 SERVER_NAME = "Mailtrap"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -629,6 +655,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -638,18 +665,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -660,24 +685,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1016,6 +1047,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1040,6 +1073,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1247,7 +1282,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Mailtrap", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: domains
-@mcp.tool()
+@mcp.tool(
+    title="List Sending Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sending_domains(account_id: int = Field(..., description="The unique identifier for the account. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all sending domains configured for an account along with their current verification status. Use this to view domain authentication and readiness for email sending."""
 
@@ -1283,7 +1324,12 @@ async def list_sending_domains(account_id: int = Field(..., description="The uni
     return _response_data
 
 # Tags: domains
-@mcp.tool()
+@mcp.tool(
+    title="Create Sending Domain",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_sending_domain(
     account_id: int = Field(..., description="The unique identifier for your account. This is a positive integer that specifies which account owns the sending domain."),
     domain_name: str = Field(..., description="The domain name you want to use for sending emails (e.g., example.com). Must be a valid hostname format."),
@@ -1319,13 +1365,20 @@ async def create_sending_domain(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: domains
-@mcp.tool()
+@mcp.tool(
+    title="Get Sending Domain",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sending_domain(
     account_id: int = Field(..., description="The unique identifier for your account."),
     sending_domain_id: int = Field(..., description="The unique identifier for the sending domain whose details and verification status you want to retrieve."),
@@ -1364,7 +1417,13 @@ async def get_sending_domain(
     return _response_data
 
 # Tags: domains
-@mcp.tool()
+@mcp.tool(
+    title="Delete Sending Domain",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sending_domain(
     account_id: int = Field(..., description="The unique identifier for your account. This is a positive integer that specifies which account owns the sending domain being deleted."),
     sending_domain_id: int = Field(..., description="The unique identifier for the sending domain to be deleted. This is a positive integer that identifies the specific domain configuration to remove from your account."),
@@ -1403,7 +1462,12 @@ async def delete_sending_domain(
     return _response_data
 
 # Tags: domains
-@mcp.tool()
+@mcp.tool(
+    title="Send Sending Domain Setup Instructions",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_sending_domain_setup_instructions(
     account_id: int = Field(..., description="The unique identifier for the account that owns the sending domain."),
     sending_domain_id: int = Field(..., description="The unique identifier for the sending domain to configure."),
@@ -1440,13 +1504,20 @@ async def send_sending_domain_setup_instructions(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: suppressions
-@mcp.tool()
+@mcp.tool(
+    title="List Suppressions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_suppressions(
     account_id: int = Field(..., description="The unique identifier for your account."),
     email: str | None = Field(None, description="Filter results to a specific email address. Must be a valid email format."),
@@ -1489,7 +1560,13 @@ async def list_suppressions(
     return _response_data
 
 # Tags: suppressions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Suppression",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_suppression(
     account_id: int = Field(..., description="The unique identifier for the account containing the suppression record. Must be a positive integer."),
     suppression_id: int = Field(..., description="The unique identifier for the suppression record to delete. Must be a positive integer."),
@@ -1528,12 +1605,18 @@ async def delete_suppression(
     return _response_data
 
 # Tags: stats
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Sending Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_sending_stats(
     account_id: int = Field(..., description="The unique identifier for the account whose sending statistics should be retrieved."),
     start_date: str = Field(..., description="The beginning of the date range for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
     end_date: str = Field(..., description="The end of the date range for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
-    sending_domain_ids: list[int] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to retrieve results for all sending domains."),
+    sending_domain_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to retrieve results for all sending domains."),
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., transactional, bulk). When provided, only statistics for the specified streams are included; omit to retrieve results for all sending streams."),
     categories: list[str] | None = Field(None, description="Optional list of email categories to filter results (e.g., Welcome Email, Password Reset). When provided, only statistics for the specified categories are included; omit to retrieve results for all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service providers to filter results (e.g., Google, Yahoo). When provided, only statistics for the specified ESPs are included; omit to retrieve results for all email service providers."),
@@ -1575,12 +1658,18 @@ async def get_account_sending_stats(
     return _response_data
 
 # Tags: stats
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Sending Stats by Domains",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_sending_stats_by_domains(
     account_id: int = Field(..., description="The unique identifier for the account whose sending statistics should be retrieved."),
     start_date: str = Field(..., description="The beginning of the date range (inclusive) for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
     end_date: str = Field(..., description="The end of the date range (inclusive) for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
-    sending_domain_ids: list[int] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to include all domains."),
+    sending_domain_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to include all domains."),
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., transactional, bulk). When provided, only statistics for the specified streams are included; omit to include all streams."),
     categories: list[str] | None = Field(None, description="Optional list of message categories to filter results (e.g., Welcome Email, Password Reset). When provided, only statistics for the specified categories are included; omit to include all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names to filter results (e.g., Google, Yahoo). When provided, only statistics for the specified providers are included; omit to include all providers."),
@@ -1622,12 +1711,18 @@ async def get_account_sending_stats_by_domains(
     return _response_data
 
 # Tags: stats
-@mcp.tool()
+@mcp.tool(
+    title="Get Sending Stats by Categories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sending_stats_by_categories(
     account_id: int = Field(..., description="The unique identifier for the account whose sending statistics should be retrieved."),
     start_date: str = Field(..., description="The beginning of the date range (inclusive) for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
     end_date: str = Field(..., description="The end of the date range (inclusive) for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
-    sending_domain_ids: list[int] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to include all domains."),
+    sending_domain_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to include all domains."),
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., 'transactional', 'bulk'). When provided, only statistics for the specified streams are included; omit to include all streams."),
     categories: list[str] | None = Field(None, description="Optional list of email category names to filter results (e.g., 'Welcome Email', 'Password Reset'). When provided, only statistics for the specified categories are included; omit to include all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names to filter results (e.g., 'Google', 'Yahoo'). When provided, only statistics for the specified providers are included; omit to include all providers."),
@@ -1669,12 +1764,18 @@ async def get_sending_stats_by_categories(
     return _response_data
 
 # Tags: stats
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Sending Stats by Email Service Providers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_sending_stats_by_email_service_providers(
     account_id: int = Field(..., description="The unique identifier for the account whose sending statistics should be retrieved."),
     start_date: str = Field(..., description="The beginning of the date range (inclusive) for which to include sending statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
     end_date: str = Field(..., description="The end of the date range (inclusive) for which to include sending statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
-    sending_domain_ids: list[int] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to include all domains."),
+    sending_domain_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="Optional list of sending domain IDs to filter results. When provided, only statistics for the specified domains are included; omit to include all domains."),
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., transactional, bulk). When provided, only statistics for the specified streams are included; omit to include all streams."),
     categories: list[str] | None = Field(None, description="Optional list of email categories to filter results (e.g., Welcome Email, Password Reset). When provided, only statistics for the specified categories are included; omit to include all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names to filter results (e.g., Google, Yahoo). When provided, only statistics for the specified ESPs are included; omit to include all providers."),
@@ -1716,12 +1817,18 @@ async def get_account_sending_stats_by_email_service_providers(
     return _response_data
 
 # Tags: stats
-@mcp.tool()
+@mcp.tool(
+    title="Get Account Sending Stats by Date",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_account_sending_stats_by_date(
     account_id: int = Field(..., description="The unique identifier for the account whose sending statistics should be retrieved."),
     start_date: str = Field(..., description="The beginning of the date range (inclusive) for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
     end_date: str = Field(..., description="The end of the date range (inclusive) for which to retrieve statistics, specified in ISO 8601 date format (YYYY-MM-DD)."),
-    sending_domain_ids: list[int] | None = Field(None, description="Optional list of sending domain IDs to filter results. When omitted, statistics for all sending domains are included."),
+    sending_domain_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, description="Optional list of sending domain IDs to filter results. When omitted, statistics for all sending domains are included."),
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types (e.g., transactional, bulk) to filter results. When omitted, statistics for all sending streams are included."),
     categories: list[str] | None = Field(None, description="Optional list of email categories (e.g., Welcome Email, Password Reset) to filter results. When omitted, statistics for all categories are included."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names (e.g., Google, Yahoo) to filter results. When omitted, statistics for all ESPs are included."),
@@ -1763,7 +1870,13 @@ async def get_account_sending_stats_by_date(
     return _response_data
 
 # Tags: email-logs
-@mcp.tool()
+@mcp.tool(
+    title="List Email Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_email_logs(
     account_id: int = Field(..., description="The unique identifier for the account whose email logs you want to retrieve. Must be a positive integer."),
     search_after: str | None = Field(None, description="Pagination cursor for fetching the next page of results. Use the message_id UUID value from the previous response's next_page_cursor field to continue pagination."),
@@ -1809,7 +1922,13 @@ async def list_email_logs(
     return _response_data
 
 # Tags: email-logs
-@mcp.tool()
+@mcp.tool(
+    title="Get Email Log Message",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_email_log_message(
     account_id: int = Field(..., description="The numeric identifier of the account that owns the email message."),
     sending_message_id: str = Field(..., description="The unique identifier (UUID) of the email message to retrieve from the log."),

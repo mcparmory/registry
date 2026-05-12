@@ -1,7 +1,7 @@
 """
 Authentication module for Mailtrap MCP server.
 
-Generated: 2026-05-05 15:33:37 UTC
+Generated: 2026-05-12 11:52:23 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

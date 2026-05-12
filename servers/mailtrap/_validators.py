@@ -1,7 +1,7 @@
 """
 Mailtrap MCP Server - Validators
 
-Generated: 2026-05-05 15:33:37 UTC
+Generated: 2026-05-12 11:52:23 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -10,7 +10,8 @@ from __future__ import annotations
 import base64
 import ipaddress
 import re
-from typing import Any
+from types import UnionType
+from typing import Annotated, Any, get_args, get_origin
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
@@ -747,6 +748,78 @@ FORMAT_VALIDATORS: dict[str, Any] = {
     "url": _validate_uri,  # Alias for uri
 }
 
+
+def _validate_nested_format(value: Any, annotation: Any, field_name: str) -> None:
+    """Validate nested Annotated/list item formats recursively."""
+    origin = get_origin(annotation)
+
+    if origin is Annotated:
+        base_annotation, *metadata = get_args(annotation)
+        for meta in metadata:
+            json_extra = getattr(meta, "json_schema_extra", None)
+            if not json_extra or not isinstance(json_extra, dict):
+                continue
+            format_name = json_extra.get("format")
+            if isinstance(format_name, str) and format_name in FORMAT_VALIDATORS:
+                try:
+                    FORMAT_VALIDATORS[format_name](value)
+                except ValueError as e:
+                    raise ValueError(f"Field '{field_name}' format validation failed: {e}") from e
+        _validate_nested_format(value, base_annotation, field_name)
+        return
+
+    if origin is tuple:
+        item_annotations = get_args(annotation)
+        if value is None:
+            return
+        if len(item_annotations) == 2 and item_annotations[1] is Ellipsis:
+            item_annotations = (item_annotations[0],)
+        for idx, item in enumerate(value):
+            if item is None:
+                continue
+            item_annotation = (
+                item_annotations[idx]
+                if idx < len(item_annotations)
+                else item_annotations[0] if item_annotations else Any
+            )
+            try:
+                _validate_nested_format(item, item_annotation, field_name)
+            except ValueError as e:
+                raise ValueError(
+                    f"Field '{field_name}' item {idx} format validation failed: {e}"
+                ) from e
+        return
+
+    if origin in (list, set, frozenset):
+        item_annotation = get_args(annotation)[0] if get_args(annotation) else Any
+        if value is None:
+            return
+        for idx, item in enumerate(value):
+            if item is None:
+                continue
+            try:
+                _validate_nested_format(item, item_annotation, field_name)
+            except ValueError as e:
+                raise ValueError(
+                    f"Field '{field_name}' item {idx} format validation failed: {e}"
+                ) from e
+        return
+
+    if origin in (UnionType,):
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if not args:
+            return
+        last_error: ValueError | None = None
+        for arg in args:
+            try:
+                _validate_nested_format(value, arg, field_name)
+                return
+            except ValueError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+
+
 # ============================================================================
 # Base Classes
 # ============================================================================
@@ -800,6 +873,11 @@ class StrictModel(BaseModel):
     def validate_formats(self) -> StrictModel:
         """Validate all fields that have a format specified in json_schema_extra."""
         for field_name, field_info in self.__class__.model_fields.items():
+            annotation = field_info.annotation
+            value = getattr(self, field_name)
+            if value is not None:
+                _validate_nested_format(value, annotation, field_name)
+
             json_extra = field_info.json_schema_extra
             if not json_extra or not isinstance(json_extra, dict):
                 continue
@@ -808,7 +886,6 @@ class StrictModel(BaseModel):
             if not format_name or not isinstance(format_name, str):
                 continue
 
-            value = getattr(self, field_name)
             if value is None:
                 continue
 
@@ -868,6 +945,11 @@ class PermissiveModel(BaseModel):
     def validate_formats(self) -> PermissiveModel:
         """Validate all fields that have a format specified in json_schema_extra."""
         for field_name, field_info in self.__class__.model_fields.items():
+            annotation = field_info.annotation
+            value = getattr(self, field_name)
+            if value is not None:
+                _validate_nested_format(value, annotation, field_name)
+
             json_extra = field_info.json_schema_extra
             if not json_extra or not isinstance(json_extra, dict):
                 continue
@@ -876,7 +958,6 @@ class PermissiveModel(BaseModel):
             if not format_name or not isinstance(format_name, str):
                 continue
 
-            value = getattr(self, field_name)
             if value is None:
                 continue
 
