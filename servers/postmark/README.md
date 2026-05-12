@@ -5,7 +5,7 @@ Base URL: https://api.postmarkapp.com
 | | |
 |---|---|
 | **Category** | Communication |
-| **Tools** | 39 |
+| **Tools** | 37 |
 | **Auth** | API Key |
 
 ---
@@ -56,6 +56,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `SERVER_API_TOKEN_API_KEY` — API Key Authentication (X-Postmark-Server-Token)
 - `ACCOUNT_API_TOKEN_API_KEY` — API Key Authentication (X-Postmark-Account-Token)
+
 Do not commit credentials to version control.
 
 ---

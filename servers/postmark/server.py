@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Postmark MCP Server
-Generated: 2026-05-05 13:51:55 UTC
+Generated: 2026-05-12 12:17:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.postmarkapp.com")
 SERVER_NAME = "Postmark"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1006,6 +1037,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1030,6 +1063,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1246,7 +1281,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Postmark", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Bounces API
-@mcp.tool()
+@mcp.tool(
+    title="List Bounces",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_bounces(
     count: int = Field(..., description="Number of bounce records to return per request, up to a maximum of 500.", le=500),
     offset: int = Field(..., description="Number of bounce records to skip from the beginning of the result set for pagination."),
@@ -1294,7 +1335,13 @@ async def list_bounces(
     return _response_data
 
 # Tags: Bounces API
-@mcp.tool()
+@mcp.tool(
+    title="Get Bounce by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bounce_by_id(bounceid: str = Field(..., description="The unique identifier of the bounce record to retrieve. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific bounce event by its ID. Use this to inspect bounce details such as type, email address, and timestamp for a particular bounce occurrence."""
 
@@ -1332,7 +1379,12 @@ async def get_bounce_by_id(bounceid: str = Field(..., description="The unique id
     return _response_data
 
 # Tags: Bounces API
-@mcp.tool()
+@mcp.tool(
+    title="Activate Bounce",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def activate_bounce(bounceid: str = Field(..., description="The unique identifier of the bounce record to activate. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Reactivate a bounce record in Postmark, allowing it to be processed again. This operation marks a previously bounced email address as active."""
 
@@ -1370,7 +1422,13 @@ async def activate_bounce(bounceid: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Bounces API
-@mcp.tool()
+@mcp.tool(
+    title="Get Bounce Dump",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_bounce_dump(bounceid: str = Field(..., description="The unique identifier of the bounce event whose dump data you want to retrieve. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve the detailed dump data for a specific bounce event. This provides comprehensive information about why a message bounced, including diagnostic details and headers."""
 
@@ -1408,7 +1466,13 @@ async def get_bounce_dump(bounceid: str = Field(..., description="The unique ide
     return _response_data
 
 # Tags: Bounces API
-@mcp.tool()
+@mcp.tool(
+    title="Get Delivery Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_delivery_stats() -> dict[str, Any] | ToolResult:
     """Retrieve delivery statistics for messages sent through your Postmark server. This provides insights into message delivery performance and status."""
 
@@ -1435,7 +1499,12 @@ async def get_delivery_stats() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Sending API
-@mcp.tool()
+@mcp.tool(
+    title="Send Email",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_email(
     attachments: list[_models.Attachment] | None = Field(None, alias="Attachments", description="Array of file attachments to include with the email. Each attachment should specify the file content, name, and MIME type."),
     from_: str | None = Field(None, alias="From", description="Sender email address. Must correspond to a registered and confirmed Sender Signature in your Postmark account."),
@@ -1479,13 +1548,19 @@ async def send_email(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Sending API
-@mcp.tool()
+@mcp.tool(
+    title="Send Emails Batch",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_emails_batch(body: list[_models.SendEmailRequest] | None = Field(None, description="Array of email objects to send in this batch. Each object should contain the email details (recipient, subject, body, etc.) in Postmark's standard email format. Order is preserved for processing.")) -> dict[str, Any] | ToolResult:
     """Send multiple emails in a single batch request to efficiently deliver messages through Postmark's email service."""
 
@@ -1518,13 +1593,19 @@ async def send_emails_batch(body: list[_models.SendEmailRequest] | None = Field(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Sending API, Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Send Email Batch with Templates",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_email_batch_with_templates(messages: list[_models.EmailWithTemplateRequest] | None = Field(None, alias="Messages", description="Array of email message objects to send, each containing template identifiers and recipient details. Order is preserved for batch processing.")) -> dict[str, Any] | ToolResult:
     """Send multiple emails in a single batch request using predefined email templates. This operation allows efficient bulk email delivery with template-based content."""
 
@@ -1556,13 +1637,19 @@ async def send_email_batch_with_templates(messages: list[_models.EmailWithTempla
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Sending API, Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Send Email with Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def send_email_with_template(
     from_: str = Field(..., alias="From", description="Sender email address. Must be a valid email format and typically should be a verified sender on your Postmark account."),
     template_alias: str = Field(..., alias="TemplateAlias", description="Template identifier using a human-readable alias string. Either this or TemplateId must be provided to identify which template to use."),
@@ -1607,13 +1694,20 @@ async def send_email_with_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Search Inbound Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_messages_inbound(
     count: int = Field(..., description="Number of messages to return per request, between 1 and 500."),
     offset: int = Field(..., description="Number of messages to skip from the beginning of results for pagination."),
@@ -1662,7 +1756,12 @@ async def search_messages_inbound(
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Bypass Inbound Message Rules",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def bypass_inbound_message_rules(messageid: str = Field(..., description="The unique identifier of the inbound message that should be exempted from rule filtering.")) -> dict[str, Any] | ToolResult:
     """Allow a blocked inbound message to bypass email filtering rules. Use this to whitelist or recover messages that were incorrectly filtered by the server's inbound rules."""
 
@@ -1698,7 +1797,13 @@ async def bypass_inbound_message_rules(messageid: str = Field(..., description="
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Get Inbound Message Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_inbound_message_details(messageid: str = Field(..., description="The unique identifier of the inbound message whose details you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific inbound message, including its content, metadata, and delivery status."""
 
@@ -1734,7 +1839,13 @@ async def get_inbound_message_details(messageid: str = Field(..., description="T
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Retry Inbound Message",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def retry_inbound_message(messageid: str = Field(..., description="The unique identifier of the inbound message to retry. This should be the message ID returned from the inbound message service.")) -> dict[str, Any] | ToolResult:
     """Retry processing of a previously failed inbound message. Use this operation to reprocess a message that encountered an error during initial delivery or processing."""
 
@@ -1770,7 +1881,13 @@ async def retry_inbound_message(messageid: str = Field(..., description="The uni
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Search Outbound Messages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_messages_outbound(
     count: int = Field(..., description="Number of messages to return per request, between 1 and 500."),
     offset: int = Field(..., description="Number of messages to skip from the beginning of results for pagination."),
@@ -1817,7 +1934,13 @@ async def search_messages_outbound(
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="List Outbound Message Clicks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outbound_message_clicks(
     count: int = Field(..., description="Number of click records to return per request, up to a maximum of 500 results."),
     offset: int = Field(..., description="Number of click records to skip before returning results, used for pagination."),
@@ -1866,7 +1989,13 @@ async def list_outbound_message_clicks(
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="List Message Outbound Clicks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_outbound_clicks(
     messageid: str = Field(..., description="The unique identifier of the outbound message for which to retrieve click statistics."),
     count: int = Field(..., description="The number of click records to return per request, between 1 and 500 clicks.", ge=1, le=500),
@@ -1909,7 +2038,13 @@ async def list_message_outbound_clicks(
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="List Message Opens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_message_opens(
     count: int = Field(..., description="Number of open events to return per request, between 1 and 500."),
     offset: int = Field(..., description="Number of open events to skip before returning results, used for pagination."),
@@ -1958,7 +2093,13 @@ async def list_message_opens(
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Get Message Opens by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_message_opens_by_id(
     messageid: str = Field(..., description="The unique identifier of the outbound message for which to retrieve open statistics."),
     count: int = Field(..., description="The number of open records to return in this request. Must be between 1 and 500 (defaults to 1).", ge=1, le=500),
@@ -2001,7 +2142,13 @@ async def get_message_opens_by_id(
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Message Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_message_details(messageid: str = Field(..., description="The unique identifier of the outbound message whose details you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific outbound message, including delivery status, recipient information, and message content."""
 
@@ -2037,7 +2184,13 @@ async def get_outbound_message_details(messageid: str = Field(..., description="
     return _response_data
 
 # Tags: Messages API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Message Dump",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_message_dump(messageid: str = Field(..., description="The unique identifier of the outbound message for which to retrieve the complete dump data.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full dump of an outbound message, including all metadata and content details. This operation requires authentication via a Postmark server token."""
 
@@ -2073,7 +2226,13 @@ async def get_outbound_message_dump(messageid: str = Field(..., description="The
     return _response_data
 
 # Tags: Server Configuration API
-@mcp.tool()
+@mcp.tool(
+    title="Get Server Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_server_configuration() -> dict[str, Any] | ToolResult:
     """Retrieve the configuration and settings for the authenticated Postmark server, including delivery settings, bounce handling, and other server-level configurations."""
 
@@ -2100,7 +2259,13 @@ async def get_server_configuration() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_stats(
     tag: str | None = Field(None, description="Filter statistics to a specific tag, useful for segmenting results by campaign, sender, or other classification."),
     fromdate: str | None = Field(None, description="Start date for the statistics range in ISO 8601 format (YYYY-MM-DD). Results will include data from this date onward."),
@@ -2142,7 +2307,13 @@ async def get_outbound_stats(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Bounce Statistics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_bounce_statistics(
     tag: str | None = Field(None, description="Filter bounce statistics to a specific tag associated with your emails."),
     fromdate: str | None = Field(None, description="Filter statistics to include data starting from this date (inclusive). Specify in ISO 8601 date format (YYYY-MM-DD)."),
@@ -2184,7 +2355,13 @@ async def get_outbound_bounce_statistics(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Click Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_click_stats(
     tag: str | None = Field(None, description="Filter statistics to only include clicks associated with a specific tag."),
     fromdate: str | None = Field(None, description="Filter statistics to include only clicks from this date forward (inclusive). Specify as a calendar date in YYYY-MM-DD format."),
@@ -2226,7 +2403,13 @@ async def get_outbound_click_stats(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Clicks by Location",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_clicks_by_location(
     tag: str | None = Field(None, description="Filter results to include only clicks from messages tagged with this value."),
     fromdate: str | None = Field(None, description="Include statistics starting from this date (inclusive). Specify in ISO 8601 date format (YYYY-MM-DD)."),
@@ -2268,7 +2451,13 @@ async def get_outbound_clicks_by_location(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="List Outbound Click Stats by Platform",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outbound_click_stats_by_platform(
     tag: str | None = Field(None, description="Filter results to include only clicks associated with a specific tag."),
     fromdate: str | None = Field(None, description="Filter results to include only statistics from this date forward, specified in ISO 8601 format (YYYY-MM-DD)."),
@@ -2310,7 +2499,13 @@ async def list_outbound_click_stats_by_platform(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Email Opens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_email_opens(
     tag: str | None = Field(None, description="Filter results to only include statistics for messages tagged with this value."),
     fromdate: str | None = Field(None, description="Filter statistics to include only data from this date forward, specified in ISO 8601 date format (YYYY-MM-DD)."),
@@ -2352,7 +2547,13 @@ async def get_outbound_email_opens(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="List Outbound Email Opens by Client",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_outbound_email_opens_by_client(
     tag: str | None = Field(None, description="Filter results to only include opens from messages tagged with this value."),
     fromdate: str | None = Field(None, description="Include opens starting from this date (inclusive). Specify in ISO 8601 date format (YYYY-MM-DD)."),
@@ -2394,7 +2595,13 @@ async def list_outbound_email_opens_by_client(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="List Email Opens by Platform",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_email_opens_by_platform(
     tag: str | None = Field(None, description="Filter statistics to only include opens from messages tagged with this value."),
     fromdate: str | None = Field(None, description="Include statistics starting from this date (inclusive). Specify in ISO 8601 date format (YYYY-MM-DD)."),
@@ -2436,7 +2643,13 @@ async def list_email_opens_by_platform(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Send Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_send_stats(
     tag: str | None = Field(None, description="Filter results to only include statistics for messages with this specific tag."),
     fromdate: str | None = Field(None, description="Filter statistics to include only data from this date forward, specified in ISO 8601 date format (YYYY-MM-DD)."),
@@ -2478,7 +2691,13 @@ async def get_outbound_send_stats(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Spam Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_spam_stats(
     tag: str | None = Field(None, description="Filter statistics by a specific tag to isolate metrics for tagged message groups."),
     fromdate: str | None = Field(None, description="Start date for the statistics query in ISO 8601 format (YYYY-MM-DD). Results will include data from this date onward."),
@@ -2520,7 +2739,13 @@ async def get_outbound_spam_stats(
     return _response_data
 
 # Tags: Stats API
-@mcp.tool()
+@mcp.tool(
+    title="Get Outbound Tracked Email Stats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_outbound_tracked_email_stats(
     tag: str | None = Field(None, description="Filter results to only include emails associated with this specific tag."),
     fromdate: str | None = Field(None, description="Start date for the stats query in ISO 8601 format (YYYY-MM-DD). Only emails sent on or after this date will be included."),
@@ -2562,7 +2787,13 @@ async def get_outbound_tracked_email_stats(
     return _response_data
 
 # Tags: Templates API
-@mcp.tool()
+@mcp.tool(
+    title="List Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_templates(
     count: int = Field(..., alias="Count", description="The maximum number of templates to return in this request. Must be a positive integer."),
     offset: int = Field(..., alias="Offset", description="The number of templates to skip before returning results, enabling pagination through your template collection. Must be a non-negative integer."),
@@ -2603,7 +2834,12 @@ async def list_templates(
     return _response_data
 
 # Tags: Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Create Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_template(
     name: str = Field(..., alias="Name", description="Human-readable name for the template displayed in the Postmark dashboard and API responses."),
     subject: str = Field(..., alias="Subject", description="Template definition for the email subject line. Supports template variables and dynamic content using Postmark's templating syntax."),
@@ -2641,13 +2877,19 @@ async def create_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Validate Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_template(
     inline_css_for_html_test_render: bool | None = Field(None, alias="InlineCssForHtmlTestRender", description="When validating HTML content, controls whether CSS style blocks are inlined as style attributes on matching elements. Defaults to true; set to false to disable CSS inlining."),
     subject: str | None = Field(None, alias="Subject", description="The subject line template content to validate using Postmark's template language syntax. Required if neither HtmlBody nor TextBody is provided."),
@@ -2683,13 +2925,20 @@ async def validate_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Get Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_template(template_id_or_alias: str = Field(..., alias="templateIdOrAlias", description="The unique identifier or alias of the template to retrieve. You can use either the TemplateID (numeric identifier) or the Alias (custom name) to look up the template.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific email template by its unique identifier or alias. Use this to fetch template details for rendering, previewing, or managing email communications."""
 
@@ -2725,7 +2974,13 @@ async def get_template(template_id_or_alias: str = Field(..., alias="templateIdO
     return _response_data
 
 # Tags: Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Update Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_template(
     template_id_or_alias: str = Field(..., alias="templateIdOrAlias", description="The unique identifier or alias of the template to update. Use either the numeric TemplateID or the string Alias value."),
     alias: str | None = Field(None, alias="Alias", description="Optional string identifier for the template using letters, numbers, and the characters '.', '-', '_'. Must start with a letter."),
@@ -2763,13 +3018,20 @@ async def update_template(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Templates API
-@mcp.tool()
+@mcp.tool(
+    title="Delete Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_template(template_id_or_alias: str = Field(..., alias="templateIdOrAlias", description="The unique identifier or alias of the template to delete. You can use either the TemplateID or the Alias value.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a template by its ID or alias. This action cannot be undone."""
 
@@ -2805,7 +3067,13 @@ async def delete_template(template_id_or_alias: str = Field(..., alias="template
     return _response_data
 
 # Tags: Inbound Rules API
-@mcp.tool()
+@mcp.tool(
+    title="List Inbound Rule Triggers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_inbound_rule_triggers(
     count: int = Field(..., description="The maximum number of trigger records to return in this request. Must be a positive integer."),
     offset: int = Field(..., description="The number of records to skip before returning results, enabling pagination through large result sets. Must be a non-negative integer."),
