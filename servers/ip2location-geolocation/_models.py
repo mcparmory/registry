@@ -1,7 +1,7 @@
 """
 Ip2location.io Ip Geolocation MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:20:46 UTC
+Generated: 2026-05-12 11:39:41 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
