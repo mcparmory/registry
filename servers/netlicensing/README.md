@@ -5,7 +5,7 @@ Base URL: https://go.netlicensing.io/core/v2/rest
 | | |
 |---|---|
 | **Category** | Legal & Compliance |
-| **Tools** | 40 |
+| **Tools** | 30 |
 | **Auth** | HTTP Basic |
 
 ## API Info
@@ -67,6 +67,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `BASIC_AUTH_PASSWORD` — Password
 - `API_KEY_AUTH_USERNAME` — Username
 - `API_KEY_AUTH_PASSWORD` — Password
+
 Do not commit credentials to version control.
 
 ---

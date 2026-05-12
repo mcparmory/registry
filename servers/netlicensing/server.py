@@ -5,7 +5,7 @@ NetLicensing MCP Server
 API Info:
 - Terms of Service: https://www.labs64.com/legal/terms-of-service/netlicensing
 
-Generated: 2026-05-05 15:38:47 UTC
+Generated: 2026-05-12 11:57:45 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://go.netlicensing.io/core/v2/rest")
 SERVER_NAME = "NetLicensing"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1010,6 +1041,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1034,6 +1067,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1250,7 +1285,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("NetLicensing", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Product
-@mcp.tool()
+@mcp.tool(
+    title="List Products",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_products() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all configured products available for the current vendor. Use this to discover and enumerate products in your vendor account."""
 
@@ -1277,7 +1318,12 @@ async def list_products() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Product
-@mcp.tool()
+@mcp.tool(
+    title="Create Product",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_product(
     active: bool = Field(..., description="Activation status of the product. When set to false, the product is disabled and prevents new licensee registrations and license issuance to existing licensees."),
     name: str = Field(..., description="The product name, which together with the version uniquely identifies the product for end customers."),
@@ -1324,7 +1370,13 @@ async def create_product(
     return _response_data
 
 # Tags: Product
-@mcp.tool()
+@mcp.tool(
+    title="Get Product",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_product(product_number: str = Field(..., alias="productNumber", description="The unique identifier for the product. This value must exactly match the product number in the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific product by its unique product number. Use this operation to fetch detailed information about a single product."""
 
@@ -1360,7 +1412,12 @@ async def get_product(product_number: str = Field(..., alias="productNumber", de
     return _response_data
 
 # Tags: Product
-@mcp.tool()
+@mcp.tool(
+    title="Update Product",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_product(
     product_number: str = Field(..., alias="productNumber", description="The unique identifier for the product to update."),
     active: bool | None = Field(None, description="Enable or disable the product. When disabled, new licensees cannot be registered and existing licensees cannot obtain new licenses."),
@@ -1409,7 +1466,13 @@ async def update_product(
     return _response_data
 
 # Tags: Product
-@mcp.tool()
+@mcp.tool(
+    title="Delete Product",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_product(
     product_number: str = Field(..., alias="productNumber", description="The unique identifier for the product to delete."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the product and all its dependent objects. Use with caution as this operation cannot be undone."),
@@ -1451,7 +1514,13 @@ async def delete_product(
     return _response_data
 
 # Tags: Product Module
-@mcp.tool()
+@mcp.tool(
+    title="List Product Modules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_product_modules() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all Product Modules available for the current Vendor. This operation returns all modules without filtering or pagination."""
 
@@ -1478,7 +1547,12 @@ async def list_product_modules() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Product Module
-@mcp.tool()
+@mcp.tool(
+    title="Create Product Module",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_product_module(
     product_number: str = Field(..., alias="productNumber", description="Unique identifier for the Product Module within the Vendor's Product catalog. Can be assigned by the Vendor or auto-generated by NetLicensing. Becomes read-only once the first Licensee is created for this Product Module."),
     active: bool = Field(..., description="Activation status of the Product Module. When set to false, the module is disabled and Licensees cannot obtain new Licenses for it."),
@@ -1531,7 +1605,13 @@ async def create_product_module(
     return _response_data
 
 # Tags: Product Module
-@mcp.tool()
+@mcp.tool(
+    title="Get Product Module",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_product_module(product_module_number: str = Field(..., alias="productModuleNumber", description="The unique identifier for the Product Module, assigned by the Vendor or auto-generated by NetLicensing. This value becomes read-only once the first Licensee is created for the Product.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Product Module by its unique identifier. Returns the complete Product Module details for the given productModuleNumber."""
 
@@ -1567,7 +1647,13 @@ async def get_product_module(product_module_number: str = Field(..., alias="prod
     return _response_data
 
 # Tags: Product Module
-@mcp.tool()
+@mcp.tool(
+    title="Update Product Module",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_product_module(
     product_module_number: str = Field(..., alias="productModuleNumber", description="Unique identifier for the Product Module within the Vendor's product catalog. This value becomes read-only once the first Licensee is created for the Product."),
     active: bool | None = Field(None, description="Enable or disable the Product Module. When disabled, Licensees cannot obtain new Licenses for this module."),
@@ -1621,7 +1707,13 @@ async def update_product_module(
     return _response_data
 
 # Tags: Product Module
-@mcp.tool()
+@mcp.tool(
+    title="Delete Product Module",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_product_module(
     product_module_number: str = Field(..., alias="productModuleNumber", description="The unique identifier for the Product Module within a Vendor's product catalog. This number must exactly match an existing Product Module."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the Product Module and all its child objects in the hierarchy. Use with caution as this operation cannot be undone."),
@@ -1663,7 +1755,13 @@ async def delete_product_module(
     return _response_data
 
 # Tags: License Template
-@mcp.tool()
+@mcp.tool(
+    title="List License Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_license_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available license templates configured for the current vendor. Use this to discover template options before creating or managing licenses."""
 
@@ -1690,7 +1788,12 @@ async def list_license_templates() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: License Template
-@mcp.tool()
+@mcp.tool(
+    title="Create License Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_license_template(
     product_module_number: str = Field(..., alias="productModuleNumber", description="The unique identifier of the Product Module under which this License Template will be created."),
     name: str = Field(..., description="A descriptive name for the License Template that identifies its purpose and licensing model."),
@@ -1739,7 +1842,13 @@ async def create_license_template(
     return _response_data
 
 # Tags: License Template
-@mcp.tool()
+@mcp.tool(
+    title="Get License Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_license_template(license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier for the License Template, assigned by the vendor during creation or auto-generated by NetLicensing. This value becomes read-only once the first License is created from this template.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific License Template by its unique identifier. This template defines the licensing model and terms for products from a vendor."""
 
@@ -1775,7 +1884,13 @@ async def get_license_template(license_template_number: str = Field(..., alias="
     return _response_data
 
 # Tags: License Template
-@mcp.tool()
+@mcp.tool(
+    title="Update License Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_license_template(
     license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier for the License Template within the Vendor's product portfolio. This value is immutable once the first License is created from this template."),
     name: str | None = Field(None, description="A human-readable name for the License Template to identify it in the system."),
@@ -1825,7 +1940,13 @@ async def update_license_template(
     return _response_data
 
 # Tags: License Template
-@mcp.tool()
+@mcp.tool(
+    title="Delete License Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_license_template(
     license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier for the License Template to delete, assigned across all Products within a Vendor."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the License Template and all its descendant objects. Use with caution as this operation cannot be undone."),
@@ -1867,7 +1988,13 @@ async def delete_license_template(
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="List Licensees",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_licensees() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all licensees associated with the current vendor account."""
 
@@ -1894,7 +2021,12 @@ async def list_licensees() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="Create Licensee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_licensee(
     product_number: str = Field(..., alias="productNumber", description="The product number to assign to the new Licensee. This identifier links the licensee to a specific product."),
     active: bool = Field(..., description="Determines whether the Licensee is active. When set to false, the Licensee is disabled and cannot obtain new licenses or participate in validation."),
@@ -1938,7 +2070,13 @@ async def create_licensee(
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="Get Licensee",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_licensee(licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier assigned to the licensee within the vendor's product ecosystem. This value is either vendor-assigned during licensee creation or auto-generated by NetLicensing, and becomes read-only once the first license is issued.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific licensee by their unique identifier. Returns complete licensee details including licensing status and associated metadata."""
 
@@ -1974,7 +2112,12 @@ async def get_licensee(licensee_number: str = Field(..., alias="licenseeNumber",
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="Update Licensee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_licensee(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier for the Licensee within the Vendor's product ecosystem. This value is assigned by the Vendor during creation or auto-generated by NetLicensing, and becomes read-only once the first License is created for this Licensee."),
     active: bool | None = Field(None, description="Enable or disable the Licensee. When set to false, the Licensee cannot obtain new Licenses and validation checks are disabled."),
@@ -2019,7 +2162,13 @@ async def update_licensee(
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="Delete Licensee",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_licensee(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier for the licensee to delete. This number is unique across all products for a given vendor."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the licensee and all its dependent objects and descendants. Use with caution as this operation cannot be undone."),
@@ -2061,7 +2210,12 @@ async def delete_licensee(
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="Validate Licensee",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def validate_licensee(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier for the licensee to validate. Maximum length is 1000 characters."),
     licensee_name: str | None = Field(None, alias="licenseeName", description="Human-readable name for the licensee. Used as a custom property if the licensee is auto-created during validation."),
@@ -2109,7 +2263,12 @@ async def validate_licensee(
     return _response_data
 
 # Tags: Licensee
-@mcp.tool()
+@mcp.tool(
+    title="Transfer Licenses Between Licensees",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def transfer_licenses_between_licensees(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The destination licensee number that will receive the transferred licenses. Must be a valid licensee identifier with a maximum length of 1000 characters."),
     source_licensee_number: str = Field(..., alias="sourceLicenseeNumber", description="The source licensee number from which licenses will be transferred. Must be a valid licensee identifier with a maximum length of 1000 characters."),
@@ -2152,7 +2311,13 @@ async def transfer_licenses_between_licensees(
     return _response_data
 
 # Tags: License
-@mcp.tool()
+@mcp.tool(
+    title="List Licenses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_licenses() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all licenses associated with the current vendor account."""
 
@@ -2179,7 +2344,12 @@ async def list_licenses() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: License
-@mcp.tool()
+@mcp.tool(
+    title="Create License",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_license(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier of the licensee to whom this license will be assigned."),
     license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier of the license template that defines the license type, model, and default properties."),
@@ -2228,7 +2398,13 @@ async def create_license(
     return _response_data
 
 # Tags: License
-@mcp.tool()
+@mcp.tool(
+    title="Get License",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_license(license_number: str = Field(..., alias="licenseNumber", description="The unique license identifier assigned by the vendor or auto-generated by NetLicensing. This value is immutable after the associated creation transaction is closed.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific license by its unique identifier. Returns complete license details including status, product information, and licensee data."""
 
@@ -2264,7 +2440,13 @@ async def get_license(license_number: str = Field(..., alias="licenseNumber", de
     return _response_data
 
 # Tags: License
-@mcp.tool()
+@mcp.tool(
+    title="Update License",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_license(
     license_number: str = Field(..., alias="licenseNumber", description="The unique identifier for the license to update. This number is assigned by the vendor or auto-generated by NetLicensing and cannot be changed after the creation transaction is closed."),
     active: bool | None = Field(None, description="Enable or disable the license. When disabled, the license becomes inactive."),
@@ -2313,7 +2495,13 @@ async def update_license(
     return _response_data
 
 # Tags: License
-@mcp.tool()
+@mcp.tool(
+    title="Delete License",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_license(license_number: str = Field(..., alias="licenseNumber", description="The unique license identifier assigned by the vendor or generated by NetLicensing. This value is immutable after the associated creation transaction is closed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a license by its unique identifier. Once deleted, the license cannot be recovered."""
 
@@ -2349,7 +2537,13 @@ async def delete_license(license_number: str = Field(..., alias="licenseNumber",
     return _response_data
 
 # Tags: Transaction
-@mcp.tool()
+@mcp.tool(
+    title="List Transactions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_transactions() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all transactions associated with the current vendor account."""
 
@@ -2376,7 +2570,12 @@ async def list_transactions() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Transaction
-@mcp.tool()
+@mcp.tool(
+    title="Create Transaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_transaction(
     active: bool = Field(..., description="Activation status of the transaction. Must always be set to true when creating a transaction."),
     status: Literal["CANCELLED", "CLOSED", "PENDING"] = Field(..., description="The current state of the transaction. Must be one of: PENDING (awaiting processing), CLOSED (completed), or CANCELLED (voided)."),
@@ -2421,7 +2620,13 @@ async def create_transaction(
     return _response_data
 
 # Tags: Transaction
-@mcp.tool()
+@mcp.tool(
+    title="Get Transaction",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_transaction(transaction_number: str = Field(..., alias="transactionNumber", description="The unique transaction identifier assigned by the vendor. This number is globally unique across all products within the vendor's system and is used to retrieve the specific transaction record.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific transaction by its unique identifier. Returns complete transaction details including all associated metadata and status information."""
 
@@ -2457,7 +2662,12 @@ async def get_transaction(transaction_number: str = Field(..., alias="transactio
     return _response_data
 
 # Tags: Transaction
-@mcp.tool()
+@mcp.tool(
+    title="Update Transaction",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_transaction(
     transaction_number: str = Field(..., alias="transactionNumber", description="The unique identifier for the transaction to update. This number is unique across all products for a given vendor."),
     active: bool | None = Field(None, description="Flag indicating whether the transaction is active. This field should always be set to true for transactions."),
@@ -2503,7 +2713,13 @@ async def update_transaction(
     return _response_data
 
 # Tags: Token
-@mcp.tool()
+@mcp.tool(
+    title="List Tokens",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tokens() -> dict[str, Any] | ToolResult:
     """Retrieve all authentication tokens associated with the current vendor account. Use this to view and manage API credentials."""
 
@@ -2530,7 +2746,12 @@ async def list_tokens() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Token
-@mcp.tool()
+@mcp.tool(
+    title="Create Token",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_token(
     token_type: Literal["DEFAULT", "SHOP", "APIKEY"] = Field(..., alias="tokenType", description="The category of token to generate. Choose DEFAULT for licensee login actions, SHOP for customer checkout flows, or APIKEY for programmatic API access."),
     api_key_role: Literal["ROLE_APIKEY_LICENSEE", "ROLE_APIKEY_ANALYTICS", "ROLE_APIKEY_OPERATION", "ROLE_APIKEY_MAINTENANCE", "ROLE_APIKEY_ADMIN"] | None = Field(None, alias="apiKeyRole", description="The permission level for APIKEY tokens only. Defaults to ROLE_APIKEY_LICENSEE if not specified. Select from licensee, analytics, operation, maintenance, or admin roles."),
@@ -2581,7 +2802,13 @@ async def create_token(
     return _response_data
 
 # Tags: Token
-@mcp.tool()
+@mcp.tool(
+    title="Get Token",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_token(token_number: str = Field(..., alias="tokenNumber", description="The unique identifier of the token to retrieve, provided as a string value.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific token by its token number. Use this operation to fetch details about an individual token in the system."""
 
@@ -2617,7 +2844,13 @@ async def get_token(token_number: str = Field(..., alias="tokenNumber", descript
     return _response_data
 
 # Tags: Token
-@mcp.tool()
+@mcp.tool(
+    title="Delete Token",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_token(token_number: str = Field(..., alias="tokenNumber", description="The unique identifier of the token to delete, provided as a string.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a token by its number. This operation removes the token from the system and cannot be undone."""
 
@@ -2653,7 +2886,13 @@ async def delete_token(token_number: str = Field(..., alias="tokenNumber", descr
     return _response_data
 
 # Tags: Payment Method
-@mcp.tool()
+@mcp.tool(
+    title="List Payment Methods",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_payment_methods() -> dict[str, Any] | ToolResult:
     """Retrieve all payment methods configured for the current vendor account. Returns a complete list of available payment options."""
 
@@ -2680,7 +2919,13 @@ async def list_payment_methods() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Payment Method
-@mcp.tool()
+@mcp.tool(
+    title="Get Payment Method",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_payment_method(payment_method_number: str = Field(..., alias="paymentMethodNumber", description="The unique identifier for the payment method to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific payment method using its unique payment method number."""
 
@@ -2716,7 +2961,12 @@ async def get_payment_method(payment_method_number: str = Field(..., alias="paym
     return _response_data
 
 # Tags: Payment Method
-@mcp.tool()
+@mcp.tool(
+    title="Update Payment Method",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_payment_method(
     payment_method_number: str = Field(..., alias="paymentMethodNumber", description="The unique identifier of the payment method to update."),
     active: bool | None = Field(None, description="Set to false to disable the payment method, or true to enable it. If not provided, the current active status is preserved."),
@@ -2760,7 +3010,13 @@ async def update_payment_method(
     return _response_data
 
 # Tags: Utility
-@mcp.tool()
+@mcp.tool(
+    title="List Licensing Models",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_licensing_models() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all licensing models supported by the service. Use this to understand available licensing options for your integration."""
 
@@ -2787,7 +3043,13 @@ async def list_licensing_models() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Utility
-@mcp.tool()
+@mcp.tool(
+    title="List License Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_license_types() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all license types supported by the service. Use this to understand available licensing options for your integration."""
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-netlicensing"
-version = "1.0.1"
+version = "1.0.2"
 description = "Create and manage software licenses, products, modules, and customer licensing agreements"
 readme = "README.md"
 license = "MIT"
@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.2.4",
     "httpx>=0.27.0,<1.0.0",
+    "mcp",
     "pydantic>=2.0.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0"
 ]
