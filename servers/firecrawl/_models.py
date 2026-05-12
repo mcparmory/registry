@@ -1,13 +1,13 @@
 """
 Firecrawl MCP Server - Pydantic Models
 
-Generated: 2026-05-05 14:59:29 UTC
+Generated: 2026-05-12 11:23:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -137,7 +137,7 @@ class MapUrlsRequest(StrictModel):
 
 # Operation: extract_structured_data
 class ExtractDataRequestBody(StrictModel):
-    urls: list[str] = Field(default=..., description="List of URLs to extract structured data from. URLs are processed in the order provided.")
+    urls: list[Annotated[str, Field(json_schema_extra={'format': 'uri'})]] = Field(default=..., description="List of URLs to extract structured data from. URLs are processed in the order provided.")
     enable_web_search: bool | None = Field(default=None, validation_alias="enableWebSearch", serialization_alias="enableWebSearch", description="Enable web search to supplement data extraction with additional information from search results.")
     include_subdomains: bool | None = Field(default=None, validation_alias="includeSubdomains", serialization_alias="includeSubdomains", description="Include subdomains of the specified URLs in the extraction scope.")
     show_sources: bool | None = Field(default=None, validation_alias="showSources", serialization_alias="showSources", description="Include source attribution in the response, showing which sources were used to extract each data point.")
@@ -442,7 +442,7 @@ class ScrapeAndExtractFromUrlsBodyWebhook(PermissiveModel):
     events: list[Literal["completed", "page", "failed", "started"]] | None = Field(None, description="Webhook URL に送信するイベントの種類。（デフォルト: すべて）")
 
 class ScrapeAndExtractFromUrlsBody(PermissiveModel):
-    urls: list[str]
+    urls: list[Annotated[str, Field(json_schema_extra={'format': 'uri'})]]
     webhook: ScrapeAndExtractFromUrlsBodyWebhook | None = Field(None, description="Webhook の仕様を表すオブジェクト。")
     max_concurrency: int | None = Field(None, validation_alias="maxConcurrency", serialization_alias="maxConcurrency", description="同時スクレイプの最大数。このパラメータで、このバッチスクレイプにおける同時実行数の上限を設定できます。指定しない場合は、チームの同時実行数の上限が適用されます。")
     ignore_invalid_ur_ls: bool | None = Field(False, validation_alias="ignoreInvalidURLs", serialization_alias="ignoreInvalidURLs", description="urls 配列に無効な URL が含まれている場合、それらは無視されます。無効な URL が原因でリクエスト全体が失敗するのではなく、残りの有効な URL のみを使ってバッチスクレイプが実行され、無効な URL はレスポンスの invalidURLs フィールドで返されます。")

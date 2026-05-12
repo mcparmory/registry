@@ -5,7 +5,7 @@ Firecrawl MCP Server
 API Info:
 - Contact: Firecrawl Support <support@firecrawl.dev> (https://firecrawl.dev/support)
 
-Generated: 2026-05-05 14:59:29 UTC
+Generated: 2026-05-12 11:23:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.firecrawl.dev/v1")
 SERVER_NAME = "Firecrawl"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -986,6 +1017,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1010,6 +1043,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1217,7 +1252,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Firecrawl", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Scraping
-@mcp.tool()
+@mcp.tool(
+    title="Scrape and Extract Webpage",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody = Field(..., description="Request payload containing the URL to scrape and extraction parameters, including the target URL and optional LLM extraction instructions or schema.")) -> dict[str, Any] | ToolResult:
     """Scrapes content from a specified URL and uses LLM-powered extraction to identify and structure relevant information from the page."""
 
@@ -1250,13 +1290,19 @@ async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody =
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Scraping
-@mcp.tool()
+@mcp.tool(
+    title="Scrape and Extract from URLs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = Field(..., description="Request payload containing the list of URLs to scrape and extraction configuration. Specify target URLs, extraction rules, and LLM processing options for batch operations.")) -> dict[str, Any] | ToolResult:
     """Scrape content from multiple URLs and extract structured information using LLM-powered analysis. Supports batch processing with optional intelligent data extraction."""
 
@@ -1289,13 +1335,20 @@ async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = F
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Scraping
-@mcp.tool()
+@mcp.tool(
+    title="Get Batch Scrape Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_batch_scrape_status(id_: str = Field(..., alias="id", description="The unique identifier of the batch scrape job to check status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and progress of a batch scraping job. Use this to monitor ongoing or completed scrape operations."""
 
@@ -1331,7 +1384,13 @@ async def get_batch_scrape_status(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: Scraping
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Batch Scrape",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancels an active batch scraping job by its ID. The job will stop processing immediately and any pending tasks will be abandoned."""
 
@@ -1367,7 +1426,13 @@ async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Scraping
-@mcp.tool()
+@mcp.tool(
+    title="List Batch Scrape Errors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job for which to retrieve errors.")) -> dict[str, Any] | ToolResult:
     """Retrieve all errors that occurred during a batch scraping job. Use this to diagnose failures and understand which URLs or data extraction steps encountered issues."""
 
@@ -1403,7 +1468,13 @@ async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Crawling
-@mcp.tool()
+@mcp.tool(
+    title="Get Crawl Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_crawl_status(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to retrieve status for. Must be a valid UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and progress of a crawl job by its unique identifier. Use this to monitor ongoing or completed web crawling operations."""
 
@@ -1439,7 +1510,13 @@ async def get_crawl_status(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: Crawling
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Crawl",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to cancel. Must be a valid UUID.")) -> dict[str, Any] | ToolResult:
     """Cancel an active or pending crawl job by its ID. Once cancelled, the crawl will stop processing and cannot be resumed."""
 
@@ -1475,7 +1552,13 @@ async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Crawling
-@mcp.tool()
+@mcp.tool(
+    title="List Crawl Errors",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_crawl_errors(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job for which to retrieve errors.")) -> dict[str, Any] | ToolResult:
     """Retrieve all errors encountered during a specific crawl job. Returns detailed error information to help diagnose and troubleshoot crawling issues."""
 
@@ -1511,7 +1594,12 @@ async def list_crawl_errors(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Crawling
-@mcp.tool()
+@mcp.tool(
+    title="Crawl URLs",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def crawl_urls(
     url: str = Field(..., description="The base URL where crawling begins. All discovered URLs must be relative to this domain unless external link following is enabled."),
     webhook_url: str = Field(..., alias="webhookUrl", description="Webhook endpoint that receives crawl lifecycle events: crawl.started (when crawling begins), crawl.page (for each page processed), and crawl.completed or crawl.failed (when finished). Response format matches the /scrape endpoint."),
@@ -1563,13 +1651,19 @@ async def crawl_urls(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Mapping
-@mcp.tool()
+@mcp.tool(
+    title="Crawl URLs Map",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def crawl_urls_map(
     url: str = Field(..., description="The base URL where crawling begins. Must be a valid URI."),
     search: str | None = Field(None, description="Search query to filter mapped URLs. During alpha phase, smart search features are limited to the first 500 results, though the map operation may discover additional results beyond this limit."),
@@ -1607,15 +1701,21 @@ async def crawl_urls_map(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="Extract Structured Data",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def extract_structured_data(
-    urls: list[str] = Field(..., description="List of URLs to extract structured data from. URLs are processed in the order provided."),
+    urls: list[Annotated[str, Field(json_schema_extra={'format': 'uri'})]] = Field(..., description="List of URLs to extract structured data from. URLs are processed in the order provided."),
     enable_web_search: bool | None = Field(None, alias="enableWebSearch", description="Enable web search to supplement data extraction with additional information from search results."),
     include_subdomains: bool | None = Field(None, alias="includeSubdomains", description="Include subdomains of the specified URLs in the extraction scope."),
     show_sources: bool | None = Field(None, alias="showSources", description="Include source attribution in the response, showing which sources were used to extract each data point."),
@@ -1651,13 +1751,20 @@ async def extract_structured_data(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Extraction
-@mcp.tool()
+@mcp.tool(
+    title="Get Extraction Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_extraction_status(id_: str = Field(..., alias="id", description="The unique identifier of the extraction job to check status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a data extraction job using its unique identifier. Returns the job's progress, completion state, and any relevant metadata."""
 
@@ -1693,7 +1800,13 @@ async def get_extraction_status(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: Crawling
-@mcp.tool()
+@mcp.tool(
+    title="List Active Crawls",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_active_crawls() -> dict[str, Any] | ToolResult:
     """Retrieve all currently running web crawls for the authenticated team. Returns a list of active crawl operations with their current status and progress."""
 
@@ -1720,7 +1833,12 @@ async def list_active_crawls() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Research
-@mcp.tool()
+@mcp.tool(
+    title="Initiate Deep Research",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def initiate_deep_research(
     query: str = Field(..., description="The research topic or question to investigate"),
     max_depth: int | None = Field(None, alias="maxDepth", description="Controls the depth of iterative research cycles, determining how many levels of follow-up analysis to perform", ge=1, le=12),
@@ -1760,13 +1878,20 @@ async def initiate_deep_research(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Research
-@mcp.tool()
+@mcp.tool(
+    title="Get Deep Research Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_deep_research_status(id_: str = Field(..., alias="id", description="The unique identifier of the research job to retrieve status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of a deep research job. Use this to check progress and access findings from an ongoing or completed research task."""
 
@@ -1802,7 +1927,13 @@ async def get_deep_research_status(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Credit Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_credit_usage() -> dict[str, Any] | ToolResult:
     """Retrieve the remaining credit balance for the authenticated team. This shows how many credits are available for use."""
 
@@ -1829,7 +1960,13 @@ async def get_team_credit_usage() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Billing
-@mcp.tool()
+@mcp.tool(
+    title="List Credit Usage History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_credit_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns credit usage history grouped by API key instead of aggregated team-level data.")) -> dict[str, Any] | ToolResult:
     """Retrieve the credit usage history for the authenticated team. Optionally filter results to show credit consumption broken down by individual API keys."""
 
@@ -1867,7 +2004,13 @@ async def list_credit_usage_history(by_api_key: bool | None = Field(None, alias=
     return _response_data
 
 # Tags: Billing
-@mcp.tool()
+@mcp.tool(
+    title="Get Token Usage",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_token_usage() -> dict[str, Any] | ToolResult:
     """Retrieve the remaining token balance for the authenticated team's Extract operations. Returns current token usage information for the team."""
 
@@ -1894,7 +2037,13 @@ async def get_token_usage() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Billing
-@mcp.tool()
+@mcp.tool(
+    title="List Token Usage History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_token_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns token usage broken down by each API key instead of aggregated team totals.")) -> dict[str, Any] | ToolResult:
     """Retrieve historical token usage data for the authenticated team. Optionally break down usage by individual API keys."""
 
@@ -1932,7 +2081,12 @@ async def list_token_usage_history(by_api_key: bool | None = Field(None, alias="
     return _response_data
 
 # Tags: Search
-@mcp.tool()
+@mcp.tool(
+    title="Search and Scrape Results",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_and_scrape_results(
     query: str = Field(..., description="The search query string to execute."),
     limit: int | None = Field(None, description="Maximum number of search results to return. Valid range is 1 to 100 results.", ge=1, le=100),
@@ -1970,13 +2124,19 @@ async def search_and_scrape_results(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: LLMs.txt
-@mcp.tool()
+@mcp.tool(
+    title="Generate LLMs.txt",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def generate_llms_txt(
     url: str = Field(..., description="The website URL to analyze and generate the LLMs.txt file from. Must be a valid URI."),
     max_urls: int | None = Field(None, alias="maxUrls", description="Maximum number of URLs to crawl and analyze from the starting URL. Controls the scope of content extraction."),
@@ -2012,13 +2172,20 @@ async def generate_llms_txt(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: LLMs.txt
-@mcp.tool()
+@mcp.tool(
+    title="Get LLMs.txt Generation Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", description="The unique identifier of the LLMs.txt generation job to retrieve status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of an LLMs.txt generation job. Use this to check if a generation job has completed and access the generated content."""
 

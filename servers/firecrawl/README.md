@@ -5,7 +5,7 @@ Base URL: https://api.firecrawl.dev/v1
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 22 |
+| **Tools** | 19 |
 | **Auth** | Bearer Token |
 
 ## API Info
@@ -55,6 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+
 Do not commit credentials to version control.
 
 ---
