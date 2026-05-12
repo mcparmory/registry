@@ -6,7 +6,7 @@ API Info:
 - API License: Codacy. All rights reserved (https://www.codacy.com)
 - Contact: Codacy Team <code@codacy.com> (https://www.codacy.com)
 
-Generated: 2026-05-11 23:17:00 UTC
+Generated: 2026-05-12 11:04:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -48,7 +48,7 @@ from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.codacy.com/api/v3")
 SERVER_NAME = "Codacy"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
