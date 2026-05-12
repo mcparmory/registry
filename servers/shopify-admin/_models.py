@@ -1,7 +1,7 @@
 """
-Shopify Admin Api MCP Server - Pydantic Models
+Shopify Admin MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:21:14 UTC
+Generated: 2026-05-12 12:49:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

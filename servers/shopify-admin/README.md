@@ -1,11 +1,11 @@
-# Shopify Admin API MCP Server
+# Shopify Admin MCP Server
 <!-- mcp-name: com.mcparmory/shopify-admin -->
 
 Base URL: https://.myshopify.com/admin/api/2024-01
 | | |
 |---|---|
 | **Category** | E-commerce |
-| **Tools** | 177 |
+| **Tools** | 165 |
 | **Auth** | OAuth2, API Key |
 
 ---
@@ -70,6 +70,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `API_KEY` — API Key Authentication (X-Shopify-Access-Token)
 - `SERVER_STORE_NAME` — From the browser URL bar when logged in.
+
 Do not commit credentials to version control.
 
 ### OAuth2
