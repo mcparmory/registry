@@ -1,13 +1,13 @@
 """
 Grafana MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:19:14 UTC
+Generated: 2026-05-12 11:37:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field, RootModel
@@ -237,8 +237,8 @@ class GetRoleAssignmentsRequest(StrictModel):
 # Operation: list_team_roles_search
 class ListTeamsRolesRequestBody(StrictModel):
     include_hidden: bool | None = Field(default=None, validation_alias="includeHidden", serialization_alias="includeHidden", description="Whether to include hidden roles in the results. Set to true to show roles that are normally hidden from view.")
-    team_ids: list[int] | None = Field(default=None, validation_alias="teamIds", serialization_alias="teamIds", description="Array of team identifiers to retrieve roles for. If provided, only roles assigned to these teams will be returned.")
-    user_ids: list[int] | None = Field(default=None, validation_alias="userIds", serialization_alias="userIds", description="Array of user identifiers to filter results. If provided, only roles assigned to users within the specified teams will be included.")
+    team_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="teamIds", serialization_alias="teamIds", description="Array of team identifiers to retrieve roles for. If provided, only roles assigned to these teams will be returned.")
+    user_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="userIds", serialization_alias="userIds", description="Array of user identifiers to filter results. If provided, only roles assigned to users within the specified teams will be included.")
 class ListTeamsRolesRequest(StrictModel):
     """Retrieve all roles that have been directly assigned to specified teams. Requires `teams.roles:read` permission with `teams:id:*` scope."""
     body: ListTeamsRolesRequestBody | None = None
@@ -288,8 +288,8 @@ class RemoveTeamRoleRequest(StrictModel):
 # Operation: search_user_roles
 class ListUsersRolesRequestBody(StrictModel):
     include_hidden: bool | None = Field(default=None, validation_alias="includeHidden", serialization_alias="includeHidden", description="Include hidden roles in the search results. When enabled, returns roles that are marked as hidden in addition to visible roles.")
-    team_ids: list[int] | None = Field(default=None, validation_alias="teamIds", serialization_alias="teamIds", description="Filter results by team identifiers. Specify as an array of team IDs to limit role search to users belonging to these teams.")
-    user_ids: list[int] | None = Field(default=None, validation_alias="userIds", serialization_alias="userIds", description="Filter results by user identifiers. Specify as an array of user IDs to search for roles assigned to these specific users.")
+    team_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="teamIds", serialization_alias="teamIds", description="Filter results by team identifiers. Specify as an array of team IDs to limit role search to users belonging to these teams.")
+    user_ids: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="userIds", serialization_alias="userIds", description="Filter results by user identifiers. Specify as an array of user IDs to search for roles assigned to these specific users.")
 class ListUsersRolesRequest(StrictModel):
     """Search for roles directly assigned to specified users. Returns custom roles only, excluding built-in roles (Viewer, Editor, Admin, Grafana Admin) and team-inherited roles. Requires `users.roles:read` permission with `users:id:*` scope."""
     body: ListUsersRolesRequestBody | None = None

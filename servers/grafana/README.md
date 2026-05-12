@@ -5,7 +5,7 @@ Base URL: https://grafana1776699204.grafana.net/api
 | | |
 |---|---|
 | **Category** | Infrastructure |
-| **Tools** | 218 |
+| **Tools** | 184 |
 | **Auth** | Bearer Token |
 
 ## API Info
@@ -59,6 +59,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BEARER_TOKEN` — Bearer token
 - `SERVER_GRAFANA_URL` — Your Grafana instance hostname, visible in the browser URL bar when logged in (e.g. your-stack.grafana.net for Grafana Cloud). (default: `grafana1776699204`)
+
 Do not commit credentials to version control.
 
 ---
