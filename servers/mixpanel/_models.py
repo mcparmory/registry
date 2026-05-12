@@ -1,7 +1,7 @@
 """
 Mixpanel MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:37:03 UTC
+Generated: 2026-05-12 11:56:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

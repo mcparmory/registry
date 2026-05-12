@@ -5,7 +5,7 @@ Mixpanel MCP Server
 API Info:
 - API License: MIT (https://opensource.org/licenses/MIT)
 
-Generated: 2026-05-05 15:37:03 UTC
+Generated: 2026-05-12 11:56:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import collections
 import contextlib
 import json
@@ -42,6 +43,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -50,7 +52,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{regionAndDomain}.com/api/query".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Mixpanel"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -541,6 +543,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -548,6 +572,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -633,6 +659,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -642,18 +669,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -664,24 +689,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -991,6 +1022,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1015,6 +1048,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1222,7 +1257,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Mixpanel", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Insights
-@mcp.tool()
+@mcp.tool(
+    title="Get Insights Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_insights_report(
     project_id: int = Field(..., description="The Mixpanel project ID associated with your account."),
     bookmark_id: int = Field(..., description="The unique identifier of your Insights report, found in the Mixpanel URL path after 'report-' in the editor-card-id parameter."),
@@ -1263,7 +1304,13 @@ async def get_insights_report(
     return _response_data
 
 # Tags: Funnels
-@mcp.tool()
+@mcp.tool(
+    title="Get Funnel Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_funnel_data(
     project_id: int = Field(..., description="The Mixpanel project ID that contains the funnel."),
     funnel_id: int = Field(..., description="The ID of the funnel to retrieve data for."),
@@ -1311,7 +1358,13 @@ async def get_funnel_data(
     return _response_data
 
 # Tags: Funnels
-@mcp.tool()
+@mcp.tool(
+    title="List Saved Funnels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_saved_funnels(project_id: int = Field(..., description="The Mixpanel project ID associated with the funnels you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all saved funnels in your Mixpanel project, including their names and unique funnel identifiers."""
 
@@ -1349,7 +1402,13 @@ async def list_saved_funnels(project_id: int = Field(..., description="The Mixpa
     return _response_data
 
 # Tags: Retention
-@mcp.tool()
+@mcp.tool(
+    title="Get Retention Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retention_report(
     project_id: int = Field(..., description="The Mixpanel project ID to query retention data for."),
     from_date: str = Field(..., description="Start date for the retention analysis period in YYYY-MM-DD format (e.g., 2024-01-15)."),
@@ -1398,7 +1457,13 @@ async def get_retention_report(
     return _response_data
 
 # Tags: Retention
-@mcp.tool()
+@mcp.tool(
+    title="Get Retention Frequency Report",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retention_frequency_report(
     project_id: int = Field(..., description="The Mixpanel project ID to query against."),
     from_date: str = Field(..., description="Start date for the analysis period in YYYY-MM-DD format (inclusive)."),
@@ -1446,7 +1511,13 @@ async def get_retention_frequency_report(
     return _response_data
 
 # Tags: Segmentation
-@mcp.tool()
+@mcp.tool(
+    title="Get Segmented Event Data",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_segmented_event_data(
     project_id: int = Field(..., description="Your Mixpanel project identifier (numeric ID)."),
     event: str = Field(..., description="The name of the event to query. Specify a single event name, not multiple events."),
@@ -1493,7 +1564,13 @@ async def get_segmented_event_data(
     return _response_data
 
 # Tags: Segmentation
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Segmentation by Numeric Buckets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_segmentation_by_numeric_buckets(
     project_id: int = Field(..., description="The Mixpanel project ID to query."),
     event: str = Field(..., description="The name of the event to analyze. Specify a single event name, not multiple events."),
@@ -1538,7 +1615,13 @@ async def get_event_segmentation_by_numeric_buckets(
     return _response_data
 
 # Tags: Segmentation
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Sum by Time",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_sum_by_time(
     project_id: int = Field(..., description="The Mixpanel project ID to query."),
     event: str = Field(..., description="The name of the event to analyze. Provide a single event name, not multiple events."),
@@ -1583,7 +1666,13 @@ async def get_event_sum_by_time(
     return _response_data
 
 # Tags: Segmentation
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Average",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_average(
     project_id: int = Field(..., description="The Mixpanel project ID to query."),
     event: str = Field(..., description="The name of the event to analyze. Provide a single event name, not multiple events."),
@@ -1628,7 +1717,13 @@ async def get_event_average(
     return _response_data
 
 # Tags: Activity Feed
-@mcp.tool()
+@mcp.tool(
+    title="Get Activity Stream for Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_activity_stream_for_users(
     project_id: int = Field(..., description="The Mixpanel project ID that identifies which project to query."),
     distinct_ids: str = Field(..., description="A JSON array (as a string) of distinct user IDs for which to return activity feeds. Each ID should be a valid distinct_id from your Mixpanel project."),
@@ -1671,7 +1766,12 @@ async def get_activity_stream_for_users(
     return _response_data
 
 # Tags: Cohorts
-@mcp.tool()
+@mcp.tool(
+    title="List Cohorts",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def list_cohorts(project_id: int = Field(..., description="The numeric identifier for your Mixpanel project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all saved cohorts in a Mixpanel project, including metadata such as name, ID, user count, description, creation date, and visibility settings. Use the /engage endpoint with filter_by_cohort to retrieve the actual users within a cohort."""
 
@@ -1709,7 +1809,12 @@ async def list_cohorts(project_id: int = Field(..., description="The numeric ide
     return _response_data
 
 # Tags: Engage
-@mcp.tool()
+@mcp.tool(
+    title="Query Profiles",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_profiles(
     project_id: int = Field(..., description="The Mixpanel project ID to query profiles from. Required to identify which project's data to access."),
     distinct_ids: str | None = Field(None, description="A JSON array of distinct IDs to retrieve profiles for. When provided, limits results to only these specific user or group identifiers."),
@@ -1760,7 +1865,13 @@ async def query_profiles(
     return _response_data
 
 # Tags: Event Breakdown
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_aggregates(
     project_id: int = Field(..., description="The Mixpanel project ID to query."),
     event: str = Field(..., description="One or more event names to analyze, provided as a JSON array of strings (e.g., [\"play song\", \"log in\"])."),
@@ -1806,7 +1917,13 @@ async def get_event_aggregates(
     return _response_data
 
 # Tags: Event Breakdown
-@mcp.tool()
+@mcp.tool(
+    title="List Top Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_top_events(
     project_id: int = Field(..., description="The Mixpanel project ID to query events for."),
     type_: Literal["general", "unique", "average"] = Field(..., alias="type", description="The type of event analysis to perform: 'general' for event frequency, 'unique' for unique user counts, or 'average' for average event values."),
@@ -1848,7 +1965,13 @@ async def list_top_events(
     return _response_data
 
 # Tags: Event Breakdown
-@mcp.tool()
+@mcp.tool(
+    title="List Top Event Names",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_top_event_names(
     project_id: int = Field(..., description="The Mixpanel project ID that identifies which project's event data to query."),
     type_: Literal["general", "unique", "average"] = Field(..., alias="type", description="The type of event analysis to perform: 'general' for event frequency, 'unique' for distinct user counts, or 'average' for per-user averages."),
@@ -1890,7 +2013,13 @@ async def list_top_event_names(
     return _response_data
 
 # Tags: Event Breakdown
-@mcp.tool()
+@mcp.tool(
+    title="Get Event Property Aggregates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_event_property_aggregates(
     project_id: int = Field(..., description="The Mixpanel project ID to query."),
     event: str = Field(..., description="The name of the event to analyze. Provide a single event name, not multiple events."),
@@ -1939,7 +2068,13 @@ async def get_event_property_aggregates(
     return _response_data
 
 # Tags: Event Breakdown
-@mcp.tool()
+@mcp.tool(
+    title="List Top Event Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_top_event_properties(
     project_id: int = Field(..., description="The Mixpanel project ID that contains the event you want to analyze."),
     event: str = Field(..., description="The name of the event to retrieve properties for. Provide a single event name, not multiple events."),
@@ -1981,7 +2116,13 @@ async def list_top_event_properties(
     return _response_data
 
 # Tags: Event Breakdown
-@mcp.tool()
+@mcp.tool(
+    title="List Event Property Top Values",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_event_property_top_values(
     project_id: int = Field(..., description="The Mixpanel project ID that contains the event data you want to query."),
     event: str = Field(..., description="The name of the event to analyze. Provide a single event name (not multiple events)."),
@@ -2024,7 +2165,12 @@ async def list_event_property_top_values(
     return _response_data
 
 # Tags: JQL
-@mcp.tool()
+@mcp.tool(
+    title="Execute JQL Script",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def execute_jql_script(
     project_id: int = Field(..., description="The numeric identifier for the Mixpanel project where the script will execute."),
     script: str = Field(..., description="A JavaScript function that processes events using the Mixpanel JQL API. The function receives a params object and must return aggregated event data. Typically groups events by specified dimensions and applies reducers (e.g., count, sum, average)."),

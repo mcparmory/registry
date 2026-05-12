@@ -67,6 +67,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
   * `eu.mixpanel` - EU servers if you are enrolled in EU Data Residency
   * `in.mixpanel` - India servers if you are enrolled in India Data Residency
  (default: `mixpanel`)
+
 Do not commit credentials to version control.
 
 ---
