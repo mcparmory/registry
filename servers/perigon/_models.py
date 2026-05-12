@@ -1,13 +1,13 @@
 """
-Perigon Api MCP Server - Pydantic Models
+Perigon MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:51:05 UTC
+Generated: 2026-05-12 12:07:59 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -409,7 +409,7 @@ class SearchWikipediaRequestQuery(StrictModel):
     text: str | None = Field(default=None, description="Search across all page content and sections using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern matching.")
     reference: str | None = Field(default=None, description="Search across page references and citations using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern matching.")
     id_: list[str] | None = Field(default=None, validation_alias="id", serialization_alias="id", description="Retrieve specific pages by their unique Perigon identifiers. Provide one or more IDs as an array to return a targeted collection of pages.")
-    wiki_namespace: list[int] | None = Field(default=None, validation_alias="wikiNamespace", serialization_alias="wikiNamespace", description="Filter pages by wiki namespace. Currently only the main namespace (0) is supported.")
+    wiki_namespace: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(default=None, validation_alias="wikiNamespace", serialization_alias="wikiNamespace", description="Filter pages by wiki namespace. Currently only the main namespace (0) is supported.")
     wikidata_id: list[str] | None = Field(default=None, validation_alias="wikidataId", serialization_alias="wikidataId", description="Retrieve pages by their corresponding Wikidata entity identifiers. Provide one or more Wikidata IDs as an array.")
     wikidata_instance_of_id: list[str] | None = Field(default=None, validation_alias="wikidataInstanceOfId", serialization_alias="wikidataInstanceOfId", description="Retrieve pages whose Wikidata entities are instances of the specified Wikidata IDs. Provide one or more IDs as an array.")
     wikidata_instance_of_label: list[str] | None = Field(default=None, validation_alias="wikidataInstanceOfLabel", serialization_alias="wikidataInstanceOfLabel", description="Retrieve pages whose Wikidata entities are instances of the specified labels. Provide one or more Wikidata entity labels as an array.")
@@ -420,7 +420,7 @@ class SearchWikipediaRequestQuery(StrictModel):
     size: int | None = Field(default=None, description="Set the number of articles to return per page in the paginated response. Maximum is 1000 results per page.", json_schema_extra={'format': 'int32'})
     sort_by: Literal["relevance", "revisionTsDesc", "revisionTsAsc", "pageViewsDesc", "pageViewsAsc", "scrapedAtDesc", "scrapedAtAsc"] | None = Field(default=None, validation_alias="sortBy", serialization_alias="sortBy", description="Sort results by relevance (default), revision timestamp (ascending or descending for recently edited), page views (ascending or descending for viewership), or scrape timestamp (ascending or descending for recently updated).")
 class SearchWikipediaRequest(StrictModel):
-    """Search and retrieve Wikipedia pages from the Perigon API using flexible filtering criteria across titles, summaries, content, and references. Results are returned as paginated collections that can be sorted by relevance, recency, or viewership."""
+    """Search and retrieve Wikipedia pages from the Perigon using flexible filtering criteria across titles, summaries, content, and references. Results are returned as paginated collections that can be sorted by relevance, recency, or viewership."""
     query: SearchWikipediaRequestQuery | None = None
 
 # ============================================================================
@@ -584,7 +584,7 @@ class TopicHolder(PermissiveModel):
     name: str | None = None
 
 class VectorData(PermissiveModel):
-    data: list[float] | None = None
+    data: list[Annotated[float, Field(json_schema_extra={'format': 'float'})]] | None = None
     version: int | None = Field(None, json_schema_extra={'format': 'int32'})
 
 class VectorSearchArticlesBodyFilterCoordinates(PermissiveModel):
@@ -775,10 +775,10 @@ class VectorSearchArticlesBodyFilter(PermissiveModel):
 class VectorSearchWikipediaBodyFilter(PermissiveModel):
     page_id: list[str] | None = Field(None, validation_alias="pageId", serialization_alias="pageId", description="Filter by specific Perigon page identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
     section_id: list[str] | None = Field(None, validation_alias="sectionId", serialization_alias="sectionId", description="Filter by specific section identifiers. Accepts either a single ID or an array of IDs. Returns only pages containing these sections.")
-    wiki_page_id: list[int] | None = Field(None, validation_alias="wikiPageId", serialization_alias="wikiPageId", description="Filter by specific Wikipedia page identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
-    wiki_revision_id: list[int] | None = Field(None, validation_alias="wikiRevisionId", serialization_alias="wikiRevisionId", description="Filter by specific Perigon page revision identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
+    wiki_page_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="wikiPageId", serialization_alias="wikiPageId", description="Filter by specific Wikipedia page identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
+    wiki_revision_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="wikiRevisionId", serialization_alias="wikiRevisionId", description="Filter by specific Perigon page revision identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
     wiki_code: list[str] | None = Field(None, validation_alias="wikiCode", serialization_alias="wikiCode", description="Filter by specific Wikipedia project codes. Returns only pages matching these projects.")
-    wiki_namespace: list[int] | None = Field(None, validation_alias="wikiNamespace", serialization_alias="wikiNamespace", description="Filter by specific Wikipedia namespaces. Returns only pages matching these namespaces.")
+    wiki_namespace: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="wikiNamespace", serialization_alias="wikiNamespace", description="Filter by specific Wikipedia namespaces. Returns only pages matching these namespaces.")
     wikidata_id: list[str] | None = Field(None, validation_alias="wikidataId", serialization_alias="wikidataId", description="Filter by specific Wikidata entity IDs. Returns only pages whose Wikidata entities match those ids.")
     wikidata_instance_of_id: list[str] | None = Field(None, validation_alias="wikidataInstanceOfId", serialization_alias="wikidataInstanceOfId", description="Filter by specific Wikidata entity IDs. Returns only pages whose Wikidata entities are instances of provided ids.")
     wikidata_instance_of_label: list[str] | None = Field(None, validation_alias="wikidataInstanceOfLabel", serialization_alias="wikidataInstanceOfLabel", description="Filter by specific Wikidata entity labels. Returns only pages whose Wikidata entities are instances of these labels.")
@@ -790,10 +790,10 @@ class WikipediaSearchFilter(PermissiveModel):
     """Complex filter structure for Wikipedia page searches that supports nested logical operations (AND, OR, NOT) and multiple filtering criteria."""
     page_id: list[str] | None = Field(None, validation_alias="pageId", serialization_alias="pageId", description="Filter by specific Perigon page identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
     section_id: list[str] | None = Field(None, validation_alias="sectionId", serialization_alias="sectionId", description="Filter by specific section identifiers. Accepts either a single ID or an array of IDs. Returns only pages containing these sections.")
-    wiki_page_id: list[int] | None = Field(None, validation_alias="wikiPageId", serialization_alias="wikiPageId", description="Filter by specific Wikipedia page identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
-    wiki_revision_id: list[int] | None = Field(None, validation_alias="wikiRevisionId", serialization_alias="wikiRevisionId", description="Filter by specific Perigon page revision identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
+    wiki_page_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="wikiPageId", serialization_alias="wikiPageId", description="Filter by specific Wikipedia page identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
+    wiki_revision_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="wikiRevisionId", serialization_alias="wikiRevisionId", description="Filter by specific Perigon page revision identifiers. Accepts either a single ID or an array of IDs. Returns only pages matching these IDs.")
     wiki_code: list[str] | None = Field(None, validation_alias="wikiCode", serialization_alias="wikiCode", description="Filter by specific Wikipedia project codes. Returns only pages matching these projects.")
-    wiki_namespace: list[int] | None = Field(None, validation_alias="wikiNamespace", serialization_alias="wikiNamespace", description="Filter by specific Wikipedia namespaces. Returns only pages matching these namespaces.")
+    wiki_namespace: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, validation_alias="wikiNamespace", serialization_alias="wikiNamespace", description="Filter by specific Wikipedia namespaces. Returns only pages matching these namespaces.")
     wikidata_id: list[str] | None = Field(None, validation_alias="wikidataId", serialization_alias="wikidataId", description="Filter by specific Wikidata entity IDs. Returns only pages whose Wikidata entities match those ids.")
     wikidata_instance_of_id: list[str] | None = Field(None, validation_alias="wikidataInstanceOfId", serialization_alias="wikidataInstanceOfId", description="Filter by specific Wikidata entity IDs. Returns only pages whose Wikidata entities are instances of provided ids.")
     wikidata_instance_of_label: list[str] | None = Field(None, validation_alias="wikidataInstanceOfLabel", serialization_alias="wikidataInstanceOfLabel", description="Filter by specific Wikidata entity labels. Returns only pages whose Wikidata entities are instances of these labels.")

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Perigon API MCP Server
+Perigon MCP Server
 
 API Info:
 - Contact: Perigon Support <data@perigon.io> (https://docs.perigon.io/)
 
-Generated: 2026-05-05 15:51:05 UTC
+Generated: 2026-05-12 12:07:59 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -41,11 +42,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.perigon.io")
-SERVER_NAME = "Perigon API"
-SERVER_VERSION = "1.0.2"
+SERVER_NAME = "Perigon"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -536,6 +538,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -543,6 +567,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -628,6 +654,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -637,18 +664,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -659,24 +684,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1010,6 +1041,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1034,6 +1067,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1238,10 +1273,16 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Perigon API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Perigon", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Articles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_articles(
     title: str | None = Field(None, description="Search within article headlines and titles. Supports Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern variations."),
     desc: str | None = Field(None, description="Search within article description fields. Supports Boolean expressions, exact phrase matching with quotes, and wildcards for flexible pattern matching."),
@@ -1355,7 +1396,13 @@ async def search_articles(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Companies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_companies(
     id_: list[str] | None = Field(None, alias="id", description="Filter results to companies with specific unique identifiers. Accepts multiple IDs as an OR filter (returns companies matching any ID in the list)."),
     symbol: list[str] | None = Field(None, description="Filter results to companies with specific stock ticker symbols (e.g., AAPL, MSFT). Accepts multiple symbols as an OR filter."),
@@ -1411,7 +1458,13 @@ async def search_companies(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Journalists",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_journalists(
     id_: list[str] | None = Field(None, alias="id", description="Filter by one or more journalist IDs. Matches any journalist whose ID is in the provided list (OR operation)."),
     name: str | None = Field(None, description="Search journalist names using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (* and ?) for pattern matching."),
@@ -1463,7 +1516,13 @@ async def search_journalists(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Get Journalist",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_journalist(id_: str = Field(..., alias="id", description="The unique identifier of the journalist. This ID is provided in article response objects and is used to fetch the journalist's full profile.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific journalist using their unique identifier. Use this to access journalist profiles and biographical details referenced in article responses."""
 
@@ -1499,7 +1558,13 @@ async def get_journalist(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search People",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_people(
     name: str | None = Field(None, description="Search by person's full or partial name using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (* for multiple characters, ? for single character) for flexible name-based lookups."),
     wikidata_id: list[str] | None = Field(None, alias="wikidataId", description="Filter results by one or more Wikidata entity IDs (e.g., Q7747, Q937) to precisely identify specific individuals and eliminate name ambiguity. Multiple IDs are combined with OR logic."),
@@ -1544,7 +1609,13 @@ async def search_people(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Media Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_media_sources(
     domain: list[str] | None = Field(None, description="Filter by publisher domain or subdomain using wildcard patterns (* for any characters, ? for single character). Supports multiple domains with OR logic (e.g., *.cnn.com, us?.nytimes.com)."),
     name: str | None = Field(None, description="Search source names using Boolean operators (AND, OR, NOT), quoted exact phrases, and wildcards (* and ?) for flexible matching."),
@@ -1600,7 +1671,13 @@ async def search_media_sources(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Stories",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_stories(
     name: str | None = Field(None, description="Search story names using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern variations."),
     cluster_id: list[str] | None = Field(None, alias="clusterId", description="Filter results to specific stories by their unique cluster identifiers. Multiple values return stories matching any of the specified IDs (OR logic)."),
@@ -1673,7 +1750,13 @@ async def search_stories(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="List Story History",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_story_history(
     cluster_id: list[str] | None = Field(None, alias="clusterId", description="Filter results to specific clusters by providing one or more cluster IDs. Only stories within the specified clusters will be returned."),
     sort_by: Literal["createdAt", "triggeredAt"] | None = Field(None, alias="sortBy", description="Sort results by creation date or the date the story was last refreshed/triggered. Defaults to creation date if not specified."),
@@ -1718,7 +1801,13 @@ async def list_story_history(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Get Story Counts by Time Interval",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_story_counts_by_time_interval(
     split_by: Literal["hour", "day", "week", "month", "none"] = Field(..., alias="splitBy", description="Required. Specify the time interval for grouping story count statistics: HOUR (hourly breakdown), DAY (daily breakdown), WEEK (weekly breakdown), MONTH (monthly breakdown), or NONE (no time-based grouping)."),
     name: str | None = Field(None, description="Search for stories by name using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcard patterns (* and ?) for flexible name matching."),
@@ -1792,7 +1881,12 @@ async def get_story_counts_by_time_interval(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search and Summarize Articles",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_and_summarize_articles(
     title: str | None = Field(None, description="Search article titles using Boolean operators (AND, OR, NOT), exact phrases with quotes, and wildcards for pattern matching."),
     desc: str | None = Field(None, description="Search article descriptions using Boolean expressions, exact phrase matching with quotes, and wildcards for flexible pattern matching."),
@@ -1900,6 +1994,7 @@ async def search_and_summarize_articles(
     _http_path = "/v1/summarize"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_and_summarize_articles")
@@ -1916,12 +2011,19 @@ async def search_and_summarize_articles(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Topics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_topics(
     name: str | None = Field(None, description="Filter topics by exact name match or partial text search. Supports partial matching but does not accept wildcard patterns."),
     category: str | None = Field(None, description="Filter results to a specific broad category such as Politics, Tech, Sports, Business, Finance, or Entertainment."),
@@ -1966,7 +2068,12 @@ async def search_topics(
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search News Articles",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_news_articles(
     prompt: str = Field(..., description="Natural language query describing what you want to find in news articles. Accepts up to 1024 characters.", min_length=0, max_length=1024),
     filter_: _models.VectorSearchArticlesBodyFilter | None = Field(None, alias="filter", description="Filter criteria to narrow search results (specific filter structure not documented)."),
@@ -1994,6 +2101,7 @@ async def search_news_articles(
     _http_path = "/v1/vector/news/all"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_news_articles")
@@ -2010,12 +2118,18 @@ async def search_news_articles(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Wikipedia",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def search_wikipedia(
     prompt: str = Field(..., description="Natural language query describing what you want to find. Supports up to 1024 characters.", min_length=0, max_length=1024),
     filter_: _models.VectorSearchWikipediaBodyFilter | None = Field(None, alias="filter", description="Optional filter to narrow search results by specific criteria."),
@@ -2040,6 +2154,7 @@ async def search_wikipedia(
     _http_path = "/v1/vector/wikipedia/all"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_wikipedia")
@@ -2056,19 +2171,26 @@ async def search_wikipedia(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: v1
-@mcp.tool()
+@mcp.tool(
+    title="Search Wikipedia Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_wikipedia_pages(
     title: str | None = Field(None, description="Search within page titles using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern matching."),
     summary: str | None = Field(None, description="Search within page summaries using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern matching."),
     text: str | None = Field(None, description="Search across all page content and sections using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern matching."),
     reference: str | None = Field(None, description="Search across page references and citations using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (*) for pattern matching."),
     id_: list[str] | None = Field(None, alias="id", description="Retrieve specific pages by their unique Perigon identifiers. Provide one or more IDs as an array to return a targeted collection of pages."),
-    wiki_namespace: list[int] | None = Field(None, alias="wikiNamespace", description="Filter pages by wiki namespace. Currently only the main namespace (0) is supported."),
+    wiki_namespace: list[Annotated[int, Field(json_schema_extra={'format': 'int32'})]] | None = Field(None, alias="wikiNamespace", description="Filter pages by wiki namespace. Currently only the main namespace (0) is supported."),
     wikidata_id: list[str] | None = Field(None, alias="wikidataId", description="Retrieve pages by their corresponding Wikidata entity identifiers. Provide one or more Wikidata IDs as an array."),
     wikidata_instance_of_id: list[str] | None = Field(None, alias="wikidataInstanceOfId", description="Retrieve pages whose Wikidata entities are instances of the specified Wikidata IDs. Provide one or more IDs as an array."),
     wikidata_instance_of_label: list[str] | None = Field(None, alias="wikidataInstanceOfLabel", description="Retrieve pages whose Wikidata entities are instances of the specified labels. Provide one or more Wikidata entity labels as an array."),
@@ -2079,7 +2201,7 @@ async def search_wikipedia_pages(
     size: str | None = Field(None, description="Set the number of articles to return per page in the paginated response. Maximum is 1000 results per page."),
     sort_by: Literal["relevance", "revisionTsDesc", "revisionTsAsc", "pageViewsDesc", "pageViewsAsc", "scrapedAtDesc", "scrapedAtAsc"] | None = Field(None, alias="sortBy", description="Sort results by relevance (default), revision timestamp (ascending or descending for recently edited), page views (ascending or descending for viewership), or scrape timestamp (ascending or descending for recently updated)."),
 ) -> dict[str, Any] | ToolResult:
-    """Search and retrieve Wikipedia pages from the Perigon API using flexible filtering criteria across titles, summaries, content, and references. Results are returned as paginated collections that can be sorted by relevance, recency, or viewership."""
+    """Search and retrieve Wikipedia pages from the Perigon using flexible filtering criteria across titles, summaries, content, and references. Results are returned as paginated collections that can be sorted by relevance, recency, or viewership."""
 
     _page = _parse_int(page)
     _size = _parse_int(size)
@@ -2199,7 +2321,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python perigon_api_server.py", file=sys.stderr)
+        print("  python perigon_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -2301,7 +2423,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Perigon API MCP Server")
+    parser = argparse.ArgumentParser(description="Perigon MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2402,7 +2524,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Perigon API MCP Server")
+    logger.info("Starting Perigon MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

@@ -1,4 +1,4 @@
-# Perigon API MCP Server
+# Perigon MCP Server
 <!-- mcp-name: com.mcparmory/perigon -->
 
 Base URL: https://api.perigon.io
@@ -55,6 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (apiKey)
+
 Do not commit credentials to version control.
 
 ---

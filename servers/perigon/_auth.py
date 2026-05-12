@@ -1,7 +1,7 @@
 """
-Authentication module for Perigon API MCP server.
+Authentication module for Perigon MCP server.
 
-Generated: 2026-05-05 15:51:05 UTC
+Generated: 2026-05-12 12:07:59 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
