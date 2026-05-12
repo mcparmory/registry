@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-05-05 15:16:06 UTC
+Generated: 2026-05-12 11:34:19 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -43,11 +44,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://searchconsole.googleapis.com")
 SERVER_NAME = "Google Search Console"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -538,6 +540,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -545,6 +569,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -630,6 +656,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -639,18 +666,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -661,24 +686,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1012,6 +1043,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1036,6 +1069,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1243,7 +1278,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Google Search Console", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: searchanalytics
-@mcp.tool()
+@mcp.tool(
+    title="Query Search Analytics",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def query_search_analytics(
     site_url: str = Field(..., alias="siteUrl", description="The site URL to query, including protocol (e.g., http://www.example.com/ or https://example.com). Must match a verified property in Search Console."),
     aggregation_type: Literal["AUTO", "BY_PROPERTY", "BY_PAGE", "BY_NEWS_SHOWCASE_PANEL"] | None = Field(None, alias="aggregationType", description="How to aggregate the returned data: AUTO (default, required if filtering/grouping by page), BY_PROPERTY (aggregate all data for the same property), BY_PAGE (aggregate by canonical URI), or BY_NEWS_SHOWCASE_PANEL. Cannot use BY_PROPERTY if grouping or filtering by page."),
@@ -1290,13 +1330,20 @@ async def query_search_analytics(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sitemaps
-@mcp.tool()
+@mcp.tool(
+    title="Get Sitemap",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sitemap(
     site_url: str = Field(..., alias="siteUrl", description="The website's URL including the protocol (http or https). Must be a valid, fully-qualified URL such as http://www.example.com/."),
     feedpath: str = Field(..., description="The complete URL path to the sitemap file. Must be a valid, fully-qualified URL such as http://www.example.com/sitemap.xml."),
@@ -1335,7 +1382,13 @@ async def get_sitemap(
     return _response_data
 
 # Tags: sitemaps
-@mcp.tool()
+@mcp.tool(
+    title="Submit Sitemap",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def submit_sitemap(
     site_url: str = Field(..., alias="siteUrl", description="The site's URL including the protocol (http or https). Must be a valid, fully-qualified URL with trailing slash (e.g., http://www.example.com/)."),
     feedpath: str = Field(..., description="The complete URL path to the sitemap file. Must be a valid, fully-qualified URL pointing to the actual sitemap resource (e.g., http://www.example.com/sitemap.xml)."),
@@ -1374,7 +1427,13 @@ async def submit_sitemap(
     return _response_data
 
 # Tags: sitemaps
-@mcp.tool()
+@mcp.tool(
+    title="Delete Sitemap",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sitemap(
     site_url: str = Field(..., alias="siteUrl", description="The site's URL including the protocol (e.g., http://www.example.com/ or https://www.example.com/). This identifies which site the sitemap belongs to."),
     feedpath: str = Field(..., description="The complete URL of the sitemap file to delete (e.g., http://www.example.com/sitemap.xml). This must be the exact sitemap URL you want to remove from the report."),
@@ -1413,7 +1472,13 @@ async def delete_sitemap(
     return _response_data
 
 # Tags: sitemaps
-@mcp.tool()
+@mcp.tool(
+    title="List Sitemaps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sitemaps(
     site_url: str = Field(..., alias="siteUrl", description="The website's URL including the protocol (http:// or https://). For example: http://www.example.com/ or https://example.com/. This identifies which site's sitemaps to retrieve."),
     sitemap_index: str | None = Field(None, alias="sitemapIndex", description="Optional URL pointing to a sitemap index file that aggregates multiple sitemaps. When provided, returns only the sitemaps referenced within that index file rather than all submitted sitemaps."),
@@ -1455,7 +1520,13 @@ async def list_sitemaps(
     return _response_data
 
 # Tags: sites
-@mcp.tool()
+@mcp.tool(
+    title="Get Site",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_site(site_url: str = Field(..., alias="siteUrl", description="The site URL or domain property identifier as it appears in Search Console. Use the full URL format (e.g., http://www.example.com/) for URL-prefix properties or the domain format (e.g., sc-domain:example.com) for domain properties.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific site property registered in Google Search Console, including its configuration and metadata."""
 
@@ -1491,7 +1562,13 @@ async def get_site(site_url: str = Field(..., alias="siteUrl", description="The 
     return _response_data
 
 # Tags: sites
-@mcp.tool()
+@mcp.tool(
+    title="Add Site",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def add_site(site_url: str = Field(..., alias="siteUrl", description="The complete URL of the website to add to Search Console (e.g., domain, subdomain, or URL prefix).")) -> dict[str, Any] | ToolResult:
     """Adds a website to your Search Console account, enabling you to monitor and manage its search performance."""
 
@@ -1527,7 +1604,13 @@ async def add_site(site_url: str = Field(..., alias="siteUrl", description="The 
     return _response_data
 
 # Tags: sites
-@mcp.tool()
+@mcp.tool(
+    title="Delete Site",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_site(site_url: str = Field(..., alias="siteUrl", description="The site URL or domain property identifier as it appears in Search Console. Use the full URL format (e.g., http://www.example.com/) for URL-prefix properties or the domain format (e.g., sc-domain:example.com) for domain properties.")) -> dict[str, Any] | ToolResult:
     """Removes a website property from your Search Console account, preventing further monitoring and analysis of that site."""
 
@@ -1563,7 +1646,13 @@ async def delete_site(site_url: str = Field(..., alias="siteUrl", description="T
     return _response_data
 
 # Tags: sites
-@mcp.tool()
+@mcp.tool(
+    title="List Sites",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_sites() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all Search Console sites that the authenticated user has access to. This includes both verified and unverified properties."""
 
@@ -1590,7 +1679,12 @@ async def list_sites() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: urlInspection
-@mcp.tool()
+@mcp.tool(
+    title="Inspect URL Index Status",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def inspect_url_index_status(
     inspection_url: str | None = Field(None, alias="inspectionUrl", description="The URL to inspect for indexing status. Must be a valid URL that belongs to the property specified in siteUrl."),
     language_code: str | None = Field(None, alias="languageCode", description="The language for translated issue messages in IETF BCP-47 format (e.g., en-US, de-CH). Defaults to English (US) if not specified."),
@@ -1626,13 +1720,19 @@ async def inspect_url_index_status(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: urlTestingTools
-@mcp.tool()
+@mcp.tool(
+    title="Test Mobile Friendly",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def test_mobile_friendly(
     request_screenshot: bool | None = Field(None, alias="requestScreenshot", description="Whether to include a screenshot of the URL as rendered on a mobile device in the test results."),
     url: str | None = Field(None, description="The complete URL to test for mobile-friendliness, including the protocol (http or https)."),
@@ -1667,6 +1767,7 @@ async def test_mobile_friendly(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
