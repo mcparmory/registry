@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Google Maps Platform MCP Server
-Generated: 2026-05-05 15:12:57 UTC
+Generated: 2026-05-12 11:31:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,6 +38,7 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://maps.googleapis.com")
@@ -46,7 +48,7 @@ OPERATION_URL_MAP: dict[str, str] = {
     "snap_points_to_roads": os.getenv("SERVER_URL_SNAP_POINTS_TO_ROADS", "https://roads.googleapis.com"),
 }
 SERVER_NAME = "Google Maps Platform"
-SERVER_VERSION = "1.0.2"
+SERVER_VERSION = "1.0.3"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -537,6 +539,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -544,6 +568,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -633,6 +659,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -642,18 +669,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -664,24 +689,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1020,6 +1051,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1044,6 +1077,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1251,7 +1286,12 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Google Maps Platform", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Geolocation API
-@mcp.tool()
+@mcp.tool(
+    title="Locate Device",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def locate_device(
     home_mobile_country_code: int | None = Field(None, alias="homeMobileCountryCode", description="The Mobile Country Code (MCC) of the primary cell tower. Used to identify the country of the cellular network."),
     home_mobile_network_code: int | None = Field(None, alias="homeMobileNetworkCode", description="The Mobile Network Code (MNC) of the primary cell tower. For GSM and WCDMA networks this is the MNC; for CDMA networks this is the System ID (SID)."),
@@ -1276,6 +1316,7 @@ async def locate_device(
     _http_path = "/geolocation/v1/geolocate"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("locate_device")
@@ -1292,12 +1333,19 @@ async def locate_device(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
     )
 
     return _response_data
 
 # Tags: Directions API
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Directions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_directions(
     destination: str = Field(..., description="The destination location as a place ID (prefixed with 'place_id:'), street address, latitude/longitude coordinates, or plus code. Place IDs are recommended for accuracy and performance."),
     origin: str = Field(..., description="The starting location as a place ID (prefixed with 'place_id:'), street address, latitude/longitude coordinates, or plus code. Place IDs are recommended for accuracy and performance over addresses or raw coordinates."),
@@ -1346,7 +1394,13 @@ async def calculate_directions(
     return _response_data
 
 # Tags: Elevation API
-@mcp.tool()
+@mcp.tool(
+    title="Get Elevation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_elevation(samples: float | None = Field(None, description="Number of elevation samples to return along a path. Required when querying elevation along a path instead of discrete locations. Specifies how many evenly-distributed points along the path should be sampled for elevation data.")) -> dict[str, Any] | ToolResult:
     """Retrieve elevation data for specific locations or sample elevation along a path. The API returns elevation values relative to local mean sea level, with interpolated values for locations where exact measurements aren't available."""
 
@@ -1382,7 +1436,13 @@ async def get_elevation(samples: float | None = Field(None, description="Number 
     return _response_data
 
 # Tags: Geocoding API
-@mcp.tool()
+@mcp.tool(
+    title="Geocode Address",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def geocode_address(
     address: str | None = Field(None, description="Street address or plus code to geocode. Use standard postal service format for the country (e.g., '24 Sussex Drive Ottawa ON'). Plus codes should be formatted as global codes (4-character area + 6+ character local code) or compound codes (6+ character local code with location). At least one of address or components is required."),
     bounds: list[str] | None = Field(None, description="Bounding box to bias results toward a specific viewport region. Specified as an array of two coordinate pairs [southwest, northeast] in latitude,longitude format. Results are influenced but not strictly restricted to this area."),
@@ -1432,7 +1492,13 @@ async def geocode_address(
     return _response_data
 
 # Tags: Time Zone API
-@mcp.tool()
+@mcp.tool(
+    title="Get Timezone",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_timezone(
     location: str = Field(..., description="The geographic coordinates as a comma-separated latitude,longitude pair (e.g., 39.6034810,-119.6822510). Required to identify the location for time zone lookup."),
     timestamp: float = Field(..., description="The target date and time as a Unix timestamp (seconds since January 1, 1970 UTC). Used to determine whether daylight savings time applies at the specified location. Historical time zone changes are not considered."),
@@ -1472,7 +1538,13 @@ async def get_timezone(
     return _response_data
 
 # Tags: Roads API
-@mcp.tool()
+@mcp.tool(
+    title="Snap Coordinates to Roads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def snap_coordinates_to_roads(
     path: list[str] = Field(..., description="A sequence of latitude/longitude coordinate pairs representing the GPS path to be snapped. Coordinates are formatted as comma-separated lat/lon values and separated by pipe characters (e.g., lat1,lon1|lat2,lon2). For best results, consecutive points should be within 300 meters of each other to ensure accurate snapping and handle GPS signal loss or noise."),
     interpolate: bool | None = Field(None, description="When enabled, generates additional interpolated points along the snapped road geometry to create a smooth, continuous path that follows road curves and geometry. The resulting path will typically contain more points than the original input. Defaults to false."),
@@ -1514,7 +1586,13 @@ async def snap_coordinates_to_roads(
     return _response_data
 
 # Tags: Roads API
-@mcp.tool()
+@mcp.tool(
+    title="Snap Points to Roads",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def snap_points_to_roads(points: list[str] = Field(..., description="A list of GPS coordinates to snap to roads, provided as latitude/longitude pairs separated by pipes. Each coordinate pair should be comma-separated (e.g., latitude,longitude|latitude,longitude). Supports up to 100 points; the points do not need to form a continuous path.")) -> dict[str, Any] | ToolResult:
     """Snaps GPS coordinates to the nearest road segments. Accepts up to 100 latitude/longitude points and returns the closest matching road for each point, useful for map matching and route analysis."""
 
@@ -1553,7 +1631,13 @@ async def snap_points_to_roads(points: list[str] = Field(..., description="A lis
     return _response_data
 
 # Tags: Distance Matrix API
-@mcp.tool()
+@mcp.tool(
+    title="Calculate Distance Matrix",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def calculate_distance_matrix(
     destinations: list[str] = Field(..., description="One or more destination locations where travel ends. Accepts place IDs (prefixed with 'place_id:'), addresses, latitude/longitude coordinates, plus codes, or encoded polylines. Place IDs are preferred for accuracy."),
     origins: list[str] = Field(..., description="One or more starting locations for travel calculation. Accepts place IDs (prefixed with 'place_id:'), addresses, latitude/longitude coordinates, plus codes, or encoded polylines. Multiple origins can be separated by pipe characters or provided as encoded polylines. Place IDs are preferred for accuracy."),
@@ -1604,7 +1688,13 @@ async def calculate_distance_matrix(
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Get Place Details",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_place_details(
     place_id: str = Field(..., description="Unique identifier for the place, obtained from a Place Search request. This ID is required to retrieve the place's detailed information."),
     fields: list[str] | None = Field(None, description="Comma-separated list of specific place data fields to return (e.g., formatted_address,name,geometry). Use forward slashes for nested fields (e.g., opening_hours/open_now). Omit to return default fields, or use '*' for all available fields. Fields are categorized as Basic (no extra charge), Contact, or Atmosphere (higher billing rates).", min_length=1),
@@ -1651,7 +1741,13 @@ async def get_place_details(
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Search Place by Text",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_place_by_text(
     input_: str = Field(..., alias="input", description="The search text input, which can be a place name, street address, or phone number. The API returns candidate matches ordered by perceived relevance based on this input."),
     inputtype: Literal["textquery", "phonenumber"] = Field(..., description="The type of input being searched: 'textquery' for place names and addresses, or 'phonenumber' for phone numbers in international E.164 format (e.g., +1-555-0123)."),
@@ -1696,7 +1792,13 @@ async def search_place_by_text(
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Search Nearby Places",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_nearby_places(
     location: str = Field(..., description="Center point for the search area, specified as latitude and longitude separated by a comma (e.g., 40,-110)."),
     radius: float = Field(..., description="Search radius in meters around the location. Maximum values vary by search type: up to 50,000 meters for keyword or name searches, dynamically adjusted for searches without keywords or names. When rankby is set to 'distance', this parameter is not allowed."),
@@ -1740,7 +1842,13 @@ async def search_nearby_places(
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Search Places by Text",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def search_places_by_text(
     query: str = Field(..., description="The search query string, such as a place name (e.g., 'pizza'), address (e.g., '123 Main Street'), or category (e.g., 'restaurants'). Results are ranked by perceived relevance to this query."),
     radius: float = Field(..., description="Search radius in meters, up to a maximum of 50,000 meters. Results within this circle are preferred, though places outside may still be returned. The API may adjust this radius based on result density."),
@@ -1783,7 +1891,13 @@ async def search_places_by_text(
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Get Place Photo",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_place_photo(photo_reference: str = Field(..., description="A unique identifier for the photo, obtained from Place Search, Nearby Search, Text Search, or Place Details requests. This reference is required to retrieve the actual photo image.")) -> dict[str, Any] | ToolResult:
     """Retrieve a high-quality photo for a place using a photo reference. Returns the image data that can be resized and displayed in your application, with attribution requirements included when necessary."""
 
@@ -1819,7 +1933,13 @@ async def get_place_photo(photo_reference: str = Field(..., description="A uniqu
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Get Query Suggestions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_query_suggestions(
     input_: str = Field(..., alias="input", description="The search text to get predictions for. The service matches this string against both full words and substrings to return relevant suggestions ordered by perceived relevance."),
     radius: float = Field(..., description="The search radius in meters within which to prefer returning results. Maximum of 50,000 meters. Results outside this radius may still be returned. Helps bias suggestions to a geographic area when combined with a location."),
@@ -1860,7 +1980,13 @@ async def get_query_suggestions(
     return _response_data
 
 # Tags: Places API
-@mcp.tool()
+@mcp.tool(
+    title="Autocomplete Place",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def autocomplete_place(
     input_: str = Field(..., alias="input", description="The search text to match against place names, addresses, and plus codes. The service returns predictions ordered by perceived relevance to this input."),
     radius: float = Field(..., description="The search radius in meters within which to prefer results. Maximum 50,000 meters for autocomplete. Results outside this radius may still be returned if they match the input."),
@@ -1909,7 +2035,13 @@ async def autocomplete_place(
     return _response_data
 
 # Tags: Street View API
-@mcp.tool()
+@mcp.tool(
+    title="Get Street View",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_street_view(
     size: str = Field(..., description="Specifies the output image dimensions as width by height in pixels. Both dimensions must not exceed 640 pixels; larger values default to 640. Use the format widthxheight (for example, 600x400)."),
     fov: float | None = Field(None, description="Controls the horizontal zoom level of the image in degrees. Accepts values from 0 to 120, where smaller values provide higher zoom. Defaults to 90 degrees if not specified."),
@@ -1952,7 +2084,13 @@ async def get_street_view(
     return _response_data
 
 # Tags: Street View API
-@mcp.tool()
+@mcp.tool(
+    title="Get Street View Metadata",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_street_view_metadata(
     heading: float | None = Field(None, description="The compass heading of the camera in degrees, ranging from 0 to 360 where 0 and 360 indicate North, 90 indicates East, and 180 indicates South. If not specified, the heading will be automatically calculated to point toward the location from the nearest available photograph."),
     pano: str | None = Field(None, description="A specific panorama ID to retrieve metadata for. Panorama IDs are generally stable identifiers, though they may change as Street View imagery is updated."),
