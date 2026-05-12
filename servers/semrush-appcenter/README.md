@@ -5,7 +5,7 @@ Base URL: https://api.semrush.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 5 |
+| **Tools** | 4 |
 | **Auth** | JWT |
 
 ---
@@ -56,6 +56,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `JWT_SHARED_SECRET` — Shared JWT signing secret
 - `JWT_ISSUER_ID` — Issuer ID (App ID, Team ID, etc.)
+
 Do not commit credentials to version control.
 
 ### JWT Bearer

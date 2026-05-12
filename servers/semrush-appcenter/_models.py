@@ -1,7 +1,7 @@
 """
 Semrush Appcenter MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:17:36 UTC
+Generated: 2026-05-12 12:44:24 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
