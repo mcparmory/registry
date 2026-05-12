@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Miro MCP Server
-Generated: 2026-05-05 15:35:26 UTC
+Generated: 2026-05-12 11:54:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -20,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.miro.com")
 SERVER_NAME = "Miro"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -1006,6 +1037,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1030,6 +1063,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1237,7 +1272,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Miro", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: tokens
-@mcp.tool()
+@mcp.tool(
+    title="Get Access Token Info",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_access_token_info() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the current access token, including its type, assigned scopes, associated team and user, creation timestamp, and the user who created it."""
 
@@ -1264,7 +1305,13 @@ async def get_access_token_info() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Audit Logs
-@mcp.tool()
+@mcp.tool(
+    title="List Audit Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audit_logs(
     created_after: str = Field(..., alias="createdAfter", description="Start of the date range for audit log retrieval in UTC ISO 8601 format with milliseconds (e.g., 2023-03-30T17:26:50.000Z). Audit logs created on or after this timestamp will be included."),
     created_before: str = Field(..., alias="createdBefore", description="End of the date range for audit log retrieval in UTC ISO 8601 format with milliseconds (e.g., 2023-04-30T17:26:50.000Z). Audit logs created before this timestamp will be included."),
@@ -1307,7 +1354,13 @@ async def list_audit_logs(
     return _response_data
 
 # Tags: Board classification: Team level
-@mcp.tool()
+@mcp.tool(
+    title="Update Team Boards Classification in Bulk",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team_boards_classification_bulk(
     org_id: str = Field(..., description="The unique identifier of the organization. This is a numeric ID that identifies which organization owns the team."),
     team_id: str = Field(..., description="The unique identifier of the team whose boards will be updated. This is a numeric ID that identifies the specific team within the organization."),
@@ -1347,13 +1400,20 @@ async def update_team_boards_classification_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Board classification: Board level
-@mcp.tool()
+@mcp.tool(
+    title="Get Board Data Classification",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_board_data_classification(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the board. Use the organization ID provided in your Enterprise account."),
     team_id: str = Field(..., description="The unique identifier of the team within the organization that contains the board."),
@@ -1393,7 +1453,12 @@ async def get_board_data_classification(
     return _response_data
 
 # Tags: doc formats
-@mcp.tool()
+@mcp.tool(
+    title="Create Markdown Document",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_markdown_doc(
     board_id: str = Field(..., description="The unique identifier of the board where the markdown document will be created."),
     content_type: Literal["markdown"] = Field(..., alias="contentType", description="The format type for the document content. Must be set to 'markdown' to specify markdown formatting."),
@@ -1430,13 +1495,20 @@ async def create_markdown_doc(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: doc formats
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Format Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_doc_format_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the doc format item to retrieve."),
@@ -1479,7 +1551,13 @@ async def get_doc_format_item(
     return _response_data
 
 # Tags: doc formats
-@mcp.tool()
+@mcp.tool(
+    title="Delete Doc Format Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_doc_format_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to delete."),
     item_id: str = Field(..., description="The unique identifier of the doc format item to delete from the board."),
@@ -1518,7 +1596,13 @@ async def delete_doc_format_item(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="List Cases",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_cases(
     org_id: str = Field(..., description="The numeric ID of the organization containing the cases to retrieve.", pattern="^[0-9]+$"),
     limit: str | None = Field(None, description="Maximum number of cases to return in the response, between 1 and 100 items (defaults to 100)."),
@@ -1562,7 +1646,12 @@ async def list_cases(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Create Case",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_case(
     org_id: str = Field(..., description="The numeric ID of the organization where the case will be created.", pattern="^[0-9]+$"),
     name: str = Field(..., description="A descriptive name for the case that identifies the legal matter or investigation."),
@@ -1599,13 +1688,20 @@ async def create_case(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Get Case",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case to retrieve. Must be a numeric string.", pattern="^[0-9]+$"),
@@ -1644,7 +1740,13 @@ async def get_case(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Update Case",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case to be edited.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case to be edited.", pattern="^[0-9]+$"),
@@ -1682,13 +1784,20 @@ async def update_case(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Close Case",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def close_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case to close.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case to close and delete.", pattern="^[0-9]+$"),
@@ -1727,7 +1836,13 @@ async def close_case(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Holds in Case",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_holds_in_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case for which to retrieve legal holds. Must be a numeric string.", pattern="^[0-9]+$"),
@@ -1772,7 +1887,12 @@ async def list_legal_holds_in_case(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Create Legal Hold for Case",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_legal_hold_for_case(
     org_id: str = Field(..., description="The numeric ID of the organization where the legal hold will be created.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case within the organization where the legal hold will be applied.", pattern="^[0-9]+$"),
@@ -1811,13 +1931,20 @@ async def create_legal_hold_for_case(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Hold Export Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_hold_export_jobs(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case. Must be a valid organization ID in numeric format.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the legal hold case for which to retrieve export jobs. Must be a valid case ID in numeric format.", pattern="^[0-9]+$"),
@@ -1862,7 +1989,13 @@ async def list_legal_hold_export_jobs(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Get Legal Hold",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_legal_hold(
     org_id: str = Field(..., description="The numeric ID of the organization containing the legal hold. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold. Must be a numeric string.", pattern="^[0-9]+$"),
@@ -1902,7 +2035,13 @@ async def get_legal_hold(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Update Legal Hold",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_legal_hold(
     org_id: str = Field(..., description="The numeric ID of the organization containing the legal hold. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold. Must be a numeric string.", pattern="^[0-9]+$"),
@@ -1942,13 +2081,20 @@ async def update_legal_hold(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="Close Legal Hold",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def close_legal_hold(
     org_id: str = Field(..., description="The numeric ID of the organization containing the legal hold to close.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold to close.", pattern="^[0-9]+$"),
@@ -1988,7 +2134,13 @@ async def close_legal_hold(
     return _response_data
 
 # Tags: Legal holds
-@mcp.tool()
+@mcp.tool(
+    title="List Legal Hold Content Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_legal_hold_content_items(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case and legal hold.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold.", pattern="^[0-9]+$"),
@@ -2034,11 +2186,17 @@ async def list_legal_hold_content_items(
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="List Board Export Jobs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_export_jobs(
     org_id: str = Field(..., description="The unique identifier of the organization whose board export jobs you want to retrieve."),
     status: list[str] | None = Field(None, description="Filter results by job status. Accepts multiple statuses such as JOB_STATUS_CREATED, JOB_STATUS_IN_PROGRESS, JOB_STATUS_CANCELLED, or JOB_STATUS_FINISHED. If not specified, all statuses are returned."),
-    creator_id: list[int] | None = Field(None, alias="creatorId", description="Filter results by the user ID of the job creator. Accepts multiple creator IDs to retrieve jobs created by specific users."),
+    creator_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(None, alias="creatorId", description="Filter results by the user ID of the job creator. Accepts multiple creator IDs to retrieve jobs created by specific users."),
     limit: str | None = Field(None, description="Maximum number of results to return per request, between 1 and 500. Defaults to 50. If the total results exceed this limit, a cursor is provided for pagination."),
 ) -> dict[str, Any] | ToolResult:
     """Retrieves a list of board export jobs for an organization, filtered by status, creator, and pagination limits. Enterprise-only endpoint requiring Company Admin role with eDiscovery enabled."""
@@ -2080,7 +2238,12 @@ async def list_board_export_jobs(
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="Create Board Export Job",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_board_export_job(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the boards to be exported."),
     request_id: str = Field(..., description="A unique identifier (UUID format) for this export job request, used to track and reference the job."),
@@ -2121,13 +2284,20 @@ async def create_board_export_job(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="Get Board Export Job Status",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_board_export_job_status(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job."),
     job_id: str = Field(..., description="The unique identifier of the board export job, formatted as a UUID."),
@@ -2166,7 +2336,13 @@ async def get_board_export_job_status(
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="Get Board Export Job Results",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_board_export_job_results(
     org_id: str = Field(..., description="The unique identifier of the organization. This is a numeric string that identifies which organization's board export job to retrieve results for."),
     job_id: str = Field(..., description="The unique identifier of the export job. This is a UUID that identifies the specific board export job whose results you want to retrieve."),
@@ -2205,7 +2381,13 @@ async def get_board_export_job_results(
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Board Export Job",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_board_export_job(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job. This is a numeric string identifier."),
     job_id: str = Field(..., description="The unique identifier of the board export job to cancel. This must be a valid UUID format."),
@@ -2242,13 +2424,20 @@ async def cancel_board_export_job(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="List Board Export Job Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_export_job_tasks(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job."),
     job_id: str = Field(..., description="The unique identifier of the board export job (UUID format)."),
@@ -2294,7 +2483,12 @@ async def list_board_export_job_tasks(
     return _response_data
 
 # Tags: Board Export
-@mcp.tool()
+@mcp.tool(
+    title="Create Board Export Task Download Link",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_board_export_task_download_link(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job. This is a numeric ID specific to your enterprise account."),
     job_id: str = Field(..., description="The unique identifier of the board export job. This must be a valid UUID that corresponds to an existing export job."),
@@ -2334,7 +2528,13 @@ async def create_board_export_task_download_link(
     return _response_data
 
 # Tags: Board Content Logs
-@mcp.tool()
+@mcp.tool(
+    title="List Board Item Content Logs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_item_content_logs(
     org_id: str = Field(..., description="The unique identifier of your organization."),
     from_: str = Field(..., alias="from", description="Start of the time range (UTC, ISO 8601 format with Z offset) for filtering logs by last modification date, inclusive."),
@@ -2383,7 +2583,13 @@ async def list_board_item_content_logs(
     return _response_data
 
 # Tags: Reset all sessions of a user
-@mcp.tool()
+@mcp.tool(
+    title="Delete User All Sessions",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_all_sessions(email: str = Field(..., description="The email address of the user whose sessions should be terminated. The user will be signed out from all devices and applications immediately.")) -> dict[str, Any] | ToolResult:
     """Immediately terminate all active sessions for a user across all devices, forcing them to sign in again. Use this to restrict access during security incidents, credential compromises, or when a user leaves the organization."""
 
@@ -2421,7 +2627,13 @@ async def delete_user_all_sessions(email: str = Field(..., description="The emai
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     filter_: str | None = Field(None, alias="filter", description="Filter results using expressions with attribute names and operators (eq, ne, co, sw, ew, pr, gt, ge, lt, le) combined with logical operators (and, or, not). Attribute names and operators are case-insensitive. Examples: userName eq \"user@miro.com\", active eq true, displayName co \"user\", groups.value eq \"3458764577585056871\", userType ne \"Full\"."),
     start_index: int | None = Field(None, alias="startIndex", description="The starting position for paginated results (1-based indexing). Use with count to retrieve specific pages of results."),
@@ -2465,7 +2677,12 @@ async def list_users(
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Create User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_user(
     user_name: str = Field(..., alias="userName", description="The unique email address that serves as the user's login identifier and username. This email becomes the user's full name if displayName or name attributes are not provided."),
     family_name: str = Field(..., alias="familyName", description="The user's last name. Combined with givenName, the total character count cannot exceed 60 characters. Used to construct the user's full name if displayName is not provided."),
@@ -2516,13 +2733,20 @@ async def create_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve. Must be a valid user ID for an organization member.")) -> dict[str, Any] | ToolResult:
     """Retrieves a single user resource by ID. Returns only users that are members of the organization; guest users are not included."""
 
@@ -2558,7 +2782,13 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the user being updated."),
     user_name: str | None = Field(None, alias="userName", description="The unique username or login identifier, typically an email address format."),
@@ -2613,13 +2843,20 @@ async def update_user(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_partial(
     id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the user being updated."),
     schemas: list[Literal["urn:ietf:params:scim:api:messages:2.0:PatchOp"]] = Field(..., description="Schema identifier array that designates this request as a SCIM PatchOp. Must include the SCIM patch operation schema."),
@@ -2656,13 +2893,20 @@ async def update_user_partial(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete, assigned by the server.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a user from the organization and transfers ownership of their boards to the oldest admin team member. The user must be an organization member (not a guest) and cannot be the last admin in their team or organization."""
 
@@ -2698,7 +2942,13 @@ async def delete_user(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="List Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups(
     filter_: str | None = Field(None, alias="filter", description="Filter results using expressions with attribute names and operators (eq, ne, co, sw, ew, pr, gt, ge, lt, le) combined with logical operators (and, or, not). Values must be enclosed in parentheses. Filtering on complex attributes is not supported. Example: displayName eq \"Product Team\""),
     start_index: int | None = Field(None, alias="startIndex", description="The starting position for paginated results (1-based indexing). Use with count to retrieve a specific page of results."),
@@ -2742,7 +2992,13 @@ async def list_groups(
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Get Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group(id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the group (team) to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a single group (team) resource along with its member users. Only users with member role in the organization are included in the response."""
 
@@ -2778,7 +3034,13 @@ async def get_group(id_: str = Field(..., alias="id", description="The unique se
     return _response_data
 
 # Tags: Group
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Members and Details",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_members_and_details(
     id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the group (team) to update."),
     schemas: Literal["urn:ietf:params:scim:api:messages:2.0:PatchOp"] = Field(..., description="Must be set to the PatchOp schema identifier to indicate this is a patch operation request."),
@@ -2815,13 +3077,20 @@ async def update_group_members_and_details(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Discovery
-@mcp.tool()
+@mcp.tool(
+    title="List Resource Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_resource_types() -> dict[str, Any] | ToolResult:
     """Retrieve the SCIM resource types supported by Miro, including Users and Groups. Use this to discover which resources can be managed through the SCIM API."""
 
@@ -2848,7 +3117,13 @@ async def list_resource_types() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Discovery
-@mcp.tool()
+@mcp.tool(
+    title="Get Resource Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_resource_type(resource: Literal["User", "Group"] = Field(..., description="The resource type to retrieve metadata for. Must be either 'User' or 'Group'.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a supported resource type (User or Group). Use this to understand the structure and properties of the specified resource type."""
 
@@ -2884,7 +3159,13 @@ async def get_resource_type(resource: Literal["User", "Group"] = Field(..., desc
     return _response_data
 
 # Tags: Discovery
-@mcp.tool()
+@mcp.tool(
+    title="List Schemas",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schemas() -> dict[str, Any] | ToolResult:
     """Retrieve metadata about supported Users, Groups, and extension attributes in the system. Use this to discover available schema definitions and their properties."""
 
@@ -2911,7 +3192,13 @@ async def list_schemas() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Discovery
-@mcp.tool()
+@mcp.tool(
+    title="Get Schema",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schema(uri: Literal["urn:ietf:params:scim:schemas:core:2.0:User", "urn:ietf:params:scim:schemas:core:2.0:Group", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"] = Field(..., description="The SCIM schema URI identifying the resource type: User, Group, or Enterprise User extension schema.")) -> dict[str, Any] | ToolResult:
     """Retrieve the SCIM schema definition for a specific resource type (User, Group, or Enterprise User), including details about supported attributes and their formatting requirements."""
 
@@ -2947,7 +3234,13 @@ async def get_schema(uri: Literal["urn:ietf:params:scim:schemas:core:2.0:User", 
     return _response_data
 
 # Tags: Organizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization(org_id: str = Field(..., description="The unique identifier of the organization to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about an organization. This endpoint is available only to Enterprise plan users with Company Admin role."""
 
@@ -2983,7 +3276,13 @@ async def get_organization(org_id: str = Field(..., description="The unique iden
     return _response_data
 
 # Tags: Organization Members
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def enterprise_get_organization_members(
     org_id: str = Field(..., description="id of the organization"),
     emails: str | None = Field(None, description="Emails of the organization members you want to retrieve. If you specify a value for the `emails` parameter, only the `emails` parameter is considered. All other filtering parameters are ignored. Maximum emails size is 10. Example: `emails=someEmail1@miro.com,someEmail2@miro.com`"),
@@ -3031,7 +3330,13 @@ async def enterprise_get_organization_members(
     return _response_data
 
 # Tags: Organization Members
-@mcp.tool()
+@mcp.tool(
+    title="Get Organization Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_organization_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the member."),
     member_id: str = Field(..., description="The unique identifier of the organization member whose information you want to retrieve."),
@@ -3070,7 +3375,13 @@ async def get_organization_member(
     return _response_data
 
 # Tags: boards
-@mcp.tool()
+@mcp.tool(
+    title="List Boards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_boards(
     team_id: str | None = Field(None, description="Filter results to boards within a specific team. When provided, overrides query and owner filters for faster results."),
     query: str | None = Field(None, description="Search for boards by name or description. Supports partial text matching up to 500 characters. Can be combined with the owner parameter to narrow results.", max_length=500),
@@ -3115,7 +3426,12 @@ async def list_boards(
     return _response_data
 
 # Tags: boards
-@mcp.tool()
+@mcp.tool(
+    title="Create Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_board(
     description: str | None = Field(None, description="Optional description of the board's purpose or content. Limited to 300 characters.", min_length=0, max_length=300),
     name: str | None = Field(None, description="Display name for the board. Defaults to 'Untitled' if not provided. Must be between 1 and 60 characters.", min_length=1, max_length=60),
@@ -3160,13 +3476,19 @@ async def create_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: boards
-@mcp.tool()
+@mcp.tool(
+    title="Create Board Copy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_board_copy(
     copy_from: str = Field(..., description="The unique identifier of the source board to duplicate. This board must exist and be accessible to the requesting user."),
     description: str | None = Field(None, description="Optional text describing the new board's purpose or content. Limited to 300 characters maximum.", min_length=0, max_length=300),
@@ -3215,13 +3537,20 @@ async def create_board_copy(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: boards
-@mcp.tool()
+@mcp.tool(
+    title="Get Board",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_board(board_id: str = Field(..., description="The unique identifier of the board to retrieve. This is a required string that identifies which board's information should be returned.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific board by its unique identifier. This operation requires boards:read scope and is rate-limited at Level 1."""
 
@@ -3257,7 +3586,13 @@ async def get_board(board_id: str = Field(..., description="The unique identifie
     return _response_data
 
 # Tags: boards
-@mcp.tool()
+@mcp.tool(
+    title="Update Board",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_board(
     board_id: str = Field(..., description="The unique identifier of the board to update."),
     description: str | None = Field(None, description="Board description text. Must be between 0 and 300 characters.", min_length=0, max_length=300),
@@ -3304,13 +3639,20 @@ async def update_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: boards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Board",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_board(board_id: str = Field(..., description="The unique identifier of the board to delete. This is a required string that identifies which board will be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a board, moving it to Trash on paid plans where it can be restored within 90 days. On free plans, deletion may be immediate."""
 
@@ -3346,7 +3688,12 @@ async def delete_board(board_id: str = Field(..., description="The unique identi
     return _response_data
 
 # Tags: app_cards
-@mcp.tool()
+@mcp.tool(
+    title="Create App Card",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_app_card(
     board_id: str = Field(..., description="The unique identifier of the board where the app card will be created."),
     description: str | None = Field(None, description="A short text description providing context about the app card's purpose or content."),
@@ -3391,13 +3738,20 @@ async def create_app_card(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: app_cards
-@mcp.tool()
+@mcp.tool(
+    title="Get App Card Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the app card item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific app card item to retrieve."),
@@ -3436,7 +3790,13 @@ async def get_app_card_item(
     return _response_data
 
 # Tags: app_cards
-@mcp.tool()
+@mcp.tool(
+    title="Update App Card Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_app_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the app card item to update."),
     item_id: str = Field(..., description="The unique identifier of the app card item to update."),
@@ -3482,13 +3842,20 @@ async def update_app_card_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: app_cards
-@mcp.tool()
+@mcp.tool(
+    title="Delete App Card Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_app_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the app card item to delete."),
     item_id: str = Field(..., description="The unique identifier of the app card item to delete from the board."),
@@ -3527,7 +3894,12 @@ async def delete_app_card_item(
     return _response_data
 
 # Tags: cards
-@mcp.tool()
+@mcp.tool(
+    title="Create Card Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_card_item(
     board_id: str = Field(..., description="The unique identifier of the board where the card will be created."),
     assignee_id: str | None = Field(None, alias="assigneeId", description="The numeric user ID of the person assigned to own this card. User IDs are automatically assigned when users first sign up."),
@@ -3572,13 +3944,20 @@ async def create_card_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: cards
-@mcp.tool()
+@mcp.tool(
+    title="Get Card Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the card item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the card item you want to retrieve."),
@@ -3617,7 +3996,13 @@ async def get_card_item(
     return _response_data
 
 # Tags: cards
-@mcp.tool()
+@mcp.tool(
+    title="Update Card Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the card item to update."),
     item_id: str = Field(..., description="The unique identifier of the card item to update."),
@@ -3663,13 +4048,20 @@ async def update_card_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: cards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Card Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the card item to delete."),
     item_id: str = Field(..., description="The unique identifier of the card item to delete from the board."),
@@ -3708,7 +4100,13 @@ async def delete_card_item(
     return _response_data
 
 # Tags: connectors
-@mcp.tool()
+@mcp.tool(
+    title="List Connectors for Board",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_connectors_for_board(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve connectors."),
     limit: str | None = Field(None, description="The maximum number of connectors to return per request, between 10 and 50. Defaults to 10. If more results exist, the response includes a cursor for fetching the next page."),
@@ -3750,7 +4148,12 @@ async def list_connectors_for_board(
     return _response_data
 
 # Tags: connectors
-@mcp.tool()
+@mcp.tool(
+    title="Create Connector",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_connector(
     board_id: str = Field(..., description="The unique identifier of the board where the connector will be created."),
     start_item_id: str | None = Field(None, alias="startItemId", description="The unique identifier of the item where the connector starts. Frames are not supported."),
@@ -3802,13 +4205,20 @@ async def create_connector(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connectors
-@mcp.tool()
+@mcp.tool(
+    title="Get Connector",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_connector(
     board_id: str = Field(..., description="The unique identifier of the board containing the connector you want to retrieve."),
     connector_id: str = Field(..., description="The unique identifier of the connector whose information you want to retrieve."),
@@ -3847,7 +4257,13 @@ async def get_connector(
     return _response_data
 
 # Tags: connectors
-@mcp.tool()
+@mcp.tool(
+    title="Update Connector",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_connector(
     board_id: str = Field(..., description="The unique identifier of the board containing the connector to update."),
     connector_id: str = Field(..., description="The unique identifier of the connector to update."),
@@ -3900,13 +4316,20 @@ async def update_connector(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: connectors
-@mcp.tool()
+@mcp.tool(
+    title="Delete Connector",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_connector(
     board_id: str = Field(..., description="The unique identifier of the board containing the connector to delete."),
     connector_id: str = Field(..., description="The unique identifier of the connector to delete from the board."),
@@ -3945,7 +4368,12 @@ async def delete_connector(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Add Document to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_document_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the document item will be created."),
     url: str = Field(..., description="The complete URL where the document is hosted and publicly accessible. Supports standard document formats like PDF."),
@@ -3982,13 +4410,20 @@ async def add_document_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Get Document Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_document_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the document item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific document item to retrieve."),
@@ -4027,7 +4462,13 @@ async def get_document_item(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the document item to update."),
     item_id: str = Field(..., description="The unique identifier of the document item to update."),
@@ -4069,13 +4510,20 @@ async def update_document_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Document Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_document_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the document item to delete."),
     item_id: str = Field(..., description="The unique identifier of the document item to delete from the board."),
@@ -4114,7 +4562,12 @@ async def delete_document_item(
     return _response_data
 
 # Tags: embeds
-@mcp.tool()
+@mcp.tool(
+    title="Add Embed Item to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_embed_item_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the embed item will be created."),
     url: str = Field(..., description="A valid URL (HTTP or HTTPS) pointing to the external content resource to embed. This is the actual content that will be displayed."),
@@ -4155,13 +4608,20 @@ async def add_embed_item_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: embeds
-@mcp.tool()
+@mcp.tool(
+    title="Get Embed Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_embed_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the embed item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific embed item to retrieve."),
@@ -4200,7 +4660,13 @@ async def get_embed_item(
     return _response_data
 
 # Tags: embeds
-@mcp.tool()
+@mcp.tool(
+    title="Update Embed Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_embed_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the embed item to update."),
     item_id: str = Field(..., description="The unique identifier of the embed item to update."),
@@ -4242,13 +4708,20 @@ async def update_embed_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: embeds
-@mcp.tool()
+@mcp.tool(
+    title="Delete Embed Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_embed_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the embed item to delete."),
     item_id: str = Field(..., description="The unique identifier of the embed item to delete from the board."),
@@ -4287,7 +4760,12 @@ async def delete_embed_item(
     return _response_data
 
 # Tags: images
-@mcp.tool()
+@mcp.tool(
+    title="Add Image to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_image_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the image will be added."),
     url: str = Field(..., description="The URL of the image to add. Must be a valid, publicly accessible image URL."),
@@ -4328,13 +4806,20 @@ async def add_image_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: images
-@mcp.tool()
+@mcp.tool(
+    title="Get Image Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_image_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the image item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the image item you want to retrieve."),
@@ -4373,7 +4858,13 @@ async def get_image_item(
     return _response_data
 
 # Tags: images
-@mcp.tool()
+@mcp.tool(
+    title="Update Image Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_image_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the image item to update."),
     item_id: str = Field(..., description="The unique identifier of the image item to update."),
@@ -4415,13 +4906,20 @@ async def update_image_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: images
-@mcp.tool()
+@mcp.tool(
+    title="Delete Image Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_image_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the image item to delete."),
     item_id: str = Field(..., description="The unique identifier of the image item to delete from the board."),
@@ -4460,7 +4958,13 @@ async def delete_image_item(
     return _response_data
 
 # Tags: items
-@mcp.tool()
+@mcp.tool(
+    title="List Board Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_items(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve items."),
     limit: str | None = Field(None, description="The maximum number of items to return per request, between 10 and 50. Defaults to 10. If more items exist, use the cursor from the response to fetch the next batch."),
@@ -4503,7 +5007,13 @@ async def list_board_items(
     return _response_data
 
 # Tags: items
-@mcp.tool()
+@mcp.tool(
+    title="Get Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the item you want to retrieve from the board."),
@@ -4542,7 +5052,13 @@ async def get_item(
     return _response_data
 
 # Tags: items
-@mcp.tool()
+@mcp.tool(
+    title="Update Item Position or Parent",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_item_position_or_parent(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to update."),
     item_id: str = Field(..., description="The unique identifier of the item whose position or parent you want to change."),
@@ -4582,13 +5098,20 @@ async def update_item_position_or_parent(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: items
-@mcp.tool()
+@mcp.tool(
+    title="Delete Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to delete."),
     item_id: str = Field(..., description="The unique identifier of the item to delete from the board."),
@@ -4627,7 +5150,13 @@ async def delete_item(
     return _response_data
 
 # Tags: board_members
-@mcp.tool()
+@mcp.tool(
+    title="List Board Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_members(
     board_id: str = Field(..., description="The unique identifier of the board whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of board members to return per request, between 1 and 50. Defaults to 20 if not specified."),
@@ -4670,7 +5199,12 @@ async def list_board_members(
     return _response_data
 
 # Tags: board_members
-@mcp.tool()
+@mcp.tool(
+    title="Invite Members to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def invite_members_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where members will be invited."),
     emails: list[str] = Field(..., description="Email addresses of users to invite to the board. You can invite between 1 and 20 members per request.", min_length=1, max_length=20),
@@ -4708,13 +5242,20 @@ async def invite_members_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: board_members
-@mcp.tool()
+@mcp.tool(
+    title="Get Board Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_board_member(
     board_id: str = Field(..., description="The unique identifier of the board containing the member you want to retrieve."),
     board_member_id: str = Field(..., description="The unique identifier of the board member whose information you want to retrieve."),
@@ -4753,7 +5294,13 @@ async def get_board_member(
     return _response_data
 
 # Tags: board_members
-@mcp.tool()
+@mcp.tool(
+    title="Update Board Member Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_board_member_role(
     board_id: str = Field(..., description="The unique identifier of the board containing the member whose role you want to update."),
     board_member_id: str = Field(..., description="The unique identifier of the board member whose role you want to change."),
@@ -4790,13 +5337,20 @@ async def update_board_member_role(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: board_members
-@mcp.tool()
+@mcp.tool(
+    title="Remove Board Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_board_member(
     board_id: str = Field(..., description="The unique identifier of the board from which you want to remove the member."),
     board_member_id: str = Field(..., description="The unique identifier of the board member you want to remove from the board."),
@@ -4835,7 +5389,12 @@ async def remove_board_member(
     return _response_data
 
 # Tags: shapes
-@mcp.tool()
+@mcp.tool(
+    title="Add Shape to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_shape_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the shape will be created."),
     content: str | None = Field(None, description="Optional text content to display on the shape. Not supported for flow_chart_or and flow_chart_summing_junction shapes."),
@@ -4888,13 +5447,20 @@ async def add_shape_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: shapes
-@mcp.tool()
+@mcp.tool(
+    title="Get Shape Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_shape_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the shape item you want to retrieve."),
@@ -4933,7 +5499,13 @@ async def get_shape_item(
     return _response_data
 
 # Tags: shapes
-@mcp.tool()
+@mcp.tool(
+    title="Update Shape Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_shape_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item to update."),
     item_id: str = Field(..., description="The unique identifier of the shape item to update."),
@@ -4987,13 +5559,20 @@ async def update_shape_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: shapes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Shape Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_shape_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item to delete."),
     item_id: str = Field(..., description="The unique identifier of the shape item to delete from the board."),
@@ -5032,7 +5611,12 @@ async def delete_shape_item(
     return _response_data
 
 # Tags: sticky_notes
-@mcp.tool()
+@mcp.tool(
+    title="Add Sticky Note",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_sticky_note(
     board_id: str = Field(..., description="The unique identifier of the board where the sticky note will be created."),
     content: str | None = Field(None, description="The text content displayed in the sticky note (e.g., 'Hello')."),
@@ -5076,13 +5660,20 @@ async def add_sticky_note(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sticky_notes
-@mcp.tool()
+@mcp.tool(
+    title="Get Sticky Note Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_sticky_note_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the sticky note item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the sticky note item you want to retrieve."),
@@ -5121,7 +5712,13 @@ async def get_sticky_note_item(
     return _response_data
 
 # Tags: sticky_notes
-@mcp.tool()
+@mcp.tool(
+    title="Update Sticky Note",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_sticky_note(
     board_id: str = Field(..., description="The unique identifier of the board containing the sticky note to update."),
     item_id: str = Field(..., description="The unique identifier of the sticky note item to update."),
@@ -5166,13 +5763,20 @@ async def update_sticky_note(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: sticky_notes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Sticky Note Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_sticky_note_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the sticky note to delete."),
     item_id: str = Field(..., description="The unique identifier of the sticky note item to delete."),
@@ -5211,7 +5815,12 @@ async def delete_sticky_note_item(
     return _response_data
 
 # Tags: texts
-@mcp.tool()
+@mcp.tool(
+    title="Add Text to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_text_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the text item will be created."),
     content: str = Field(..., description="The text content to display in the item."),
@@ -5257,13 +5866,20 @@ async def add_text_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: texts
-@mcp.tool()
+@mcp.tool(
+    title="Get Text Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_text_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the text item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the text item you want to retrieve."),
@@ -5302,7 +5918,13 @@ async def get_text_item(
     return _response_data
 
 # Tags: texts
-@mcp.tool()
+@mcp.tool(
+    title="Update Text Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_text_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the text item to update."),
     item_id: str = Field(..., description="The unique identifier of the text item to update."),
@@ -5349,13 +5971,20 @@ async def update_text_item(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: texts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Text Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_text_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the text item to delete."),
     item_id: str = Field(..., description="The unique identifier of the text item to delete from the board."),
@@ -5394,7 +6023,12 @@ async def delete_text_item(
     return _response_data
 
 # Tags: Bulk operations
-@mcp.tool()
+@mcp.tool(
+    title="Create Items in Bulk",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_items_bulk(
     board_id: str = Field(..., description="The unique identifier of the board where items will be created."),
     body: list[_models.ItemCreate] = Field(..., description="Array of item objects to create. Must contain between 1 and 20 items. Items can be of different types (cards, shapes, sticky notes, etc.) and are processed together as a single transaction.", min_length=1, max_length=20),
@@ -5431,13 +6065,19 @@ async def create_items_bulk(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: frames
-@mcp.tool()
+@mcp.tool(
+    title="Add Frame to Board",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_frame_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the frame will be created."),
     format_: Literal["custom"] | None = Field(None, alias="format", description="The frame format type. Currently, only custom frames are supported."),
@@ -5481,13 +6121,20 @@ async def add_frame_to_board(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: frames
-@mcp.tool()
+@mcp.tool(
+    title="Get Frame",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_frame(
     board_id: str = Field(..., description="The unique identifier of the board containing the frame you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the frame you want to retrieve."),
@@ -5526,7 +6173,13 @@ async def get_frame(
     return _response_data
 
 # Tags: frames
-@mcp.tool()
+@mcp.tool(
+    title="Update Frame",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_frame(
     board_id: str = Field(..., description="The unique identifier of the board containing the frame to update."),
     item_id: str = Field(..., description="The unique identifier of the frame to update."),
@@ -5571,13 +6224,20 @@ async def update_frame(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: frames
-@mcp.tool()
+@mcp.tool(
+    title="Delete Frame",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_frame(
     board_id: str = Field(..., description="The unique identifier of the board containing the frame to delete."),
     item_id: str = Field(..., description="The unique identifier of the frame to delete from the board."),
@@ -5616,7 +6276,13 @@ async def delete_frame(
     return _response_data
 
 # Tags: items
-@mcp.tool()
+@mcp.tool(
+    title="List Items in Frame",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_items_in_frame(
     board_id_platform_containers: str = Field(..., alias="board_id_PlatformContainers", description="The unique identifier of the board containing the frame."),
     parent_item_id: str = Field(..., description="The unique identifier of the frame (parent item) whose child items you want to retrieve."),
@@ -5660,7 +6326,13 @@ async def list_items_in_frame(
     return _response_data
 
 # Tags: App metrics (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Get App Metrics",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_metrics(
     app_id: str = Field(..., description="The unique identifier of the app for which to retrieve metrics."),
     start_date: str = Field(..., alias="startDate", description="The start date for the metrics period in UTC format (YYYY-MM-DD). Metrics will be retrieved from this date onwards."),
@@ -5704,7 +6376,13 @@ async def get_app_metrics(
     return _response_data
 
 # Tags: App metrics (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Get App Metrics Total",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_app_metrics_total(app_id: str = Field(..., description="The unique identifier of the app for which to retrieve total metrics.")) -> dict[str, Any] | ToolResult:
     """Retrieve cumulative usage metrics for a specific app since its creation. Returns total metrics data for the app identified by the provided app ID."""
 
@@ -5740,7 +6418,13 @@ async def get_app_metrics_total(app_id: str = Field(..., description="The unique
     return _response_data
 
 # Tags: Mind map nodes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Get Mind Map Node",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_mindmap_node(
     board_id: str = Field(..., description="The unique identifier of the board containing the mind map node you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific mind map node to retrieve."),
@@ -5779,7 +6463,13 @@ async def get_mindmap_node(
     return _response_data
 
 # Tags: Mind map nodes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Mindmap Node",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_mindmap_node(
     board_id: str = Field(..., description="The unique identifier of the board containing the mind map node to delete."),
     item_id: str = Field(..., description="The unique identifier of the mind map node to delete. Deleting a node also removes all of its child nodes."),
@@ -5818,7 +6508,13 @@ async def delete_mindmap_node(
     return _response_data
 
 # Tags: Mind map nodes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="List Mindmap Nodes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_mindmap_nodes(
     board_id: str = Field(..., description="The unique identifier of the board containing the mind map nodes you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of mind map nodes to return per request. Use this with the cursor parameter to paginate through large result sets."),
@@ -5860,7 +6556,12 @@ async def list_mindmap_nodes(
     return _response_data
 
 # Tags: Mind map nodes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Create Mind Map Node",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_mindmap_node(
     board_id: str = Field(..., description="The unique identifier of the board where the mind map node will be created."),
     type_: str = Field(..., alias="type", description="The type of mind map node. Currently only 'text' is supported."),
@@ -5903,13 +6604,20 @@ async def create_mindmap_node(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Flowchart shapes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="List Board Items (Experimental)",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_items_experimental(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve items."),
     limit: str | None = Field(None, description="The maximum number of items to return per request, between 10 and 50. Defaults to 10 items. Use the cursor from the response to fetch subsequent pages."),
@@ -5952,7 +6660,13 @@ async def list_board_items_experimental(
     return _response_data
 
 # Tags: Flowchart shapes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Get Board Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_board_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific item you want to retrieve from the board."),
@@ -5991,7 +6705,13 @@ async def get_board_item(
     return _response_data
 
 # Tags: items
-@mcp.tool()
+@mcp.tool(
+    title="Delete Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_item_beta(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to delete."),
     item_id: str = Field(..., description="The unique identifier of the item to delete from the board."),
@@ -6030,7 +6750,12 @@ async def delete_item_beta(
     return _response_data
 
 # Tags: Flowchart shapes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Add Shape to Board Flowchart",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_shape_to_board_flowchart(
     board_id: str = Field(..., description="The unique identifier of the board where the shape will be created."),
     content: str | None = Field(None, description="Optional text to display on the shape. Not supported for OR gates and summing junction flowchart shapes."),
@@ -6083,13 +6808,20 @@ async def add_shape_to_board_flowchart(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Flowchart shapes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Get Shape Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_shape_item_experimental(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the shape item you want to retrieve."),
@@ -6128,7 +6860,13 @@ async def get_shape_item_experimental(
     return _response_data
 
 # Tags: Flowchart shapes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Update Shape Item Flowchart",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_shape_item_flowchart(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape to update."),
     item_id: str = Field(..., description="The unique identifier of the shape item to update."),
@@ -6182,13 +6920,20 @@ async def update_shape_item_flowchart(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Flowchart shapes (experimental)
-@mcp.tool()
+@mcp.tool(
+    title="Delete Shape Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_shape_item_experimental(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item to delete."),
     item_id: str = Field(..., description="The unique identifier of the shape item to delete from the board."),
@@ -6227,10 +6972,15 @@ async def delete_shape_item_experimental(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Create Document Item from File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_document_item_from_file(
     board_id_platform_file_upload: str = Field(..., alias="board_id_PlatformFileUpload", description="The unique identifier of the board where the document item will be created."),
-    resource: str = Field(..., description="The file to upload from your device. Maximum file size is 6 MB."),
+    resource: str = Field(..., description="Base64-encoded file content for upload. The file to upload from your device. Maximum file size is 6 MB.", json_schema_extra={'format': 'byte'}),
     title: str | None = Field(None, description="Optional title for the document item. If not provided, the uploaded filename will be used."),
     height: float | None = Field(None, description="Optional height of the document item on the board, specified in pixels."),
     width: float | None = Field(None, description="Optional width of the document item on the board, specified in pixels."),
@@ -6277,11 +7027,17 @@ async def create_document_item_from_file(
     return _response_data
 
 # Tags: documents
-@mcp.tool()
+@mcp.tool(
+    title="Update Document Item with File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_document_item_with_file(
     board_id_platform_file_upload: str = Field(..., alias="board_id_PlatformFileUpload", description="The unique identifier of the board containing the document item you want to update."),
     item_id: str = Field(..., description="The unique identifier of the document item you want to replace with a new file."),
-    resource: str = Field(..., description="The file to upload from your device. Maximum file size is 6 MB. Provide the file as binary data."),
+    resource: str = Field(..., description="Base64-encoded file content for upload. The file to upload from your device. Maximum file size is 6 MB. Provide the file as binary data.", json_schema_extra={'format': 'byte'}),
     title: str | None = Field(None, description="Optional title for the document (e.g., 'foo.png'). If not provided, the existing title is retained."),
     alt_text: str | None = Field(None, alias="altText", description="Optional alt-text description to improve accessibility and help viewers understand the document content."),
     height: float | None = Field(None, description="Optional height of the item in pixels. Specify as a decimal number."),
@@ -6329,10 +7085,15 @@ async def update_document_item_with_file(
     return _response_data
 
 # Tags: images
-@mcp.tool()
+@mcp.tool(
+    title="Create Image Item from Local File",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_image_item_from_local_file(
     board_id_platform_file_upload: str = Field(..., alias="board_id_PlatformFileUpload", description="The unique identifier of the board where the image item will be created."),
-    resource: str = Field(..., description="The image file to upload from your device. Maximum file size is 6 MB."),
+    resource: str = Field(..., description="Base64-encoded file content for upload. The image file to upload from your device. Maximum file size is 6 MB.", json_schema_extra={'format': 'byte'}),
     title: str | None = Field(None, description="Optional display title for the image item (e.g., 'foo.png'). If not provided, the filename may be used."),
     alt_text: str | None = Field(None, alias="altText", description="Optional alt text describing the image content for accessibility purposes."),
     height: float | None = Field(None, description="Optional height of the image item in pixels. If not specified, the original image dimensions will be used."),
@@ -6380,11 +7141,17 @@ async def create_image_item_from_local_file(
     return _response_data
 
 # Tags: images
-@mcp.tool()
+@mcp.tool(
+    title="Update Image Item from File",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_image_item_from_file(
     board_id_platform_file_upload: str = Field(..., alias="board_id_PlatformFileUpload", description="The unique identifier of the board containing the image item you want to update."),
     item_id: str = Field(..., description="The unique identifier of the image item on the board that you want to replace or modify."),
-    resource: str = Field(..., description="The image file to upload from your device. Maximum file size is 6 MB. This replaces the existing image on the item."),
+    resource: str = Field(..., description="Base64-encoded file content for upload. The image file to upload from your device. Maximum file size is 6 MB. This replaces the existing image on the item.", json_schema_extra={'format': 'byte'}),
     title: str | None = Field(None, description="Optional display name for the image (e.g., 'foo.png'). If not provided, the existing title is retained."),
     alt_text: str | None = Field(None, alias="altText", description="Optional alt text describing the image content for accessibility purposes. Helps users understand what the image depicts."),
     height: float | None = Field(None, description="Optional height of the image in pixels. Specify as a decimal number to set or adjust the vertical dimension."),
@@ -6432,7 +7199,13 @@ async def update_image_item_from_file(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups on Board",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups_on_board(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve groups."),
     limit: str | None = Field(None, description="The maximum number of groups to return per request, between 10 and 50 items (defaults to 10). Use this with the cursor parameter to paginate through results."),
@@ -6476,7 +7249,13 @@ async def list_groups_on_board(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="List Items in Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_items_in_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group."),
     group_item_id: str = Field(..., description="The unique identifier of the group whose items you want to retrieve."),
@@ -6521,7 +7300,13 @@ async def list_items_in_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Group by ID",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_by_id(
     board_id: str = Field(..., description="The unique identifier of the board containing the group. This is a required string ID that identifies which board to query."),
     group_id: str = Field(..., description="The unique identifier of the group to retrieve. This is a required numeric ID that specifies which group's items should be returned."),
@@ -6560,7 +7345,13 @@ async def get_group_by_id(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group to update."),
     group_id: str = Field(..., description="The unique identifier of the group to replace."),
@@ -6600,13 +7391,20 @@ async def update_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove Items from Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_items_from_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group."),
     group_id: str = Field(..., description="The unique identifier of the group to ungroup items from."),
@@ -6649,7 +7447,13 @@ async def remove_items_from_group(
     return _response_data
 
 # Tags: groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group to delete."),
     group_id: str = Field(..., description="The unique identifier of the group to delete."),
@@ -6692,7 +7496,13 @@ async def delete_group(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags for Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_for_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item. This ID is required to locate the correct board context."),
     item_id: str = Field(..., description="The unique identifier of the item whose tags you want to retrieve. This ID must correspond to an item that exists on the specified board."),
@@ -6731,7 +7541,13 @@ async def list_tags_for_item(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="List Tags from Board",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_tags_from_board(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve tags."),
     limit: str | None = Field(None, description="The maximum number of tags to return in a single request. Must be between 1 and 50 items. Defaults to 20 if not specified."),
@@ -6774,7 +7590,12 @@ async def list_tags_from_board(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Create Tag",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_tag(
     board_id: str = Field(..., description="The unique identifier of the board where the tag will be created."),
     title: str = Field(..., description="The display text for the tag, case-sensitive and must be unique within the board. Can be up to 120 characters long.", min_length=0, max_length=120),
@@ -6811,13 +7632,20 @@ async def create_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Get Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_tag(
     board_id: str = Field(..., description="The unique identifier of the board containing the tag you want to retrieve."),
     tag_id: str = Field(..., description="The unique identifier of the tag whose information you want to retrieve."),
@@ -6856,7 +7684,13 @@ async def get_tag(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Update Tag",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_tag(
     board_id: str = Field(..., description="The unique identifier of the board containing the tag you want to update."),
     tag_id: str = Field(..., description="The unique identifier of the tag you want to update."),
@@ -6894,13 +7728,20 @@ async def update_tag(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Delete Tag",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_tag(
     board_id: str = Field(..., description="The unique identifier of the board containing the tag to delete."),
     tag_id: str = Field(..., description="The unique identifier of the tag to delete from the board."),
@@ -6939,7 +7780,13 @@ async def delete_tag(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="List Items by Tag",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_items_by_tag(
     board_id_platform_tags: str = Field(..., alias="board_id_PlatformTags", description="The unique identifier of the board containing the items you want to retrieve."),
     tag_id: str = Field(..., description="The unique identifier of the tag used to filter items. Only items with this tag will be returned."),
@@ -6983,7 +7830,12 @@ async def list_items_by_tag(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Add Tag to Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_tag_to_item(
     board_id_platform_tags: str = Field(..., alias="board_id_PlatformTags", description="The unique identifier of the board containing the item you want to tag."),
     item_id: str = Field(..., description="The unique identifier of the item (card or sticky note) to which you want to attach the tag."),
@@ -7026,7 +7878,13 @@ async def add_tag_to_item(
     return _response_data
 
 # Tags: tags
-@mcp.tool()
+@mcp.tool(
+    title="Remove Tag from Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_tag_from_item(
     board_id_platform_tags: str = Field(..., alias="board_id_PlatformTags", description="The unique identifier of the board containing the item from which you want to remove the tag."),
     item_id: str = Field(..., description="The unique identifier of the item from which you want to remove the tag."),
@@ -7069,7 +7927,13 @@ async def remove_tag_from_item(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="List Projects in Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_projects_in_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team. Required to scope the request to the correct organization."),
     team_id: str = Field(..., description="The unique identifier of the team within the organization. Required to retrieve projects from the specific team."),
@@ -7114,7 +7978,12 @@ async def list_projects_in_team(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Create Project in Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_project_in_team(
     org_id: str = Field(..., description="The unique identifier of the organization where you want to create the project."),
     team_id: str = Field(..., description="The unique identifier of the team within the organization where you want to create the project."),
@@ -7151,13 +8020,20 @@ async def create_project_in_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Get Project in Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_in_team(
     org_id: str = Field(..., description="The organization ID that contains the team and project. Use the numeric organization identifier provided in your Enterprise account."),
     team_id: str = Field(..., description="The team ID that contains the project. Use the numeric team identifier within the organization."),
@@ -7197,7 +8073,13 @@ async def get_project_in_team(
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Update Project",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project(
     org_id: str = Field(..., description="The unique identifier of the organization containing the project."),
     team_id: str = Field(..., description="The unique identifier of the team that owns the project."),
@@ -7235,13 +8117,20 @@ async def update_project(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Projects
-@mcp.tool()
+@mcp.tool(
+    title="Delete Project in Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_project_in_team(
     org_id: str = Field(..., description="The organization ID from which the project will be deleted. Use the numeric organization identifier."),
     team_id: str = Field(..., description="The team ID from which the project will be deleted. Use the numeric team identifier."),
@@ -7281,7 +8170,13 @@ async def delete_project_in_team(
     return _response_data
 
 # Tags: Project Members
-@mcp.tool()
+@mcp.tool(
+    title="List Project Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_members(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the project."),
     team_id: str = Field(..., description="The unique identifier of the team that contains the project."),
@@ -7327,7 +8222,12 @@ async def list_project_members(
     return _response_data
 
 # Tags: Project Members
-@mcp.tool()
+@mcp.tool(
+    title="Add Project Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_project_member(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the project."),
     team_id: str = Field(..., description="The unique identifier of the team that owns the project."),
@@ -7366,13 +8266,20 @@ async def add_project_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project Members
-@mcp.tool()
+@mcp.tool(
+    title="Get Project Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_project_member(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the project. Use the organization ID provided in your enterprise account."),
     team_id: str = Field(..., description="The unique identifier of the team that owns the project. Use the team ID associated with your organization."),
@@ -7413,7 +8320,13 @@ async def get_project_member(
     return _response_data
 
 # Tags: Project Members
-@mcp.tool()
+@mcp.tool(
+    title="Update Project Member Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_project_member_role(
     org_id: str = Field(..., description="The organization ID that contains the team and project. Use the numeric organization identifier (e.g., 3074457345618265000)."),
     team_id: str = Field(..., description="The team ID that owns the project. Use the numeric team identifier (e.g., 3074457345619012000)."),
@@ -7452,13 +8365,20 @@ async def update_project_member_role(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Project Members
-@mcp.tool()
+@mcp.tool(
+    title="Remove Project Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_project_member(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the project."),
     team_id: str = Field(..., description="The unique identifier of the team that contains the project."),
@@ -7499,7 +8419,13 @@ async def remove_project_member(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Organization Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_organization_teams(
     org_id: str = Field(..., description="The unique identifier of the organization whose teams you want to retrieve."),
     limit: str | None = Field(None, description="Maximum number of teams to return per request. Accepts values between 1 and 100, defaults to 100 if not specified."),
@@ -7544,7 +8470,12 @@ async def list_organization_teams(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(
     org_id: str = Field(..., description="The unique identifier of the organization where the team will be created."),
     name: str = Field(..., description="The name for the new team. Must be between 1 and 60 characters long.", min_length=1, max_length=60),
@@ -7580,13 +8511,20 @@ async def create_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the team. Use the organization ID provided during enterprise setup."),
     team_id: str = Field(..., description="The unique identifier of the team to retrieve. This must be a valid team ID within the specified organization."),
@@ -7625,7 +8563,13 @@ async def get_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team to update."),
@@ -7662,13 +8606,20 @@ async def update_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team to delete."),
     team_id: str = Field(..., description="The unique identifier of the team to delete."),
@@ -7707,7 +8658,13 @@ async def delete_team(
     return _response_data
 
 # Tags: Team Members
-@mcp.tool()
+@mcp.tool(
+    title="List Team Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_team_members(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team whose members you want to retrieve."),
@@ -7753,7 +8710,12 @@ async def list_team_members(
     return _response_data
 
 # Tags: Team Members
-@mcp.tool()
+@mcp.tool(
+    title="Add Team Member",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_team_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team to which the user will be invited."),
@@ -7791,13 +8753,20 @@ async def add_team_member(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Team Members
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team containing the member."),
@@ -7837,7 +8806,13 @@ async def get_team_member(
     return _response_data
 
 # Tags: Team Members
-@mcp.tool()
+@mcp.tool(
+    title="Update Team Member Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team_member_role(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team. Use the organization ID provided in your Enterprise account."),
     team_id: str = Field(..., description="The unique identifier of the team containing the member to update."),
@@ -7875,13 +8850,20 @@ async def update_team_member_role(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Team Members
-@mcp.tool()
+@mcp.tool(
+    title="Remove Team Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_team_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team from which the member will be removed."),
@@ -7921,7 +8903,13 @@ async def remove_team_member(
     return _response_data
 
 # Tags: User groups
-@mcp.tool()
+@mcp.tool(
+    title="List Enterprise Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups_enterprise(
     org_id: str = Field(..., description="The unique identifier of the organization whose groups you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of groups to return in a single response, between 1 and 100. Defaults to 100 if not specified."),
@@ -7965,7 +8953,12 @@ async def list_groups_enterprise(
     return _response_data
 
 # Tags: User groups
-@mcp.tool()
+@mcp.tool(
+    title="Create Group in Organization",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_group_organization(
     org_id: str = Field(..., description="The unique identifier of the organization where the group will be created."),
     name: str = Field(..., description="The name of the user group. Must be between 1 and 60 characters.", min_length=1, max_length=60),
@@ -8002,13 +8995,20 @@ async def create_group_organization(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Enterprise Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_enterprise(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group to retrieve."),
@@ -8047,7 +9047,13 @@ async def get_group_enterprise(
     return _response_data
 
 # Tags: User groups
-@mcp.tool()
+@mcp.tool(
+    title="Update Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_org(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group to update."),
     group_id: str = Field(..., description="The unique identifier of the user group to update."),
@@ -8085,13 +9091,20 @@ async def update_group_org(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User groups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Group from Organization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_group_organization(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group to delete."),
     group_id: str = Field(..., description="The unique identifier of the user group to delete."),
@@ -8130,7 +9143,13 @@ async def delete_group_organization(
     return _response_data
 
 # Tags: User group members
-@mcp.tool()
+@mcp.tool(
+    title="List Group Members",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_group_members(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group whose members you want to retrieve."),
@@ -8175,7 +9194,12 @@ async def list_group_members(
     return _response_data
 
 # Tags: User group members
-@mcp.tool()
+@mcp.tool(
+    title="Add Member to Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_member_to_group(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group. Use the organization ID provided in your enterprise account."),
     group_id: str = Field(..., description="The unique identifier of the user group to which the member will be added."),
@@ -8212,13 +9236,20 @@ async def add_member_to_group(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User group members
-@mcp.tool()
+@mcp.tool(
+    title="Update Group Members",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_group_members(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group to modify."),
@@ -8256,13 +9287,20 @@ async def update_group_members(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: User group members
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Member",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group from which to retrieve the member."),
@@ -8302,7 +9340,13 @@ async def get_group_member(
     return _response_data
 
 # Tags: User group members
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group Member",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group from which the member will be removed."),
@@ -8342,7 +9386,13 @@ async def remove_group_member(
     return _response_data
 
 # Tags: User group to teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams for Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams_for_group(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group whose team memberships you want to retrieve."),
@@ -8387,7 +9437,13 @@ async def list_teams_for_group(
     return _response_data
 
 # Tags: User group to teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Group Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_group_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group and team."),
     group_id: str = Field(..., description="The unique identifier of the user group within the organization."),
@@ -8427,7 +9483,13 @@ async def get_group_team(
     return _response_data
 
 # Tags: Team user groups
-@mcp.tool()
+@mcp.tool(
+    title="List Groups for Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_groups_for_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team whose connected groups you want to retrieve."),
@@ -8472,7 +9534,12 @@ async def list_groups_for_team(
     return _response_data
 
 # Tags: Team user groups
-@mcp.tool()
+@mcp.tool(
+    title="Add User Group to Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_group_to_team(
     org_id: str = Field(..., description="The unique identifier of the organization where the team resides."),
     team_id: str = Field(..., description="The unique identifier of the team to which the user group will be added."),
@@ -8510,13 +9577,20 @@ async def add_user_group_to_team(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Team user groups
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_group(
     org_id: str = Field(..., description="The unique identifier of the organization. Use the organization ID provided in your Enterprise account."),
     team_id: str = Field(..., description="The unique identifier of the team. Use the team ID to scope the group lookup within a specific team."),
@@ -8556,7 +9630,13 @@ async def get_team_group(
     return _response_data
 
 # Tags: Team user groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group from Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_from_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team. Use the organization ID provided during setup (a numeric string)."),
     team_id: str = Field(..., description="The unique identifier of the team from which the group will be removed. Use the team ID provided during setup (a numeric string)."),
@@ -8596,7 +9676,13 @@ async def remove_group_from_team(
     return _response_data
 
 # Tags: Share boards with groups
-@mcp.tool()
+@mcp.tool(
+    title="List Board Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_board_groups(
     org_id: str = Field(..., description="The unique identifier of the organization containing the board."),
     board_id: str = Field(..., description="The unique identifier of the board for which to retrieve group assignments."),
@@ -8641,7 +9727,12 @@ async def list_board_groups(
     return _response_data
 
 # Tags: Share boards with groups
-@mcp.tool()
+@mcp.tool(
+    title="Share Board with Groups",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def share_board_with_groups(
     org_id: str = Field(..., description="The unique identifier of the organization. Format: numeric string (e.g., '3074457345618265000')."),
     board_id: str = Field(..., description="The unique identifier of the board to share. Format: alphanumeric string (e.g., 'uXjVOfjm6tI=')."),
@@ -8679,13 +9770,20 @@ async def share_board_with_groups(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Share boards with groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group from Board",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_from_board(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the board."),
     board_id: str = Field(..., description="The unique identifier of the board from which the user group will be removed."),
@@ -8725,7 +9823,13 @@ async def remove_group_from_board(
     return _response_data
 
 # Tags: Share projects with groups
-@mcp.tool()
+@mcp.tool(
+    title="List Project Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_project_groups(
     org_id: str = Field(..., description="The unique identifier of the organization containing the project."),
     project_id: str = Field(..., description="The unique identifier of the project for which to retrieve group assignments."),
@@ -8770,7 +9874,12 @@ async def list_project_groups(
     return _response_data
 
 # Tags: Share projects with groups
-@mcp.tool()
+@mcp.tool(
+    title="Share Project with Groups",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def share_project_with_groups(
     org_id: str = Field(..., description="The unique identifier of the organization containing the project."),
     project_id: str = Field(..., description="The unique identifier of the project to share with user groups."),
@@ -8808,13 +9917,20 @@ async def share_project_with_groups(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="application/json",
         headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Share projects with groups
-@mcp.tool()
+@mcp.tool(
+    title="Remove Group from Project",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_group_from_project(
     org_id: str = Field(..., description="The organization ID that contains the project. Use the numeric organization identifier."),
     project_id: str = Field(..., description="The project ID from which to remove the group. Use the numeric project identifier."),

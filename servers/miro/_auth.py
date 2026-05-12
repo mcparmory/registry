@@ -1,7 +1,7 @@
 """
 Authentication module for Miro MCP server.
 
-Generated: 2026-05-05 15:35:26 UTC
+Generated: 2026-05-12 11:54:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

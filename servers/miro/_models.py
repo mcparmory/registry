@@ -1,13 +1,13 @@
 """
 Miro MCP Server - Pydantic Models
 
-Generated: 2026-05-05 15:35:26 UTC
+Generated: 2026-05-12 11:54:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from _validators import PermissiveModel, StrictModel
 from pydantic import Field
@@ -400,7 +400,7 @@ class EnterpriseBoardExportJobsRequestPath(StrictModel):
     org_id: str = Field(default=..., description="The unique identifier of the organization whose board export jobs you want to retrieve.")
 class EnterpriseBoardExportJobsRequestQuery(StrictModel):
     status: list[str] | None = Field(default=None, description="Filter results by job status. Accepts multiple statuses such as JOB_STATUS_CREATED, JOB_STATUS_IN_PROGRESS, JOB_STATUS_CANCELLED, or JOB_STATUS_FINISHED. If not specified, all statuses are returned.")
-    creator_id: list[int] | None = Field(default=None, validation_alias="creatorId", serialization_alias="creatorId", description="Filter results by the user ID of the job creator. Accepts multiple creator IDs to retrieve jobs created by specific users.")
+    creator_id: list[Annotated[int, Field(json_schema_extra={'format': 'int64'})]] | None = Field(default=None, validation_alias="creatorId", serialization_alias="creatorId", description="Filter results by the user ID of the job creator. Accepts multiple creator IDs to retrieve jobs created by specific users.")
     limit: int | None = Field(default=None, description="Maximum number of results to return per request, between 1 and 500. Defaults to 50. If the total results exceed this limit, a cursor is provided for pagination.", json_schema_extra={'format': 'int32'})
 class EnterpriseBoardExportJobsRequest(StrictModel):
     """Retrieves a list of board export jobs for an organization, filtered by status, creator, and pagination limits. Enterprise-only endpoint requiring Company Admin role with eDiscovery enabled."""
@@ -1688,7 +1688,7 @@ class CreateDocumentItemUsingFileFromDeviceRequestBodyData(StrictModel):
     title: str | None = Field(default=None, validation_alias="title", serialization_alias="title", description="Optional title for the document item. If not provided, the uploaded filename will be used.")
     geometry: CreateDocumentItemUsingFileFromDeviceRequestBodyDataGeometry | None = None
 class CreateDocumentItemUsingFileFromDeviceRequestBody(StrictModel):
-    resource: str = Field(default=..., description="The file to upload from your device. Maximum file size is 6 MB.", json_schema_extra={'format': 'binary'})
+    resource: str = Field(default=..., description="Base64-encoded file content for upload. The file to upload from your device. Maximum file size is 6 MB.", json_schema_extra={'format': 'byte'})
     data: CreateDocumentItemUsingFileFromDeviceRequestBodyData | None = None
 class CreateDocumentItemUsingFileFromDeviceRequest(StrictModel):
     """Uploads a document file from your device and adds it as a document item to a board. The file must not exceed 6 MB in size."""
@@ -1708,7 +1708,7 @@ class UpdateDocumentItemUsingFileFromDeviceRequestBodyData(StrictModel):
     alt_text: str | None = Field(default=None, validation_alias="altText", serialization_alias="altText", description="Optional alt-text description to improve accessibility and help viewers understand the document content.")
     geometry: UpdateDocumentItemUsingFileFromDeviceRequestBodyDataGeometry | None = None
 class UpdateDocumentItemUsingFileFromDeviceRequestBody(StrictModel):
-    resource: str = Field(default=..., description="The file to upload from your device. Maximum file size is 6 MB. Provide the file as binary data.", json_schema_extra={'format': 'binary'})
+    resource: str = Field(default=..., description="Base64-encoded file content for upload. The file to upload from your device. Maximum file size is 6 MB. Provide the file as binary data.", json_schema_extra={'format': 'byte'})
     data: UpdateDocumentItemUsingFileFromDeviceRequestBodyData | None = None
 class UpdateDocumentItemUsingFileFromDeviceRequest(StrictModel):
     """Replace a document item on a board with a new file uploaded from your device. The file must not exceed 6 MB in size."""
@@ -1727,7 +1727,7 @@ class CreateImageItemUsingLocalFileRequestBodyData(StrictModel):
     alt_text: str | None = Field(default=None, validation_alias="altText", serialization_alias="altText", description="Optional alt text describing the image content for accessibility purposes.")
     geometry: CreateImageItemUsingLocalFileRequestBodyDataGeometry | None = None
 class CreateImageItemUsingLocalFileRequestBody(StrictModel):
-    resource: str = Field(default=..., description="The image file to upload from your device. Maximum file size is 6 MB.", json_schema_extra={'format': 'binary'})
+    resource: str = Field(default=..., description="Base64-encoded file content for upload. The image file to upload from your device. Maximum file size is 6 MB.", json_schema_extra={'format': 'byte'})
     data: CreateImageItemUsingLocalFileRequestBodyData | None = None
 class CreateImageItemUsingLocalFileRequest(StrictModel):
     """Adds an image item to a board by uploading a file from your device. Supports images up to 6 MB with optional sizing, rotation, and accessibility metadata."""
@@ -1747,7 +1747,7 @@ class UpdateImageItemUsingFileFromDeviceRequestBodyData(StrictModel):
     alt_text: str | None = Field(default=None, validation_alias="altText", serialization_alias="altText", description="Optional alt text describing the image content for accessibility purposes. Helps users understand what the image depicts.")
     geometry: UpdateImageItemUsingFileFromDeviceRequestBodyDataGeometry | None = None
 class UpdateImageItemUsingFileFromDeviceRequestBody(StrictModel):
-    resource: str = Field(default=..., description="The image file to upload from your device. Maximum file size is 6 MB. This replaces the existing image on the item.", json_schema_extra={'format': 'binary'})
+    resource: str = Field(default=..., description="Base64-encoded file content for upload. The image file to upload from your device. Maximum file size is 6 MB. This replaces the existing image on the item.", json_schema_extra={'format': 'byte'})
     data: UpdateImageItemUsingFileFromDeviceRequestBodyData | None = None
 class UpdateImageItemUsingFileFromDeviceRequest(StrictModel):
     """Replace an image on a board with a new file from your device. Supports updating the image file itself along with optional metadata like title, alt text, dimensions, and rotation."""
