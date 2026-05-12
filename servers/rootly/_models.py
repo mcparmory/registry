@@ -1,7 +1,7 @@
 """
 Rootly MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:10:54 UTC
+Generated: 2026-05-12 12:29:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

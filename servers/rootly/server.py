@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Rootly MCP Server
-Generated: 2026-05-05 16:10:54 UTC
+Generated: 2026-05-12 12:29:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -37,11 +38,12 @@ import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.rootly.com")
 SERVER_NAME = "Rootly"
-SERVER_VERSION = "1.0.4"
+SERVER_VERSION = "1.0.5"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -532,6 +534,28 @@ def _resolve_request_url(base_url: str, path: str) -> str:
     return path
 
 
+def _decode_base64_upload_content(value: str | bytes | bytearray, field_name: str) -> bytes:
+    """Decode base64 upload content, tolerating direct bytes for compatibility."""
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported file input for '{field_name}': expected base64 string or bytes, "
+            f"got {type(value).__name__}"
+        )
+
+    try:
+        standard_b64 = value.replace("-", "+").replace("_", "/")
+        padding = len(standard_b64) % 4
+        if padding:
+            standard_b64 += "=" * (4 - padding)
+        return base64.b64decode(standard_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 file content for '{field_name}'") from exc
+
+
 async def _make_request(
     method: str,
     path: str,
@@ -539,6 +563,8 @@ async def _make_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -624,6 +650,7 @@ async def _make_request(
             if body_content_type == "multipart/form-data":
                 _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
                 _file_fields = set(multipart_file_fields or [])
+                _file_content_types = multipart_file_content_types or {}
                 if isinstance(body, dict):
                     for _key, _value in body.items():
                         if _value is None:
@@ -633,18 +660,16 @@ async def _make_request(
                             for _file_item in _file_values:
                                 if _file_item is None:
                                     continue
-                                if isinstance(_file_item, str):
-                                    _file_content = _file_item.encode("utf-8")
-                                elif isinstance(_file_item, (bytes, bytearray)):
-                                    _file_content = bytes(_file_item)
-                                else:
-                                    raise ValueError(
-                                        f"Unsupported multipart file field '{_key}': "
-                                        "expected str, bytes, or list of str/bytes, got "
-                                        f"{type(_file_item).__name__}"
-                                    )
+                                _file_content = _decode_base64_upload_content(_file_item, _key)
                                 _multipart_parts.append(
-                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                    (
+                                        _key,
+                                        (
+                                            f"{_key}.bin",
+                                            _file_content,
+                                            _file_content_types.get(_key, "application/octet-stream"),
+                                        ),
+                                    )
                                 )
                         else:
                             if isinstance(_value, (dict, list)):
@@ -655,24 +680,30 @@ async def _make_request(
                                 _part_value = str(_value)
                             _multipart_parts.append((_key, (None, _part_value)))
                 elif body is not None:
-                    if isinstance(body, str):
-                        _file_content = body.encode("utf-8")
-                    elif isinstance(body, (bytes, bytearray)):
-                        _file_content = bytes(body)
-                    else:
-                        raise ValueError(
-                            "Unsupported multipart file body: expected str or bytes "
-                            f"for file part, got {type(body).__name__}"
-                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _file_content = _decode_base64_upload_content(body, _field_name)
                     _field_name = next(iter(_file_fields), "file")
                     _multipart_parts.append(
-                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                        (
+                            _field_name,
+                            (
+                                f"{_field_name}.bin",
+                                _file_content,
+                                _file_content_types.get(_field_name, "application/octet-stream"),
+                            ),
+                        )
                     )
                 _files = _multipart_parts
             _content: bytes | str | None = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                if isinstance(_raw, (dict, list)):
+                if whole_body_base64 and _raw is not None:
+                    if not isinstance(_raw, (str, bytes, bytearray)):
+                        raise ValueError(
+                            f"Unsupported file input for 'body': expected base64 string or bytes, got {type(_raw).__name__}"
+                        )
+                    _content = _decode_base64_upload_content(_raw, "body")
+                elif isinstance(_raw, (dict, list)):
                     _content = json.dumps(_raw).encode()
                 elif isinstance(_raw, bytearray):
                     _content = bytes(_raw)
@@ -982,6 +1013,8 @@ async def _execute_tool_request(
     body: Any = None,
     body_content_type: str | None = None,
     multipart_file_fields: list[str] | None = None,
+    multipart_file_content_types: dict[str, str] | None = None,
+    whole_body_base64: bool = False,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
@@ -1006,6 +1039,8 @@ async def _execute_tool_request(
                 body=body,
                 body_content_type=body_content_type,
                 multipart_file_fields=multipart_file_fields,
+                multipart_file_content_types=multipart_file_content_types,
+                whole_body_base64=whole_body_base64,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1213,7 +1248,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 mcp = FastMCP("Rootly", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: AlertEvents
-@mcp.tool()
+@mcp.tool(
+    title="List Alert Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alert_events(
     alert_id: str = Field(..., description="The unique identifier of the alert for which to retrieve events."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., actor, metadata). Reduces need for additional API calls."),
@@ -1259,7 +1300,12 @@ async def list_alert_events(
     return _response_data
 
 # Tags: AlertEvents
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert_event(
     alert_id: str = Field(..., description="The unique identifier of the alert to which this event will be attached."),
     type_: Literal["alert_events"] = Field(..., alias="type", description="The category of event being created. Must be 'alert_events' to classify this as an alert event."),
@@ -1309,7 +1355,13 @@ async def create_alert_event(
     return _response_data
 
 # Tags: AlertEvents
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert_event(id_: str = Field(..., alias="id", description="The unique identifier of the alert event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific alert event by its unique identifier. Use this to fetch detailed information about a single alert event."""
 
@@ -1345,7 +1397,12 @@ async def get_alert_event(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: AlertEvents
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_alert_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert event to update."),
     type_: Literal["alert_events"] = Field(..., alias="type", description="The resource type, which must be 'alert_events' to identify this as an alert event resource."),
@@ -1394,7 +1451,13 @@ async def update_alert_event(
     return _response_data
 
 # Tags: AlertEvents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert Event",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert_event(id_: str = Field(..., alias="id", description="The unique identifier of the alert event to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific alert event by its unique identifier. This action cannot be undone."""
 
@@ -1430,7 +1493,13 @@ async def delete_alert_event(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: AlertGroups
-@mcp.tool()
+@mcp.tool(
+    title="List Alert Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alert_groups(include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., rules, notifications). Omit to return only alert group core data.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all alert groups. Use the include parameter to expand related resources in the response."""
 
@@ -1468,7 +1537,12 @@ async def list_alert_groups(include: str | None = Field(None, description="Comma
     return _response_data
 
 # Tags: AlertGroups
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert Group",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert_group(
     type_: Literal["alert_groups"] = Field(..., alias="type", description="The resource type identifier; must be set to 'alert_groups' to specify this is an alert group resource."),
     name: str = Field(..., description="A human-readable name for the alert group used for identification and display purposes."),
@@ -1521,7 +1595,13 @@ async def create_alert_group(
     return _response_data
 
 # Tags: AlertGroups
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert_group(id_: str = Field(..., alias="id", description="The unique identifier of the alert group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific alert group by its unique identifier. Use this operation to fetch detailed information about a single alert group."""
 
@@ -1557,7 +1637,13 @@ async def get_alert_group(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: AlertGroups
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert group to update."),
     type_: Literal["alert_groups"] = Field(..., alias="type", description="The resource type identifier; must be set to 'alert_groups'."),
@@ -1611,7 +1697,13 @@ async def update_alert_group(
     return _response_data
 
 # Tags: AlertGroups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert_group(id_: str = Field(..., alias="id", description="The unique identifier of the alert group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific alert group by its unique identifier. This action cannot be undone."""
 
@@ -1647,7 +1739,13 @@ async def delete_alert_group(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: AlertUrgencies
-@mcp.tool()
+@mcp.tool(
+    title="List Alert Urgencies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alert_urgencies(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., alerts, rules). Reduces the need for additional API calls."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1. Use with page[size] to navigate through results."),
@@ -1690,7 +1788,12 @@ async def list_alert_urgencies(
     return _response_data
 
 # Tags: AlertUrgencies
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert Urgency",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert_urgency(
     type_: Literal["alert_urgencies"] = Field(..., alias="type", description="The resource type identifier, must be set to 'alert_urgencies' to specify the resource being created."),
     name: str = Field(..., description="The display name for this alert urgency level (e.g., 'Critical', 'High', 'Medium', 'Low')."),
@@ -1738,7 +1841,13 @@ async def create_alert_urgency(
     return _response_data
 
 # Tags: AlertUrgencies
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert Urgency",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert_urgency(id_: str = Field(..., alias="id", description="The unique identifier of the alert urgency to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific alert urgency configuration by its unique identifier. Use this to fetch details about how urgent a particular alert level is classified."""
 
@@ -1774,7 +1883,13 @@ async def get_alert_urgency(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: AlertUrgencies
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert Urgency",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert_urgency(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert urgency to update."),
     type_: Literal["alert_urgencies"] = Field(..., alias="type", description="The resource type identifier, which must be 'alert_urgencies' to specify this is an alert urgency resource."),
@@ -1823,7 +1938,13 @@ async def update_alert_urgency(
     return _response_data
 
 # Tags: AlertUrgencies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert Urgency",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert_urgency(id_: str = Field(..., alias="id", description="The unique identifier of the alert urgency to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific alert urgency by its unique identifier. This operation permanently removes the alert urgency configuration from the system."""
 
@@ -1859,7 +1980,13 @@ async def delete_alert_urgency(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: AlertSources
-@mcp.tool()
+@mcp.tool(
+    title="List Alert Sources",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alert_sources(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., configuration details, metadata)."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1. Use with page[size] to navigate through results."),
@@ -1904,7 +2031,12 @@ async def list_alert_sources(
     return _response_data
 
 # Tags: AlertSources
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert Source",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert_source(
     type_: Literal["alert_sources"] = Field(..., alias="type", description="The resource type identifier; must be set to 'alert_sources'."),
     name: str = Field(..., description="A human-readable name for this alert source to identify it in your system."),
@@ -1975,7 +2107,13 @@ async def create_alert_source(
     return _response_data
 
 # Tags: AlertSources
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert Source",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert_source(id_: str = Field(..., alias="id", description="The unique identifier of the alert source to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific alert source by its unique identifier. Use this to fetch detailed configuration and settings for a particular alert source."""
 
@@ -2011,7 +2149,13 @@ async def get_alert_source(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: AlertSources
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert Source",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert_source(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert source to update."),
     type_: Literal["alert_sources"] = Field(..., alias="type", description="The resource type identifier; must be set to 'alert_sources'."),
@@ -2081,7 +2225,13 @@ async def update_alert_source(
     return _response_data
 
 # Tags: AlertSources
-@mcp.tool()
+@mcp.tool(
+    title="Delete Alert Source",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_alert_source(id_: str = Field(..., alias="id", description="The unique identifier of the alert source to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific alert source by its unique identifier. This action cannot be undone."""
 
@@ -2117,7 +2267,13 @@ async def delete_alert_source(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_alerts(
     incident_id: str = Field(..., description="The unique identifier of the incident for which to retrieve alerts."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., incident details, source metadata)."),
@@ -2168,7 +2324,12 @@ async def list_incident_alerts(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Attach Alerts to Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def attach_alerts_to_incident(
     incident_id: str = Field(..., description="The unique identifier of the incident to which alerts will be attached."),
     type_: Literal["alerts"] = Field(..., alias="type", description="The resource type being attached, which must be 'alerts' to specify that alert resources are being linked to this incident."),
@@ -2216,7 +2377,13 @@ async def attach_alerts_to_incident(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="List Alerts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_alerts(
     include: str | None = Field(None, description="Comma-separated list of fields to include in the response. Specify which alert properties should be returned to optimize payload size."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter alerts by their current status (e.g., active, resolved, acknowledged). Only alerts matching the specified status will be returned."),
@@ -2259,7 +2426,12 @@ async def list_alerts(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Create Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_alert(
     type_: Literal["alerts"] = Field(..., alias="type", description="The alert type; must be 'alerts' to indicate this is an alert resource."),
     source: Literal["rootly", "manual", "api", "web", "slack", "email", "workflow", "live_call_routing", "pagerduty", "opsgenie", "victorops", "pagertree", "datadog", "nobl9", "zendesk", "asana", "clickup", "sentry", "rollbar", "jira", "honeycomb", "service_now", "linear", "grafana", "alertmanager", "google_cloud", "generic_webhook", "cloud_watch", "azure", "splunk", "chronosphere", "app_optics", "bug_snag", "monte_carlo", "nagios", "prtg", "catchpoint", "app_dynamics", "checkly", "new_relic", "gitlab"] = Field(..., description="The origin system or channel that generated the alert, such as monitoring tools (Datadog, Grafana, New Relic), incident platforms (PagerDuty, OpsGenie), ticketing systems (Jira, Linear), or manual/API entry."),
@@ -2319,7 +2491,13 @@ async def create_alert(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Get Alert",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_alert(id_: str = Field(..., alias="id", description="The unique identifier of the alert to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific alert by its unique identifier. Use this operation to fetch detailed information about a single alert."""
 
@@ -2355,7 +2533,13 @@ async def get_alert(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Update Alert",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_alert(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert to update."),
     noise: Literal["noise", "not_noise"] | None = Field(None, description="Mark the alert as noise or not noise to help filter false positives and relevant alerts."),
@@ -2410,7 +2594,12 @@ async def update_alert(
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Acknowledge Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def acknowledge_alert(id_: str = Field(..., alias="id", description="The unique identifier of the alert to acknowledge.")) -> dict[str, Any] | ToolResult:
     """Marks a specific alert as acknowledged, indicating that it has been reviewed and noted by the user."""
 
@@ -2448,7 +2637,12 @@ async def acknowledge_alert(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Alerts
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Alert",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resolve_alert(
     id_: str = Field(..., alias="id", description="The unique identifier of the alert to resolve."),
     resolution_message: str | None = Field(None, description="Optional explanation describing how or why the alert was resolved."),
@@ -2493,7 +2687,13 @@ async def resolve_alert(
     return _response_data
 
 # Tags: Audits
-@mcp.tool()
+@mcp.tool(
+    title="List Audits",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_audits(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., user details, API key information)."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1. Use with page[size] to control result set boundaries."),
@@ -2540,7 +2740,13 @@ async def list_audits(
     return _response_data
 
 # Tags: Authorizations
-@mcp.tool()
+@mcp.tool(
+    title="Get Authorization",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_authorization(id_: str = Field(..., alias="id", description="The unique identifier of the authorization to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific authorization by its unique identifier. Use this to fetch details about an existing authorization."""
 
@@ -2576,7 +2782,13 @@ async def get_authorization(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Authorizations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Authorization",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_authorization(id_: str = Field(..., alias="id", description="The unique identifier of the authorization to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific authorization by its unique identifier. This action cannot be undone."""
 
@@ -2612,7 +2824,13 @@ async def delete_authorization(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: CatalogEntities
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Entities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_entities(
     catalog_id: str = Field(..., description="The unique identifier of the catalog containing the entities to list."),
     include: Literal["catalog", "properties"] | None = Field(None, description="Comma-separated list of related data to include in the response. Options are 'catalog' (parent catalog details) and 'properties' (entity properties)."),
@@ -2657,7 +2875,12 @@ async def list_catalog_entities(
     return _response_data
 
 # Tags: CatalogEntities
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Entity",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_entity(
     catalog_id: str = Field(..., description="The unique identifier of the catalog where the entity will be created."),
     type_: Literal["catalog_entities"] = Field(..., alias="type", description="The type classification for this entity. Must be set to 'catalog_entities'."),
@@ -2707,7 +2930,13 @@ async def create_catalog_entity(
     return _response_data
 
 # Tags: CatalogEntities
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog Entity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog_entity(
     id_: str = Field(..., alias="id", description="The unique identifier of the Catalog Entity to retrieve."),
     include: Literal["catalog", "properties"] | None = Field(None, description="Optional comma-separated list of related data to include in the response. Valid options are 'catalog' (to include parent catalog information) and 'properties' (to include entity properties)."),
@@ -2749,7 +2978,13 @@ async def get_catalog_entity(
     return _response_data
 
 # Tags: CatalogEntities
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog Entity",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog_entity(
     id_: str = Field(..., alias="id", description="The unique identifier of the Catalog Entity to update."),
     type_: Literal["catalog_entities"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'catalog_entities' to specify this is a Catalog Entity resource."),
@@ -2798,7 +3033,13 @@ async def update_catalog_entity(
     return _response_data
 
 # Tags: CatalogEntities
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog Entity",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog_entity(id_: str = Field(..., alias="id", description="The unique identifier of the Catalog Entity to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific Catalog Entity by its unique identifier. This action cannot be undone."""
 
@@ -2834,7 +3075,13 @@ async def delete_catalog_entity(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: CatalogEntityProperties
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Entity Properties",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_entity_properties(
     catalog_entity_id: str = Field(..., description="The unique identifier of the catalog entity whose properties you want to list."),
     include: Literal["catalog_entity", "catalog_field"] | None = Field(None, description="Comma-separated list of related entities to include in the response. Valid options are 'catalog_entity' and 'catalog_field'."),
@@ -2881,7 +3128,12 @@ async def list_catalog_entity_properties(
     return _response_data
 
 # Tags: CatalogEntityProperties
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Entity Property",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_entity_property(
     catalog_entity_id: str = Field(..., description="The unique identifier of the catalog entity to which this property will be added."),
     type_: Literal["catalog_entity_properties"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be 'catalog_entity_properties'."),
@@ -2931,7 +3183,13 @@ async def create_catalog_entity_property(
     return _response_data
 
 # Tags: CatalogEntityProperties
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog Entity Property",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog_entity_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the Catalog Entity Property to retrieve."),
     include: Literal["catalog_entity", "catalog_field"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options are 'catalog_entity' and 'catalog_field'."),
@@ -2973,7 +3231,13 @@ async def get_catalog_entity_property(
     return _response_data
 
 # Tags: CatalogEntityProperties
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog Entity Property",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog_entity_property(
     id_: str = Field(..., alias="id", description="The unique identifier of the catalog entity property to update."),
     type_: Literal["catalog_entity_properties"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'catalog_entity_properties' to specify the entity being updated."),
@@ -3022,7 +3286,13 @@ async def update_catalog_entity_property(
     return _response_data
 
 # Tags: CatalogEntityProperties
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog Entity Property",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog_entity_property(id_: str = Field(..., alias="id", description="The unique identifier of the Catalog Entity Property to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific Catalog Entity Property by its unique identifier. This operation removes the property and all associated data."""
 
@@ -3058,7 +3328,13 @@ async def delete_catalog_entity_property(id_: str = Field(..., alias="id", descr
     return _response_data
 
 # Tags: CatalogFields
-@mcp.tool()
+@mcp.tool(
+    title="List Catalog Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalog_fields(
     catalog_id: str = Field(..., description="The unique identifier of the catalog whose fields you want to list."),
     include: Literal["catalog"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Use 'catalog' to include the parent catalog data."),
@@ -3104,7 +3380,12 @@ async def list_catalog_fields(
     return _response_data
 
 # Tags: CatalogFields
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog_field(
     catalog_id: str = Field(..., description="The unique identifier of the catalog where the field will be created."),
     type_: Literal["catalog_fields"] = Field(..., alias="type", description="The resource type identifier; must be set to 'catalog_fields'."),
@@ -3156,7 +3437,13 @@ async def create_catalog_field(
     return _response_data
 
 # Tags: CatalogFields
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog_field(
     id_: str = Field(..., alias="id", description="The unique identifier of the Catalog Field to retrieve."),
     include: Literal["catalog"] | None = Field(None, description="Optional comma-separated list of related resources to include in the response. Specify 'catalog' to include the parent catalog information."),
@@ -3198,7 +3485,13 @@ async def get_catalog_field(
     return _response_data
 
 # Tags: CatalogFields
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog_field(
     id_: str = Field(..., alias="id", description="The unique identifier of the catalog field to update."),
     type_: Literal["catalog_fields"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'catalog_fields' to specify this is a catalog field resource."),
@@ -3249,7 +3542,13 @@ async def update_catalog_field(
     return _response_data
 
 # Tags: CatalogFields
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog_field(id_: str = Field(..., alias="id", description="The unique identifier of the catalog field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a catalog field by its unique identifier. This action cannot be undone."""
 
@@ -3285,7 +3584,13 @@ async def delete_catalog_field(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="List Catalogs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_catalogs(
     include: Literal["fields", "entities"] | None = Field(None, description="Comma-separated list of related data to include in the response. Choose from 'fields' to include field definitions or 'entities' to include entity information."),
     sort: Literal["created_at", "-created_at", "updated_at", "-updated_at", "position", "-position"] | None = Field(None, description="Comma-separated list of fields to sort results by. Use 'created_at', 'updated_at', or 'position' for ascending order, or prefix with a hyphen (e.g., '-created_at') for descending order."),
@@ -3328,7 +3633,12 @@ async def list_catalogs(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Create Catalog",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_catalog(
     type_: Literal["catalogs"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'catalogs' to indicate this is a catalog resource."),
     name: str = Field(..., description="The display name for the catalog. This is the primary identifier users will see when viewing catalogs."),
@@ -3377,7 +3687,13 @@ async def create_catalog(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Get Catalog",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_catalog(id_: str = Field(..., alias="id", description="The unique identifier of the catalog to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific catalog by its unique identifier. Use this operation to fetch detailed information about a catalog."""
 
@@ -3413,7 +3729,13 @@ async def get_catalog(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Update Catalog",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_catalog(
     id_: str = Field(..., alias="id", description="The unique identifier of the catalog to update."),
     type_: Literal["catalogs"] = Field(..., alias="type", description="The resource type, which must be set to 'catalogs' to identify this as a catalog resource."),
@@ -3463,7 +3785,13 @@ async def update_catalog(
     return _response_data
 
 # Tags: Catalogs
-@mcp.tool()
+@mcp.tool(
+    title="Delete Catalog",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_catalog(id_: str = Field(..., alias="id", description="The unique identifier of the catalog to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a catalog and all its associated data. This action cannot be undone."""
 
@@ -3499,7 +3827,13 @@ async def delete_catalog(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Causes
-@mcp.tool()
+@mcp.tool(
+    title="List Causes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_causes(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., organizations, campaigns). Reduces the need for additional API calls."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use with page[size] to navigate through results."),
@@ -3541,7 +3875,12 @@ async def list_causes(
     return _response_data
 
 # Tags: Causes
-@mcp.tool()
+@mcp.tool(
+    title="Create Cause",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_cause(
     type_: Literal["causes"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'causes' for this operation."),
     name: str = Field(..., description="The display name for the cause. This is a required field that identifies the cause."),
@@ -3589,7 +3928,13 @@ async def create_cause(
     return _response_data
 
 # Tags: Causes
-@mcp.tool()
+@mcp.tool(
+    title="Get Cause",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_cause(id_: str = Field(..., alias="id", description="The unique identifier of the cause to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific cause by its unique identifier. Use this operation to fetch detailed information about a single cause."""
 
@@ -3625,7 +3970,13 @@ async def get_cause(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Causes
-@mcp.tool()
+@mcp.tool(
+    title="Update Cause",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_cause(
     id_: str = Field(..., alias="id", description="The unique identifier of the cause to update."),
     type_: Literal["causes"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'causes' to specify this is a cause resource."),
@@ -3674,7 +4025,13 @@ async def update_cause(
     return _response_data
 
 # Tags: Causes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Cause",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_cause(id_: str = Field(..., alias="id", description="The unique identifier of the cause to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a cause by its unique identifier. This action cannot be undone."""
 
@@ -3710,7 +4067,13 @@ async def delete_cause(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: CustomForms
-@mcp.tool()
+@mcp.tool(
+    title="List Custom Forms",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_custom_forms(
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1."),
     page_size: int | None = Field(None, alias="pagesize", description="The number of custom forms to return per page."),
@@ -3753,7 +4116,12 @@ async def list_custom_forms(
     return _response_data
 
 # Tags: CustomForms
-@mcp.tool()
+@mcp.tool(
+    title="Create Custom Form",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_custom_form(
     type_: Literal["custom_forms"] = Field(..., alias="type", description="The form type identifier; must be set to 'custom_forms' to indicate this is a custom form resource."),
     name: str = Field(..., description="The display name for the custom form; used to identify the form in the UI and logs."),
@@ -3803,7 +4171,13 @@ async def create_custom_form(
     return _response_data
 
 # Tags: CustomForms
-@mcp.tool()
+@mcp.tool(
+    title="Get Custom Form",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_custom_form(id_: str = Field(..., alias="id", description="The unique identifier of the custom form to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific custom form by its unique identifier. Use this operation to fetch the complete details and configuration of a custom form."""
 
@@ -3839,7 +4213,13 @@ async def get_custom_form(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: CustomForms
-@mcp.tool()
+@mcp.tool(
+    title="Update Custom Form",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_custom_form(
     id_: str = Field(..., alias="id", description="The unique identifier of the custom form to update."),
     type_: Literal["custom_forms"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'custom_forms' to specify this is a custom form resource."),
@@ -3890,7 +4270,13 @@ async def update_custom_form(
     return _response_data
 
 # Tags: CustomForms
-@mcp.tool()
+@mcp.tool(
+    title="Delete Custom Form",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_custom_form(id_: str = Field(..., alias="id", description="The unique identifier of the custom form to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom form by its unique identifier. This action cannot be undone."""
 
@@ -3926,7 +4312,13 @@ async def delete_custom_form(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: DashboardPanels
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboard Panels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboard_panels(
     dashboard_id: str = Field(..., description="The unique identifier of the dashboard containing the panels to retrieve."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., metadata, configuration details). Reduces need for additional requests."),
@@ -3970,7 +4362,12 @@ async def list_dashboard_panels(
     return _response_data
 
 # Tags: DashboardPanels
-@mcp.tool()
+@mcp.tool(
+    title="Create Dashboard Panel",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dashboard_panel(
     dashboard_id: str = Field(..., description="The unique identifier of the dashboard where the panel will be created."),
     type_: Literal["dashboard_panels"] = Field(..., alias="type", description="The resource type identifier for dashboard panels; must be set to 'dashboard_panels'."),
@@ -4032,7 +4429,12 @@ async def create_dashboard_panel(
     return _response_data
 
 # Tags: DashboardPanels
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Dashboard Panel",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_dashboard_panel(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard panel to duplicate.")) -> dict[str, Any] | ToolResult:
     """Creates a duplicate copy of an existing dashboard panel, preserving its configuration and settings. The duplicated panel is added to the same dashboard as the original."""
 
@@ -4070,7 +4472,13 @@ async def duplicate_dashboard_panel(id_: str = Field(..., alias="id", descriptio
     return _response_data
 
 # Tags: DashboardPanels
-@mcp.tool()
+@mcp.tool(
+    title="Get Dashboard Panel",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dashboard_panel(
     id_: str = Field(..., alias="id", description="The unique identifier of the dashboard panel to retrieve."),
     range_: str | None = Field(None, alias="range", description="Optional date range for filtering panel data, specified as two ISO 8601 timestamps separated by the word 'to' (e.g., start timestamp to end timestamp)."),
@@ -4114,7 +4522,13 @@ async def get_dashboard_panel(
     return _response_data
 
 # Tags: DashboardPanels
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard Panel",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard_panel(
     id_: str = Field(..., alias="id", description="The unique identifier of the dashboard panel to update."),
     x: float = Field(..., description="The horizontal position (x-coordinate) of the panel on the dashboard grid."),
@@ -4174,7 +4588,13 @@ async def update_dashboard_panel(
     return _response_data
 
 # Tags: DashboardPanels
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dashboard Panel",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dashboard_panel(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard panel to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific dashboard panel by its unique identifier. This action cannot be undone."""
 
@@ -4210,7 +4630,13 @@ async def delete_dashboard_panel(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="List Dashboards",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_dashboards(
     include: Literal["panels"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Use 'panels' to include panel data for each dashboard."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number for pagination, starting from 1. Use with page[size] to control which dashboards are returned."),
@@ -4252,7 +4678,12 @@ async def list_dashboards(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Create Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_dashboard(
     type_: Literal["dashboards"] = Field(..., alias="type", description="The resource type identifier; must be set to 'dashboards' to indicate this is a dashboard resource."),
     name: str = Field(..., description="A human-readable name for the dashboard that appears in the UI and search results."),
@@ -4306,7 +4737,12 @@ async def create_dashboard(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Duplicate Dashboard",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def duplicate_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to duplicate.")) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing dashboard with all its configuration, layout, and widgets. The duplicated dashboard will be a complete independent instance."""
 
@@ -4344,7 +4780,13 @@ async def duplicate_dashboard(id_: str = Field(..., alias="id", description="The
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Set Dashboard as Default",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def set_dashboard_as_default(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to set as default.")) -> dict[str, Any] | ToolResult:
     """Sets the specified dashboard as the default dashboard for the current user. The default dashboard is displayed when the user first accesses the dashboard interface."""
 
@@ -4382,7 +4824,13 @@ async def set_dashboard_as_default(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Get Dashboard",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_dashboard(
     id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to retrieve."),
     include: Literal["panels"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Supports 'panels' to include dashboard panel definitions."),
@@ -4424,7 +4872,13 @@ async def get_dashboard(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Update Dashboard",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_dashboard(
     id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to update."),
     description: str | None = Field(None, description="A text description of the dashboard's purpose or content."),
@@ -4475,7 +4929,13 @@ async def update_dashboard(
     return _response_data
 
 # Tags: Dashboards
-@mcp.tool()
+@mcp.tool(
+    title="Delete Dashboard",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a dashboard by its unique identifier. This action cannot be undone."""
 
@@ -4511,7 +4971,13 @@ async def delete_dashboard(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="List Environments",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_environments(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., metadata, configuration details)."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1."),
@@ -4555,7 +5021,12 @@ async def list_environments(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Create Environment",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_environment(
     type_: Literal["environments"] = Field(..., alias="type", description="The resource type identifier; must be set to 'environments' to specify this is an environment resource."),
     name: str = Field(..., description="A human-readable name for the environment (e.g., 'Production', 'Staging', 'Development')."),
@@ -4607,7 +5078,13 @@ async def create_environment(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Get Environment",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_environment(id_: str = Field(..., alias="id", description="The unique identifier of the environment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific environment by its unique identifier. Use this operation to fetch detailed information about a single environment."""
 
@@ -4643,7 +5120,13 @@ async def get_environment(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Update Environment",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_environment(
     id_: str = Field(..., alias="id", description="The unique identifier of the environment to update."),
     type_: Literal["environments"] = Field(..., alias="type", description="The resource type, which must be 'environments' to identify this as an environment resource."),
@@ -4696,7 +5179,13 @@ async def update_environment(
     return _response_data
 
 # Tags: Environments
-@mcp.tool()
+@mcp.tool(
+    title="Delete Environment",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_environment(id_: str = Field(..., alias="id", description="The unique identifier of the environment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific environment by its unique identifier. This action cannot be undone."""
 
@@ -4732,7 +5221,13 @@ async def delete_environment(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: EscalationPolicies
-@mcp.tool()
+@mcp.tool(
+    title="List Escalation Policies",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_escalation_policies(
     include: Literal["escalation_policy_levels", "escalation_policy_paths", "groups", "services"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options are escalation_policy_levels (the escalation steps), escalation_policy_paths (the routing paths), groups (associated groups), or services (associated services)."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number for pagination, starting from 1. Use this to navigate through results when the total count exceeds the page size."),
@@ -4774,7 +5269,12 @@ async def list_escalation_policies(
     return _response_data
 
 # Tags: EscalationPolicies
-@mcp.tool()
+@mcp.tool(
+    title="Create Escalation Policy",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_escalation_policy(
     type_: Literal["escalation_policies"] = Field(..., alias="type", description="The resource type identifier; must be set to 'escalation_policies' to indicate this is an escalation policy resource."),
     name: str = Field(..., description="A human-readable name for the escalation policy used for identification and display purposes."),
@@ -4829,7 +5329,13 @@ async def create_escalation_policy(
     return _response_data
 
 # Tags: EscalationPolicies
-@mcp.tool()
+@mcp.tool(
+    title="Get Escalation Policy",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_escalation_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to retrieve."),
     include: Literal["escalation_policy_levels", "escalation_policy_paths", "groups", "services"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options are escalation_policy_levels, escalation_policy_paths, groups, and services."),
@@ -4871,7 +5377,13 @@ async def get_escalation_policy(
     return _response_data
 
 # Tags: EscalationPolicies
-@mcp.tool()
+@mcp.tool(
+    title="Update Escalation Policy",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_escalation_policy(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to update."),
     type_: Literal["escalation_policies"] = Field(..., alias="type", description="The resource type identifier; must be set to 'escalation_policies' to specify this is an escalation policy resource."),
@@ -4925,7 +5437,13 @@ async def update_escalation_policy(
     return _response_data
 
 # Tags: EscalationPolicies
-@mcp.tool()
+@mcp.tool(
+    title="Delete Escalation Policy",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_escalation_policy(id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an escalation policy by its unique identifier. This action cannot be undone and will remove the policy from the system."""
 
@@ -4961,7 +5479,13 @@ async def delete_escalation_policy(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: EscalationLevelsPolicies
-@mcp.tool()
+@mcp.tool(
+    title="List Escalation Levels",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_escalation_levels(
     escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy whose levels you want to retrieve."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., users, schedules). Reduces the need for additional API calls."),
@@ -5005,7 +5529,12 @@ async def list_escalation_levels(
     return _response_data
 
 # Tags: EscalationLevelsPolicies
-@mcp.tool()
+@mcp.tool(
+    title="Create Escalation Level",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_escalation_level(
     escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy to which this escalation level will be added."),
     type_: Literal["escalation_levels"] = Field(..., alias="type", description="The resource type identifier for this escalation level. Must be set to 'escalation_levels'."),
@@ -5057,7 +5586,13 @@ async def create_escalation_level(
     return _response_data
 
 # Tags: EscalationLevelsPath
-@mcp.tool()
+@mcp.tool(
+    title="List Escalation Levels for Escalation Path",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_escalation_levels_for_escalation_path(
     escalation_policy_path_id: str = Field(..., description="The unique identifier of the escalation path whose escalation levels you want to retrieve."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., users, teams, schedules). Reduces the need for additional API calls."),
@@ -5101,7 +5636,12 @@ async def list_escalation_levels_for_escalation_path(
     return _response_data
 
 # Tags: EscalationLevelsPath
-@mcp.tool()
+@mcp.tool(
+    title="Create Escalation Level Path",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_escalation_level_path(
     escalation_policy_path_id: str = Field(..., description="The unique identifier of the escalation path to which this escalation level will be added."),
     type_: Literal["escalation_levels"] = Field(..., alias="type", description="The resource type identifier; must be set to 'escalation_levels'."),
@@ -5153,7 +5693,13 @@ async def create_escalation_level_path(
     return _response_data
 
 # Tags: EscalationLevels
-@mcp.tool()
+@mcp.tool(
+    title="Get Escalation Level",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_escalation_level(id_: str = Field(..., alias="id", description="The unique identifier of the escalation level to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific escalation level by its unique identifier. Use this to fetch details about a particular escalation level configuration."""
 
@@ -5189,7 +5735,13 @@ async def get_escalation_level(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: EscalationLevels
-@mcp.tool()
+@mcp.tool(
+    title="Update Escalation Level",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_escalation_level(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation level to update."),
     type_: Literal["escalation_levels"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'escalation_levels' to specify this is an escalation level resource."),
@@ -5241,7 +5793,13 @@ async def update_escalation_level(
     return _response_data
 
 # Tags: EscalationLevels
-@mcp.tool()
+@mcp.tool(
+    title="Delete Escalation Level",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_escalation_level(id_: str = Field(..., alias="id", description="The unique identifier of the escalation level to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an escalation level by its unique identifier. This action cannot be undone."""
 
@@ -5277,7 +5835,13 @@ async def delete_escalation_level(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: EscalationPaths
-@mcp.tool()
+@mcp.tool(
+    title="List Escalation Paths",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_escalation_paths(
     escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy containing the escalation paths to retrieve."),
     include: Literal["escalation_policy_levels"] | None = Field(None, description="Optional comma-separated list of related resources to include in the response. Specify 'escalation_policy_levels' to include the policy levels associated with each escalation path."),
@@ -5321,7 +5885,13 @@ async def list_escalation_paths(
     return _response_data
 
 # Tags: EscalationPaths
-@mcp.tool()
+@mcp.tool(
+    title="Get Escalation Path",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_escalation_path(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation path to retrieve."),
     include: Literal["escalation_policy_levels"] | None = Field(None, description="Optional comma-separated list of related resources to include in the response. Supports including escalation_policy_levels to fetch the policy levels associated with this escalation path."),
@@ -5363,7 +5933,13 @@ async def get_escalation_path(
     return _response_data
 
 # Tags: EscalationPaths
-@mcp.tool()
+@mcp.tool(
+    title="Update Escalation Path",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_escalation_path(
     id_: str = Field(..., alias="id", description="The unique identifier of the escalation path to update."),
     type_: Literal["escalation_paths"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'escalation_paths'."),
@@ -5420,7 +5996,13 @@ async def update_escalation_path(
     return _response_data
 
 # Tags: EscalationPaths
-@mcp.tool()
+@mcp.tool(
+    title="Delete Escalation Path",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_escalation_path(id_: str = Field(..., alias="id", description="The unique identifier of the escalation path to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific escalation path by its unique identifier. This action cannot be undone."""
 
@@ -5456,7 +6038,13 @@ async def delete_escalation_path(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: FormFieldOptions
-@mcp.tool()
+@mcp.tool(
+    title="List Form Field Options",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_field_options(
     form_field_id: str = Field(..., description="The unique identifier of the form field whose options you want to list."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., metadata, dependencies). Specify which associations should be populated."),
@@ -5502,7 +6090,12 @@ async def list_form_field_options(
     return _response_data
 
 # Tags: FormFieldOptions
-@mcp.tool()
+@mcp.tool(
+    title="Add Form Field Option",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_form_field_option(
     form_field_id: str = Field(..., description="The unique identifier of the form field to which this option will be added."),
     attributes_form_field_id: str = Field(..., alias="attributesForm_field_id", description="The unique identifier of the form field that this option belongs to; must match the form_field_id in the path."),
@@ -5554,7 +6147,13 @@ async def add_form_field_option(
     return _response_data
 
 # Tags: FormFieldOptions
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Field Option",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_field_option(id_: str = Field(..., alias="id", description="The unique identifier of the form field option to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific form field option by its unique identifier. Use this to fetch details about a single option available for a form field."""
 
@@ -5590,7 +6189,13 @@ async def get_form_field_option(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: FormFieldOptions
-@mcp.tool()
+@mcp.tool(
+    title="Update Form Field Option",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_form_field_option(
     id_: str = Field(..., alias="id", description="The unique identifier of the form field option to update."),
     type_: Literal["form_field_options"] = Field(..., alias="type", description="The resource type identifier, which must be 'form_field_options' to specify the resource being updated."),
@@ -5641,7 +6246,13 @@ async def update_form_field_option(
     return _response_data
 
 # Tags: FormFieldOptions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form Field Option",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form_field_option(id_: str = Field(..., alias="id", description="The unique identifier of the form field option to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific form field option by its unique identifier. This operation permanently removes the option from the form field."""
 
@@ -5677,7 +6288,13 @@ async def delete_form_field_option(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: FormFieldPlacementConditions
-@mcp.tool()
+@mcp.tool(
+    title="List Form Field Placement Conditions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_field_placement_conditions(
     form_field_placement_id: str = Field(..., description="The unique identifier of the form field placement whose conditions you want to retrieve."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response for expanded context (e.g., condition details, field metadata)."),
@@ -5721,7 +6338,13 @@ async def list_form_field_placement_conditions(
     return _response_data
 
 # Tags: FormFieldPlacementConditions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form Field Placement Condition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form_field_placement_condition(id_: str = Field(..., alias="id", description="The unique identifier of the form field placement condition to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific form field placement condition by its unique identifier. This removes the condition rule that controls when a form field should be displayed or hidden."""
 
@@ -5757,7 +6380,13 @@ async def delete_form_field_placement_condition(id_: str = Field(..., alias="id"
     return _response_data
 
 # Tags: FormFieldPlacements
-@mcp.tool()
+@mcp.tool(
+    title="List Form Field Placements",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_field_placements(
     form_field_id: str = Field(..., description="The unique identifier of the form field for which to list placements."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., form, placement_context)."),
@@ -5801,7 +6430,12 @@ async def list_form_field_placements(
     return _response_data
 
 # Tags: FormFieldPlacements
-@mcp.tool()
+@mcp.tool(
+    title="Create Form Field Placement",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form_field_placement(
     form_field_id: str = Field(..., description="The unique identifier of the form field being placed."),
     type_: Literal["form_field_placements"] = Field(..., alias="type", description="The resource type identifier; must be set to 'form_field_placements' to indicate this is a form field placement resource."),
@@ -5854,7 +6488,13 @@ async def create_form_field_placement(
     return _response_data
 
 # Tags: FormFieldPositions
-@mcp.tool()
+@mcp.tool(
+    title="List Form Field Positions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_field_positions(
     form_field_id: str = Field(..., description="The unique identifier of the form field for which to retrieve positions."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., form details, metadata)."),
@@ -5899,7 +6539,12 @@ async def list_form_field_positions(
     return _response_data
 
 # Tags: FormFieldPositions
-@mcp.tool()
+@mcp.tool(
+    title="Create Form Field Position",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form_field_position(
     form_field_id: str = Field(..., description="The unique identifier of the form field to position."),
     attributes_form_field_id: str = Field(..., alias="attributesForm_field_id", description="The unique identifier of the form field being positioned. Must match the form_field_id in the path parameter."),
@@ -5949,7 +6594,13 @@ async def create_form_field_position(
     return _response_data
 
 # Tags: FormFieldPositions
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Field Position",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_field_position(id_: str = Field(..., alias="id", description="The unique identifier of the form field position to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the position and layout details of a specific form field by its unique identifier."""
 
@@ -5985,7 +6636,13 @@ async def get_form_field_position(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: FormFields
-@mcp.tool()
+@mcp.tool(
+    title="List Form Fields",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_fields(
     include: Literal["options", "positions"] | None = Field(None, description="Comma-separated list of related data to include in the response. Valid options are 'options' (field choices/values) and 'positions' (field ordering/layout information)."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number for pagination, starting from 1. Use with page[size] to retrieve specific result sets."),
@@ -6029,7 +6686,12 @@ async def list_form_fields(
     return _response_data
 
 # Tags: FormFields
-@mcp.tool()
+@mcp.tool(
+    title="Create Form Field",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form_field(
     type_: Literal["form_fields"] = Field(..., alias="type", description="The resource type identifier; must be set to 'form_fields' to indicate this is a form field resource."),
     kind: Literal["custom", "title", "summary", "mitigation_message", "resolution_message", "severity", "environments", "types", "services", "causes", "functionalities", "teams", "visibility", "mark_as_test", "mark_as_backfilled", "labels", "notify_emails", "trigger_manual_workflows", "show_ongoing_incidents", "attach_alerts", "mark_as_in_triage", "in_triage_at", "started_at", "detected_at", "acknowledged_at", "mitigated_at", "resolved_at", "closed_at", "manual_starting_datetime_field"] = Field(..., description="The category of form field being created. Choose from predefined types like 'custom' for user-defined fields, 'title' and 'summary' for incident metadata, message fields for communication, standard incident attributes (severity, environments, types, services, causes, functionalities, teams, visibility), workflow controls (mark_as_test, mark_as_backfilled, trigger_manual_workflows), triage management (mark_as_in_triage, in_triage_at), or timestamp fields (started_at, detected_at, acknowledged_at, mitigated_at, resolved_at, closed_at, manual_starting_datetime_field)."),
@@ -6085,7 +6747,13 @@ async def create_form_field(
     return _response_data
 
 # Tags: FormFields
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Field",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_field(
     id_: str = Field(..., alias="id", description="The unique identifier of the form field to retrieve."),
     include: Literal["options", "positions"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Supported values are 'options' (field choices/values) and 'positions' (field layout positioning)."),
@@ -6127,7 +6795,13 @@ async def get_form_field(
     return _response_data
 
 # Tags: FormFields
-@mcp.tool()
+@mcp.tool(
+    title="Update Form Field",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_form_field(
     id_: str = Field(..., alias="id", description="The unique identifier of the form field to update."),
     type_: Literal["form_fields"] = Field(..., alias="type", description="The resource type, which must be 'form_fields' to identify this as a form field resource."),
@@ -6184,7 +6858,13 @@ async def update_form_field(
     return _response_data
 
 # Tags: FormFields
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form Field",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form_field(id_: str = Field(..., alias="id", description="The unique identifier of the form field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a form field by its unique identifier. This action cannot be undone."""
 
@@ -6220,7 +6900,13 @@ async def delete_form_field(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: FormSetConditions
-@mcp.tool()
+@mcp.tool(
+    title="List Form Set Conditions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_set_conditions(
     form_set_id: str = Field(..., description="The unique identifier of the form set for which to retrieve conditions."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response for expanded context."),
@@ -6264,7 +6950,12 @@ async def list_form_set_conditions(
     return _response_data
 
 # Tags: FormSetConditions
-@mcp.tool()
+@mcp.tool(
+    title="Create Form Set Condition",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form_set_condition(
     form_set_id: str = Field(..., description="The unique identifier of the form set to which this condition will be applied."),
     type_: Literal["form_set_conditions"] = Field(..., alias="type", description="The resource type identifier, which must be 'form_set_conditions' to specify this is a form set condition resource."),
@@ -6314,7 +7005,13 @@ async def create_form_set_condition(
     return _response_data
 
 # Tags: FormSetConditions
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Set Condition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_set_condition(id_: str = Field(..., alias="id", description="The unique identifier of the form set condition to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific form set condition by its unique identifier. Use this to fetch the configuration and rules associated with a particular form set condition."""
 
@@ -6350,7 +7047,13 @@ async def get_form_set_condition(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: FormSetConditions
-@mcp.tool()
+@mcp.tool(
+    title="Update Form Set Condition",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_form_set_condition(
     id_: str = Field(..., alias="id", description="The unique identifier of the form set condition to update."),
     type_: Literal["form_set_conditions"] = Field(..., alias="type", description="The resource type identifier, which must be 'form_set_conditions' to specify this is a form set condition resource."),
@@ -6400,7 +7103,13 @@ async def update_form_set_condition(
     return _response_data
 
 # Tags: FormSetConditions
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form Set Condition",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form_set_condition(id_: str = Field(..., alias="id", description="The unique identifier of the form set condition to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific form set condition by its unique identifier. This operation permanently removes the condition and cannot be undone."""
 
@@ -6436,7 +7145,13 @@ async def delete_form_set_condition(id_: str = Field(..., alias="id", descriptio
     return _response_data
 
 # Tags: FormSets
-@mcp.tool()
+@mcp.tool(
+    title="List Form Sets",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_form_sets(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., forms, metadata). Reduces the need for additional API calls."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1. Use with page[size] to control result pagination."),
@@ -6479,7 +7194,12 @@ async def list_form_sets(
     return _response_data
 
 # Tags: FormSets
-@mcp.tool()
+@mcp.tool(
+    title="Create Form Set",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_form_set(
     type_: Literal["form_sets"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'form_sets' to indicate this operation creates a form set resource."),
     name: str = Field(..., description="A human-readable name for the form set. Used to identify and organize the form set in the system."),
@@ -6526,7 +7246,13 @@ async def create_form_set(
     return _response_data
 
 # Tags: FormSets
-@mcp.tool()
+@mcp.tool(
+    title="Get Form Set",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_form_set(id_: str = Field(..., alias="id", description="The unique identifier of the form set to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific form set by its unique identifier. Use this operation to fetch the complete configuration and details of a form set."""
 
@@ -6562,7 +7288,13 @@ async def get_form_set(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: FormSets
-@mcp.tool()
+@mcp.tool(
+    title="Update Form Set",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_form_set(
     id_: str = Field(..., alias="id", description="The unique identifier of the form set to update."),
     type_: Literal["form_sets"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'form_sets' to specify this is a form set resource."),
@@ -6610,7 +7342,13 @@ async def update_form_set(
     return _response_data
 
 # Tags: FormSets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Form Set",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_form_set(id_: str = Field(..., alias="id", description="The unique identifier of the form set to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a form set and all its associated data. This action cannot be undone."""
 
@@ -6646,7 +7384,13 @@ async def delete_form_set(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="List Functionalities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_functionalities(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., metadata, relationships)."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1. Use with page[size] to control result set boundaries."),
@@ -6693,7 +7437,12 @@ async def list_functionalities(
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="Create Functionality",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_functionality(
     type_: Literal["functionalities"] = Field(..., alias="type", description="The resource type identifier; must be set to 'functionalities' to indicate this is a functionality resource."),
     name: str = Field(..., description="The display name of the functionality; used to identify and reference this capability across the system."),
@@ -6757,7 +7506,13 @@ async def create_functionality(
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="Get Functionality",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_functionality(id_: str = Field(..., alias="id", description="The unique identifier of the functionality to retrieve. This is a required string value that specifies which functionality resource to fetch.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific functionality by its unique identifier. Use this operation to fetch detailed information about a single functionality resource."""
 
@@ -6793,7 +7548,13 @@ async def get_functionality(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="Update Functionality",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_functionality(
     id_: str = Field(..., alias="id", description="The unique identifier of the functionality to update."),
     type_: Literal["functionalities"] = Field(..., alias="type", description="The resource type, which must be 'functionalities' to identify this as a functionality resource."),
@@ -6856,7 +7617,13 @@ async def update_functionality(
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="Delete Functionality",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_functionality(id_: str = Field(..., alias="id", description="The unique identifier of the functionality to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a functionality by its unique identifier. This action cannot be undone."""
 
@@ -6892,7 +7659,13 @@ async def delete_functionality(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="Get Functionality Incidents Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_functionality_incidents_chart(
     id_: str = Field(..., alias="id", description="The unique identifier of the functionality for which to retrieve incident chart data."),
     period: str = Field(..., description="The time period for which to retrieve incident data. Specify the desired time range to filter incidents in the chart (e.g., last 7 days, last month, custom date range)."),
@@ -6934,7 +7707,13 @@ async def get_functionality_incidents_chart(
     return _response_data
 
 # Tags: Functionalities
-@mcp.tool()
+@mcp.tool(
+    title="Get Functionality Uptime Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_functionality_uptime_chart(
     id_: str = Field(..., alias="id", description="The unique identifier of the functionality for which to retrieve the uptime chart."),
     period: str | None = Field(None, description="The time period for the uptime chart data (e.g., day, week, month, year). If not specified, a default period will be used."),
@@ -6976,7 +7755,13 @@ async def get_functionality_uptime_chart(
     return _response_data
 
 # Tags: WorkflowTasks
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_tasks(
     workflow_id: str = Field(..., description="The unique identifier of the workflow containing the tasks to list."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., assignees, dependencies). Reduces need for additional API calls."),
@@ -7020,7 +7805,12 @@ async def list_workflow_tasks(
     return _response_data
 
 # Tags: WorkflowTasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Workflow Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workflow_task(
     workflow_id: str = Field(..., description="The unique identifier of the workflow to which this task will be added."),
     type_: Literal["workflow_tasks"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be set to 'workflow_tasks'."),
@@ -7071,7 +7861,13 @@ async def create_workflow_task(
     return _response_data
 
 # Tags: WorkflowTasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_task(id_: str = Field(..., alias="id", description="The unique identifier of the workflow task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific workflow task by its unique identifier. Use this to fetch detailed information about a single task within a workflow."""
 
@@ -7107,7 +7903,13 @@ async def get_workflow_task(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: WorkflowTasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Workflow Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workflow_task(
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow task to update."),
     type_: Literal["workflow_tasks"] = Field(..., alias="type", description="The resource type identifier, which must be 'workflow_tasks' to specify this is a workflow task resource."),
@@ -7158,7 +7960,13 @@ async def update_workflow_task(
     return _response_data
 
 # Tags: WorkflowTasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow_task(id_: str = Field(..., alias="id", description="The unique identifier of the workflow task to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific workflow task by its unique identifier. This action cannot be undone."""
 
@@ -7194,7 +8002,13 @@ async def delete_workflow_task(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: WorkflowFormFieldConditions
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Form Field Conditions",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_form_field_conditions(
     workflow_id: str = Field(..., description="The unique identifier of the workflow for which to retrieve form field conditions."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., field references, condition rules). Specify which associations should be populated to reduce additional API calls."),
@@ -7238,7 +8052,13 @@ async def list_workflow_form_field_conditions(
     return _response_data
 
 # Tags: WorkflowFormFieldConditions
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Form Field Condition",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_form_field_condition(id_: str = Field(..., alias="id", description="The unique identifier of the workflow form field condition to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific workflow form field condition by its unique identifier. Use this to fetch the details of a condition that controls the visibility or behavior of a form field within a workflow."""
 
@@ -7274,7 +8094,13 @@ async def get_workflow_form_field_condition(id_: str = Field(..., alias="id", de
     return _response_data
 
 # Tags: WorkflowGroups
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_groups(
     include: str | None = Field(None, description="Comma-separated list of related fields to include in the response for expanded context (e.g., metadata, configuration details)."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1. Use with page[size] to navigate through large result sets."),
@@ -7319,7 +8145,13 @@ async def list_workflow_groups(
     return _response_data
 
 # Tags: WorkflowGroups
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow_group(id_: str = Field(..., alias="id", description="The unique identifier of the workflow group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific workflow group by its unique identifier. Use this operation to fetch detailed information about a workflow group configuration."""
 
@@ -7355,7 +8187,13 @@ async def get_workflow_group(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: WorkflowGroups
-@mcp.tool()
+@mcp.tool(
+    title="Update Workflow Group",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_workflow_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow group to update."),
     type_: Literal["workflow_groups"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'workflow_groups' to specify this is a workflow group resource."),
@@ -7407,7 +8245,13 @@ async def update_workflow_group(
     return _response_data
 
 # Tags: WorkflowGroups
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow Group",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow_group(id_: str = Field(..., alias="id", description="The unique identifier of the workflow group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a workflow group and all its associated data by its unique identifier. This action cannot be undone."""
 
@@ -7443,7 +8287,13 @@ async def delete_workflow_group(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: WorkflowRuns
-@mcp.tool()
+@mcp.tool(
+    title="List Workflow Runs",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_workflow_runs(
     workflow_id: str = Field(..., description="The unique identifier of the workflow for which to list runs."),
     include: Literal["genius_task_runs"] | None = Field(None, description="Optional comma-separated list of related data to include in the response. Use 'genius_task_runs' to include detailed task execution information for each workflow run."),
@@ -7487,7 +8337,12 @@ async def list_workflow_runs(
     return _response_data
 
 # Tags: WorkflowRuns
-@mcp.tool()
+@mcp.tool(
+    title="Create Workflow Run",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_workflow_run(
     workflow_id: str = Field(..., description="The unique identifier of the workflow for which to create a run."),
     type_: Literal["workflow_runs"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'workflow_runs' to specify the type of object being created."),
@@ -7532,7 +8387,13 @@ async def create_workflow_run(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Get Workflow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_workflow(
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow to retrieve."),
     include: Literal["form_field_conditions", "genius_tasks", "genius_workflow_runs"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options are form_field_conditions, genius_tasks, and genius_workflow_runs."),
@@ -7574,7 +8435,13 @@ async def get_workflow(
     return _response_data
 
 # Tags: Workflows
-@mcp.tool()
+@mcp.tool(
+    title="Delete Workflow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a workflow by its unique identifier. This action cannot be undone."""
 
@@ -7610,7 +8477,13 @@ async def delete_workflow(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Heartbeats
-@mcp.tool()
+@mcp.tool(
+    title="List Heartbeats",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_heartbeats(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., metadata, details). Reduces the need for additional API calls."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use with page[size] to navigate through results."),
@@ -7652,7 +8525,12 @@ async def list_heartbeats(
     return _response_data
 
 # Tags: Heartbeats
-@mcp.tool()
+@mcp.tool(
+    title="Create Heartbeat",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_heartbeat(
     type_: Literal["heartbeats"] = Field(..., alias="type", description="The resource type identifier; must be set to 'heartbeats' to indicate this is a heartbeat resource."),
     name: str = Field(..., description="A human-readable name for the heartbeat to identify it in the system."),
@@ -7706,7 +8584,13 @@ async def create_heartbeat(
     return _response_data
 
 # Tags: Heartbeats
-@mcp.tool()
+@mcp.tool(
+    title="Get Heartbeat",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_heartbeat(id_: str = Field(..., alias="id", description="The unique identifier of the heartbeat to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific heartbeat record by its unique identifier. Use this to fetch details about a particular heartbeat event or status check."""
 
@@ -7742,7 +8626,13 @@ async def get_heartbeat(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Heartbeats
-@mcp.tool()
+@mcp.tool(
+    title="Update Heartbeat",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_heartbeat(
     id_: str = Field(..., alias="id", description="The unique identifier of the heartbeat to update."),
     type_: Literal["heartbeats"] = Field(..., alias="type", description="The resource type, which must be 'heartbeats' to identify this as a heartbeat resource."),
@@ -7797,7 +8687,13 @@ async def update_heartbeat(
     return _response_data
 
 # Tags: Heartbeats
-@mcp.tool()
+@mcp.tool(
+    title="Delete Heartbeat",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_heartbeat(id_: str = Field(..., alias="id", description="The unique identifier of the heartbeat to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a heartbeat record by its unique identifier. This action cannot be undone."""
 
@@ -7833,7 +8729,13 @@ async def delete_heartbeat(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: IncidentActionItems
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Action Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_action_items(
     incident_id: str = Field(..., description="The unique identifier of the incident for which to retrieve action items."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., assignee details, timestamps). Specify which fields or nested objects should be populated."),
@@ -7877,7 +8779,12 @@ async def list_incident_action_items(
     return _response_data
 
 # Tags: IncidentActionItems
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Action Item",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_action_item(
     incident_id: str = Field(..., description="The unique identifier of the incident to which this action item belongs."),
     type_: Literal["incident_action_items"] = Field(..., alias="type", description="The resource type identifier; must be set to 'incident_action_items'."),
@@ -7933,7 +8840,13 @@ async def create_incident_action_item(
     return _response_data
 
 # Tags: IncidentActionItems
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Action Item",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_action_item(id_: str = Field(..., alias="id", description="The unique identifier of the incident action item to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident action item by its unique identifier. Use this to fetch details about a single action item associated with an incident."""
 
@@ -7969,7 +8882,13 @@ async def get_incident_action_item(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: IncidentActionItems
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Action Item",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_action_item(
     id_: str = Field(..., alias="id", description="The unique identifier of the action item to update."),
     type_: Literal["incident_action_items"] = Field(..., alias="type", description="The resource type identifier; must be 'incident_action_items'."),
@@ -8025,7 +8944,13 @@ async def update_incident_action_item(
     return _response_data
 
 # Tags: IncidentActionItems
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Action Item",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_action_item(id_: str = Field(..., alias="id", description="The unique identifier of the incident action item to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific incident action item by its unique identifier. This operation removes the action item record from the system."""
 
@@ -8061,7 +8986,13 @@ async def delete_incident_action_item(id_: str = Field(..., alias="id", descript
     return _response_data
 
 # Tags: IncidentActionItems
-@mcp.tool()
+@mcp.tool(
+    title="List Action Items",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_action_items(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., incident, assignee). Reduces the need for follow-up requests."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1. Use with page[size] to navigate through large result sets."),
@@ -8108,7 +9039,13 @@ async def list_action_items(
     return _response_data
 
 # Tags: IncidentEventFunctionalities
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Event Functionalities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_event_functionalities(
     incident_event_id: str = Field(..., description="The unique identifier of the incident event for which to list associated functionalities."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response for expanded context."),
@@ -8152,7 +9089,12 @@ async def list_incident_event_functionalities(
     return _response_data
 
 # Tags: IncidentEventFunctionalities
-@mcp.tool()
+@mcp.tool(
+    title="Add Functionality to Incident Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_functionality_to_incident_event(
     incident_event_id: str = Field(..., description="The unique identifier of the incident event to which the functionality will be added."),
     attributes_incident_event_id: str = Field(..., alias="attributesIncident_event_id", description="The unique identifier of the incident event being referenced in the request body (must match the incident_event_id in the path)."),
@@ -8202,7 +9144,13 @@ async def add_functionality_to_incident_event(
     return _response_data
 
 # Tags: IncidentEventFunctionalities
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Event Functionality",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_event_functionality(id_: str = Field(..., alias="id", description="The unique identifier of the incident event functionality to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident event functionality by its unique identifier. Use this to fetch detailed information about a particular functionality associated with incident events."""
 
@@ -8238,7 +9186,13 @@ async def get_incident_event_functionality(id_: str = Field(..., alias="id", des
     return _response_data
 
 # Tags: IncidentEventFunctionalities
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Event Functionality",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_event_functionality(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident event functionality to update."),
     type_: Literal["incident_event_functionalities"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'incident_event_functionalities' to specify the type of resource being updated."),
@@ -8286,7 +9240,13 @@ async def update_incident_event_functionality(
     return _response_data
 
 # Tags: IncidentEventFunctionalities
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Event Functionality",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_event_functionality(id_: str = Field(..., alias="id", description="The unique identifier of the incident event functionality to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific incident event functionality by its unique identifier. This action cannot be undone."""
 
@@ -8322,7 +9282,13 @@ async def delete_incident_event_functionality(id_: str = Field(..., alias="id", 
     return _response_data
 
 # Tags: IncidentEventServices
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Event Services",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_event_services(
     incident_event_id: str = Field(..., description="The unique identifier of the incident event for which to list associated services."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., service details, metadata). Specify which associations to expand for richer context."),
@@ -8366,7 +9332,12 @@ async def list_incident_event_services(
     return _response_data
 
 # Tags: IncidentEventServices
-@mcp.tool()
+@mcp.tool(
+    title="Add Service to Incident Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_service_to_incident_event(
     incident_event_id: str = Field(..., description="The unique identifier of the incident event to which the service will be added."),
     attributes_incident_event_id: str = Field(..., alias="attributesIncident_event_id", description="The unique identifier of the incident event being referenced in the request body (must match the incident_event_id in the path)."),
@@ -8416,7 +9387,13 @@ async def add_service_to_incident_event(
     return _response_data
 
 # Tags: IncidentEventServices
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Event Service",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_event_service(id_: str = Field(..., alias="id", description="The unique identifier of the incident event service to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident event service by its unique identifier. Use this to fetch detailed information about a single incident event service."""
 
@@ -8452,7 +9429,13 @@ async def get_incident_event_service(id_: str = Field(..., alias="id", descripti
     return _response_data
 
 # Tags: IncidentEventServices
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Event Service Status",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_event_service_status(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident event service to update."),
     type_: Literal["incident_event_services"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'incident_event_services' to specify the type of resource being updated."),
@@ -8500,7 +9483,13 @@ async def update_incident_event_service_status(
     return _response_data
 
 # Tags: IncidentEventServices
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Event Service",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_event_service(id_: str = Field(..., alias="id", description="The unique identifier of the incident event service to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific incident event service by its unique identifier. This action cannot be undone."""
 
@@ -8536,7 +9525,13 @@ async def delete_incident_event_service(id_: str = Field(..., alias="id", descri
     return _response_data
 
 # Tags: IncidentEvents
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_events(
     incident_id: str = Field(..., description="The unique identifier of the incident for which to retrieve events."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., user details, attachments). Reduces the need for additional API calls."),
@@ -8580,7 +9575,12 @@ async def list_incident_events(
     return _response_data
 
 # Tags: IncidentEvents
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_event(
     incident_id: str = Field(..., description="The unique identifier of the incident to which this event belongs."),
     type_: Literal["incident_events"] = Field(..., alias="type", description="The type of event being created. Must be set to 'incident_events' to classify this as an incident event record."),
@@ -8629,7 +9629,13 @@ async def create_incident_event(
     return _response_data
 
 # Tags: IncidentEvents
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_event(id_: str = Field(..., alias="id", description="The unique identifier of the incident event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident event by its unique identifier. Use this to fetch detailed information about a single incident event."""
 
@@ -8665,7 +9671,13 @@ async def get_incident_event(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: IncidentEvents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Event",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident event to update."),
     type_: Literal["incident_events"] = Field(..., alias="type", description="The resource type, which must be 'incident_events' to identify this as an incident event resource."),
@@ -8714,7 +9726,13 @@ async def update_incident_event(
     return _response_data
 
 # Tags: IncidentEvents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Event",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_event(id_: str = Field(..., alias="id", description="The unique identifier of the incident event to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific incident event by its unique identifier. This action cannot be undone."""
 
@@ -8750,7 +9768,13 @@ async def delete_incident_event(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: IncidentFeedbacks
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Feedbacks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_feedbacks(
     incident_id: str = Field(..., description="The unique identifier of the incident for which to retrieve feedbacks."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., user details, metadata). Specify which associations should be expanded in the results."),
@@ -8794,7 +9818,12 @@ async def list_incident_feedbacks(
     return _response_data
 
 # Tags: IncidentFeedbacks
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Feedback",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_feedback(
     incident_id: str = Field(..., description="The unique identifier of the incident for which feedback is being submitted."),
     type_: Literal["incident_feedbacks"] = Field(..., alias="type", description="The type of feedback being submitted. Must be set to 'incident_feedbacks' to classify this as incident feedback."),
@@ -8844,7 +9873,13 @@ async def create_incident_feedback(
     return _response_data
 
 # Tags: IncidentFeedbacks
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Feedback",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_feedback(id_: str = Field(..., alias="id", description="The unique identifier of the incident feedback to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident feedback by its unique identifier. Use this to fetch detailed information about a single feedback entry associated with an incident."""
 
@@ -8880,7 +9915,13 @@ async def get_incident_feedback(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: IncidentFeedbacks
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Feedback",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_feedback(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident feedback to update."),
     type_: Literal["incident_feedbacks"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'incident_feedbacks' to specify this is an incident feedback resource."),
@@ -8930,7 +9971,13 @@ async def update_incident_feedback(
     return _response_data
 
 # Tags: IncidentFormFieldSelections
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Form Field Selections",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_form_field_selections(
     incident_id: str = Field(..., description="The unique identifier of the incident for which to retrieve form field selections."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., field definitions, metadata). Specify which associations should be populated."),
@@ -8974,7 +10021,12 @@ async def list_incident_form_field_selections(
     return _response_data
 
 # Tags: IncidentFormFieldSelections
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Form Field Selection",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_form_field_selection(
     incident_id: str = Field(..., description="The unique identifier of the incident to which this form field selection will be added."),
     attributes_incident_id: str = Field(..., alias="attributesIncident_id", description="The incident ID associated with this form field selection; must match the incident_id in the URL path."),
@@ -9030,7 +10082,13 @@ async def create_incident_form_field_selection(
     return _response_data
 
 # Tags: IncidentFormFieldSelections
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Form Field Selection",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_form_field_selection(id_: str = Field(..., alias="id", description="The unique identifier of the incident form field selection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident form field selection by its unique identifier. Use this to fetch configuration details for how form fields are selected and displayed in incident reports."""
 
@@ -9066,7 +10124,13 @@ async def get_incident_form_field_selection(id_: str = Field(..., alias="id", de
     return _response_data
 
 # Tags: IncidentRetrospectives
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Post Mortems",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_post_mortems(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., incident details, user information)."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1."),
@@ -9118,7 +10182,13 @@ async def list_incident_post_mortems(
     return _response_data
 
 # Tags: IncidentRetrospectives
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Postmortem",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_postmortem(id_: str = Field(..., alias="id", description="The unique identifier of the incident postmortem to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a detailed incident postmortem (retrospective) by its unique identifier. Use this to access the analysis and findings from a completed incident investigation."""
 
@@ -9154,7 +10224,13 @@ async def get_incident_postmortem(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: IncidentRetrospectives
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Postmortem",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_postmortem(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident postmortem to update."),
     type_: Literal["incident_post_mortems"] = Field(..., alias="type", description="The resource type identifier; must be set to 'incident_post_mortems'."),
@@ -9212,7 +10288,13 @@ async def update_incident_postmortem(
     return _response_data
 
 # Tags: IncidentRetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Retrospective Step",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_retrospective_step(id_: str = Field(..., alias="id", description="The unique identifier of the incident retrospective step to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident retrospective step by its unique identifier. Use this to fetch details about a particular step within an incident retrospective."""
 
@@ -9248,7 +10330,13 @@ async def get_incident_retrospective_step(id_: str = Field(..., alias="id", desc
     return _response_data
 
 # Tags: IncidentRetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Retrospective Step",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_retrospective_step(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident retrospective step to update."),
     type_: Literal["incident_retrospective_steps"] = Field(..., alias="type", description="The resource type identifier, which must be 'incident_retrospective_steps' to specify the entity being updated."),
@@ -9301,7 +10389,13 @@ async def update_incident_retrospective_step(
     return _response_data
 
 # Tags: IncidentRoleTasks
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Role Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_role_tasks(
     incident_role_id: str = Field(..., description="The unique identifier of the incident role for which to list associated tasks."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., assignees, status details). Reduces need for additional API calls."),
@@ -9345,7 +10439,12 @@ async def list_incident_role_tasks(
     return _response_data
 
 # Tags: IncidentRoleTasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Role Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_role_task(
     incident_role_id: str = Field(..., description="The unique identifier of the incident role to which this task will be assigned."),
     type_: Literal["incident_role_tasks"] = Field(..., alias="type", description="The resource type identifier for incident role tasks. Must be set to 'incident_role_tasks'."),
@@ -9395,7 +10494,13 @@ async def create_incident_role_task(
     return _response_data
 
 # Tags: IncidentRoleTasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Role Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_role_task(id_: str = Field(..., alias="id", description="The unique identifier of the incident role task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident role task by its unique identifier. Use this to fetch details about a particular task assigned to a role within an incident."""
 
@@ -9431,7 +10536,13 @@ async def get_incident_role_task(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: IncidentRoleTasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Role Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_role_task(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident role task to update."),
     type_: Literal["incident_role_tasks"] = Field(..., alias="type", description="The resource type identifier, which must be 'incident_role_tasks' to specify the resource being updated."),
@@ -9481,7 +10592,13 @@ async def update_incident_role_task(
     return _response_data
 
 # Tags: IncidentRoleTasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Role Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_role_task(id_: str = Field(..., alias="id", description="The unique identifier of the incident role task to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific incident role task by its unique identifier. This action cannot be undone."""
 
@@ -9517,7 +10634,13 @@ async def delete_incident_role_task(id_: str = Field(..., alias="id", descriptio
     return _response_data
 
 # Tags: IncidentRoles
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_roles(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., permissions, metadata). Specify which associations should be populated alongside each role."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve when paginating through results. Use with page[size] to control pagination."),
@@ -9561,7 +10684,12 @@ async def list_incident_roles(
     return _response_data
 
 # Tags: IncidentRoles
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Role",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_role(
     type_: Literal["incident_roles"] = Field(..., alias="type", description="The resource type identifier; must be set to 'incident_roles' to specify this is an incident role resource."),
     name: str = Field(..., description="The display name for the incident role (e.g., 'Incident Commander', 'Communications Lead'). Used to identify the role throughout the incident management system."),
@@ -9613,7 +10741,13 @@ async def create_incident_role(
     return _response_data
 
 # Tags: IncidentRoles
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_role(id_: str = Field(..., alias="id", description="The unique identifier of the incident role to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident role by its unique identifier. Use this to fetch detailed information about a particular incident role."""
 
@@ -9649,7 +10783,13 @@ async def get_incident_role(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: IncidentRoles
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident role to update."),
     type_: Literal["incident_roles"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'incident_roles'."),
@@ -9702,7 +10842,13 @@ async def update_incident_role(
     return _response_data
 
 # Tags: IncidentRoles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_role(id_: str = Field(..., alias="id", description="The unique identifier of the incident role to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an incident role by its unique identifier. This action cannot be undone."""
 
@@ -9738,7 +10884,13 @@ async def delete_incident_role(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: IncidentStatusPageEvents
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Status Page Events",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_status_page_events(
     incident_id: str = Field(..., description="The unique identifier of the incident for which to retrieve status page events."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., incident details, status page information). Specify which associations to expand for richer context."),
@@ -9782,7 +10934,12 @@ async def list_incident_status_page_events(
     return _response_data
 
 # Tags: IncidentStatusPageEvents
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Status Page Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_status_page_event(
     incident_id: str = Field(..., description="The unique identifier of the incident for which you are creating a status page event."),
     type_: Literal["incident_status_page_events"] = Field(..., alias="type", description="The type of resource being created; must be set to 'incident_status_page_events'."),
@@ -9834,7 +10991,13 @@ async def create_incident_status_page_event(
     return _response_data
 
 # Tags: IncidentStatusPageEvents
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Status Page Event",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_status_page_event(id_: str = Field(..., alias="id", description="The unique identifier of the incident status page event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident status page event by its unique identifier. Use this to fetch detailed information about a particular status page event associated with an incident."""
 
@@ -9870,7 +11033,12 @@ async def get_incident_status_page_event(id_: str = Field(..., alias="id", descr
     return _response_data
 
 # Tags: IncidentStatusPageEvents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Status Page Event",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_incident_status_page_event(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident status page event to update."),
     type_: Literal["incident_status_page_events"] = Field(..., alias="type", description="The resource type identifier, which must be 'incident_status_page_events' to specify the event resource being updated."),
@@ -9922,7 +11090,13 @@ async def update_incident_status_page_event(
     return _response_data
 
 # Tags: IncidentStatusPageEvents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Status Page Event",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_status_page_event(id_: str = Field(..., alias="id", description="The unique identifier of the status page event to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific incident status page event. This removes the event record from the status page."""
 
@@ -9958,7 +11132,13 @@ async def delete_status_page_event(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: IncidentTypes
-@mcp.tool()
+@mcp.tool(
+    title="List Incident Types",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incident_types(
     include: str | None = Field(None, description="Comma-separated list of related fields to include in the response (e.g., metadata, categories). Specify which associations should be expanded in the returned incident type objects."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1. Use with page[size] to control result set boundaries."),
@@ -10002,7 +11182,12 @@ async def list_incident_types(
     return _response_data
 
 # Tags: IncidentTypes
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident Type",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident_type(
     type_: Literal["incident_types"] = Field(..., alias="type", description="The resource type identifier; must be set to 'incident_types' to specify this is an incident type resource."),
     name: str = Field(..., description="The display name for the incident type; used to identify and reference this type throughout the system."),
@@ -10054,7 +11239,13 @@ async def create_incident_type(
     return _response_data
 
 # Tags: IncidentTypes
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident Type",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident_type(id_: str = Field(..., alias="id", description="The unique identifier of the incident type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident type by its unique identifier. Use this to fetch detailed information about a particular incident type configuration."""
 
@@ -10090,7 +11281,13 @@ async def get_incident_type(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: IncidentTypes
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident Type",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident_type(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident type to update."),
     type_: Literal["incident_types"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'incident_types'."),
@@ -10143,7 +11340,13 @@ async def update_incident_type(
     return _response_data
 
 # Tags: IncidentTypes
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident Type",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident_type(id_: str = Field(..., alias="id", description="The unique identifier of the incident type to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an incident type by its unique identifier. This action cannot be undone and will remove the incident type from the system."""
 
@@ -10179,7 +11382,13 @@ async def delete_incident_type(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="List Incidents",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_incidents(
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination (1-indexed). Use with page[size] to retrieve specific result sets."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of incidents per page. Determines the size of each paginated result set."),
@@ -10261,7 +11470,12 @@ async def list_incidents(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Create Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_incident(
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type identifier; must be set to 'incidents' to create an incident."),
     title: str | None = Field(None, description="A human-readable title for the incident. If omitted, the system will automatically generate one."),
@@ -10329,7 +11543,13 @@ async def create_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Get Incident",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to retrieve."),
     include: Literal["sub_statuses", "causes", "subscribers", "roles", "slack_messages", "environments", "incident_types", "services", "functionalities", "groups", "events", "action_items", "custom_field_selections", "feedbacks", "incident_post_mortem"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options include sub_statuses, causes, subscribers, roles, slack_messages, environments, incident_types, services, functionalities, groups, events, action_items, custom_field_selections, feedbacks, and incident_post_mortem."),
@@ -10371,7 +11591,13 @@ async def get_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be 'incidents' for this operation."),
@@ -10438,7 +11664,13 @@ async def update_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Delete Incident",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_incident(id_: str = Field(..., alias="id", description="The unique identifier of the incident to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific incident by its unique identifier. This action cannot be undone."""
 
@@ -10474,7 +11706,12 @@ async def delete_incident(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Mitigate Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def mitigate_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to mitigate."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be set to 'incidents' to specify that this operation applies to incident resources."),
@@ -10522,7 +11759,12 @@ async def mitigate_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Resolve Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def resolve_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to resolve."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be 'incidents' to specify this operation targets incident resources."),
@@ -10570,7 +11812,13 @@ async def resolve_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Cancel Incident",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def cancel_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to cancel."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be 'incidents' to specify that this operation applies to incident resources."),
@@ -10618,7 +11866,12 @@ async def cancel_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Update Incident to Triage",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_incident_to_triage(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to transition into triage state."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'incidents' to specify this operation applies to incident resources."),
@@ -10662,7 +11915,12 @@ async def update_incident_to_triage(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Restart Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def restart_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to restart."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be set to 'incidents' to specify the target resource category."),
@@ -10706,7 +11964,12 @@ async def restart_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Add Subscribers to Incident",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_subscribers_to_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to which subscribers will be added."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be 'incidents' for this operation."),
@@ -10755,7 +12018,13 @@ async def add_subscribers_to_incident(
     return _response_data
 
 # Tags: Incidents
-@mcp.tool()
+@mcp.tool(
+    title="Remove Subscribers From Incident",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def remove_subscribers_from_incident(
     id_: str = Field(..., alias="id", description="The unique identifier of the incident from which subscribers will be removed."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type, which must be 'incidents' for this operation."),
@@ -10804,7 +12073,13 @@ async def remove_subscribers_from_incident(
     return _response_data
 
 # Tags: LiveCallRouters
-@mcp.tool()
+@mcp.tool(
+    title="List Live Call Routers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_live_call_routers(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., nested objects or associations)."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1."),
@@ -10847,7 +12122,12 @@ async def list_live_call_routers(
     return _response_data
 
 # Tags: LiveCallRouters
-@mcp.tool()
+@mcp.tool(
+    title="Create Live Call Router",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_live_call_router(
     data_type: Literal["live_call_routers"] = Field(..., alias="dataType", description="The resource type identifier; must be set to 'live_call_routers'."),
     escalation_policy_trigger_params_type: Literal["service", "group", "escalation_policy"] = Field(..., alias="escalation_policy_trigger_paramsType", description="The target type for escalation notifications: 'service' (PagerDuty service), 'group' (team/group), or 'escalation_policy' (escalation policy)."),
@@ -10913,7 +12193,13 @@ async def create_live_call_router(
     return _response_data
 
 # Tags: LiveCallRouters
-@mcp.tool()
+@mcp.tool(
+    title="Generate Phone Number for Live Call Router",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def generate_phone_number_for_live_call_router(
     country_code: Literal["AU", "CA", "NL", "NZ", "GB", "US"] = Field(..., description="The country where the phone number will be allocated. Supported countries are Australia, Canada, Netherlands, New Zealand, United Kingdom, and United States."),
     phone_type: Literal["local", "toll_free", "mobile"] = Field(..., description="The type of phone number to generate: local (geographic area code), toll_free (caller pays no charges), or mobile (cellular number)."),
@@ -10954,7 +12240,13 @@ async def generate_phone_number_for_live_call_router(
     return _response_data
 
 # Tags: LiveCallRouters
-@mcp.tool()
+@mcp.tool(
+    title="Get Live Call Router",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_live_call_router(id_: str = Field(..., alias="id", description="The unique identifier of the Live Call Router to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific Live Call Router configuration by its unique identifier. Use this to fetch details about a configured call routing rule."""
 
@@ -10990,7 +12282,12 @@ async def get_live_call_router(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: LiveCallRouters
-@mcp.tool()
+@mcp.tool(
+    title="Update Live Call Router",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_live_call_router(
     id_: str = Field(..., alias="id", description="The unique identifier of the Live Call Router to update."),
     escalation_policy_trigger_params_id: str = Field(..., alias="escalation_policy_trigger_paramsId", description="The unique identifier of the notification target (Service, Group, or Escalation Policy) that will receive escalation alerts."),
@@ -11056,7 +12353,13 @@ async def update_live_call_router(
     return _response_data
 
 # Tags: LiveCallRouters
-@mcp.tool()
+@mcp.tool(
+    title="Delete Live Call Router",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_live_call_router(id_: str = Field(..., alias="id", description="The unique identifier of the Live Call Router to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Live Call Router by its unique identifier. This action cannot be undone."""
 
@@ -11092,7 +12395,13 @@ async def delete_live_call_router(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: OnCallRoles
-@mcp.tool()
+@mcp.tool(
+    title="List On-Call Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_on_call_roles(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., users, schedules). Reduces the need for additional API calls by embedding associated data."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve when paginating through results. Use with page[size] to navigate large datasets."),
@@ -11135,7 +12444,12 @@ async def list_on_call_roles(
     return _response_data
 
 # Tags: OnCallRoles
-@mcp.tool()
+@mcp.tool(
+    title="Create On-Call Role",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_on_call_role(
     type_: Literal["on_call_roles"] = Field(..., alias="type", description="The resource type identifier; must be set to 'on_call_roles' to specify this is an On-Call Role resource."),
     name: str = Field(..., description="The human-readable name for the On-Call Role; used for display and identification throughout the system."),
@@ -11200,7 +12514,13 @@ async def create_on_call_role(
     return _response_data
 
 # Tags: OnCallRoles
-@mcp.tool()
+@mcp.tool(
+    title="Get On Call Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_on_call_role(id_: str = Field(..., alias="id", description="The unique identifier of the On-Call Role to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific On-Call Role by its unique identifier. Use this to fetch detailed information about a particular on-call role configuration."""
 
@@ -11236,7 +12556,13 @@ async def get_on_call_role(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: OnCallRoles
-@mcp.tool()
+@mcp.tool(
+    title="Update On-Call Role",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_on_call_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the On-Call Role to update."),
     type_: Literal["on_call_roles"] = Field(..., alias="type", description="The resource type identifier; must be set to 'on_call_roles'."),
@@ -11302,7 +12628,13 @@ async def update_on_call_role(
     return _response_data
 
 # Tags: OnCallShadows
-@mcp.tool()
+@mcp.tool(
+    title="List On Call Shadows",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_on_call_shadows(
     schedule_id: str = Field(..., description="The unique identifier of the schedule for which to retrieve shadow shifts."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., user details, shift metadata). Specify which associations to expand for richer context."),
@@ -11346,7 +12678,12 @@ async def list_on_call_shadows(
     return _response_data
 
 # Tags: OnCallShadows
-@mcp.tool()
+@mcp.tool(
+    title="Create On-Call Shadow",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_on_call_shadow(
     schedule_id: str = Field(..., description="The unique identifier of the schedule to which this shadow configuration belongs."),
     type_: Literal["on_call_shadows"] = Field(..., alias="type", description="The resource type for this operation; must be set to 'on_call_shadows'."),
@@ -11398,7 +12735,13 @@ async def create_on_call_shadow(
     return _response_data
 
 # Tags: OnCallShadows
-@mcp.tool()
+@mcp.tool(
+    title="Get On Call Shadow",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_on_call_shadow(id_: str = Field(..., alias="id", description="The unique identifier of the On Call Shadow configuration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific On Call Shadow configuration by its unique identifier. Use this to fetch details about an on-call shadow setup, including its rules and associated personnel."""
 
@@ -11434,7 +12777,13 @@ async def get_on_call_shadow(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: OnCallShadows
-@mcp.tool()
+@mcp.tool(
+    title="Update On Call Shadow",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_on_call_shadow(
     id_: str = Field(..., alias="id", description="The unique identifier of the on-call shadow configuration to update."),
     type_: Literal["on_call_shadows"] = Field(..., alias="type", description="The resource type identifier, which must be 'on_call_shadows' to specify this is an on-call shadow resource."),
@@ -11487,7 +12836,13 @@ async def update_on_call_shadow(
     return _response_data
 
 # Tags: OverrideShifts
-@mcp.tool()
+@mcp.tool(
+    title="Delete On-Call Shadow",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_on_call_shadow(id_: str = Field(..., alias="id", description="The unique identifier of the on-call shadow configuration to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a specific on-call shadow configuration by its unique identifier. This operation permanently deletes the shadow configuration and its associated settings."""
 
@@ -11523,7 +12878,13 @@ async def delete_on_call_shadow(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: OverrideShifts
-@mcp.tool()
+@mcp.tool(
+    title="List Override Shifts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_override_shifts(
     schedule_id: str = Field(..., description="The unique identifier of the schedule containing the override shifts to retrieve."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., user details, shift metadata). Specify which associations should be populated."),
@@ -11567,7 +12928,12 @@ async def list_override_shifts(
     return _response_data
 
 # Tags: OverrideShifts
-@mcp.tool()
+@mcp.tool(
+    title="Create Override Shift",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_override_shift(
     schedule_id: str = Field(..., description="The unique identifier of the schedule in which the override shift will be created."),
     type_: Literal["shifts"] = Field(..., alias="type", description="The resource type for this operation, which must be 'shifts' to indicate an override shift resource."),
@@ -11617,7 +12983,13 @@ async def create_override_shift(
     return _response_data
 
 # Tags: OverrideShifts
-@mcp.tool()
+@mcp.tool(
+    title="Get Override Shift",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_override_shift(id_: str = Field(..., alias="id", description="The unique identifier of the override shift to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific override shift by its unique identifier. Use this to fetch details about a single override shift record."""
 
@@ -11653,7 +13025,13 @@ async def get_override_shift(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: OverrideShifts
-@mcp.tool()
+@mcp.tool(
+    title="Update Override Shift",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_override_shift(
     id_: str = Field(..., alias="id", description="The unique identifier of the override shift to update."),
     type_: Literal["shifts"] = Field(..., alias="type", description="The resource type, which must be 'shifts' to indicate this operation applies to shift override resources."),
@@ -11701,7 +13079,13 @@ async def update_override_shift(
     return _response_data
 
 # Tags: OverrideShifts
-@mcp.tool()
+@mcp.tool(
+    title="Delete Override Shift",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_override_shift(id_: str = Field(..., alias="id", description="The unique identifier of the override shift to delete. This must be a valid override shift ID that exists in the system.")) -> dict[str, Any] | ToolResult:
     """Remove a specific override shift from the system by its unique identifier. This operation permanently deletes the override shift record."""
 
@@ -11737,7 +13121,13 @@ async def delete_override_shift(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: PlaybookTasks
-@mcp.tool()
+@mcp.tool(
+    title="List Playbook Tasks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_playbook_tasks(
     playbook_id: str = Field(..., description="The unique identifier of the playbook for which to retrieve tasks."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., task details, execution history). Specify which associations to expand for richer context."),
@@ -11781,7 +13171,12 @@ async def list_playbook_tasks(
     return _response_data
 
 # Tags: PlaybookTasks
-@mcp.tool()
+@mcp.tool(
+    title="Create Playbook Task",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_playbook_task(
     playbook_id: str = Field(..., description="The unique identifier of the playbook to which this task will be added."),
     type_: Literal["playbook_tasks"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be set to 'playbook_tasks'."),
@@ -11831,7 +13226,13 @@ async def create_playbook_task(
     return _response_data
 
 # Tags: PlaybookTasks
-@mcp.tool()
+@mcp.tool(
+    title="Get Playbook Task",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_playbook_task(id_: str = Field(..., alias="id", description="The unique identifier of the playbook task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific playbook task by its unique identifier. Use this to fetch detailed information about a single task within a playbook."""
 
@@ -11867,7 +13268,13 @@ async def get_playbook_task(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: PlaybookTasks
-@mcp.tool()
+@mcp.tool(
+    title="Update Playbook Task",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_playbook_task(
     id_: str = Field(..., alias="id", description="The unique identifier of the playbook task to update."),
     type_: Literal["playbook_tasks"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'playbook_tasks' to specify the resource being updated."),
@@ -11917,7 +13324,13 @@ async def update_playbook_task(
     return _response_data
 
 # Tags: PlaybookTasks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Playbook Task",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_playbook_task(id_: str = Field(..., alias="id", description="The unique identifier of the playbook task to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific playbook task by its unique identifier. This action cannot be undone."""
 
@@ -11953,7 +13366,13 @@ async def delete_playbook_task(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: Playbooks
-@mcp.tool()
+@mcp.tool(
+    title="List Playbooks",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_playbooks(
     include: Literal["severities", "environments", "services", "functionalities", "groups", "causes", "incident_types"] | None = Field(None, description="Comma-separated list of related entities to include in the response. Valid options are: severities, environments, services, functionalities, groups, causes, or incident_types."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination (1-indexed). Use with page[size] to navigate through results."),
@@ -11995,7 +13414,12 @@ async def list_playbooks(
     return _response_data
 
 # Tags: Playbooks
-@mcp.tool()
+@mcp.tool(
+    title="Create Playbook",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_playbook(
     type_: Literal["playbooks"] = Field(..., alias="type", description="The resource type identifier; must be set to 'playbooks' to indicate this is a playbook resource."),
     title: str = Field(..., description="The name of the playbook; used as the primary identifier in lists and displays."),
@@ -12049,7 +13473,13 @@ async def create_playbook(
     return _response_data
 
 # Tags: Playbooks
-@mcp.tool()
+@mcp.tool(
+    title="Get Playbook",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_playbook(
     id_: str = Field(..., alias="id", description="The unique identifier of the playbook to retrieve."),
     include: Literal["severities", "environments", "services", "functionalities", "groups", "causes", "incident_types"] | None = Field(None, description="Comma-separated list of related entities to include in the response. Valid options are: severities, environments, services, functionalities, groups, causes, and incident_types."),
@@ -12091,7 +13521,13 @@ async def get_playbook(
     return _response_data
 
 # Tags: Playbooks
-@mcp.tool()
+@mcp.tool(
+    title="Update Playbook",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_playbook(
     id_: str = Field(..., alias="id", description="The unique identifier of the playbook to update."),
     type_: Literal["playbooks"] = Field(..., alias="type", description="The resource type identifier; must be set to 'playbooks'."),
@@ -12147,7 +13583,13 @@ async def update_playbook(
     return _response_data
 
 # Tags: Playbooks
-@mcp.tool()
+@mcp.tool(
+    title="Delete Playbook",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_playbook(id_: str = Field(..., alias="id", description="The unique identifier of the playbook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a playbook by its unique identifier. This action cannot be undone."""
 
@@ -12183,7 +13625,13 @@ async def delete_playbook(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: RetrospectiveTemplates
-@mcp.tool()
+@mcp.tool(
+    title="List Postmortem Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_postmortem_templates(
     include: str | None = Field(None, description="Comma-separated list of related fields to include in the response (e.g., metadata, tags). Specify which additional data should be populated alongside each template."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve when paginating through results. Use with page[size] to control which set of templates is returned."),
@@ -12225,7 +13673,12 @@ async def list_postmortem_templates(
     return _response_data
 
 # Tags: RetrospectiveTemplates
-@mcp.tool()
+@mcp.tool(
+    title="Create Postmortem Template",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_postmortem_template(
     type_: Literal["post_mortem_templates"] = Field(..., alias="type", description="The resource type identifier, must be set to 'post_mortem_templates' to specify this is a postmortem template resource."),
     name: str = Field(..., description="A descriptive name for the postmortem template that identifies its purpose or use case."),
@@ -12274,7 +13727,13 @@ async def create_postmortem_template(
     return _response_data
 
 # Tags: RetrospectiveTemplates
-@mcp.tool()
+@mcp.tool(
+    title="Get Postmortem Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_postmortem_template(id_: str = Field(..., alias="id", description="The unique identifier of the postmortem template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific postmortem (retrospective) template by its unique identifier. Use this to fetch template details for viewing or further processing."""
 
@@ -12310,7 +13769,13 @@ async def get_postmortem_template(id_: str = Field(..., alias="id", description=
     return _response_data
 
 # Tags: RetrospectiveTemplates
-@mcp.tool()
+@mcp.tool(
+    title="Update Postmortem Template",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_postmortem_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the postmortem template to update."),
     type_: Literal["post_mortem_templates"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'post_mortem_templates' to specify this is a postmortem template resource."),
@@ -12360,7 +13825,13 @@ async def update_postmortem_template(
     return _response_data
 
 # Tags: RetrospectiveTemplates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Postmortem Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_postmortem_template(id_: str = Field(..., alias="id", description="The unique identifier of the retrospective template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific retrospective template by its unique identifier. This action cannot be undone."""
 
@@ -12396,7 +13867,13 @@ async def delete_postmortem_template(id_: str = Field(..., alias="id", descripti
     return _response_data
 
 # Tags: Pulses
-@mcp.tool()
+@mcp.tool(
+    title="List Pulses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_pulses(
     include: str | None = Field(None, description="Comma-separated list of related fields to include in the response (e.g., source details, label metadata). Specify which associations should be expanded in each pulse record."),
     filter_source: str | None = Field(None, alias="filtersource", description="Filter pulses by their source identifier or name. Returns only pulses originating from the specified source."),
@@ -12445,7 +13922,12 @@ async def list_pulses(
     return _response_data
 
 # Tags: Pulses
-@mcp.tool()
+@mcp.tool(
+    title="Create Pulse",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_pulse(
     type_: Literal["pulses"] = Field(..., alias="type", description="The pulse type identifier. Must be set to 'pulses' to indicate this is a pulse event."),
     summary: str = Field(..., description="A brief, human-readable title describing the pulse event. This is the primary display name for the pulse."),
@@ -12497,7 +13979,13 @@ async def create_pulse(
     return _response_data
 
 # Tags: Pulses
-@mcp.tool()
+@mcp.tool(
+    title="Get Pulse",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_pulse(id_: str = Field(..., alias="id", description="The unique identifier of the pulse to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific pulse by its unique identifier. Use this operation to fetch detailed information about a single pulse."""
 
@@ -12533,7 +14021,13 @@ async def get_pulse(id_: str = Field(..., alias="id", description="The unique id
     return _response_data
 
 # Tags: Pulses
-@mcp.tool()
+@mcp.tool(
+    title="Update Pulse",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_pulse(
     id_: str = Field(..., alias="id", description="The unique identifier of the pulse to update."),
     source: str | None = Field(None, description="The origin or system that generated this pulse (e.g., 'k8s' for Kubernetes)."),
@@ -12583,7 +14077,13 @@ async def update_pulse(
     return _response_data
 
 # Tags: RetrospectiveConfigurations
-@mcp.tool()
+@mcp.tool(
+    title="List Retrospective Configurations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retrospective_configurations(
     include: Literal["severities", "groups", "incident_types"] | None = Field(None, description="Comma-separated list of related data to include in the response. Valid options are severities, groups, or incident_types. Omit this parameter to return only core configuration data."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number for pagination, starting from 1. Use with page[size] to navigate through large result sets."),
@@ -12626,7 +14126,13 @@ async def list_retrospective_configurations(
     return _response_data
 
 # Tags: RetrospectiveConfigurations
-@mcp.tool()
+@mcp.tool(
+    title="Get Retrospective Configuration",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retrospective_configuration(
     id_: str = Field(..., alias="id", description="The unique identifier of the retrospective configuration to retrieve."),
     include: Literal["severities", "groups", "incident_types"] | None = Field(None, description="Optional comma-separated list of related entities to include in the response. Valid options are severities, groups, or incident_types."),
@@ -12668,7 +14174,13 @@ async def get_retrospective_configuration(
     return _response_data
 
 # Tags: RetrospectiveConfigurations
-@mcp.tool()
+@mcp.tool(
+    title="Update Retrospective Configuration",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_retrospective_configuration(
     id_: str = Field(..., alias="id", description="The unique identifier of the retrospective configuration to update."),
     type_: Literal["retrospective_configurations"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'retrospective_configurations' to specify the resource being updated."),
@@ -12718,7 +14230,13 @@ async def update_retrospective_configuration(
     return _response_data
 
 # Tags: RetrospectiveProcessGroupSteps
-@mcp.tool()
+@mcp.tool(
+    title="List Retrospective Process Group Steps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retrospective_process_group_steps(
     retrospective_process_group_id: str = Field(..., description="The unique identifier of the retrospective process group whose steps you want to list."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., nested objects or associations)."),
@@ -12763,7 +14281,13 @@ async def list_retrospective_process_group_steps(
     return _response_data
 
 # Tags: RetrospectiveProcessGroupSteps
-@mcp.tool()
+@mcp.tool(
+    title="Get Retrospective Process Group Step",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retrospective_process_group_step(id_: str = Field(..., alias="id", description="The unique identifier of the retrospective process group step to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific retrospective process group step by its unique identifier. Use this to fetch detailed information about a single step within a retrospective process group."""
 
@@ -12799,7 +14323,13 @@ async def get_retrospective_process_group_step(id_: str = Field(..., alias="id",
     return _response_data
 
 # Tags: RetrospectiveProcessGroups
-@mcp.tool()
+@mcp.tool(
+    title="List Retrospective Process Groups",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retrospective_process_groups(
     retrospective_process_id: str = Field(..., description="The unique identifier of the retrospective process containing the groups to list."),
     include: Literal["retrospective_process_group_steps"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Use 'retrospective_process_group_steps' to embed step details within each group."),
@@ -12845,7 +14375,13 @@ async def list_retrospective_process_groups(
     return _response_data
 
 # Tags: RetrospectiveProcessGroups
-@mcp.tool()
+@mcp.tool(
+    title="Get Retrospective Process Group",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retrospective_process_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the Retrospective Process Group to retrieve."),
     include: Literal["retrospective_process_group_steps"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Use 'retrospective_process_group_steps' to include the process group's associated steps."),
@@ -12887,7 +14423,13 @@ async def get_retrospective_process_group(
     return _response_data
 
 # Tags: RetrospectiveProcesses
-@mcp.tool()
+@mcp.tool(
+    title="List Retrospective Processes",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retrospective_processes(
     include: Literal["retrospective_steps", "severities", "incident_types", "groups"] | None = Field(None, description="Comma-separated list of related entities to include in the response. Valid options are: retrospective_steps, severities, incident_types, and groups. Omit this parameter to return only core retrospective process data."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number for pagination, starting from 1. Use this to navigate through result sets when combined with page size."),
@@ -12929,7 +14471,12 @@ async def list_retrospective_processes(
     return _response_data
 
 # Tags: RetrospectiveProcesses
-@mcp.tool()
+@mcp.tool(
+    title="Create Retrospective Process",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_retrospective_process(
     type_: Literal["retrospective_processes"] = Field(..., alias="type", description="The resource type identifier; must be set to 'retrospective_processes' to indicate this operation creates a retrospective process resource."),
     name: str = Field(..., description="A human-readable name for the retrospective process that will be displayed in your team's workflow."),
@@ -12978,7 +14525,13 @@ async def create_retrospective_process(
     return _response_data
 
 # Tags: RetrospectiveProcesses
-@mcp.tool()
+@mcp.tool(
+    title="Get Retrospective Process",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retrospective_process(
     id_: str = Field(..., alias="id", description="The unique identifier of the retrospective process to retrieve."),
     include: Literal["retrospective_steps", "severities", "incident_types", "groups"] | None = Field(None, description="Comma-separated list of related entities to include in the response. Valid options are retrospective_steps, severities, incident_types, and groups."),
@@ -13020,7 +14573,13 @@ async def get_retrospective_process(
     return _response_data
 
 # Tags: RetrospectiveProcesses
-@mcp.tool()
+@mcp.tool(
+    title="Update Retrospective Process",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_retrospective_process(
     id_: str = Field(..., alias="id", description="The unique identifier of the retrospective process to update."),
     type_: Literal["retrospective_processes"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'retrospective_processes' to specify the entity being updated."),
@@ -13069,7 +14628,13 @@ async def update_retrospective_process(
     return _response_data
 
 # Tags: RetrospectiveProcesses
-@mcp.tool()
+@mcp.tool(
+    title="Delete Retrospective Process",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_retrospective_process(id_: str = Field(..., alias="id", description="The unique identifier of the retrospective process to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a retrospective process and all associated data by its unique identifier."""
 
@@ -13105,7 +14670,13 @@ async def delete_retrospective_process(id_: str = Field(..., alias="id", descrip
     return _response_data
 
 # Tags: RetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="List Retrospective Steps",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_retrospective_steps(
     retrospective_process_id: str = Field(..., description="The unique identifier of the retrospective process containing the steps to retrieve."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., participants, feedback, outcomes). Reduces need for additional API calls."),
@@ -13150,7 +14721,12 @@ async def list_retrospective_steps(
     return _response_data
 
 # Tags: RetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="Create Retrospective Step",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_retrospective_step(
     retrospective_process_id: str = Field(..., description="The unique identifier of the retrospective process to which this step belongs."),
     type_: Literal["retrospective_steps"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be set to 'retrospective_steps'."),
@@ -13202,7 +14778,13 @@ async def create_retrospective_step(
     return _response_data
 
 # Tags: RetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="Get Retrospective Step",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_retrospective_step(id_: str = Field(..., alias="id", description="The unique identifier of the retrospective step to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific retrospective step by its unique identifier. Use this to fetch details about a single retrospective step within a retrospective."""
 
@@ -13238,7 +14820,13 @@ async def get_retrospective_step(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: RetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="Update Retrospective Step",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_retrospective_step(
     id_: str = Field(..., alias="id", description="The unique identifier of the retrospective step to update."),
     type_: Literal["retrospective_steps"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'retrospective_steps' to specify the entity being updated."),
@@ -13290,7 +14878,13 @@ async def update_retrospective_step(
     return _response_data
 
 # Tags: RetrospectiveSteps
-@mcp.tool()
+@mcp.tool(
+    title="Delete Retrospective Step",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_retrospective_step(id_: str = Field(..., alias="id", description="The unique identifier of the retrospective step to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a retrospective step by its unique identifier. This action cannot be undone."""
 
@@ -13326,7 +14920,13 @@ async def delete_retrospective_step(id_: str = Field(..., alias="id", descriptio
     return _response_data
 
 # Tags: Roles
-@mcp.tool()
+@mcp.tool(
+    title="List Roles",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_roles(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., permissions, users). Reduces the need for additional API calls."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for paginated results, starting from 1. Use with page[size] to control pagination."),
@@ -13369,7 +14969,13 @@ async def list_roles(
     return _response_data
 
 # Tags: Roles
-@mcp.tool()
+@mcp.tool(
+    title="Get Role",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_role(id_: str = Field(..., alias="id", description="The unique identifier of the role to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific role by its unique identifier. Use this operation to fetch detailed information about a role."""
 
@@ -13405,7 +15011,13 @@ async def get_role(id_: str = Field(..., alias="id", description="The unique ide
     return _response_data
 
 # Tags: Roles
-@mcp.tool()
+@mcp.tool(
+    title="Delete Role",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_role(id_: str = Field(..., alias="id", description="The unique identifier of the role to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a role by its unique identifier. This action removes the role and its associated permissions from the system."""
 
@@ -13441,7 +15053,13 @@ async def delete_role(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: ScheduleRotationActiveDays
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Rotation Active Days",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_rotation_active_days(
     schedule_rotation_id: str = Field(..., description="The unique identifier of the schedule rotation for which to list active days."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., schedule, users). Reduces the need for additional API calls."),
@@ -13485,7 +15103,12 @@ async def list_schedule_rotation_active_days(
     return _response_data
 
 # Tags: ScheduleRotationActiveDays
-@mcp.tool()
+@mcp.tool(
+    title="Add Active Day to Schedule Rotation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_active_day_to_schedule_rotation(
     schedule_rotation_id: str = Field(..., description="The unique identifier of the schedule rotation to which the active day will be added."),
     type_: Literal["schedule_rotation_active_days"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'schedule_rotation_active_days' to indicate this is a schedule rotation active day resource."),
@@ -13534,7 +15157,13 @@ async def add_active_day_to_schedule_rotation(
     return _response_data
 
 # Tags: ScheduleRotationActiveDays
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule Rotation Active Day",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule_rotation_active_day(id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation active day to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific schedule rotation active day by its unique identifier. Use this to fetch details about a particular day within a schedule rotation."""
 
@@ -13570,7 +15199,13 @@ async def get_schedule_rotation_active_day(id_: str = Field(..., alias="id", des
     return _response_data
 
 # Tags: ScheduleRotationActiveDays
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule Rotation Active Day",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule_rotation_active_day(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation active day record to update."),
     type_: Literal["schedule_rotation_active_days"] = Field(..., alias="type", description="The resource type identifier, which must be 'schedule_rotation_active_days' to specify the type of object being updated."),
@@ -13619,7 +15254,13 @@ async def update_schedule_rotation_active_day(
     return _response_data
 
 # Tags: ScheduleRotationActiveDays
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule Rotation Active Day",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule_rotation_active_day(id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation active day to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a specific schedule rotation active day from the system. This operation permanently deletes the identified active day configuration."""
 
@@ -13655,7 +15296,13 @@ async def delete_schedule_rotation_active_day(id_: str = Field(..., alias="id", 
     return _response_data
 
 # Tags: ScheduleRotationUsers
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Rotation Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_rotation_users(
     schedule_rotation_id: str = Field(..., description="The unique identifier of the schedule rotation for which to list assigned users."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., user details, rotation metadata). Specify which associations to expand for richer response data."),
@@ -13699,7 +15346,12 @@ async def list_schedule_rotation_users(
     return _response_data
 
 # Tags: ScheduleRotationUsers
-@mcp.tool()
+@mcp.tool(
+    title="Add User to Schedule Rotation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_user_to_schedule_rotation(
     schedule_rotation_id: str = Field(..., description="The unique identifier of the schedule rotation to which the user will be added."),
     user_id: int = Field(..., description="The unique identifier of the user to add to the schedule rotation."),
@@ -13746,7 +15398,13 @@ async def add_user_to_schedule_rotation(
     return _response_data
 
 # Tags: ScheduleRotationUsers
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule Rotation User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule_rotation_user(id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific schedule rotation user by their unique identifier. Use this to fetch details about an individual user assigned to a schedule rotation."""
 
@@ -13782,7 +15440,13 @@ async def get_schedule_rotation_user(id_: str = Field(..., alias="id", descripti
     return _response_data
 
 # Tags: ScheduleRotationUsers
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule Rotation User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule_rotation_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation user record to update."),
     type_: Literal["schedule_rotation_users"] = Field(..., alias="type", description="The resource type identifier, which must be 'schedule_rotation_users' to specify the target resource type."),
@@ -13831,7 +15495,13 @@ async def update_schedule_rotation_user(
     return _response_data
 
 # Tags: ScheduleRotationUsers
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule Rotation User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule_rotation_user(id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation user to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a schedule rotation user from the system by their unique identifier. This operation permanently deletes the specified schedule rotation user record."""
 
@@ -13867,7 +15537,13 @@ async def delete_schedule_rotation_user(id_: str = Field(..., alias="id", descri
     return _response_data
 
 # Tags: ScheduleRotations
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Rotations",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_rotations(
     schedule_id: str = Field(..., description="The unique identifier of the schedule for which to list rotations."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., users, shifts). Reduces the need for additional API calls."),
@@ -13912,7 +15588,12 @@ async def list_schedule_rotations(
     return _response_data
 
 # Tags: ScheduleRotations
-@mcp.tool()
+@mcp.tool(
+    title="Create Schedule Rotation",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schedule_rotation(
     schedule_id: str = Field(..., description="The unique identifier of the schedule to which this rotation will be added."),
     type_: Literal["schedule_rotations"] = Field(..., alias="type", description="The resource type identifier; must be set to 'schedule_rotations'."),
@@ -13966,7 +15647,13 @@ async def create_schedule_rotation(
     return _response_data
 
 # Tags: ScheduleRotations
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule Rotation",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule_rotation(id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific schedule rotation by its unique identifier. Use this to fetch details about a particular rotation configuration."""
 
@@ -14002,7 +15689,13 @@ async def get_schedule_rotation(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: ScheduleRotations
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule Rotation",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule_rotation(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation to update."),
     type_: Literal["schedule_rotations"] = Field(..., alias="type", description="The resource type identifier, which must be 'schedule_rotations' to specify this is a schedule rotation resource."),
@@ -14055,7 +15748,13 @@ async def update_schedule_rotation(
     return _response_data
 
 # Tags: ScheduleRotations
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule Rotation",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule_rotation(id_: str = Field(..., alias="id", description="The unique identifier of the schedule rotation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a schedule rotation by its unique identifier. This action cannot be undone."""
 
@@ -14091,7 +15790,13 @@ async def delete_schedule_rotation(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="List Schedules",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedules(
     include: str | None = Field(None, description="Comma-separated list of related fields to include in the response, such as associated resources or metadata."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve when paginating through results, starting from page 1."),
@@ -14133,7 +15838,12 @@ async def list_schedules(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Create Schedule",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_schedule(
     type_: Literal["schedules"] = Field(..., alias="type", description="Resource type identifier; must be set to 'schedules' to indicate this is a schedule resource."),
     name: str = Field(..., description="The display name for the schedule; used to identify the schedule in the system."),
@@ -14183,7 +15893,13 @@ async def create_schedule(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Get Schedule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific schedule by its unique identifier. Use this operation to fetch detailed information about a schedule."""
 
@@ -14219,7 +15935,13 @@ async def get_schedule(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Update Schedule",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_schedule(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule to update."),
     type_: Literal["schedules"] = Field(..., alias="type", description="The resource type identifier; must be set to 'schedules' to specify this operation targets schedule resources."),
@@ -14271,7 +15993,13 @@ async def update_schedule(
     return _response_data
 
 # Tags: Schedules
-@mcp.tool()
+@mcp.tool(
+    title="Delete Schedule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a schedule by its unique identifier. This action cannot be undone."""
 
@@ -14307,7 +16035,13 @@ async def delete_schedule(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Shifts
-@mcp.tool()
+@mcp.tool(
+    title="List Schedule Shifts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_schedule_shifts(
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule whose shifts you want to retrieve."),
     to: str | None = Field(None, description="Optional end date for filtering shifts. Shifts on or before this date will be included in the results. Use ISO 8601 format."),
@@ -14350,7 +16084,13 @@ async def list_schedule_shifts(
     return _response_data
 
 # Tags: Secrets
-@mcp.tool()
+@mcp.tool(
+    title="Get Secret",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_secret(id_: str = Field(..., alias="id", description="The unique identifier of the secret to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific secret by its unique identifier. Returns the secret details if found and accessible."""
 
@@ -14386,7 +16126,13 @@ async def get_secret(id_: str = Field(..., alias="id", description="The unique i
     return _response_data
 
 # Tags: Secrets
-@mcp.tool()
+@mcp.tool(
+    title="Update Secret",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_secret(
     id_: str = Field(..., alias="id", description="The unique identifier of the secret to update."),
     type_: Literal["secrets"] = Field(..., alias="type", description="The resource type, which must be 'secrets' for this operation."),
@@ -14438,7 +16184,13 @@ async def update_secret(
     return _response_data
 
 # Tags: Secrets
-@mcp.tool()
+@mcp.tool(
+    title="Delete Secret",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_secret(id_: str = Field(..., alias="id", description="The unique identifier of the secret to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a secret by its unique identifier. This action cannot be undone."""
 
@@ -14474,7 +16226,13 @@ async def delete_secret(id_: str = Field(..., alias="id", description="The uniqu
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="List Services",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_services(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., owners, tags, metadata)."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination, starting from 1. Use with page[size] to control result set boundaries."),
@@ -14521,7 +16279,12 @@ async def list_services(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Create Service",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_service(
     type_: Literal["services"] = Field(..., alias="type", description="The resource type identifier; must be set to 'services'."),
     name: str = Field(..., description="The display name of the service."),
@@ -14591,7 +16354,13 @@ async def create_service(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Service",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service(id_: str = Field(..., alias="id", description="The unique identifier of the service to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific service by its unique identifier. Use this operation to fetch detailed information about a single service."""
 
@@ -14627,7 +16396,13 @@ async def get_service(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Update Service",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the service to update."),
     type_: Literal["services"] = Field(..., alias="type", description="The resource type, which must be 'services' for this operation."),
@@ -14695,7 +16470,13 @@ async def update_service(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Delete Service",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_service(id_: str = Field(..., alias="id", description="The unique identifier of the service to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a service by its unique identifier. This action cannot be undone."""
 
@@ -14731,7 +16512,13 @@ async def delete_service(id_: str = Field(..., alias="id", description="The uniq
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Incidents Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_incidents_chart(
     id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve incident chart data."),
     period: str = Field(..., description="The time period for the incident chart data (e.g., last 7 days, last 30 days, or a specific date range). Specify the period in the format expected by the API."),
@@ -14773,7 +16560,13 @@ async def get_service_incidents_chart(
     return _response_data
 
 # Tags: Services
-@mcp.tool()
+@mcp.tool(
+    title="Get Service Uptime Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_service_uptime_chart(
     id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve the uptime chart."),
     period: str | None = Field(None, description="The time period to display in the chart (e.g., last 7 days, 30 days, or 90 days). If not specified, a default period will be used."),
@@ -14815,7 +16608,13 @@ async def get_service_uptime_chart(
     return _response_data
 
 # Tags: Severities
-@mcp.tool()
+@mcp.tool(
+    title="List Severities",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_severities(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., metadata, counts). Specify which associations should be expanded in the result."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1. Use with page[size] to control result set boundaries."),
@@ -14859,7 +16658,12 @@ async def list_severities(
     return _response_data
 
 # Tags: Severities
-@mcp.tool()
+@mcp.tool(
+    title="Create Severity",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_severity(
     type_: Literal["severities"] = Field(..., alias="type", description="Resource type identifier; must be set to 'severities' to indicate this is a severity resource."),
     name: str = Field(..., description="The display name for this severity level (e.g., 'Critical', 'High Priority')."),
@@ -14912,7 +16716,13 @@ async def create_severity(
     return _response_data
 
 # Tags: Severities
-@mcp.tool()
+@mcp.tool(
+    title="Get Severity",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_severity(id_: str = Field(..., alias="id", description="The unique identifier of the severity to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific severity record by its unique identifier. Use this to fetch detailed information about a severity level."""
 
@@ -14948,7 +16758,13 @@ async def get_severity(id_: str = Field(..., alias="id", description="The unique
     return _response_data
 
 # Tags: Severities
-@mcp.tool()
+@mcp.tool(
+    title="Update Severity",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_severity(
     id_: str = Field(..., alias="id", description="The unique identifier of the severity to update."),
     type_: Literal["severities"] = Field(..., alias="type", description="The resource type identifier; must be set to 'severities' to specify this is a severity resource."),
@@ -15002,7 +16818,13 @@ async def update_severity(
     return _response_data
 
 # Tags: Severities
-@mcp.tool()
+@mcp.tool(
+    title="Delete Severity",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_severity(id_: str = Field(..., alias="id", description="The unique identifier of the severity to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a severity by its unique identifier. This action cannot be undone."""
 
@@ -15038,7 +16860,13 @@ async def delete_severity(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: Shifts
-@mcp.tool()
+@mcp.tool(
+    title="List Shifts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_shifts(
     include: Literal["shift_override", "user"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options are shift_override (to include override details) and user (to include user information)."),
     to: str | None = Field(None, description="End of the time range for filtering shifts. Use ISO 8601 format for the date/time value."),
@@ -15082,7 +16910,13 @@ async def list_shifts(
     return _response_data
 
 # Tags: StatusPageTemplates
-@mcp.tool()
+@mcp.tool(
+    title="List Status Page Templates",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_page_templates(
     status_page_id: str = Field(..., description="The unique identifier of the status page for which to list templates."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., components, incidents). Reduces the need for additional API calls."),
@@ -15126,7 +16960,13 @@ async def list_status_page_templates(
     return _response_data
 
 # Tags: StatusPageTemplates
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page Template",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page_template(id_: str = Field(..., alias="id", description="The unique identifier of the status page template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific status page template by its unique identifier. Use this to fetch the full details and configuration of a template for viewing or further operations."""
 
@@ -15162,7 +17002,13 @@ async def get_status_page_template(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: StatusPageTemplates
-@mcp.tool()
+@mcp.tool(
+    title="Delete Status Page Template",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_status_page_template(id_: str = Field(..., alias="id", description="The unique identifier of the status page template to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific status page template by its unique identifier. This operation permanently removes the template and cannot be undone."""
 
@@ -15198,7 +17044,13 @@ async def delete_status_page_template(id_: str = Field(..., alias="id", descript
     return _response_data
 
 # Tags: StatusPages
-@mcp.tool()
+@mcp.tool(
+    title="List Status Pages",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_status_pages(
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., components, incidents). Reduces the need for additional API calls."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1. Use with page[size] to navigate through results."),
@@ -15241,7 +17093,12 @@ async def list_status_pages(
     return _response_data
 
 # Tags: StatusPages
-@mcp.tool()
+@mcp.tool(
+    title="Create Status Page",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_status_page(
     type_: Literal["status_pages"] = Field(..., alias="type", description="The resource type identifier; must be set to 'status_pages'."),
     title: str = Field(..., description="The internal title of the status page used for identification and management."),
@@ -15308,7 +17165,13 @@ async def create_status_page(
     return _response_data
 
 # Tags: StatusPages
-@mcp.tool()
+@mcp.tool(
+    title="Get Status Page",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_status_page(id_: str = Field(..., alias="id", description="The unique identifier of the status page to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific status page by its unique identifier. Use this to fetch detailed information about a status page including its current state and configuration."""
 
@@ -15344,7 +17207,13 @@ async def get_status_page(id_: str = Field(..., alias="id", description="The uni
     return _response_data
 
 # Tags: StatusPages
-@mcp.tool()
+@mcp.tool(
+    title="Update Status Page",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_status_page(
     id_: str = Field(..., alias="id", description="The unique identifier of the status page to update."),
     type_: Literal["status_pages"] = Field(..., alias="type", description="The resource type identifier; must be set to 'status_pages'."),
@@ -15413,7 +17282,13 @@ async def update_status_page(
     return _response_data
 
 # Tags: StatusPages
-@mcp.tool()
+@mcp.tool(
+    title="Delete Status Page",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_status_page(id_: str = Field(..., alias="id", description="The unique identifier of the status page to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a status page by its unique identifier. This action cannot be undone and will remove the status page and all associated data."""
 
@@ -15449,7 +17324,13 @@ async def delete_status_page(id_: str = Field(..., alias="id", description="The 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="List Teams",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_teams(
     include: Literal["users"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Use 'users' to include team member information."),
     page_number: int | None = Field(None, alias="pagenumber", description="Page number for pagination (1-indexed). Use with page[size] to retrieve specific result sets."),
@@ -15497,7 +17378,12 @@ async def list_teams(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Create Team",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def create_team(
     type_: Literal["groups"] = Field(..., alias="type", description="The type of entity being created; must be 'groups' to indicate this is a team/group resource."),
     name: str = Field(..., description="The display name for the team; used as the primary identifier in the UI."),
@@ -15561,7 +17447,13 @@ async def create_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team to retrieve."),
     include: Literal["users"] | None = Field(None, description="Comma-separated list of related resources to include in the response. Supported values: users (to include team members)."),
@@ -15603,7 +17495,13 @@ async def get_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Update Team",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_team(
     id_: str = Field(..., alias="id", description="The unique identifier of the team to update."),
     type_: Literal["groups"] = Field(..., alias="type", description="The resource type, which must be 'groups' for team operations."),
@@ -15667,7 +17565,13 @@ async def update_team(
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Delete Team",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_team(id_: str = Field(..., alias="id", description="The unique identifier of the team to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team by its unique identifier. This action cannot be undone and will remove the team and all associated data."""
 
@@ -15703,7 +17607,13 @@ async def delete_team(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: Teams
-@mcp.tool()
+@mcp.tool(
+    title="Get Team Incidents Chart",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_team_incidents_chart(
     id_: str = Field(..., alias="id", description="The unique identifier of the team for which to retrieve incident chart data."),
     period: str = Field(..., description="The time period for which to retrieve incident data. Specify the desired reporting window (e.g., daily, weekly, monthly, or a specific date range)."),
@@ -15745,7 +17655,13 @@ async def get_team_incidents_chart(
     return _response_data
 
 # Tags: UserEmailAddresses
-@mcp.tool()
+@mcp.tool(
+    title="List User Email Addresses",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_email_addresses(user_id: str = Field(..., description="The unique identifier of the user whose email addresses should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all email addresses associated with a specific user account. Returns a collection of email addresses linked to the user's profile."""
 
@@ -15781,7 +17697,12 @@ async def list_user_email_addresses(user_id: str = Field(..., description="The u
     return _response_data
 
 # Tags: UserEmailAddresses
-@mcp.tool()
+@mcp.tool(
+    title="Add Email Address to User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_email_address_to_user(
     user_id: str = Field(..., description="The unique identifier of the user to whom the email address will be added."),
     type_: Literal["user_email_addresses"] = Field(..., alias="type", description="The type of email address being created. Must be set to 'user_email_addresses' to indicate this is a standard user email address."),
@@ -15829,7 +17750,13 @@ async def add_email_address_to_user(
     return _response_data
 
 # Tags: UserEmailAddresses
-@mcp.tool()
+@mcp.tool(
+    title="Get Email Address",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_email_address(id_: str = Field(..., alias="id", description="The unique identifier of the email address to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific user email address by its unique identifier."""
 
@@ -15865,7 +17792,13 @@ async def get_email_address(id_: str = Field(..., alias="id", description="The u
     return _response_data
 
 # Tags: UserEmailAddresses
-@mcp.tool()
+@mcp.tool(
+    title="Update User Email Address",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user_email_address(
     id_: str = Field(..., alias="id", description="The unique identifier of the user email address record to update."),
     type_: Literal["user_email_addresses"] = Field(..., alias="type", description="The resource type identifier, which must be 'user_email_addresses' to specify this is a user email address resource."),
@@ -15913,7 +17846,13 @@ async def update_user_email_address(
     return _response_data
 
 # Tags: UserEmailAddresses
-@mcp.tool()
+@mcp.tool(
+    title="Delete Email Address",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_email_address(id_: str = Field(..., alias="id", description="The unique identifier of the email address to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a user's email address by its unique identifier. This action cannot be undone."""
 
@@ -15949,7 +17888,13 @@ async def delete_email_address(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: UserNotificationRules
-@mcp.tool()
+@mcp.tool(
+    title="Get Notification Rule",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_notification_rule(id_: str = Field(..., alias="id", description="The unique identifier of the notification rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific notification rule by its unique identifier. Use this to fetch the configuration and settings for a particular user notification rule."""
 
@@ -15985,7 +17930,13 @@ async def get_notification_rule(id_: str = Field(..., alias="id", description="T
     return _response_data
 
 # Tags: UserNotificationRules
-@mcp.tool()
+@mcp.tool(
+    title="Delete Notification Rule",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_notification_rule(id_: str = Field(..., alias="id", description="The unique identifier of the notification rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific notification rule by its unique identifier. This operation permanently removes the rule and stops any notifications governed by it."""
 
@@ -16021,7 +17972,13 @@ async def delete_notification_rule(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: UserPhoneNumbers
-@mcp.tool()
+@mcp.tool(
+    title="List User Phone Numbers",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_user_phone_numbers(user_id: str = Field(..., description="The unique identifier of the user whose phone numbers should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all phone numbers associated with a specific user account. Returns a collection of phone number records for the given user."""
 
@@ -16057,7 +18014,12 @@ async def list_user_phone_numbers(user_id: str = Field(..., description="The uni
     return _response_data
 
 # Tags: UserPhoneNumbers
-@mcp.tool()
+@mcp.tool(
+    title="Add Phone Number to User",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def add_phone_number_to_user(
     user_id: str = Field(..., description="The unique identifier of the user to whom the phone number will be added."),
     type_: Literal["user_phone_numbers"] = Field(..., alias="type", description="The type of phone number resource being created. Must be set to 'user_phone_numbers'."),
@@ -16105,7 +18067,13 @@ async def add_phone_number_to_user(
     return _response_data
 
 # Tags: UserPhoneNumbers
-@mcp.tool()
+@mcp.tool(
+    title="Get Phone Number",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_phone_number(id_: str = Field(..., alias="id", description="The unique identifier of the phone number record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific user phone number by its unique identifier."""
 
@@ -16141,7 +18109,12 @@ async def get_phone_number(id_: str = Field(..., alias="id", description="The un
     return _response_data
 
 # Tags: UserPhoneNumbers
-@mcp.tool()
+@mcp.tool(
+    title="Update User Phone Number",
+    annotations=ToolAnnotations(
+        openWorldHint=True
+    ),
+)
 async def update_user_phone_number(
     id_: str = Field(..., alias="id", description="The unique identifier of the user phone number record to update."),
     type_: Literal["user_phone_numbers"] = Field(..., alias="type", description="The resource type identifier, which must be 'user_phone_numbers' to specify this is a user phone number resource."),
@@ -16189,7 +18162,13 @@ async def update_user_phone_number(
     return _response_data
 
 # Tags: UserPhoneNumbers
-@mcp.tool()
+@mcp.tool(
+    title="Delete User Phone Number",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user_phone_number(id_: str = Field(..., alias="id", description="The unique identifier of the phone number to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific user phone number by its unique identifier. This action cannot be undone."""
 
@@ -16225,7 +18204,13 @@ async def delete_user_phone_number(id_: str = Field(..., alias="id", description
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="List Users",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_users(
     page_number: int | None = Field(None, alias="pagenumber", description="The page number for pagination (1-indexed). Use with page[size] to control result offset."),
     page_size: int | None = Field(None, alias="pagesize", description="The number of users to return per page. Use with page[number] to paginate through results."),
@@ -16269,7 +18254,13 @@ async def list_users(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get Current User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile information for the authenticated user making the request. This endpoint returns details about the current user's account."""
 
@@ -16296,7 +18287,13 @@ async def get_current_user() -> dict[str, Any] | ToolResult:
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Get User",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve."),
     include: Literal["email_addresses", "phone_numbers", "devices", "role", "on_call_role"] | None = Field(None, description="Comma-separated list of related data to include in the response. Valid options are: email_addresses, phone_numbers, devices, role, and on_call_role."),
@@ -16338,7 +18335,13 @@ async def get_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Update User",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user to update."),
     type_: Literal["users"] = Field(..., alias="type", description="The resource type, which must be 'users' to specify this operation targets user resources."),
@@ -16389,7 +18392,13 @@ async def update_user(
     return _response_data
 
 # Tags: Users
-@mcp.tool()
+@mcp.tool(
+    title="Delete User",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a user account by its unique identifier. This action cannot be undone."""
 
@@ -16425,7 +18434,13 @@ async def delete_user(id_: str = Field(..., alias="id", description="The unique 
     return _response_data
 
 # Tags: WebhooksDeliveries
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Deliveries",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_deliveries(
     endpoint_id: str = Field(..., description="The unique identifier of the webhook endpoint for which to retrieve deliveries."),
     include: str | None = Field(None, description="Comma-separated list of related resources to include in the response (e.g., request details, response data). Specify which additional fields should be populated in the delivery records."),
@@ -16469,7 +18484,13 @@ async def list_webhook_deliveries(
     return _response_data
 
 # Tags: WebhooksDeliveries
-@mcp.tool()
+@mcp.tool(
+    title="Retry Webhook Delivery",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def retry_webhook_delivery(id_: str = Field(..., alias="id", description="The unique identifier of the webhook delivery to retry.")) -> dict[str, Any] | ToolResult:
     """Retries the delivery of a previously failed webhook event. Use this operation to manually re-attempt sending a webhook that did not reach its destination."""
 
@@ -16507,7 +18528,13 @@ async def retry_webhook_delivery(id_: str = Field(..., alias="id", description="
     return _response_data
 
 # Tags: WebhooksDeliveries
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Delivery",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_delivery(id_: str = Field(..., alias="id", description="The unique identifier of the webhook delivery to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific webhook delivery event, including its status, payload, and response data."""
 
@@ -16543,7 +18570,13 @@ async def get_webhook_delivery(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: WebhooksEndpoints
-@mcp.tool()
+@mcp.tool(
+    title="List Webhook Endpoints",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def list_webhook_endpoints(
     include: str | None = Field(None, description="Comma-separated list of related fields to include in the response for each webhook endpoint, such as event types or configuration details."),
     page_number: int | None = Field(None, alias="pagenumber", description="The page number to retrieve when paginating through results, starting from page 1."),
@@ -16585,7 +18618,13 @@ async def list_webhook_endpoints(
     return _response_data
 
 # Tags: WebhooksEndpoints
-@mcp.tool()
+@mcp.tool(
+    title="Get Webhook Endpoint",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        openWorldHint=True
+    ),
+)
 async def get_webhook_endpoint(id_: str = Field(..., alias="id", description="The unique identifier of the webhook endpoint to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the configuration and details of a specific webhook endpoint by its unique identifier."""
 
@@ -16621,7 +18660,13 @@ async def get_webhook_endpoint(id_: str = Field(..., alias="id", description="Th
     return _response_data
 
 # Tags: WebhooksEndpoints
-@mcp.tool()
+@mcp.tool(
+    title="Update Webhooks Endpoint",
+    annotations=ToolAnnotations(
+        idempotentHint=True,
+        openWorldHint=True
+    ),
+)
 async def update_webhooks_endpoint(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook endpoint to update."),
     type_: Literal["webhooks_endpoints"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'webhooks_endpoints' to specify this is a webhook endpoint resource."),
@@ -16670,7 +18715,13 @@ async def update_webhooks_endpoint(
     return _response_data
 
 # Tags: WebhooksEndpoints
-@mcp.tool()
+@mcp.tool(
+    title="Delete Webhook Endpoint",
+    annotations=ToolAnnotations(
+        destructiveHint=True,
+        openWorldHint=True
+    ),
+)
 async def delete_webhook_endpoint(id_: str = Field(..., alias="id", description="The unique identifier of the webhook endpoint to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a webhook endpoint by its unique identifier. This action cannot be undone and will stop all webhook deliveries to this endpoint."""
 
