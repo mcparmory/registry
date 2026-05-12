@@ -1,7 +1,7 @@
 """
-Scrapingant Api MCP Server - Pydantic Models
+Scrapingant MCP Server - Pydantic Models
 
-Generated: 2026-05-05 16:16:09 UTC
+Generated: 2026-05-12 12:34:25 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

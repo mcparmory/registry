@@ -1,11 +1,11 @@
-# Scrapingant API MCP Server
+# Scrapingant MCP Server
 <!-- mcp-name: com.mcparmory/scrapingant -->
 
 Base URL: https://api.scrapingant.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
-| **Tools** | 6 |
+| **Tools** | 5 |
 | **Auth** | API Key |
 
 ---
@@ -52,6 +52,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (x-api-key)
+
 Do not commit credentials to version control.
 
 ---
